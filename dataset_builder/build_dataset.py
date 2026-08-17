@@ -248,9 +248,23 @@ def prune_tree(tree, keep_dirs):
                 return True
         return False
 
-    # inside every build/ directory, drop non-protected children
-    for root, dirs, files in os.walk(tree, topdown=True):
-        if os.path.basename(root) == "build":
+    # Walk every build/ directory recursively and drop anything not protected.
+    #
+    # Pruning only the immediate children of build/ is not enough: the whole
+    # `intermediates` directory is an ancestor of the class output and so has to
+    # be kept, but its siblings inside it (merged_res, dex, transforms,
+    # merged_manifests, ...) are not needed and are where the bulk of the space
+    # goes. Open-Food-Facts stayed at 1.9 GB until this walked all the way down.
+    build_dirs = []
+    for root, dirs, _ in os.walk(tree):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for d in dirs:
+            if d == "build":
+                build_dirs.append(os.path.join(root, d))
+
+    for bdir in build_dirs:
+        for root, dirs, files in os.walk(bdir, topdown=True):
             for d in list(dirs):
                 full = os.path.join(root, d)
                 if not is_protected(full):
@@ -258,10 +272,12 @@ def prune_tree(tree, keep_dirs):
                     removed += 1
                     dirs.remove(d)
             for f in files:
-                try:
-                    os.remove(os.path.join(root, f))
-                except OSError:
-                    pass
+                full = os.path.join(root, f)
+                if not is_protected(full):
+                    try:
+                        os.remove(full)
+                    except OSError:
+                        pass
     for junk in (".git", ".gradle", "build/kotlin", ".idea"):
         p = os.path.join(tree, junk)
         if os.path.isdir(p):
@@ -307,8 +323,21 @@ def write_class_files_json(app_dir, apk_name, class_dirs, source_dirs):
 
 
 # ------------------------------------------------------------------- gradle
+def wrapper_gradle_major(tree):
+    """Major Gradle version from the wrapper properties, or None."""
+    p = os.path.join(tree, "gradle", "wrapper", "gradle-wrapper.properties")
+    if not os.path.isfile(p):
+        return None
+    m = re.search(r"gradle-(\d+)\.", open(p, encoding="utf-8",
+                                          errors="replace").read())
+    return int(m.group(1)) if m else None
+
+
+JDKS = {"8": JDK8, "11": "/usr/lib/jvm/java-11-openjdk-amd64", "17": JDK17}
+
+
 def gradle_env(jdk):
-    java_home = JDK8 if str(jdk) == "8" else JDK17
+    java_home = JDKS.get(str(jdk), JDK17)
     return {
         "JAVA_HOME": java_home,
         "ANDROID_SDK_ROOT": SDK,
@@ -442,10 +471,15 @@ def build_subject(subject, status_rows):
     # the APK used by the published runs, when Themis publishes one
     themis_apk = fetch_themis_apk(subject, app_dir, logfile)
 
-    if not subject.get("repo"):
+    # No upstream branch is not necessarily fatal: APhotoManager and
+    # MaterialFBook lost their instrumented branches when a GitHub account was
+    # deleted, but the original dataset already ships their source trees, so
+    # they can still be built locally. Only fall back to apk-only when there is
+    # no tree either.
+    if not subject.get("repo") and not os.path.isdir(tree):
         row["state"] = "apk_only"
         row["apk"] = os.path.basename(themis_apk) if themis_apk else ""
-        row["detail"] = subject.get("note", "no source branch")
+        row["detail"] = subject.get("note", "no source branch, no local tree")
         row["seconds"] = str(int(time.time() - t0))
         status_rows[key] = row
         save_status(status_rows)
@@ -459,6 +493,18 @@ def build_subject(subject, status_rows):
             cmd += ["--branch", subject["ref"]]
         cmd += [subject["repo"], tree]
         rc = run(cmd, timeout=CLONE_TIMEOUT, logfile=logfile)
+        if rc == 0:
+            # Drop the checkout's own git metadata straight away. If a tree
+            # still contains .git when the dataset is committed, git records a
+            # gitlink (a submodule reference) instead of the files, so the
+            # entry appears on GitHub as an unclickable submodule with no
+            # contents. Pruning removes .git too, but only after a successful
+            # build, which leaves every failed subject exposed to this.
+            for dot in (os.path.join(tree, ".git"),):
+                if os.path.isdir(dot):
+                    shutil.rmtree(dot, ignore_errors=True)
+                elif os.path.isfile(dot):
+                    os.remove(dot)
         if rc != 0:
             shutil.rmtree(tree, ignore_errors=True)
             row.update(state="clone_failed", detail="git clone rc=%d" % rc,
@@ -498,14 +544,32 @@ def build_subject(subject, status_rows):
         if flavours:
             rc, detail = gradle_build(tree, jdk, logfile, [[t] for t in flavours])
     if rc != 0:
-        # The era guess for the JDK is sometimes wrong in both directions: a
-        # 2023 tag can still need JDK 8 toolchains, and an older project can
-        # refuse JDK 8. Retry once with the other JDK before giving up.
-        other = "17" if str(jdk) == "8" else "8"
-        log("  %s: retrying with JDK %s" % (name, other))
-        rc, detail = gradle_build(tree, other, logfile, tasks)
-        if rc == 0:
-            detail += " (jdk%s)" % other
+        # The era guess for the JDK is sometimes wrong, so retry with the other
+        # one - but only when that JDK can actually run this Gradle. Gradle 4.x
+        # and 5.x cannot start a daemon on JDK 17 at all ("unrecognized jvm
+        # option MaxPermSize", "Could not determine java version from 17.0.19"),
+        # and an unconditional retry both wasted a build and buried the real
+        # error at the end of the log.
+        gv = wrapper_gradle_major(tree)
+        # JDK 11 matters on its own: a Gradle 7 project with an older Kotlin
+        # plugin rejects JDK 17 ("Unsupported class file major version") while
+        # being too new for JDK 8. Six subjects failed on exactly that.
+        ladder = [j for j in ("11", "17", "8") if j != str(jdk)]
+        for other in ladder:
+            runnable = (
+                (other == "8" and (gv is None or gv <= 8)) or
+                (other == "11" and (gv is None or gv >= 5)) or
+                (other == "17" and (gv is None or gv >= 6))
+            )
+            if not runnable:
+                log("  %s: skipping JDK %s (gradle %s cannot run on it)"
+                    % (name, other, gv))
+                continue
+            log("  %s: retrying with JDK %s (gradle %s)" % (name, other, gv))
+            rc2, detail2 = gradle_build(tree, other, logfile, tasks)
+            if rc2 == 0:
+                rc, detail = rc2, detail2 + " (jdk%s)" % other
+                break
     if rc != 0:
         row.update(state="build_failed", detail=detail,
                    seconds=str(int(time.time() - t0)))
