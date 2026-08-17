@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BackupManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.anki</a> &gt; <span class="el_source">BackupManager.java</span></div><h1>BackupManager.java</h1><pre class="source lang-java linenums">/***************************************************************************************
+ * Copyright (c) 2011 Norbert Nagold &lt;norbert.nagold@gmail.com&gt;                         *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General Public License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General Public License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.anki;
+
+import android.content.SharedPreferences;
+import android.os.StatFs;
+
+
+import com.ichi2.libanki.Collection;
+import com.ichi2.libanki.Utils;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.Locale;
+import java.util.UnknownFormatConversionException;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import timber.log.Timber;
+
+public class BackupManager {
+
+    public static final int MIN_FREE_SPACE = 10;
+    public static final int MIN_BACKUP_COL_SIZE = 10000; // threshold in bytes to backup a col file
+
+    public final static String BACKUP_SUFFIX = &quot;backup&quot;;
+    public final static String BROKEN_DECKS_SUFFIX = &quot;broken&quot;;
+
+<span class="fc" id="L53">    private static boolean mUseBackups = true;</span>
+
+
+    /** Number of hours after which a backup new backup is created */
+    public static final int BACKUP_INTERVAL = 5;
+
+
+    /* Prevent class from being instantiated */
+    private BackupManager() {
+    }
+
+
+    public static boolean isActivated() {
+<span class="nc" id="L66">        return mUseBackups;</span>
+    }
+
+
+    private static File getBackupDirectory(File ankidroidDir) {
+<span class="fc" id="L71">        File directory = new File(ankidroidDir, BACKUP_SUFFIX);</span>
+<span class="pc bpc" id="L72" title="1 of 2 branches missed.">        if (!directory.isDirectory()) {</span>
+<span class="nc" id="L73">            directory.mkdirs();</span>
+        }
+<span class="fc" id="L75">        return directory;</span>
+    }
+
+
+    private static File getBrokenDirectory(File ankidroidDir) {
+<span class="nc" id="L80">        File directory = new File(ankidroidDir, BROKEN_DECKS_SUFFIX);</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (!directory.isDirectory()) {</span>
+<span class="nc" id="L82">            directory.mkdirs();</span>
+        }
+<span class="nc" id="L84">        return directory;</span>
+    }
+
+
+    public static boolean performBackupInBackground(String path) {
+<span class="fc" id="L89">        return performBackupInBackground(path, BACKUP_INTERVAL, false);</span>
+    }
+
+
+    public static boolean performBackupInBackground(String path, boolean force) {
+<span class="nc" id="L94">        return performBackupInBackground(path, BACKUP_INTERVAL, force);</span>
+    }
+
+
+    public static boolean performBackupInBackground(String path, int interval) {
+<span class="nc" id="L99">        return performBackupInBackground(path, interval, false);</span>
+    }
+
+
+    public static boolean performBackupInBackground(final String colPath, int interval, boolean force) {
+<span class="fc" id="L104">        SharedPreferences prefs = AnkiDroidApp.getSharedPrefs(AnkiDroidApp.getInstance().getBaseContext());</span>
+<span class="pc bpc" id="L105" title="3 of 4 branches missed.">        if (prefs.getInt(&quot;backupMax&quot;, 8) == 0 &amp;&amp; !force) {</span>
+<span class="nc" id="L106">            Timber.w(&quot;backups are disabled&quot;);</span>
+<span class="nc" id="L107">            return false;</span>
+        }
+<span class="fc" id="L109">        final File colFile = new File(colPath);</span>
+<span class="fc" id="L110">        File[] deckBackups = getBackups(colFile);</span>
+<span class="fc" id="L111">        int len = deckBackups.length;</span>
+<span class="pc bpc" id="L112" title="2 of 4 branches missed.">        if (len &gt; 0 &amp;&amp; deckBackups[len - 1].lastModified() == colFile.lastModified()) {</span>
+<span class="nc" id="L113">            Timber.d(&quot;performBackup: No backup necessary due to no collection changes&quot;);</span>
+<span class="nc" id="L114">            return false;</span>
+        }
+
+<span class="fc" id="L117">        SimpleDateFormat df = new SimpleDateFormat(&quot;yyyy-MM-dd-HH-mm&quot;, Locale.US);</span>
+<span class="fc" id="L118">        Calendar cal = new GregorianCalendar();</span>
+<span class="fc" id="L119">        cal.setTimeInMillis(System.currentTimeMillis());</span>
+
+        // Abort backup if one was already made less than 5 hours ago
+<span class="fc" id="L122">        Date lastBackupDate = null;</span>
+<span class="pc bpc" id="L123" title="1 of 4 branches missed.">        while (lastBackupDate == null &amp;&amp; len &gt; 0) {</span>
+            try {
+<span class="fc" id="L125">                len--;</span>
+<span class="fc" id="L126">                lastBackupDate = df.parse(deckBackups[len].getName().replaceAll(</span>
+                        &quot;^.*-(\\d{4}-\\d{2}-\\d{2}-\\d{2}-\\d{2}).apkg$&quot;, &quot;$1&quot;));
+<span class="nc" id="L128">            } catch (ParseException e) {</span>
+<span class="nc" id="L129">                lastBackupDate = null;</span>
+<span class="pc" id="L130">            }</span>
+        }
+<span class="pc bpc" id="L132" title="3 of 6 branches missed.">        if (lastBackupDate != null &amp;&amp; lastBackupDate.getTime() + interval * 3600000L &gt; Utils.intNow(1000) &amp;&amp; !force) {</span>
+<span class="fc" id="L133">            Timber.d(&quot;performBackup: No backup created. Last backup younger than 5 hours&quot;);</span>
+<span class="fc" id="L134">            return false;</span>
+        }
+
+        String backupFilename;
+        try {
+<span class="nc" id="L139">            backupFilename = String.format(Utils.ENGLISH_LOCALE, colFile.getName().replace(&quot;.anki2&quot;, &quot;&quot;)</span>
+<span class="nc" id="L140">                    + &quot;-%s.apkg&quot;, df.format(cal.getTime()));</span>
+<span class="nc" id="L141">        } catch (UnknownFormatConversionException e) {</span>
+<span class="nc" id="L142">            Timber.e(e, &quot;performBackup: error on creating backup filename&quot;);</span>
+<span class="nc" id="L143">            return false;</span>
+<span class="nc" id="L144">        }</span>
+
+        // Abort backup if destination already exists (extremely unlikely)
+<span class="nc" id="L147">        final File backupFile = new File(getBackupDirectory(colFile.getParentFile()), backupFilename);</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (backupFile.exists()) {</span>
+<span class="nc" id="L149">            Timber.d(&quot;performBackup: No new backup created. File already exists&quot;);</span>
+<span class="nc" id="L150">            return false;</span>
+        }
+
+        // Abort backup if not enough free space
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (getFreeDiscSpace(colFile) &lt; colFile.length() + (MIN_FREE_SPACE * 1024 * 1024)) {</span>
+<span class="nc" id="L155">            Timber.e(&quot;performBackup: Not enough space on sd card to backup.&quot;);</span>
+<span class="nc" id="L156">            prefs.edit().putBoolean(&quot;noSpaceLeft&quot;, true).commit();</span>
+<span class="nc" id="L157">            return false;</span>
+        }
+
+        // Don't bother trying to do backup if the collection is too small to be valid
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (colFile.length() &lt; MIN_BACKUP_COL_SIZE) {</span>
+<span class="nc" id="L162">            Timber.d(&quot;performBackup: No backup created as the collection is too small to be valid&quot;);</span>
+<span class="nc" id="L163">            return false;</span>
+        }
+
+
+        // TODO: Probably not a good idea to do the backup while the collection is open
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (CollectionHelper.getInstance().colIsOpen()) {</span>
+<span class="nc" id="L169">            Timber.w(&quot;Collection is already open during backup... we probably shouldn't be doing this&quot;);</span>
+        }
+<span class="nc" id="L171">        Timber.i(&quot;Launching new thread to backup %s to %s&quot;, colPath, backupFile.getPath());</span>
+
+        // Backup collection as apkg in new thread
+<span class="nc" id="L174">        Thread thread = new Thread() {</span>
+            @Override
+            public void run() {
+                // Save collection file as zip archive
+<span class="nc" id="L178">                int BUFFER_SIZE = 1024;</span>
+<span class="nc" id="L179">                byte[] buf = new byte[BUFFER_SIZE];</span>
+                try {
+<span class="nc" id="L181">                    BufferedInputStream bis = new BufferedInputStream(new FileInputStream(colPath), BUFFER_SIZE);</span>
+<span class="nc" id="L182">                    ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(backupFile)));</span>
+<span class="nc" id="L183">                    ZipEntry ze = new ZipEntry(&quot;collection.anki2&quot;);</span>
+<span class="nc" id="L184">                    zos.putNextEntry(ze);</span>
+                    int len;
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                    while ((len = bis.read(buf, 0, BUFFER_SIZE)) != -1) {</span>
+<span class="nc" id="L187">                        zos.write(buf, 0, len);</span>
+                    }
+<span class="nc" id="L189">                    zos.close();</span>
+<span class="nc" id="L190">                    bis.close();</span>
+                    // Delete old backup files if needed
+<span class="nc" id="L192">                    SharedPreferences prefs = AnkiDroidApp.getSharedPrefs(AnkiDroidApp.getInstance().getBaseContext());</span>
+<span class="nc" id="L193">                    deleteDeckBackups(colPath, prefs.getInt(&quot;backupMax&quot;, 8));</span>
+                    // set timestamp of file in order to avoid creating a new backup unless its changed
+<span class="nc" id="L195">                    backupFile.setLastModified(colFile.lastModified());</span>
+<span class="nc" id="L196">                    Timber.i(&quot;Backup created succesfully&quot;);</span>
+<span class="nc" id="L197">                } catch (IOException e) {</span>
+<span class="nc" id="L198">                    e.printStackTrace();</span>
+<span class="nc" id="L199">                }</span>
+<span class="nc" id="L200">            }</span>
+        };
+<span class="nc" id="L202">        thread.start();</span>
+<span class="nc" id="L203">        return true;</span>
+    }
+
+
+    public static boolean enoughDiscSpace(String path) {
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">        return getFreeDiscSpace(path) &gt;= (MIN_FREE_SPACE * 1024 * 1024);</span>
+    }
+
+    /**
+     * Get free disc space in bytes from path to Collection
+     * @param path
+     * @return
+     */
+    public static long getFreeDiscSpace(String path) {
+<span class="fc" id="L217">        return getFreeDiscSpace(new File(path));</span>
+    }
+
+
+    private static long getFreeDiscSpace(File file) {
+        try {
+<span class="fc" id="L223">            StatFs stat = new StatFs(file.getParentFile().getPath());</span>
+<span class="fc" id="L224">            long blocks = stat.getAvailableBlocks();</span>
+<span class="fc" id="L225">            long blocksize = stat.getBlockSize();</span>
+<span class="fc" id="L226">            return blocks * blocksize;</span>
+<span class="nc" id="L227">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L228">            Timber.e(e, &quot;Free space could not be retrieved&quot;);</span>
+<span class="nc" id="L229">            return MIN_FREE_SPACE * 1024 * 1024;</span>
+        }
+    }
+
+
+    /**
+     * Run the sqlite3 command-line-tool (if it exists) on the collection to dump to a text file
+     * and reload as a new database. Recently this command line tool isn't available on many devices
+     *
+     * @param col Collection
+     * @return whether the repair was successful
+     */
+    public static boolean repairCollection(Collection col) {
+<span class="nc" id="L242">        String deckPath = col.getPath();</span>
+<span class="nc" id="L243">        File deckFile = new File(deckPath);</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (col != null) {</span>
+<span class="nc" id="L245">            col.close();</span>
+        }
+
+        // repair file
+<span class="nc" id="L249">        String execString = &quot;sqlite3 &quot; + deckPath + &quot; .dump | sqlite3 &quot; + deckPath + &quot;.tmp&quot;;</span>
+<span class="nc" id="L250">        Timber.i(&quot;repairCollection - Execute: &quot; + execString);</span>
+        try {
+<span class="nc" id="L252">            String[] cmd = { &quot;/system/bin/sh&quot;, &quot;-c&quot;, execString };</span>
+<span class="nc" id="L253">            Process process = Runtime.getRuntime().exec(cmd);</span>
+<span class="nc" id="L254">            process.waitFor();</span>
+
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            if (!new File(deckPath + &quot;.tmp&quot;).exists()) {</span>
+<span class="nc" id="L257">                Timber.e(&quot;repairCollection - dump to &quot; + deckPath + &quot;.tmp failed&quot;);</span>
+<span class="nc" id="L258">                return false;</span>
+            }
+
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if (!moveDatabaseToBrokenFolder(deckPath, false)) {</span>
+<span class="nc" id="L262">                Timber.e(&quot;repairCollection - could not move corrupt file to broken folder&quot;);</span>
+<span class="nc" id="L263">                return false;</span>
+            }
+<span class="nc" id="L265">            Timber.i(&quot;repairCollection - moved corrupt file to broken folder&quot;);</span>
+<span class="nc" id="L266">            File repairedFile = new File(deckPath + &quot;.tmp&quot;);</span>
+<span class="nc" id="L267">            return repairedFile.renameTo(deckFile);</span>
+<span class="nc" id="L268">        } catch (IOException | InterruptedException e) {</span>
+<span class="nc" id="L269">            Timber.e(&quot;repairCollection - error: &quot; + e.getMessage());</span>
+        }
+<span class="nc" id="L271">        return false;</span>
+    }
+
+
+    public static boolean moveDatabaseToBrokenFolder(String colPath, boolean moveConnectedFilesToo) {
+<span class="nc" id="L276">        File colFile = new File(colPath);</span>
+
+        // move file
+<span class="nc" id="L279">        Date value = Utils.genToday(Utils.utcOffset());</span>
+<span class="nc" id="L280">        String movedFilename = String.format(Utils.ENGLISH_LOCALE, colFile.getName().replace(&quot;.anki2&quot;, &quot;&quot;)</span>
+                + &quot;-corrupt-%tF.anki2&quot;, value);
+<span class="nc" id="L282">        File movedFile = new File(getBrokenDirectory(colFile.getParentFile()), movedFilename);</span>
+<span class="nc" id="L283">        int i = 1;</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">        while (movedFile.exists()) {</span>
+<span class="nc" id="L285">            movedFile = new File(getBrokenDirectory(colFile.getParentFile()), movedFilename.replace(&quot;.anki2&quot;,</span>
+<span class="nc" id="L286">                    &quot;-&quot; + Integer.toString(i) + &quot;.anki2&quot;));</span>
+<span class="nc" id="L287">            i++;</span>
+        }
+<span class="nc" id="L289">        movedFilename = movedFile.getName();</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (!colFile.renameTo(movedFile)) {</span>
+<span class="nc" id="L291">            return false;</span>
+        }
+
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (moveConnectedFilesToo) {</span>
+            // move all connected files (like journals, directories...) too
+<span class="nc" id="L296">            String deckName = colFile.getName();</span>
+<span class="nc" id="L297">            File directory = new File(colFile.getParent());</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            for (File f : directory.listFiles()) {</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                if (f.getName().startsWith(deckName)) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                    if (!f.renameTo(new File(getBrokenDirectory(colFile.getParentFile()), f.getName().replace(deckName,</span>
+                            movedFilename)))) {
+<span class="nc" id="L302">                        return false;</span>
+                    }
+                }
+            }
+        }
+<span class="nc" id="L307">        return true;</span>
+    }
+
+
+    public static File[] getBackups(File colFile) {
+<span class="fc" id="L312">        File[] files = getBackupDirectory(colFile.getParentFile()).listFiles();</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">        if (files == null) {</span>
+<span class="nc" id="L314">            files = new File[0];</span>
+        }
+<span class="fc" id="L316">        ArrayList&lt;File&gt; deckBackups = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">        for (File aktFile : files) {</span>
+<span class="fc" id="L318">            if (aktFile.getName().replaceAll(&quot;^(.*)-\\d{4}-\\d{2}-\\d{2}-\\d{2}-\\d{2}.apkg$&quot;, &quot;$1.apkg&quot;)</span>
+<span class="pc bpc" id="L319" title="1 of 2 branches missed.">                    .equals(colFile.getName().replace(&quot;.anki2&quot;,&quot;.apkg&quot;))) {</span>
+<span class="fc" id="L320">                deckBackups.add(aktFile);</span>
+            }
+        }
+<span class="fc" id="L323">        Collections.sort(deckBackups);</span>
+<span class="fc" id="L324">        File[] fileList = new File[deckBackups.size()];</span>
+<span class="fc" id="L325">        deckBackups.toArray(fileList);</span>
+<span class="fc" id="L326">        return fileList;</span>
+    }
+
+
+    public static boolean deleteDeckBackups(String colFile, int keepNumber) {
+<span class="nc" id="L331">        return deleteDeckBackups(getBackups(new File(colFile)), keepNumber);</span>
+    }
+
+
+    public static boolean deleteDeckBackups(File colFile, int keepNumber) {
+<span class="nc" id="L336">        return deleteDeckBackups(getBackups(colFile), keepNumber);</span>
+    }
+
+
+    public static boolean deleteDeckBackups(File[] backups, int keepNumber) {
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        if (backups == null) {</span>
+<span class="nc" id="L342">            return false;</span>
+        }
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        for (int i = 0; i &lt; backups.length - keepNumber; i++) {</span>
+<span class="nc" id="L345">            backups[i].delete();</span>
+<span class="nc" id="L346">            Timber.e(&quot;deleteDeckBackups: backup file &quot;+backups[i].getPath()+ &quot; deleted.&quot;);</span>
+        }
+<span class="nc" id="L348">        return true;</span>
+    }
+
+
+    public static boolean removeDir(File dir) {
+<span class="nc bnc" id="L353" title="All 2 branches missed.">        if (dir.isDirectory()) {</span>
+<span class="nc" id="L354">            File[] files = dir.listFiles();</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">            for (File aktFile : files) {</span>
+<span class="nc" id="L356">                removeDir(aktFile);</span>
+            }
+        }
+<span class="nc" id="L359">        return dir.delete();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

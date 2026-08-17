@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UploadService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE commons</a> &gt; <a href="index.source.html" class="el_package">fr.free.nrw.commons.upload</a> &gt; <span class="el_source">UploadService.java</span></div><h1>UploadService.java</h1><pre class="source lang-java linenums">package fr.free.nrw.commons.upload;
+
+import android.annotation.SuppressLint;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.BitmapFactory;
+import android.os.Bundle;
+import android.support.v4.app.NotificationCompat;
+import android.webkit.MimeTypeMap;
+import android.widget.Toast;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.inject.Inject;
+import javax.inject.Named;
+
+import fr.free.nrw.commons.HandlerService;
+import fr.free.nrw.commons.R;
+import fr.free.nrw.commons.Utils;
+import fr.free.nrw.commons.auth.SessionManager;
+import fr.free.nrw.commons.contributions.Contribution;
+import fr.free.nrw.commons.contributions.ContributionDao;
+import fr.free.nrw.commons.contributions.ContributionsActivity;
+import fr.free.nrw.commons.contributions.ContributionsContentProvider;
+import fr.free.nrw.commons.modifications.ModificationsContentProvider;
+import fr.free.nrw.commons.mwapi.MediaWikiApi;
+import fr.free.nrw.commons.mwapi.UploadResult;
+import timber.log.Timber;
+
+public class UploadService extends HandlerService&lt;Contribution&gt; {
+
+    private static final String EXTRA_PREFIX = &quot;fr.free.nrw.commons.upload&quot;;
+
+    public static final int ACTION_UPLOAD_FILE = 1;
+
+    public static final String ACTION_START_SERVICE = EXTRA_PREFIX + &quot;.upload&quot;;
+    public static final String EXTRA_SOURCE = EXTRA_PREFIX + &quot;.source&quot;;
+    public static final String EXTRA_CAMPAIGN = EXTRA_PREFIX + &quot;.campaign&quot;;
+
+    @Inject MediaWikiApi mwApi;
+    @Inject SessionManager sessionManager;
+    @Inject @Named(&quot;default_preferences&quot;) SharedPreferences prefs;
+    @Inject ContributionDao contributionDao;
+
+    private NotificationManager notificationManager;
+    private NotificationCompat.Builder curProgressNotification;
+    private int toUpload;
+
+    // The file names of unfinished uploads, used to prevent overwriting
+<span class="nc" id="L61">    private Set&lt;String&gt; unfinishedUploads = new HashSet&lt;&gt;();</span>
+
+    // DO NOT HAVE NOTIFICATION ID OF 0 FOR ANYTHING
+    // See http://stackoverflow.com/questions/8725909/startforeground-does-not-show-my-notification
+    // Seriously, Android?
+    public static final int NOTIFICATION_UPLOAD_IN_PROGRESS = 1;
+    public static final int NOTIFICATION_UPLOAD_COMPLETE = 2;
+    public static final int NOTIFICATION_UPLOAD_FAILED = 3;
+
+    public UploadService() {
+<span class="nc" id="L71">        super(&quot;UploadService&quot;);</span>
+<span class="nc" id="L72">    }</span>
+
+    private class NotificationUpdateProgressListener implements MediaWikiApi.ProgressListener {
+
+        String notificationTag;
+        boolean notificationTitleChanged;
+        Contribution contribution;
+
+        String notificationProgressTitle;
+        String notificationFinishingTitle;
+
+<span class="nc" id="L83">        public NotificationUpdateProgressListener(String notificationTag, String notificationProgressTitle, String notificationFinishingTitle, Contribution contribution) {</span>
+<span class="nc" id="L84">            this.notificationTag = notificationTag;</span>
+<span class="nc" id="L85">            this.notificationProgressTitle = notificationProgressTitle;</span>
+<span class="nc" id="L86">            this.notificationFinishingTitle = notificationFinishingTitle;</span>
+<span class="nc" id="L87">            this.contribution = contribution;</span>
+<span class="nc" id="L88">        }</span>
+
+        @Override
+        public void onProgress(long transferred, long total) {
+<span class="nc" id="L92">            Timber.d(&quot;Uploaded %d of %d&quot;, transferred, total);</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            if (!notificationTitleChanged) {</span>
+<span class="nc" id="L94">                curProgressNotification.setContentTitle(notificationProgressTitle);</span>
+<span class="nc" id="L95">                notificationTitleChanged = true;</span>
+<span class="nc" id="L96">                contribution.setState(Contribution.STATE_IN_PROGRESS);</span>
+            }
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            if (transferred == total) {</span>
+                // Completed!
+<span class="nc" id="L100">                curProgressNotification.setContentTitle(notificationFinishingTitle);</span>
+<span class="nc" id="L101">                curProgressNotification.setProgress(0, 100, true);</span>
+            } else {
+<span class="nc" id="L103">                curProgressNotification.setProgress(100, (int) (((double) transferred / (double) total) * 100), false);</span>
+            }
+<span class="nc" id="L105">            startForeground(NOTIFICATION_UPLOAD_IN_PROGRESS, curProgressNotification.build());</span>
+
+<span class="nc" id="L107">            contribution.setTransferred(transferred);</span>
+<span class="nc" id="L108">            contributionDao.save(contribution);</span>
+<span class="nc" id="L109">        }</span>
+
+    }
+
+    @Override
+    public void onDestroy() {
+<span class="nc" id="L115">        super.onDestroy();</span>
+<span class="nc" id="L116">        Timber.d(&quot;UploadService.onDestroy; %s are yet to be uploaded&quot;, unfinishedUploads);</span>
+<span class="nc" id="L117">    }</span>
+
+    @Override
+    public void onCreate() {
+<span class="nc" id="L121">        super.onCreate();</span>
+
+<span class="nc" id="L123">        notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);</span>
+<span class="nc" id="L124">    }</span>
+
+    @Override
+    protected void handle(int what, Contribution contribution) {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        switch (what) {</span>
+            case ACTION_UPLOAD_FILE:
+                //FIXME: Google Photos bug
+<span class="nc" id="L131">                uploadContribution(contribution);</span>
+<span class="nc" id="L132">                break;</span>
+            default:
+<span class="nc" id="L134">                throw new IllegalArgumentException(&quot;Unknown value for what&quot;);</span>
+        }
+<span class="nc" id="L136">    }</span>
+
+    @Override
+    public void queue(int what, Contribution contribution) {
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        switch (what) {</span>
+            case ACTION_UPLOAD_FILE:
+
+<span class="nc" id="L143">                contribution.setState(Contribution.STATE_QUEUED);</span>
+<span class="nc" id="L144">                contribution.setTransferred(0);</span>
+<span class="nc" id="L145">                contributionDao.save(contribution);</span>
+<span class="nc" id="L146">                toUpload++;</span>
+<span class="nc bnc" id="L147" title="All 4 branches missed.">                if (curProgressNotification != null &amp;&amp; toUpload != 1) {</span>
+<span class="nc" id="L148">                    curProgressNotification.setContentText(getResources().getQuantityString(R.plurals.uploads_pending_notification_indicator, toUpload, toUpload));</span>
+<span class="nc" id="L149">                    Timber.d(&quot;%d uploads left&quot;, toUpload);</span>
+<span class="nc" id="L150">                    this.startForeground(NOTIFICATION_UPLOAD_IN_PROGRESS, curProgressNotification.build());</span>
+                }
+
+<span class="nc" id="L153">                super.queue(what, contribution);</span>
+<span class="nc" id="L154">                break;</span>
+            default:
+<span class="nc" id="L156">                throw new IllegalArgumentException(&quot;Unknown value for what&quot;);</span>
+        }
+<span class="nc" id="L158">    }</span>
+
+<span class="nc" id="L160">    private boolean freshStart = true;</span>
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+<span class="nc bnc" id="L164" title="All 4 branches missed.">        if (ACTION_START_SERVICE.equals(intent.getAction()) &amp;&amp; freshStart) {</span>
+<span class="nc" id="L165">            ContentValues failedValues = new ContentValues();</span>
+<span class="nc" id="L166">            failedValues.put(ContributionDao.Table.COLUMN_STATE, Contribution.STATE_FAILED);</span>
+
+<span class="nc" id="L168">            int updated = getContentResolver().update(ContributionsContentProvider.BASE_URI,</span>
+                    failedValues,
+                    ContributionDao.Table.COLUMN_STATE + &quot; = ? OR &quot; + ContributionDao.Table.COLUMN_STATE + &quot; = ?&quot;,
+<span class="nc" id="L171">                    new String[]{ String.valueOf(Contribution.STATE_QUEUED), String.valueOf(Contribution.STATE_IN_PROGRESS) }</span>
+            );
+<span class="nc" id="L173">            Timber.d(&quot;Set %d uploads to failed&quot;, updated);</span>
+<span class="nc" id="L174">            Timber.d(&quot;Flags is %d id is %d&quot;, flags, startId);</span>
+<span class="nc" id="L175">            freshStart = false;</span>
+        }
+<span class="nc" id="L177">        return START_REDELIVER_INTENT;</span>
+    }
+
+    @SuppressLint(&quot;StringFormatInvalid&quot;)
+    private void uploadContribution(Contribution contribution) {
+        InputStream file;
+
+<span class="nc" id="L184">        String notificationTag = contribution.getLocalUri().toString();</span>
+
+        try {
+            //FIXME: Google Photos bug
+<span class="nc" id="L188">            file = this.getContentResolver().openInputStream(contribution.getLocalUri());</span>
+<span class="nc" id="L189">        } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L190">            Timber.d(&quot;File not found&quot;);</span>
+<span class="nc" id="L191">            Toast fileNotFound = Toast.makeText(this, R.string.upload_failed, Toast.LENGTH_LONG);</span>
+<span class="nc" id="L192">            fileNotFound.show();</span>
+<span class="nc" id="L193">            return;</span>
+<span class="nc" id="L194">        }</span>
+
+        //As the file is null there's no point in continuing the upload process
+        //mwapi.upload accepts a NonNull input stream
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if(file == null) {</span>
+<span class="nc" id="L199">            Timber.d(&quot;File not found&quot;);</span>
+<span class="nc" id="L200">            return;</span>
+        }
+
+<span class="nc" id="L203">        Timber.d(&quot;Before execution!&quot;);</span>
+<span class="nc" id="L204">        curProgressNotification = new NotificationCompat.Builder(this).setAutoCancel(true)</span>
+<span class="nc" id="L205">                .setSmallIcon(R.drawable.ic_launcher)</span>
+<span class="nc" id="L206">                .setLargeIcon(BitmapFactory.decodeResource(getResources(), R.drawable.ic_launcher))</span>
+<span class="nc" id="L207">                .setAutoCancel(true)</span>
+<span class="nc" id="L208">                .setContentTitle(getString(R.string.upload_progress_notification_title_start, contribution.getDisplayTitle()))</span>
+<span class="nc" id="L209">                .setContentText(getResources().getQuantityString(R.plurals.uploads_pending_notification_indicator, toUpload, toUpload))</span>
+<span class="nc" id="L210">                .setOngoing(true)</span>
+<span class="nc" id="L211">                .setProgress(100, 0, true)</span>
+<span class="nc" id="L212">                .setContentIntent(PendingIntent.getActivity(this, 0, new Intent(this, ContributionsActivity.class), 0))</span>
+<span class="nc" id="L213">                .setTicker(getString(R.string.upload_progress_notification_title_in_progress, contribution.getDisplayTitle()));</span>
+
+<span class="nc" id="L215">        this.startForeground(NOTIFICATION_UPLOAD_IN_PROGRESS, curProgressNotification.build());</span>
+
+<span class="nc" id="L217">        String filename = null;</span>
+        try {
+<span class="nc" id="L219">            filename = Utils.fixExtension(</span>
+<span class="nc" id="L220">                    contribution.getFilename(),</span>
+<span class="nc" id="L221">                    MimeTypeMap.getSingleton().getExtensionFromMimeType((String)contribution.getTag(&quot;mimeType&quot;)));</span>
+
+<span class="nc" id="L223">            synchronized (unfinishedUploads) {</span>
+<span class="nc" id="L224">                Timber.d(&quot;making sure of uniqueness of name: %s&quot;, filename);</span>
+<span class="nc" id="L225">                filename = findUniqueFilename(filename);</span>
+<span class="nc" id="L226">                unfinishedUploads.add(filename);</span>
+<span class="nc" id="L227">            }</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            if (!mwApi.validateLogin()) {</span>
+                // Need to revalidate!
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                if (sessionManager.revalidateAuthToken()) {</span>
+<span class="nc" id="L231">                    Timber.d(&quot;Successfully revalidated token!&quot;);</span>
+                } else {
+<span class="nc" id="L233">                    Timber.d(&quot;Unable to revalidate :(&quot;);</span>
+                    // TODO: Put up a new notification, ask them to re-login
+<span class="nc" id="L235">                    stopForeground(true);</span>
+<span class="nc" id="L236">                    Toast failureToast = Toast.makeText(this, R.string.authentication_failed, Toast.LENGTH_LONG);</span>
+<span class="nc" id="L237">                    failureToast.show();</span>
+<span class="nc" id="L238">                    return;</span>
+                }
+            }
+<span class="nc" id="L241">            NotificationUpdateProgressListener notificationUpdater = new NotificationUpdateProgressListener(notificationTag,</span>
+<span class="nc" id="L242">                    getString(R.string.upload_progress_notification_title_in_progress, contribution.getDisplayTitle()),</span>
+<span class="nc" id="L243">                    getString(R.string.upload_progress_notification_title_finishing, contribution.getDisplayTitle()),</span>
+                    contribution
+            );
+<span class="nc" id="L246">            UploadResult uploadResult = mwApi.uploadFile(filename, file, contribution.getDataLength(), contribution.getPageContents(), contribution.getEditSummary(), notificationUpdater);</span>
+
+<span class="nc" id="L248">            Timber.d(&quot;Response is %s&quot;, uploadResult.toString());</span>
+
+<span class="nc" id="L250">            curProgressNotification = null;</span>
+
+<span class="nc" id="L252">            String resultStatus = uploadResult.getResultStatus();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if (!resultStatus.equals(&quot;Success&quot;)) {</span>
+<span class="nc" id="L254">                showFailedNotification(contribution);</span>
+            } else {
+<span class="nc" id="L256">                contribution.setFilename(uploadResult.getCanonicalFilename());</span>
+<span class="nc" id="L257">                contribution.setImageUrl(uploadResult.getImageUrl());</span>
+<span class="nc" id="L258">                contribution.setState(Contribution.STATE_COMPLETED);</span>
+<span class="nc" id="L259">                contribution.setDateUploaded(uploadResult.getDateUploaded());</span>
+<span class="nc" id="L260">                contributionDao.save(contribution);</span>
+            }
+<span class="nc" id="L262">        } catch (IOException e) {</span>
+<span class="nc" id="L263">            Timber.d(&quot;I have a network fuckup&quot;);</span>
+<span class="nc" id="L264">            showFailedNotification(contribution);</span>
+        } finally {
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (filename != null) {</span>
+<span class="nc" id="L267">                unfinishedUploads.remove(filename);</span>
+            }
+<span class="nc" id="L269">            toUpload--;</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            if (toUpload == 0) {</span>
+                // Sync modifications right after all uplaods are processed
+<span class="nc" id="L272">                ContentResolver.requestSync(sessionManager.getCurrentAccount(), ModificationsContentProvider.MODIFICATIONS_AUTHORITY, new Bundle());</span>
+<span class="nc" id="L273">                stopForeground(true);</span>
+            }
+        }
+<span class="nc" id="L276">    }</span>
+
+    @SuppressLint(&quot;StringFormatInvalid&quot;)
+    private void showFailedNotification(Contribution contribution) {
+<span class="nc" id="L280">        Notification failureNotification = new NotificationCompat.Builder(this).setAutoCancel(true)</span>
+<span class="nc" id="L281">                .setSmallIcon(R.drawable.ic_launcher)</span>
+<span class="nc" id="L282">                .setAutoCancel(true)</span>
+<span class="nc" id="L283">                .setContentIntent(PendingIntent.getActivity(this, 0, new Intent(this, ContributionsActivity.class), 0))</span>
+<span class="nc" id="L284">                .setTicker(getString(R.string.upload_failed_notification_title, contribution.getDisplayTitle()))</span>
+<span class="nc" id="L285">                .setContentTitle(getString(R.string.upload_failed_notification_title, contribution.getDisplayTitle()))</span>
+<span class="nc" id="L286">                .setContentText(getString(R.string.upload_failed_notification_subtitle))</span>
+<span class="nc" id="L287">                .build();</span>
+<span class="nc" id="L288">        notificationManager.notify(NOTIFICATION_UPLOAD_FAILED, failureNotification);</span>
+
+<span class="nc" id="L290">        contribution.setState(Contribution.STATE_FAILED);</span>
+<span class="nc" id="L291">        contributionDao.save(contribution);</span>
+<span class="nc" id="L292">    }</span>
+
+    private String findUniqueFilename(String fileName) throws IOException {
+        String sequenceFileName;
+<span class="nc" id="L296">        for (int sequenceNumber = 1; true; sequenceNumber++) {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (sequenceNumber == 1) {</span>
+<span class="nc" id="L298">                sequenceFileName = fileName;</span>
+            } else {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                if (fileName.indexOf('.') == -1) {</span>
+                    // We really should have appended a file type suffix already.
+                    // But... we might not.
+<span class="nc" id="L303">                    sequenceFileName = fileName + &quot; &quot; + sequenceNumber;</span>
+                } else {
+<span class="nc" id="L305">                    Pattern regex = Pattern.compile(&quot;^(.*)(\\..+?)$&quot;);</span>
+<span class="nc" id="L306">                    Matcher regexMatcher = regex.matcher(fileName);</span>
+<span class="nc" id="L307">                    sequenceFileName = regexMatcher.replaceAll(&quot;$1 &quot; + sequenceNumber + &quot;$2&quot;);</span>
+                }
+            }
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            if (!mwApi.fileExistsWithName(sequenceFileName)</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                    &amp;&amp; !unfinishedUploads.contains(sequenceFileName)) {</span>
+<span class="nc" id="L312">                break;</span>
+            }
+        }
+<span class="nc" id="L315">        return sequenceFileName;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,917 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Syncer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.libanki.sync</a> &gt; <span class="el_source">Syncer.java</span></div><h1>Syncer.java</h1><pre class="source lang-java linenums">/***************************************************************************************
+ * Copyright (c) 2011 Norbert Nagold &lt;norbert.nagold@gmail.com&gt;                         *
+ * Copyright (c) 2014 Timothy Rae &lt;perceptualchaos2@gmail.com&gt;                          *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General Public License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General Public License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.libanki.sync;
+
+import android.database.Cursor;
+import android.database.SQLException;
+
+
+import com.ichi2.anki.AnkiDroidApp;
+import com.ichi2.anki.R;
+import com.ichi2.anki.exception.UnknownHttpResponseException;
+import com.ichi2.async.Connection;
+import com.ichi2.libanki.Collection;
+import com.ichi2.libanki.Consts;
+import com.ichi2.libanki.Utils;
+
+import org.apache.http.HttpResponse;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+import timber.log.Timber;
+
+public class Syncer {
+    // Mapping of column type names to Cursor types for API &lt; 11
+    public static final int TYPE_NULL = 0;
+    public static final int TYPE_INTEGER = 1;
+    public static final int TYPE_FLOAT = 2;
+    public static final int TYPE_STRING = 3;
+    public static final int TYPE_BLOB = 4;
+
+    Collection mCol;
+    HttpSyncer mServer;
+    long mRMod;
+    long mRScm;
+    int mMaxUsn;
+    long mLMod;
+    long mLScm;
+    int mMinUsn;
+    boolean mLNewer;
+    JSONObject mRChg;
+    String mSyncMsg;
+
+    private LinkedList&lt;String&gt; mTablesLeft;
+    private Cursor mCursor;
+
+
+<span class="nc" id="L72">    public Syncer(Collection col, HttpSyncer server) {</span>
+<span class="nc" id="L73">        mCol = col;</span>
+<span class="nc" id="L74">        mServer = server;</span>
+<span class="nc" id="L75">    }</span>
+
+
+    /** Returns 'noChanges', 'fullSync', 'success', etc */
+    public Object[] sync() throws UnknownHttpResponseException {
+<span class="nc" id="L80">        return sync(null);</span>
+    }
+
+
+    public Object[] sync(Connection con) throws UnknownHttpResponseException {
+<span class="nc" id="L85">        mSyncMsg = &quot;&quot;;</span>
+        // if the deck has any pending changes, flush them first and bump mod time
+<span class="nc" id="L87">        mCol.save();</span>
+        // step 1: login &amp; metadata
+<span class="nc" id="L89">        HttpResponse ret = mServer.meta();</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (ret == null) {</span>
+<span class="nc" id="L91">            return null;</span>
+        }
+<span class="nc" id="L93">        int returntype = ret.getStatusLine().getStatusCode();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (returntype == 403) {</span>
+<span class="nc" id="L95">            return new Object[] { &quot;badAuth&quot; };</span>
+        }
+        try {
+<span class="nc" id="L98">            mCol.getDb().getDatabase().beginTransaction();</span>
+            try {
+<span class="nc" id="L100">                Timber.i(&quot;Sync: getting meta data from server&quot;);</span>
+<span class="nc" id="L101">                JSONObject rMeta = new JSONObject(mServer.stream2String(ret.getEntity().getContent()));</span>
+<span class="nc" id="L102">                mCol.log(&quot;rmeta&quot;, rMeta);</span>
+<span class="nc" id="L103">                mSyncMsg = rMeta.getString(&quot;msg&quot;);</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                if (!rMeta.getBoolean(&quot;cont&quot;)) {</span>
+                    // Don't add syncMsg; it can be fetched by UI code using the accessor
+<span class="nc" id="L106">                    return new Object[] { &quot;serverAbort&quot; };</span>
+                } else {
+                    // don't abort, but ui should show messages after sync finishes
+                    // and require confirmation if it's non-empty
+                }
+<span class="nc" id="L111">                throwExceptionIfCancelled(con);</span>
+<span class="nc" id="L112">                long rscm = rMeta.getLong(&quot;scm&quot;);</span>
+<span class="nc" id="L113">                int rts = rMeta.getInt(&quot;ts&quot;);</span>
+<span class="nc" id="L114">                mRMod = rMeta.getLong(&quot;mod&quot;);</span>
+<span class="nc" id="L115">                mMaxUsn = rMeta.getInt(&quot;usn&quot;);</span>
+                // skip uname, AnkiDroid already stores and shows it
+<span class="nc" id="L117">                Timber.i(&quot;Sync: building local meta data&quot;);</span>
+<span class="nc" id="L118">                JSONObject lMeta = meta();</span>
+<span class="nc" id="L119">                mCol.log(&quot;lmeta&quot;, lMeta);</span>
+<span class="nc" id="L120">                mLMod = lMeta.getLong(&quot;mod&quot;);</span>
+<span class="nc" id="L121">                mMinUsn = lMeta.getInt(&quot;usn&quot;);</span>
+<span class="nc" id="L122">                long lscm = lMeta.getLong(&quot;scm&quot;);</span>
+<span class="nc" id="L123">                int lts = lMeta.getInt(&quot;ts&quot;);</span>
+
+<span class="nc" id="L125">                long diff = Math.abs(rts - lts);</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                if (diff &gt; 300) {</span>
+<span class="nc" id="L127">                    mCol.log(&quot;clock off&quot;);</span>
+<span class="nc" id="L128">                    return new Object[] { &quot;clockOff&quot;, diff };</span>
+                }
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                if (mLMod == mRMod) {</span>
+<span class="nc" id="L131">                    Timber.i(&quot;Sync: no changes - returning&quot;);</span>
+<span class="nc" id="L132">                    mCol.log(&quot;no changes&quot;);</span>
+<span class="nc" id="L133">                    return new Object[] { &quot;noChanges&quot; };</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                } else if (lscm != rscm) {</span>
+<span class="nc" id="L135">                    Timber.i(&quot;Sync: full sync necessary - returning&quot;);</span>
+<span class="nc" id="L136">                    mCol.log(&quot;schema diff&quot;);</span>
+<span class="nc" id="L137">                    return new Object[] { &quot;fullSync&quot; };</span>
+                }
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                mLNewer = mLMod &gt; mRMod;</span>
+                // step 1.5: check collection is valid
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                if (!mCol.basicCheck()) {</span>
+<span class="nc" id="L142">                    mCol.log(&quot;basic check&quot;);</span>
+<span class="nc" id="L143">                    return new Object[] { &quot;basicCheckFailed&quot; };</span>
+                }
+<span class="nc" id="L145">                throwExceptionIfCancelled(con);</span>
+                // step 2: deletions
+<span class="nc" id="L147">                publishProgress(con, R.string.sync_deletions_message);</span>
+
+<span class="nc" id="L149">                Timber.i(&quot;Sync: collection removed data&quot;);</span>
+<span class="nc" id="L150">                JSONObject lrem = removed();</span>
+<span class="nc" id="L151">                JSONObject o = new JSONObject();</span>
+<span class="nc" id="L152">                o.put(&quot;minUsn&quot;, mMinUsn);</span>
+<span class="nc" id="L153">                o.put(&quot;lnewer&quot;, mLNewer);</span>
+<span class="nc" id="L154">                o.put(&quot;graves&quot;, lrem);</span>
+
+<span class="nc" id="L156">                Timber.i(&quot;Sync: sending and receiving removed data&quot;);</span>
+<span class="nc" id="L157">                JSONObject rrem = mServer.start(o);</span>
+<span class="nc" id="L158">                Timber.i(&quot;Sync: applying removed data&quot;);</span>
+<span class="nc" id="L159">                throwExceptionIfCancelled(con);</span>
+<span class="nc" id="L160">                remove(rrem);</span>
+                // ... and small objects
+<span class="nc" id="L162">                publishProgress(con, R.string.sync_small_objects_message);</span>
+
+<span class="nc" id="L164">                Timber.i(&quot;Sync: collection small changes&quot;);</span>
+<span class="nc" id="L165">                JSONObject lchg = changes();</span>
+<span class="nc" id="L166">                JSONObject sch = new JSONObject();</span>
+<span class="nc" id="L167">                sch.put(&quot;changes&quot;, lchg);</span>
+
+<span class="nc" id="L169">                Timber.i(&quot;Sync: sending and receiving small changes&quot;);</span>
+<span class="nc" id="L170">                JSONObject rchg = mServer.applyChanges(sch);</span>
+<span class="nc" id="L171">                throwExceptionIfCancelled(con);</span>
+<span class="nc" id="L172">                Timber.i(&quot;Sync: merging small changes&quot;);</span>
+<span class="nc" id="L173">                mergeChanges(lchg, rchg);</span>
+                // step 3: stream large tables from server
+<span class="nc" id="L175">                publishProgress(con, R.string.sync_download_chunk);</span>
+                while (true) {
+<span class="nc" id="L177">                    throwExceptionIfCancelled(con);</span>
+<span class="nc" id="L178">                    Timber.i(&quot;Sync: downloading chunked data&quot;);</span>
+<span class="nc" id="L179">                    JSONObject chunk = mServer.chunk();</span>
+<span class="nc" id="L180">                    mCol.log(&quot;server chunk&quot;, chunk);</span>
+<span class="nc" id="L181">                    Timber.i(&quot;Sync: applying chunked data&quot;);</span>
+<span class="nc" id="L182">                    applyChunk(chunk);</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                    if (chunk.getBoolean(&quot;done&quot;)) {</span>
+<span class="nc" id="L184">                        break;</span>
+                    }
+<span class="nc" id="L186">                }</span>
+                // step 4: stream to server
+<span class="nc" id="L188">                publishProgress(con, R.string.sync_upload_chunk);</span>
+                while (true) {
+<span class="nc" id="L190">                    throwExceptionIfCancelled(con);</span>
+<span class="nc" id="L191">                    Timber.i(&quot;Sync: collecting chunked data&quot;);</span>
+<span class="nc" id="L192">                    JSONObject chunk = chunk();</span>
+<span class="nc" id="L193">                    mCol.log(&quot;client chunk&quot;, chunk);</span>
+<span class="nc" id="L194">                    JSONObject sech = new JSONObject();</span>
+<span class="nc" id="L195">                    sech.put(&quot;chunk&quot;, chunk);</span>
+<span class="nc" id="L196">                    Timber.i(&quot;Sync: sending chunked data&quot;);</span>
+<span class="nc" id="L197">                    mServer.applyChunk(sech);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                    if (chunk.getBoolean(&quot;done&quot;)) {</span>
+<span class="nc" id="L199">                        break;</span>
+                    }
+<span class="nc" id="L201">                }</span>
+                // step 5: sanity check
+<span class="nc" id="L203">                JSONObject c = sanityCheck();</span>
+<span class="nc" id="L204">                JSONObject sanity = mServer.sanityCheck2(c);</span>
+<span class="nc bnc" id="L205" title="All 4 branches missed.">                if (sanity == null || !sanity.optString(&quot;status&quot;, &quot;bad&quot;).equals(&quot;ok&quot;)) {</span>
+<span class="nc" id="L206">                    mCol.log(&quot;sanity check failed&quot;, c, sanity);</span>
+<span class="nc" id="L207">                    return new Object[] { &quot;sanityCheckError&quot;, null };</span>
+                }
+                // finalize
+<span class="nc" id="L210">                publishProgress(con, R.string.sync_finish_message);</span>
+<span class="nc" id="L211">                Timber.i(&quot;Sync: sending finish command&quot;);</span>
+<span class="nc" id="L212">                long mod = mServer.finish();</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                if (mod == 0) {</span>
+<span class="nc" id="L214">                    return new Object[] { &quot;finishError&quot; };</span>
+                }
+<span class="nc" id="L216">                Timber.i(&quot;Sync: finishing&quot;);</span>
+<span class="nc" id="L217">                finish(mod);</span>
+
+<span class="nc" id="L219">                publishProgress(con, R.string.sync_writing_db);</span>
+<span class="nc" id="L220">                mCol.getDb().getDatabase().setTransactionSuccessful();</span>
+            } finally {
+<span class="nc" id="L222">                mCol.getDb().getDatabase().endTransaction();</span>
+            }
+<span class="nc" id="L224">        } catch (JSONException | IllegalStateException e) {</span>
+<span class="nc" id="L225">            throw new RuntimeException(e);</span>
+<span class="nc" id="L226">        } catch (OutOfMemoryError e) {</span>
+<span class="nc" id="L227">            AnkiDroidApp.sendExceptionReport(e, &quot;Syncer-sync&quot;);</span>
+<span class="nc" id="L228">            return new Object[] { &quot;OutOfMemoryError&quot; };</span>
+<span class="nc" id="L229">        } catch (IOException e) {</span>
+<span class="nc" id="L230">            AnkiDroidApp.sendExceptionReport(e, &quot;Syncer-sync&quot;);</span>
+<span class="nc" id="L231">            return new Object[] { &quot;IOException&quot; };</span>
+<span class="nc" id="L232">        }</span>
+<span class="nc" id="L233">        return new Object[] { &quot;success&quot; };</span>
+    }
+
+
+    private void publishProgress(Connection con, int id) {
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (con != null) {</span>
+<span class="nc" id="L239">            con.publishProgress(id);</span>
+        }
+<span class="nc" id="L241">    }</span>
+
+
+    public JSONObject meta() throws JSONException {
+<span class="nc" id="L245">        JSONObject j = new JSONObject();</span>
+<span class="nc" id="L246">        j.put(&quot;mod&quot;, mCol.getMod());</span>
+<span class="nc" id="L247">        j.put(&quot;scm&quot;, mCol.getScm());</span>
+<span class="nc" id="L248">        j.put(&quot;usn&quot;, mCol.getUsnForSync());</span>
+<span class="nc" id="L249">        j.put(&quot;ts&quot;, Utils.intNow());</span>
+<span class="nc" id="L250">        j.put(&quot;musn&quot;, 0);</span>
+<span class="nc" id="L251">        j.put(&quot;msg&quot;, &quot;&quot;);</span>
+<span class="nc" id="L252">        j.put(&quot;cont&quot;, true);</span>
+<span class="nc" id="L253">        return j;</span>
+    }
+
+
+    /** Bundle up small objects. */
+    public JSONObject changes() {
+<span class="nc" id="L259">        JSONObject o = new JSONObject();</span>
+        try {
+<span class="nc" id="L261">            o.put(&quot;models&quot;, getModels());</span>
+<span class="nc" id="L262">            o.put(&quot;decks&quot;, getDecks());</span>
+<span class="nc" id="L263">            o.put(&quot;tags&quot;, getTags());</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            if (mLNewer) {</span>
+<span class="nc" id="L265">                o.put(&quot;conf&quot;, getConf());</span>
+<span class="nc" id="L266">                o.put(&quot;crt&quot;, mCol.getCrt());</span>
+            }
+<span class="nc" id="L268">        } catch (JSONException e) {</span>
+<span class="nc" id="L269">            throw new RuntimeException(e);</span>
+<span class="nc" id="L270">        }</span>
+<span class="nc" id="L271">        return o;</span>
+    }
+
+
+    public JSONObject applyChanges(JSONObject changes) {
+<span class="nc" id="L276">        mRChg = changes;</span>
+<span class="nc" id="L277">        JSONObject lchg = changes();</span>
+        // merge our side before returning
+<span class="nc" id="L279">        mergeChanges(lchg, mRChg);</span>
+<span class="nc" id="L280">        return lchg;</span>
+    }
+
+
+    public void mergeChanges(JSONObject lchg, JSONObject rchg) {
+        try {
+            // then the other objects
+<span class="nc" id="L287">            mergeModels(rchg.getJSONArray(&quot;models&quot;));</span>
+<span class="nc" id="L288">            mergeDecks(rchg.getJSONArray(&quot;decks&quot;));</span>
+<span class="nc" id="L289">            mergeTags(rchg.getJSONArray(&quot;tags&quot;));</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            if (rchg.has(&quot;conf&quot;)) {</span>
+<span class="nc" id="L291">                mergeConf(rchg.getJSONObject(&quot;conf&quot;));</span>
+            }
+            // this was left out of earlier betas
+<span class="nc bnc" id="L294" title="All 2 branches missed.">            if (rchg.has(&quot;crt&quot;)) {</span>
+<span class="nc" id="L295">                mCol.setCrt(rchg.getLong(&quot;crt&quot;));</span>
+            }
+<span class="nc" id="L297">        } catch (JSONException e) {</span>
+<span class="nc" id="L298">            throw new RuntimeException(e);</span>
+<span class="nc" id="L299">        }</span>
+<span class="nc" id="L300">        prepareToChunk();</span>
+<span class="nc" id="L301">    }</span>
+
+
+    public JSONObject sanityCheck() {
+<span class="nc" id="L305">        JSONObject result = new JSONObject();</span>
+        try {
+<span class="nc bnc" id="L307" title="All 2 branches missed.">            if (mCol.getDb().queryScalar(&quot;SELECT count() FROM cards WHERE nid NOT IN (SELECT id FROM notes)&quot;) != 0) {</span>
+<span class="nc" id="L308">                Timber.e(&quot;Sync - SanityCheck: there are cards without mother notes&quot;);</span>
+<span class="nc" id="L309">                result.put(&quot;client&quot;, &quot;missing notes&quot;);</span>
+<span class="nc" id="L310">                return result;</span>
+            }
+<span class="nc bnc" id="L312" title="All 2 branches missed.">            if (mCol.getDb().queryScalar(&quot;SELECT count() FROM notes WHERE id NOT IN (SELECT DISTINCT nid FROM cards)&quot;) != 0) {</span>
+<span class="nc" id="L313">                Timber.e(&quot;Sync - SanityCheck: there are notes without cards&quot;);</span>
+<span class="nc" id="L314">                result.put(&quot;client&quot;, &quot;missing cards&quot;);</span>
+<span class="nc" id="L315">                return result;</span>
+            }
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (mCol.getDb().queryScalar(&quot;SELECT count() FROM cards WHERE usn = -1&quot;) != 0) {</span>
+<span class="nc" id="L318">                Timber.e(&quot;Sync - SanityCheck: there are unsynced cards&quot;);</span>
+<span class="nc" id="L319">                result.put(&quot;client&quot;, &quot;cards had usn = -1&quot;);</span>
+<span class="nc" id="L320">                return result;</span>
+            }
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            if (mCol.getDb().queryScalar(&quot;SELECT count() FROM notes WHERE usn = -1&quot;) != 0) {</span>
+<span class="nc" id="L323">                Timber.e(&quot;Sync - SanityCheck: there are unsynced notes&quot;);</span>
+<span class="nc" id="L324">                result.put(&quot;client&quot;, &quot;notes had usn = -1&quot;);</span>
+<span class="nc" id="L325">                return result;</span>
+            }
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (mCol.getDb().queryScalar(&quot;SELECT count() FROM revlog WHERE usn = -1&quot;) != 0) {</span>
+<span class="nc" id="L328">                Timber.e(&quot;Sync - SanityCheck: there are unsynced revlogs&quot;);</span>
+<span class="nc" id="L329">                result.put(&quot;client&quot;, &quot;revlog had usn = -1&quot;);</span>
+<span class="nc" id="L330">                return result;</span>
+            }
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            if (mCol.getDb().queryScalar(&quot;SELECT count() FROM graves WHERE usn = -1&quot;) != 0) {</span>
+<span class="nc" id="L333">                Timber.e(&quot;Sync - SanityCheck: there are unsynced graves&quot;);</span>
+<span class="nc" id="L334">                result.put(&quot;client&quot;, &quot;graves had usn = -1&quot;);</span>
+<span class="nc" id="L335">                return result;</span>
+            }
+<span class="nc bnc" id="L337" title="All 2 branches missed.">            for (JSONObject g : mCol.getDecks().all()) {</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                if (g.getInt(&quot;usn&quot;) == -1) {</span>
+<span class="nc" id="L339">                    Timber.e(&quot;Sync - SanityCheck: unsynced deck: &quot; + g.getString(&quot;name&quot;));</span>
+<span class="nc" id="L340">                    result.put(&quot;client&quot;, &quot;deck had usn = -1&quot;);</span>
+<span class="nc" id="L341">                    return result;</span>
+                }
+<span class="nc" id="L343">            }</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">            for (Map.Entry&lt;String, Integer&gt; tag : mCol.getTags().allItems()) {</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">                if (tag.getValue() == -1) {</span>
+<span class="nc" id="L346">                    Timber.e(&quot;Sync - SanityCheck: there are unsynced tags&quot;);</span>
+<span class="nc" id="L347">                    result.put(&quot;client&quot;, &quot;tag had usn = -1&quot;);</span>
+<span class="nc" id="L348">                    return result;</span>
+                }
+<span class="nc" id="L350">            }</span>
+<span class="nc" id="L351">            boolean found = false;</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">            for (JSONObject m : mCol.getModels().all()) {</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                if (mCol.getServer()) {</span>
+                    // the web upgrade was mistakenly setting usn
+<span class="nc bnc" id="L355" title="All 2 branches missed.">                    if (m.getInt(&quot;usn&quot;) &lt; 0) {</span>
+<span class="nc" id="L356">                        m.put(&quot;usn&quot;, 0);</span>
+<span class="nc" id="L357">                        found = true;</span>
+                    }
+                } else {
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                    if (m.getInt(&quot;usn&quot;) == -1) {</span>
+<span class="nc" id="L361">                        Timber.e(&quot;Sync - SanityCheck: unsynced model: &quot; + m.getString(&quot;name&quot;));</span>
+<span class="nc" id="L362">                        result.put(&quot;client&quot;, &quot;model had usn = -1&quot;);</span>
+<span class="nc" id="L363">                        return result;</span>
+                    }
+                }
+<span class="nc" id="L366">            }</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (found) {</span>
+<span class="nc" id="L368">                mCol.getModels().save();</span>
+            }
+<span class="nc" id="L370">            mCol.getSched().reset();</span>
+            // check for missing parent decks
+<span class="nc" id="L372">            mCol.getSched().deckDueList();</span>
+            // return summary of deck
+<span class="nc" id="L374">            JSONArray ja = new JSONArray();</span>
+<span class="nc" id="L375">            JSONArray sa = new JSONArray();</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">            for (int c : mCol.getSched().counts()) {</span>
+<span class="nc" id="L377">                sa.put(c);</span>
+            }
+<span class="nc" id="L379">            ja.put(sa);</span>
+<span class="nc" id="L380">            ja.put(mCol.getDb().queryScalar(&quot;SELECT count() FROM cards&quot;));</span>
+<span class="nc" id="L381">            ja.put(mCol.getDb().queryScalar(&quot;SELECT count() FROM notes&quot;));</span>
+<span class="nc" id="L382">            ja.put(mCol.getDb().queryScalar(&quot;SELECT count() FROM revlog&quot;));</span>
+<span class="nc" id="L383">            ja.put(mCol.getDb().queryScalar(&quot;SELECT count() FROM graves&quot;));</span>
+<span class="nc" id="L384">            ja.put(mCol.getModels().all().size());</span>
+<span class="nc" id="L385">            ja.put(mCol.getDecks().all().size());</span>
+<span class="nc" id="L386">            ja.put(mCol.getDecks().allConf().size());</span>
+<span class="nc" id="L387">            result.put(&quot;client&quot;, ja);</span>
+<span class="nc" id="L388">            return result;</span>
+<span class="nc" id="L389">        } catch (JSONException e) {</span>
+<span class="nc" id="L390">            Timber.e(e, &quot;Syncer.sanityCheck()&quot;);</span>
+<span class="nc" id="L391">            throw new RuntimeException(e);</span>
+        }
+    }
+
+
+    // private Map&lt;String, Object&gt; sanityCheck2(JSONArray client) {
+    // Object server = sanityCheck();
+    // Map&lt;String, Object&gt; result = new HashMap&lt;String, Object&gt;();
+    // if (client.equals(server)) {
+    // result.put(&quot;status&quot;, &quot;ok&quot;);
+    // } else {
+    // result.put(&quot;status&quot;, &quot;bad&quot;);
+    // result.put(&quot;c&quot;, client);
+    // result.put(&quot;s&quot;, server);
+    // }
+    // return result;
+    // }
+
+    private String usnLim() {
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (mCol.getServer()) {</span>
+<span class="nc" id="L411">            return &quot;usn &gt;= &quot; + mMinUsn;</span>
+        } else {
+<span class="nc" id="L413">            return &quot;usn = -1&quot;;</span>
+        }
+    }
+
+
+    public long finish() {
+<span class="nc" id="L419">        return finish(0);</span>
+    }
+
+
+    private long finish(long mod) {
+<span class="nc bnc" id="L424" title="All 2 branches missed.">        if (mod == 0) {</span>
+            // server side; we decide new mod time
+<span class="nc" id="L426">            mod = Utils.intNow(1000);</span>
+        }
+<span class="nc" id="L428">        mCol.setLs(mod);</span>
+<span class="nc" id="L429">        mCol.setUsnAfterSync(mMaxUsn + 1);</span>
+        // ensure we save the mod time even if no changes made
+<span class="nc" id="L431">        mCol.getDb().setMod(true);</span>
+<span class="nc" id="L432">        mCol.save(null, mod);</span>
+<span class="nc" id="L433">        return mod;</span>
+    }
+
+
+    /**
+     * Chunked syncing ********************************************************************
+     */
+
+    private void prepareToChunk() {
+<span class="nc" id="L442">        mTablesLeft = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L443">        mTablesLeft.add(&quot;revlog&quot;);</span>
+<span class="nc" id="L444">        mTablesLeft.add(&quot;cards&quot;);</span>
+<span class="nc" id="L445">        mTablesLeft.add(&quot;notes&quot;);</span>
+<span class="nc" id="L446">        mCursor = null;</span>
+<span class="nc" id="L447">    }</span>
+
+
+    private Cursor cursorForTable(String table) {
+<span class="nc" id="L451">        String lim = usnLim();</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if (table.equals(&quot;revlog&quot;)) {</span>
+<span class="nc" id="L453">            return mCol</span>
+<span class="nc" id="L454">                    .getDb()</span>
+<span class="nc" id="L455">                    .getDatabase()</span>
+<span class="nc" id="L456">                    .rawQuery(</span>
+<span class="nc" id="L457">                            String.format(Locale.US,</span>
+                                    &quot;SELECT id, cid, %d, ease, ivl, lastIvl, factor, time, type FROM revlog WHERE %s&quot;,
+<span class="nc" id="L459">                                    mMaxUsn, lim), null);</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        } else if (table.equals(&quot;cards&quot;)) {</span>
+<span class="nc" id="L461">            return mCol</span>
+<span class="nc" id="L462">                    .getDb()</span>
+<span class="nc" id="L463">                    .getDatabase()</span>
+<span class="nc" id="L464">                    .rawQuery(</span>
+<span class="nc" id="L465">                            String.format(</span>
+                                    Locale.US,
+                                    &quot;SELECT id, nid, did, ord, mod, %d, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data FROM cards WHERE %s&quot;,
+<span class="nc" id="L468">                                    mMaxUsn, lim), null);</span>
+        } else {
+<span class="nc" id="L470">            return mCol</span>
+<span class="nc" id="L471">                    .getDb()</span>
+<span class="nc" id="L472">                    .getDatabase()</span>
+<span class="nc" id="L473">                    .rawQuery(</span>
+<span class="nc" id="L474">                            String.format(</span>
+                                    Locale.US,
+                                    &quot;SELECT id, guid, mid, mod, %d, tags, flds, '', '', flags, data FROM notes WHERE %s&quot;,
+<span class="nc" id="L477">                                    mMaxUsn, lim), null);</span>
+        }
+    }
+
+
+    private List&lt;Integer&gt; columnTypesForQuery(String table) {
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        if (table.equals(&quot;revlog&quot;)) {</span>
+<span class="nc" id="L484">            return Arrays.asList(TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER,</span>
+<span class="nc" id="L485">                    TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER);</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        } else if (table.equals(&quot;cards&quot;)) {</span>
+<span class="nc" id="L487">            return Arrays.asList(TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER,</span>
+<span class="nc" id="L488">                    TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER,</span>
+<span class="nc" id="L489">                    TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_STRING);</span>
+        } else {
+<span class="nc" id="L491">            return Arrays.asList(TYPE_INTEGER, TYPE_STRING, TYPE_INTEGER, TYPE_INTEGER, TYPE_INTEGER, TYPE_STRING,</span>
+<span class="nc" id="L492">                    TYPE_STRING, TYPE_STRING, TYPE_STRING, TYPE_INTEGER, TYPE_STRING);</span>
+        }
+    }
+
+
+    public JSONObject chunk() {
+<span class="nc" id="L498">        JSONObject buf = new JSONObject();</span>
+        try {
+<span class="nc" id="L500">            buf.put(&quot;done&quot;, false);</span>
+<span class="nc" id="L501">            int lim = 250;</span>
+<span class="nc" id="L502">            List&lt;Integer&gt; colTypes = null;</span>
+<span class="nc bnc" id="L503" title="All 4 branches missed.">            while (!mTablesLeft.isEmpty() &amp;&amp; lim &gt; 0) {</span>
+<span class="nc" id="L504">                String curTable = mTablesLeft.getFirst();</span>
+<span class="nc bnc" id="L505" title="All 2 branches missed.">                if (mCursor == null) {</span>
+<span class="nc" id="L506">                    mCursor = cursorForTable(curTable);</span>
+                }
+<span class="nc" id="L508">                colTypes = columnTypesForQuery(curTable);</span>
+<span class="nc" id="L509">                JSONArray rows = new JSONArray();</span>
+<span class="nc" id="L510">                int count = mCursor.getColumnCount();</span>
+<span class="nc" id="L511">                int fetched = 0;</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">                while (mCursor.moveToNext()) {</span>
+<span class="nc" id="L513">                    JSONArray r = new JSONArray();</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                    for (int i = 0; i &lt; count; i++) {</span>
+<span class="nc bnc" id="L515" title="All 4 branches missed.">                        switch (colTypes.get(i)) {</span>
+                            case TYPE_STRING:
+<span class="nc" id="L517">                                r.put(mCursor.getString(i));</span>
+<span class="nc" id="L518">                                break;</span>
+                            case TYPE_FLOAT:
+<span class="nc" id="L520">                                r.put(mCursor.getDouble(i));</span>
+<span class="nc" id="L521">                                break;</span>
+                            case TYPE_INTEGER:
+<span class="nc" id="L523">                                r.put(mCursor.getLong(i));</span>
+                                break;
+                        }
+                    }
+<span class="nc" id="L527">                    rows.put(r);</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">                    if (++fetched == lim) {</span>
+<span class="nc" id="L529">                        break;</span>
+                    }
+<span class="nc" id="L531">                }</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">                if (fetched != lim) {</span>
+                    // table is empty
+<span class="nc" id="L534">                    mTablesLeft.removeFirst();</span>
+<span class="nc" id="L535">                    mCursor.close();</span>
+<span class="nc" id="L536">                    mCursor = null;</span>
+                    // if we're the client, mark the objects as having been sent
+<span class="nc bnc" id="L538" title="All 2 branches missed.">                    if (!mCol.getServer()) {</span>
+<span class="nc" id="L539">                        mCol.getDb().execute(&quot;UPDATE &quot; + curTable + &quot; SET usn=&quot; + mMaxUsn + &quot; WHERE usn=-1&quot;);</span>
+                    }
+                }
+<span class="nc" id="L542">                buf.put(curTable, rows);</span>
+<span class="nc" id="L543">                lim -= fetched;</span>
+<span class="nc" id="L544">            }</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">            if (mTablesLeft.isEmpty()) {</span>
+<span class="nc" id="L546">                buf.put(&quot;done&quot;, true);</span>
+            }
+<span class="nc" id="L548">        } catch (JSONException e) {</span>
+<span class="nc" id="L549">            throw new RuntimeException(e);</span>
+<span class="nc" id="L550">        }</span>
+<span class="nc" id="L551">        return buf;</span>
+    }
+
+
+    public void applyChunk(JSONObject chunk) {
+        try {
+<span class="nc bnc" id="L557" title="All 2 branches missed.">            if (chunk.has(&quot;revlog&quot;)) {</span>
+<span class="nc" id="L558">                mergeRevlog(chunk.getJSONArray(&quot;revlog&quot;));</span>
+            }
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            if (chunk.has(&quot;cards&quot;)) {</span>
+<span class="nc" id="L561">                mergeCards(chunk.getJSONArray(&quot;cards&quot;));</span>
+            }
+<span class="nc bnc" id="L563" title="All 2 branches missed.">            if (chunk.has(&quot;notes&quot;)) {</span>
+<span class="nc" id="L564">                mergeNotes(chunk.getJSONArray(&quot;notes&quot;));</span>
+            }
+<span class="nc" id="L566">        } catch (JSONException e) {</span>
+<span class="nc" id="L567">            throw new RuntimeException(e);</span>
+<span class="nc" id="L568">        }</span>
+<span class="nc" id="L569">    }</span>
+
+
+    /**
+     * Deletions ********************************************************************
+     */
+
+    private JSONObject removed() {
+<span class="nc" id="L577">        JSONArray cards = new JSONArray();</span>
+<span class="nc" id="L578">        JSONArray notes = new JSONArray();</span>
+<span class="nc" id="L579">        JSONArray decks = new JSONArray();</span>
+<span class="nc" id="L580">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L582">            cur = mCol</span>
+<span class="nc" id="L583">                    .getDb()</span>
+<span class="nc" id="L584">                    .getDatabase()</span>
+<span class="nc" id="L585">                    .rawQuery(</span>
+                            &quot;SELECT oid, type FROM graves WHERE usn&quot;
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                                    + (mCol.getServer() ? (&quot; &gt;= &quot; + mMinUsn) : (&quot; = -1&quot;)), null);</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L589">                int type = cur.getInt(1);</span>
+<span class="nc bnc" id="L590" title="All 4 branches missed.">                switch (type) {</span>
+                    case Consts.REM_CARD:
+<span class="nc" id="L592">                        cards.put(cur.getLong(0));</span>
+<span class="nc" id="L593">                        break;</span>
+                    case Consts.REM_NOTE:
+<span class="nc" id="L595">                        notes.put(cur.getLong(0));</span>
+<span class="nc" id="L596">                        break;</span>
+                    case Consts.REM_DECK:
+<span class="nc" id="L598">                        decks.put(cur.getLong(0));</span>
+                        break;
+                }
+<span class="nc" id="L601">            }</span>
+        } finally {
+<span class="nc bnc" id="L603" title="All 4 branches missed.">            if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L604">                cur.close();</span>
+            }
+        }
+<span class="nc bnc" id="L607" title="All 2 branches missed.">        if (!mCol.getServer()) {</span>
+<span class="nc" id="L608">            mCol.getDb().execute(&quot;UPDATE graves SET usn=&quot; + mMaxUsn + &quot; WHERE usn=-1&quot;);</span>
+        }
+<span class="nc" id="L610">        JSONObject o = new JSONObject();</span>
+        try {
+<span class="nc" id="L612">            o.put(&quot;cards&quot;, cards);</span>
+<span class="nc" id="L613">            o.put(&quot;notes&quot;, notes);</span>
+<span class="nc" id="L614">            o.put(&quot;decks&quot;, decks);</span>
+<span class="nc" id="L615">        } catch (JSONException e) {</span>
+<span class="nc" id="L616">            throw new RuntimeException(e);</span>
+<span class="nc" id="L617">        }</span>
+<span class="nc" id="L618">        return o;</span>
+    }
+
+
+    public JSONObject start(int minUsn, boolean lnewer, JSONObject graves) {
+<span class="nc" id="L623">        mMaxUsn = mCol.getUsnForSync();</span>
+<span class="nc" id="L624">        mMinUsn = minUsn;</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">        mLNewer = !lnewer;</span>
+<span class="nc" id="L626">        JSONObject lgraves = removed();</span>
+<span class="nc" id="L627">        remove(graves);</span>
+<span class="nc" id="L628">        return lgraves;</span>
+    }
+
+
+    private void remove(JSONObject graves) {
+        // pretend to be the server so we don't set usn = -1
+<span class="nc" id="L634">        boolean wasServer = mCol.getServer();</span>
+<span class="nc" id="L635">        mCol.setServer(true);</span>
+        try {
+            // notes first, so we don't end up with duplicate graves
+<span class="nc" id="L638">            mCol._remNotes(Utils.jsonArrayToLongArray(graves.getJSONArray(&quot;notes&quot;)));</span>
+            // then cards
+<span class="nc" id="L640">            mCol.remCards(Utils.jsonArrayToLongArray(graves.getJSONArray(&quot;cards&quot;)), false);</span>
+            // and decks
+<span class="nc" id="L642">            JSONArray decks = graves.getJSONArray(&quot;decks&quot;);</span>
+<span class="nc bnc" id="L643" title="All 2 branches missed.">            for (int i = 0; i &lt; decks.length(); i++) {</span>
+<span class="nc" id="L644">                mCol.getDecks().rem(decks.getLong(i), false, false);</span>
+            }
+<span class="nc" id="L646">        } catch (JSONException e) {</span>
+<span class="nc" id="L647">            throw new RuntimeException(e);</span>
+<span class="nc" id="L648">        }</span>
+<span class="nc" id="L649">        mCol.setServer(wasServer);</span>
+<span class="nc" id="L650">    }</span>
+
+
+    /**
+     * Models ********************************************************************
+     */
+
+    private JSONArray getModels() {
+<span class="nc" id="L658">        JSONArray result = new JSONArray();</span>
+        try {
+<span class="nc bnc" id="L660" title="All 2 branches missed.">            if (mCol.getServer()) {</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                for (JSONObject m : mCol.getModels().all()) {</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                    if (m.getInt(&quot;usn&quot;) &gt;= mMinUsn) {</span>
+<span class="nc" id="L663">                        result.put(m);</span>
+                    }
+<span class="nc" id="L665">                }</span>
+            } else {
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                for (JSONObject m : mCol.getModels().all()) {</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">                    if (m.getInt(&quot;usn&quot;) == -1) {</span>
+<span class="nc" id="L669">                        m.put(&quot;usn&quot;, mMaxUsn);</span>
+<span class="nc" id="L670">                        result.put(m);</span>
+                    }
+<span class="nc" id="L672">                }</span>
+<span class="nc" id="L673">                mCol.getModels().save();</span>
+            }
+<span class="nc" id="L675">        } catch (JSONException e) {</span>
+<span class="nc" id="L676">            throw new RuntimeException(e);</span>
+<span class="nc" id="L677">        }</span>
+<span class="nc" id="L678">        return result;</span>
+    }
+
+
+    private void mergeModels(JSONArray rchg) {
+<span class="nc bnc" id="L683" title="All 2 branches missed.">        for (int i = 0; i &lt; rchg.length(); i++) {</span>
+            try {
+<span class="nc" id="L685">                JSONObject r = rchg.getJSONObject(i);</span>
+                JSONObject l;
+<span class="nc" id="L687">                l = mCol.getModels().get(r.getLong(&quot;id&quot;));</span>
+                // if missing locally or server is newer, update
+<span class="nc bnc" id="L689" title="All 4 branches missed.">                if (l == null || r.getLong(&quot;mod&quot;) &gt; l.getLong(&quot;mod&quot;)) {</span>
+<span class="nc" id="L690">                    mCol.getModels().update(r);</span>
+                }
+<span class="nc" id="L692">            } catch (JSONException e) {</span>
+<span class="nc" id="L693">                throw new RuntimeException(e);</span>
+<span class="nc" id="L694">            }</span>
+        }
+<span class="nc" id="L696">    }</span>
+
+
+    /**
+     * Decks ********************************************************************
+     */
+
+    private JSONArray getDecks() {
+<span class="nc" id="L704">        JSONArray result = new JSONArray();</span>
+        try {
+<span class="nc bnc" id="L706" title="All 2 branches missed.">            if (mCol.getServer()) {</span>
+<span class="nc" id="L707">                JSONArray decks = new JSONArray();</span>
+<span class="nc bnc" id="L708" title="All 2 branches missed.">                for (JSONObject g : mCol.getDecks().all()) {</span>
+<span class="nc bnc" id="L709" title="All 2 branches missed.">                    if (g.getInt(&quot;usn&quot;) &gt;= mMinUsn) {</span>
+<span class="nc" id="L710">                        decks.put(g);</span>
+                    }
+<span class="nc" id="L712">                }</span>
+<span class="nc" id="L713">                JSONArray dconfs = new JSONArray();</span>
+<span class="nc bnc" id="L714" title="All 2 branches missed.">                for (JSONObject g : mCol.getDecks().allConf()) {</span>
+<span class="nc bnc" id="L715" title="All 2 branches missed.">                    if (g.getInt(&quot;usn&quot;) &gt;= mMinUsn) {</span>
+<span class="nc" id="L716">                        dconfs.put(g);</span>
+                    }
+<span class="nc" id="L718">                }</span>
+<span class="nc" id="L719">                result.put(decks);</span>
+<span class="nc" id="L720">                result.put(dconfs);</span>
+<span class="nc" id="L721">            } else {</span>
+<span class="nc" id="L722">                JSONArray decks = new JSONArray();</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">                for (JSONObject g : mCol.getDecks().all()) {</span>
+<span class="nc bnc" id="L724" title="All 2 branches missed.">                    if (g.getInt(&quot;usn&quot;) == -1) {</span>
+<span class="nc" id="L725">                        g.put(&quot;usn&quot;, mMaxUsn);</span>
+<span class="nc" id="L726">                        decks.put(g);</span>
+                    }
+<span class="nc" id="L728">                }</span>
+<span class="nc" id="L729">                JSONArray dconfs = new JSONArray();</span>
+<span class="nc bnc" id="L730" title="All 2 branches missed.">                for (JSONObject g : mCol.getDecks().allConf()) {</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">                    if (g.getInt(&quot;usn&quot;) == -1) {</span>
+<span class="nc" id="L732">                        g.put(&quot;usn&quot;, mMaxUsn);</span>
+<span class="nc" id="L733">                        dconfs.put(g);</span>
+                    }
+<span class="nc" id="L735">                }</span>
+<span class="nc" id="L736">                mCol.getDecks().save();</span>
+<span class="nc" id="L737">                result.put(decks);</span>
+<span class="nc" id="L738">                result.put(dconfs);</span>
+            }
+<span class="nc" id="L740">        } catch (JSONException e) {</span>
+<span class="nc" id="L741">            throw new RuntimeException(e);</span>
+<span class="nc" id="L742">        }</span>
+<span class="nc" id="L743">        return result;</span>
+    }
+
+
+    private void mergeDecks(JSONArray rchg) {
+        try {
+<span class="nc" id="L749">            JSONArray decks = rchg.getJSONArray(0);</span>
+<span class="nc bnc" id="L750" title="All 2 branches missed.">            for (int i = 0; i &lt; decks.length(); i++) {</span>
+<span class="nc" id="L751">                JSONObject r = decks.getJSONObject(i);</span>
+<span class="nc" id="L752">                JSONObject l = mCol.getDecks().get(r.getLong(&quot;id&quot;), false);</span>
+                // if missing locally or server is newer, update
+<span class="nc bnc" id="L754" title="All 4 branches missed.">                if (l == null || r.getLong(&quot;mod&quot;) &gt; l.getLong(&quot;mod&quot;)) {</span>
+<span class="nc" id="L755">                    mCol.getDecks().update(r);</span>
+                }
+            }
+<span class="nc" id="L758">            JSONArray confs = rchg.getJSONArray(1);</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">            for (int i = 0; i &lt; confs.length(); i++) {</span>
+<span class="nc" id="L760">                JSONObject r = confs.getJSONObject(i);</span>
+<span class="nc" id="L761">                JSONObject l = mCol.getDecks().getConf(r.getLong(&quot;id&quot;));</span>
+                // if missing locally or server is newer, update
+<span class="nc bnc" id="L763" title="All 4 branches missed.">                if (l == null || r.getLong(&quot;mod&quot;) &gt; l.getLong(&quot;mod&quot;)) {</span>
+<span class="nc" id="L764">                    mCol.getDecks().updateConf(r);</span>
+                }
+            }
+<span class="nc" id="L767">        } catch (JSONException e) {</span>
+<span class="nc" id="L768">            throw new RuntimeException(e);</span>
+<span class="nc" id="L769">        }</span>
+<span class="nc" id="L770">    }</span>
+
+
+    /**
+     * Tags ********************************************************************
+     */
+
+    private JSONArray getTags() {
+<span class="nc" id="L778">        JSONArray result = new JSONArray();</span>
+<span class="nc bnc" id="L779" title="All 2 branches missed.">        if (mCol.getServer()) {</span>
+<span class="nc bnc" id="L780" title="All 2 branches missed.">            for (Map.Entry&lt;String, Integer&gt; t : mCol.getTags().allItems()) {</span>
+<span class="nc bnc" id="L781" title="All 2 branches missed.">                if (t.getValue() &gt;= mMinUsn) {</span>
+<span class="nc" id="L782">                    result.put(t.getKey());</span>
+                }
+<span class="nc" id="L784">            }</span>
+        } else {
+<span class="nc bnc" id="L786" title="All 2 branches missed.">            for (Map.Entry&lt;String, Integer&gt; t : mCol.getTags().allItems()) {</span>
+<span class="nc bnc" id="L787" title="All 2 branches missed.">                if (t.getValue() == -1) {</span>
+<span class="nc" id="L788">                    String tag = t.getKey();</span>
+<span class="nc" id="L789">                    mCol.getTags().add(t.getKey(), mMaxUsn);</span>
+<span class="nc" id="L790">                    result.put(tag);</span>
+                }
+<span class="nc" id="L792">            }</span>
+<span class="nc" id="L793">            mCol.getTags().save();</span>
+        }
+<span class="nc" id="L795">        return result;</span>
+    }
+
+
+    private void mergeTags(JSONArray tags) {
+<span class="nc" id="L800">        ArrayList&lt;String&gt; list = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        for (int i = 0; i &lt; tags.length(); i++) {</span>
+            try {
+<span class="nc" id="L803">                list.add(tags.getString(i));</span>
+<span class="nc" id="L804">            } catch (JSONException e) {</span>
+<span class="nc" id="L805">                throw new RuntimeException(e);</span>
+<span class="nc" id="L806">            }</span>
+        }
+<span class="nc" id="L808">        mCol.getTags().register(list, mMaxUsn);</span>
+<span class="nc" id="L809">    }</span>
+
+
+    /**
+     * Cards/notes/revlog ********************************************************************
+     */
+
+    private void mergeRevlog(JSONArray logs) {
+<span class="nc bnc" id="L817" title="All 2 branches missed.">        for (int i = 0; i &lt; logs.length(); i++) {</span>
+            try {
+<span class="nc" id="L819">                mCol.getDb().execute(&quot;INSERT OR IGNORE INTO revlog VALUES (?,?,?,?,?,?,?,?,?)&quot;,</span>
+<span class="nc" id="L820">                        Utils.jsonArray2Objects(logs.getJSONArray(i)));</span>
+<span class="nc" id="L821">            } catch (SQLException | JSONException e) {</span>
+<span class="nc" id="L822">                throw new RuntimeException(e);</span>
+<span class="nc" id="L823">            }</span>
+        }
+
+<span class="nc" id="L826">    }</span>
+
+
+    private ArrayList&lt;Object[]&gt; newerRows(JSONArray data, String table, int modIdx) {
+<span class="nc" id="L830">        long[] ids = new long[data.length()];</span>
+        try {
+<span class="nc bnc" id="L832" title="All 2 branches missed.">            for (int i = 0; i &lt; data.length(); i++) {</span>
+<span class="nc" id="L833">                ids[i] = data.getJSONArray(i).getLong(0);</span>
+            }
+<span class="nc" id="L835">            HashMap&lt;Long, Long&gt; lmods = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L836">            Cursor cur = null;</span>
+            try {
+<span class="nc" id="L838">                cur = mCol</span>
+<span class="nc" id="L839">                        .getDb()</span>
+<span class="nc" id="L840">                        .getDatabase()</span>
+<span class="nc" id="L841">                        .rawQuery(</span>
+<span class="nc" id="L842">                                &quot;SELECT id, mod FROM &quot; + table + &quot; WHERE id IN &quot; + Utils.ids2str(ids) + &quot; AND &quot;</span>
+<span class="nc" id="L843">                                        + usnLim(), null);</span>
+<span class="nc bnc" id="L844" title="All 2 branches missed.">                while (cur.moveToNext()) {</span>
+<span class="nc" id="L845">                    lmods.put(cur.getLong(0), cur.getLong(1));</span>
+                }
+            } finally {
+<span class="nc bnc" id="L848" title="All 4 branches missed.">                if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L849">                    cur.close();</span>
+                }
+            }
+<span class="nc" id="L852">            ArrayList&lt;Object[]&gt; update = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L853" title="All 2 branches missed.">            for (int i = 0; i &lt; data.length(); i++) {</span>
+<span class="nc" id="L854">                JSONArray r = data.getJSONArray(i);</span>
+<span class="nc bnc" id="L855" title="All 4 branches missed.">                if (!lmods.containsKey(r.getLong(0)) || lmods.get(r.getLong(0)) &lt; r.getLong(modIdx)) {</span>
+<span class="nc" id="L856">                    update.add(Utils.jsonArray2Objects(r));</span>
+                }
+            }
+<span class="nc" id="L859">            mCol.log(table, data);</span>
+<span class="nc" id="L860">            return update;</span>
+<span class="nc" id="L861">        } catch (JSONException e) {</span>
+<span class="nc" id="L862">            throw new RuntimeException(e);</span>
+        }
+    }
+
+
+    private void mergeCards(JSONArray cards) {
+<span class="nc bnc" id="L868" title="All 2 branches missed.">        for (Object[] r : newerRows(cards, &quot;cards&quot;, 4)) {</span>
+<span class="nc" id="L869">            mCol.getDb().execute(&quot;INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)&quot;, r);</span>
+<span class="nc" id="L870">        }</span>
+<span class="nc" id="L871">    }</span>
+
+
+    private void mergeNotes(JSONArray notes) {
+<span class="nc bnc" id="L875" title="All 2 branches missed.">        for (Object[] n : newerRows(notes, &quot;notes&quot;, 4)) {</span>
+<span class="nc" id="L876">            mCol.getDb().execute(&quot;INSERT OR REPLACE INTO notes VALUES (?,?,?,?,?,?,?,?,?,?,?)&quot;, n);</span>
+<span class="nc" id="L877">            mCol.updateFieldCache(new long[]{Long.valueOf(((Number) n[0]).longValue())});</span>
+<span class="nc" id="L878">        }</span>
+<span class="nc" id="L879">    }</span>
+
+
+    public String getSyncMsg() {
+<span class="nc" id="L883">        return mSyncMsg;</span>
+    }
+
+
+    /**
+     * Col config ********************************************************************
+     */
+
+    private JSONObject getConf() {
+<span class="nc" id="L892">        return mCol.getConf();</span>
+    }
+
+
+    private void mergeConf(JSONObject conf) {
+<span class="nc" id="L897">        mCol.setConf(conf);</span>
+<span class="nc" id="L898">    }</span>
+
+    /**
+     * If the user asked to cancel the sync then we just throw a Runtime exception which should be gracefully handled
+     * @param con
+     */
+    private void throwExceptionIfCancelled(Connection con) {
+<span class="nc bnc" id="L905" title="All 2 branches missed.">        if (Connection.getIsCancelled()) {</span>
+<span class="nc" id="L906">            Timber.i(&quot;Sync was cancelled&quot;);</span>
+<span class="nc" id="L907">            publishProgress(con, R.string.sync_cancelled);</span>
+            try {
+<span class="nc" id="L909">                mServer.finish();</span>
+<span class="nc" id="L910">            } catch (UnknownHttpResponseException e) {</span>
+<span class="nc" id="L911">            }</span>
+<span class="nc" id="L912">            throw new RuntimeException(&quot;UserAbortedSync&quot;);</span>
+        }
+<span class="nc" id="L914">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

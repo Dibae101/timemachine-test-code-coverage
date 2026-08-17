@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CreateAccountActivity.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wikipedia</a> &gt; <a href="index.source.html" class="el_package">org.wikipedia.createaccount</a> &gt; <span class="el_source">CreateAccountActivity.kt</span></div><h1>CreateAccountActivity.kt</h1><pre class="source lang-java linenums">package org.wikipedia.createaccount
+
+import android.content.Context
+import android.content.DialogInterface
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.text.TextWatcher
+import android.util.Patterns
+import android.view.KeyEvent
+import android.view.View
+import androidx.core.widget.doOnTextChanged
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.textfield.TextInputLayout
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
+import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.schedulers.Schedulers
+import org.wikipedia.R
+import org.wikipedia.WikipediaApp
+import org.wikipedia.activity.BaseActivity
+import org.wikipedia.analytics.eventplatform.CreateAccountEvent
+import org.wikipedia.captcha.CaptchaHandler
+import org.wikipedia.captcha.CaptchaResult
+import org.wikipedia.databinding.ActivityCreateAccountBinding
+import org.wikipedia.dataclient.Service
+import org.wikipedia.dataclient.ServiceFactory
+import org.wikipedia.page.PageTitle
+import org.wikipedia.util.DeviceUtil
+import org.wikipedia.util.FeedbackUtil
+import org.wikipedia.util.StringUtil
+import org.wikipedia.util.UriUtil.visitInExternalBrowser
+import org.wikipedia.util.log.L
+import org.wikipedia.views.NonEmptyValidator
+import java.util.concurrent.TimeUnit
+import java.util.regex.Pattern
+
+<span class="nc" id="L37">class CreateAccountActivity : BaseActivity() {</span>
+    enum class ValidateResult {
+<span class="nc" id="L39">        SUCCESS, INVALID_USERNAME, PASSWORD_TOO_SHORT, PASSWORD_IS_USERNAME, PASSWORD_MISMATCH, NO_EMAIL, INVALID_EMAIL</span>
+    }
+
+    private lateinit var binding: ActivityCreateAccountBinding
+    private lateinit var captchaHandler: CaptchaHandler
+    private lateinit var createAccountEvent: CreateAccountEvent
+<span class="nc" id="L45">    private val disposables = CompositeDisposable()</span>
+<span class="nc" id="L46">    private var wiki = WikipediaApp.instance.wikiSite</span>
+    private var userNameTextWatcher: TextWatcher? = null
+<span class="nc" id="L48">    private val userNameVerifyRunnable = UserNameVerifyRunnable()</span>
+
+    public override fun onCreate(savedInstanceState: Bundle?) {
+<span class="nc" id="L51">        super.onCreate(savedInstanceState)</span>
+<span class="nc" id="L52">        binding = ActivityCreateAccountBinding.inflate(layoutInflater)</span>
+<span class="nc" id="L53">        setContentView(binding.root)</span>
+<span class="nc" id="L54">        captchaHandler = CaptchaHandler(this, wiki, binding.captchaContainer.root, binding.createAccountPrimaryContainer, getString(R.string.create_account_activity_title), getString(R.string.create_account_button))</span>
+        // Don't allow user to submit registration unless they've put in a username and password
+<span class="nc" id="L56">        NonEmptyValidator(binding.createAccountSubmitButton, binding.createAccountUsername, binding.createAccountPasswordInput)</span>
+        // Don't allow user to continue when they're shown a captcha until they fill it in
+<span class="nc" id="L58">        NonEmptyValidator(binding.captchaContainer.captchaSubmitButton, binding.captchaContainer.captchaText)</span>
+<span class="nc" id="L59">        setClickListeners()</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        createAccountEvent = CreateAccountEvent(intent.getStringExtra(LOGIN_REQUEST_SOURCE).orEmpty())</span>
+        // Only send the editing start log event if the activity is created for the first time
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (savedInstanceState == null) {</span>
+<span class="nc" id="L63">            createAccountEvent.logStart()</span>
+        }
+        // Set default result to failed, so we can override if it did not
+<span class="nc" id="L66">        setResult(RESULT_ACCOUNT_NOT_CREATED)</span>
+<span class="nc" id="L67">    }</span>
+
+    private fun setClickListeners() {
+<span class="nc" id="L70">        binding.viewCreateAccountError.backClickListener = View.OnClickListener {</span>
+<span class="nc" id="L71">            binding.viewCreateAccountError.visibility = View.GONE</span>
+<span class="nc" id="L72">            captchaHandler.requestNewCaptcha()</span>
+<span class="nc" id="L73">        }</span>
+<span class="nc" id="L74">        binding.viewCreateAccountError.retryClickListener = View.OnClickListener { binding.viewCreateAccountError.visibility = View.GONE }</span>
+<span class="nc" id="L75">        binding.createAccountSubmitButton.setOnClickListener {</span>
+<span class="nc" id="L76">            validateThenCreateAccount()</span>
+<span class="nc" id="L77">        }</span>
+<span class="nc" id="L78">        binding.captchaContainer.captchaSubmitButton.setOnClickListener {</span>
+<span class="nc" id="L79">            validateThenCreateAccount()</span>
+<span class="nc" id="L80">        }</span>
+<span class="nc" id="L81">        binding.createAccountLoginButton.setOnClickListener {</span>
+            // This assumes that the CreateAccount activity was launched from the Login activity
+            // (since there's currently no other mechanism to invoke CreateAccountActivity),
+            // so finishing this activity will implicitly go back to Login.
+<span class="nc" id="L85">            setResult(RESULT_ACCOUNT_LOGIN)</span>
+<span class="nc" id="L86">            finish()</span>
+<span class="nc" id="L87">        }</span>
+<span class="nc" id="L88">        binding.footerContainer.privacyPolicyLink.setOnClickListener {</span>
+<span class="nc" id="L89">            FeedbackUtil.showPrivacyPolicy(this)</span>
+<span class="nc" id="L90">        }</span>
+<span class="nc" id="L91">        binding.footerContainer.forgotPasswordLink.setOnClickListener {</span>
+<span class="nc" id="L92">            visitInExternalBrowser(this, Uri.parse(PageTitle(&quot;Special:PasswordReset&quot;, wiki).uri))</span>
+<span class="nc" id="L93">        }</span>
+        // Add listener so that when the user taps enter, it submits the captcha
+<span class="nc" id="L95">        binding.captchaContainer.captchaText.setOnKeyListener { _: View, keyCode: Int, event: KeyEvent -&gt;</span>
+<span class="nc bnc" id="L96" title="All 4 branches missed.">            if (event.action == KeyEvent.ACTION_UP &amp;&amp; keyCode == KeyEvent.KEYCODE_ENTER) {</span>
+<span class="nc" id="L97">                validateThenCreateAccount()</span>
+<span class="nc" id="L98">                return@setOnKeyListener true</span>
+            }
+<span class="nc" id="L100">            false</span>
+        }
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        userNameTextWatcher = binding.createAccountUsername.editText?.doOnTextChanged { text, _, _, _ -&gt;</span>
+<span class="nc" id="L103">            binding.createAccountUsername.removeCallbacks(userNameVerifyRunnable)</span>
+<span class="nc" id="L104">            binding.createAccountUsername.isErrorEnabled = false</span>
+<span class="nc" id="L105">            if (text.isNullOrEmpty()) {</span>
+<span class="nc" id="L106">                return@doOnTextChanged</span>
+            }
+<span class="nc" id="L108">            userNameVerifyRunnable.setUserName(text.toString())</span>
+<span class="nc" id="L109">            binding.createAccountUsername.postDelayed(userNameVerifyRunnable, TimeUnit.SECONDS.toMillis(1))</span>
+<span class="nc" id="L110">        }</span>
+<span class="nc" id="L111">    }</span>
+
+    fun handleAccountCreationError(message: String) {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (message.contains(&quot;blocked&quot;)) {</span>
+<span class="nc" id="L115">            FeedbackUtil.makeSnackbar(this, getString(R.string.create_account_ip_block_message))</span>
+<span class="nc" id="L116">                    .setAction(R.string.create_account_ip_block_details) {</span>
+<span class="nc" id="L117">                        visitInExternalBrowser(this,</span>
+<span class="nc" id="L118">                                Uri.parse(getString(R.string.create_account_ip_block_help_url)))</span>
+<span class="nc" id="L119">                    }</span>
+<span class="nc" id="L120">                    .show()</span>
+        } else {
+<span class="nc" id="L122">            FeedbackUtil.showMessage(this, StringUtil.fromHtml(message))</span>
+        }
+<span class="nc" id="L124">        L.w(&quot;Account creation failed with result $message&quot;)</span>
+<span class="nc" id="L125">    }</span>
+
+    private val createAccountInfo: Unit
+        get() {
+<span class="nc" id="L129">            disposables.add(ServiceFactory.get(wiki).authManagerInfo</span>
+<span class="nc" id="L130">                    .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L131">                    .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L132">                    .subscribe({ response -&gt;</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                        val token = response.query?.createAccountToken()</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                        val captchaId = response.query?.captchaId()</span>
+<span class="nc bnc" id="L135" title="All 6 branches missed.">                        if (token.isNullOrEmpty()) {</span>
+<span class="nc" id="L136">                            handleAccountCreationError(getString(R.string.create_account_generic_error))</span>
+<span class="nc bnc" id="L137" title="All 6 branches missed.">                        } else if (!captchaId.isNullOrEmpty()) {</span>
+<span class="nc" id="L138">                            captchaHandler.handleCaptcha(token, CaptchaResult(captchaId))</span>
+                        } else {
+<span class="nc" id="L140">                            doCreateAccount(token)</span>
+                        }
+<span class="nc" id="L142">                    }) { caught -&gt;</span>
+<span class="nc" id="L143">                        showError(caught)</span>
+<span class="nc" id="L144">                        L.e(caught)</span>
+<span class="nc" id="L145">                    })</span>
+<span class="nc" id="L146">        }</span>
+
+    private fun doCreateAccount(token: String) {
+<span class="nc" id="L149">        showProgressBar(true)</span>
+<span class="nc bnc" id="L150" title="All 4 branches missed.">        val email = getText(binding.createAccountEmail).ifEmpty { null }</span>
+<span class="nc" id="L151">        val password = getText(binding.createAccountPasswordInput)</span>
+<span class="nc" id="L152">        val repeat = getText(binding.createAccountPasswordRepeat)</span>
+<span class="nc" id="L153">        disposables.add(ServiceFactory.get(wiki).postCreateAccount(getText(binding.createAccountUsername), password, repeat, token, Service.WIKIPEDIA_URL,</span>
+<span class="nc" id="L154">                email,</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                if (captchaHandler.isActive) captchaHandler.captchaId() else &quot;null&quot;,</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                if (captchaHandler.isActive) captchaHandler.captchaWord() else &quot;null&quot;)</span>
+<span class="nc" id="L157">                .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L158">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L159">                .subscribe({ response -&gt;</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                    if (&quot;PASS&quot; == response.status) {</span>
+<span class="nc" id="L161">                        finishWithUserResult(response.user)</span>
+                    } else {
+<span class="nc" id="L163">                        createAccountEvent.logError(StringUtil.removeStyleTags(response.message))</span>
+<span class="nc" id="L164">                        throw CreateAccountException(StringUtil.removeStyleTags(response.message))</span>
+                    }
+<span class="nc" id="L166">                }) { caught -&gt;</span>
+<span class="nc" id="L167">                    L.e(caught.toString())</span>
+<span class="nc" id="L168">                    createAccountEvent.logError(caught.toString())</span>
+<span class="nc" id="L169">                    showProgressBar(false)</span>
+<span class="nc" id="L170">                    showError(caught)</span>
+<span class="nc" id="L171">                })</span>
+<span class="nc" id="L172">    }</span>
+
+    override fun onBackPressed() {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (captchaHandler.isActive) {</span>
+<span class="nc" id="L176">            captchaHandler.cancelCaptcha()</span>
+<span class="nc" id="L177">            showProgressBar(false)</span>
+<span class="nc" id="L178">            return</span>
+        }
+<span class="nc" id="L180">        DeviceUtil.hideSoftKeyboard(this)</span>
+<span class="nc" id="L181">        super.onBackPressed()</span>
+<span class="nc" id="L182">    }</span>
+
+    public override fun onStop() {
+<span class="nc" id="L185">        showProgressBar(false)</span>
+<span class="nc" id="L186">        super.onStop()</span>
+<span class="nc" id="L187">    }</span>
+
+    public override fun onDestroy() {
+<span class="nc" id="L190">        disposables.clear()</span>
+<span class="nc" id="L191">        captchaHandler.dispose()</span>
+<span class="nc bnc" id="L192" title="All 4 branches missed.">        userNameTextWatcher?.let { binding.createAccountUsername.editText?.removeTextChangedListener(it) }</span>
+<span class="nc" id="L193">        super.onDestroy()</span>
+<span class="nc" id="L194">    }</span>
+
+    private fun clearErrors() {
+<span class="nc" id="L197">        binding.createAccountUsername.isErrorEnabled = false</span>
+<span class="nc" id="L198">        binding.createAccountPasswordInput.isErrorEnabled = false</span>
+<span class="nc" id="L199">        binding.createAccountPasswordRepeat.isErrorEnabled = false</span>
+<span class="nc" id="L200">        binding.createAccountEmail.isErrorEnabled = false</span>
+<span class="nc" id="L201">    }</span>
+
+    private fun validateThenCreateAccount() {
+<span class="nc" id="L204">        clearErrors()</span>
+<span class="nc" id="L205">        val result = validateInput(getText(binding.createAccountUsername), getText(binding.createAccountPasswordInput),</span>
+<span class="nc" id="L206">                getText(binding.createAccountPasswordRepeat), getText(binding.createAccountEmail))</span>
+<span class="nc bnc" id="L207" title="All 8 branches missed.">        when (result) {</span>
+            ValidateResult.INVALID_USERNAME -&gt; {
+<span class="nc" id="L209">                binding.createAccountUsername.requestFocus()</span>
+<span class="nc" id="L210">                binding.createAccountUsername.error = getString(R.string.create_account_username_error)</span>
+<span class="nc" id="L211">                return</span>
+            }
+            ValidateResult.PASSWORD_TOO_SHORT -&gt; {
+<span class="nc" id="L214">                binding.createAccountPasswordInput.requestFocus()</span>
+<span class="nc" id="L215">                binding.createAccountPasswordInput.error = getString(R.string.create_account_password_error)</span>
+<span class="nc" id="L216">                return</span>
+            }
+            ValidateResult.PASSWORD_IS_USERNAME -&gt; {
+<span class="nc" id="L219">                binding.createAccountPasswordInput.requestFocus()</span>
+<span class="nc" id="L220">                binding.createAccountPasswordInput.error = getString(R.string.create_account_password_is_username)</span>
+<span class="nc" id="L221">                return</span>
+            }
+            ValidateResult.PASSWORD_MISMATCH -&gt; {
+<span class="nc" id="L224">                binding.createAccountPasswordRepeat.requestFocus()</span>
+<span class="nc" id="L225">                binding.createAccountPasswordRepeat.error = getString(R.string.create_account_passwords_mismatch_error)</span>
+<span class="nc" id="L226">                return</span>
+            }
+            ValidateResult.INVALID_EMAIL -&gt; {
+<span class="nc" id="L229">                binding.createAccountEmail.requestFocus()</span>
+<span class="nc" id="L230">                binding.createAccountEmail.error = getString(R.string.create_account_email_error)</span>
+<span class="nc" id="L231">                return</span>
+            }
+<span class="nc" id="L233">            ValidateResult.NO_EMAIL -&gt; MaterialAlertDialogBuilder(this)</span>
+<span class="nc" id="L234">                    .setCancelable(false)</span>
+<span class="nc" id="L235">                    .setTitle(R.string.email_recommendation_dialog_title)</span>
+<span class="nc" id="L236">                    .setMessage(StringUtil.fromHtml(resources.getString(R.string.email_recommendation_dialog_message)))</span>
+<span class="nc" id="L237">                    .setPositiveButton(R.string.email_recommendation_dialog_create_without_email_action</span>
+<span class="nc" id="L238">                    ) { _: DialogInterface, _: Int -&gt; createAccount() }</span>
+<span class="nc" id="L239">                    .setNegativeButton(R.string.email_recommendation_dialog_create_with_email_action</span>
+<span class="nc" id="L240">                    ) { _: DialogInterface, _: Int -&gt; binding.createAccountEmail.requestFocus() }</span>
+<span class="nc" id="L241">                    .show()</span>
+<span class="nc" id="L242">            ValidateResult.SUCCESS -&gt; createAccount()</span>
+        }
+<span class="nc" id="L244">    }</span>
+
+    private fun createAccount() {
+<span class="nc bnc" id="L247" title="All 4 branches missed.">        if (captchaHandler.isActive &amp;&amp; captchaHandler.token != null) {</span>
+<span class="nc" id="L248">            doCreateAccount(captchaHandler.token!!)</span>
+        } else {
+<span class="nc" id="L250">            createAccountInfo</span>
+        }
+<span class="nc" id="L252">    }</span>
+
+    private fun getText(input: TextInputLayout): String {
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        input.editText?.let {</span>
+<span class="nc" id="L256">            return it.text.toString()</span>
+        }
+<span class="nc" id="L258">        return &quot;&quot;</span>
+    }
+
+    private fun finishWithUserResult(userName: String) {
+<span class="nc" id="L262">        val resultIntent = Intent()</span>
+<span class="nc" id="L263">        resultIntent.putExtra(CREATE_ACCOUNT_RESULT_USERNAME, userName)</span>
+<span class="nc" id="L264">        resultIntent.putExtra(CREATE_ACCOUNT_RESULT_PASSWORD, getText(binding.createAccountPasswordInput))</span>
+<span class="nc" id="L265">        setResult(RESULT_ACCOUNT_CREATED, resultIntent)</span>
+<span class="nc" id="L266">        showProgressBar(false)</span>
+<span class="nc" id="L267">        captchaHandler.cancelCaptcha()</span>
+<span class="nc" id="L268">        createAccountEvent.logSuccess()</span>
+<span class="nc" id="L269">        DeviceUtil.hideSoftKeyboard(this@CreateAccountActivity)</span>
+<span class="nc" id="L270">        finish()</span>
+<span class="nc" id="L271">    }</span>
+
+    private fun showProgressBar(enable: Boolean) {
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        binding.viewProgressBar.visibility = if (enable) View.VISIBLE else View.GONE</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        binding.captchaContainer.captchaSubmitButton.isEnabled = !enable</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        binding.captchaContainer.captchaSubmitButton.setText(if (enable) R.string.dialog_create_account_checking_progress else R.string.create_account_button)</span>
+<span class="nc" id="L277">    }</span>
+
+    private fun showError(caught: Throwable) {
+<span class="nc" id="L280">        binding.viewCreateAccountError.setError(caught)</span>
+<span class="nc" id="L281">        binding.viewCreateAccountError.visibility = View.VISIBLE</span>
+<span class="nc" id="L282">    }</span>
+
+<span class="nc" id="L284">    private inner class UserNameVerifyRunnable : Runnable {</span>
+        private lateinit var userName: String
+
+        fun setUserName(userName: String) {
+<span class="nc" id="L288">            this.userName = userName</span>
+<span class="nc" id="L289">        }</span>
+
+        override fun run() {
+<span class="nc" id="L292">            disposables.add(ServiceFactory.get(wiki).getUserList(userName)</span>
+<span class="nc" id="L293">                    .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L294">                    .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L295">                    .subscribe({ response -&gt;</span>
+<span class="nc bnc" id="L296" title="All 4 branches missed.">                        response.query?.getUserResponse(userName)?.let {</span>
+<span class="nc" id="L297">                            binding.createAccountUsername.isErrorEnabled = false</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">                            if (it.hasBlockError) {</span>
+<span class="nc" id="L299">                                handleAccountCreationError(it.error)</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                            } else if (!it.canCreate) {</span>
+<span class="nc" id="L301">                                binding.createAccountUsername.error = getString(R.string.create_account_name_unavailable, userName)</span>
+                            }
+<span class="nc" id="L303">                        }</span>
+<span class="nc" id="L304">                    }) { L.e(it) })</span>
+<span class="nc" id="L305">        }</span>
+    }
+
+    companion object {
+        private const val PASSWORD_MIN_LENGTH = 8
+        const val RESULT_ACCOUNT_CREATED = 1
+        const val RESULT_ACCOUNT_NOT_CREATED = 2
+        const val RESULT_ACCOUNT_LOGIN = 3
+        const val LOGIN_REQUEST_SOURCE = &quot;login_request_source&quot;
+        const val CREATE_ACCOUNT_RESULT_USERNAME = &quot;username&quot;
+        const val CREATE_ACCOUNT_RESULT_PASSWORD = &quot;password&quot;
+
+<span class="nc" id="L317">        val USERNAME_PATTERN: Pattern = Pattern.compile(&quot;[^#&lt;&gt;\\[\\]|{}/@]*&quot;)</span>
+
+        fun validateInput(username: CharSequence,
+                          password: CharSequence,
+                          passwordRepeat: CharSequence,
+                          email: CharSequence): ValidateResult {
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            if (!USERNAME_PATTERN.matcher(username).matches()) {</span>
+<span class="nc" id="L324">                return ValidateResult.INVALID_USERNAME</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            } else if (password.length &lt; PASSWORD_MIN_LENGTH) {</span>
+<span class="nc" id="L326">                return ValidateResult.PASSWORD_TOO_SHORT</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            } else if (password.toString().equals(username.toString(), true)) {</span>
+<span class="nc" id="L328">                return ValidateResult.PASSWORD_IS_USERNAME</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            } else if (passwordRepeat.toString() != password.toString()) {</span>
+<span class="nc" id="L330">                return ValidateResult.PASSWORD_MISMATCH</span>
+<span class="nc bnc" id="L331" title="All 6 branches missed.">            } else if (email.isNotEmpty() &amp;&amp; !Patterns.EMAIL_ADDRESS.matcher(email).matches()) {</span>
+<span class="nc" id="L332">                return ValidateResult.INVALID_EMAIL</span>
+<span class="nc bnc" id="L333" title="All 4 branches missed.">            } else if (email.isEmpty()) {</span>
+<span class="nc" id="L334">                return ValidateResult.NO_EMAIL</span>
+            }
+<span class="nc" id="L336">            return ValidateResult.SUCCESS</span>
+        }
+
+        fun newIntent(context: Context, source: String): Intent {
+<span class="nc" id="L340">            return Intent(context, CreateAccountActivity::class.java)</span>
+<span class="nc" id="L341">                    .putExtra(LOGIN_REQUEST_SOURCE, source)</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MapDataController.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.data.osm.mapdata</a> &gt; <span class="el_source">MapDataController.kt</span></div><h1>MapDataController.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.data.osm.mapdata
+
+import android.util.Log
+import de.westnordost.streetcomplete.data.osm.created_elements.CreatedElementsController
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometry
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometryCreator
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometryDao
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometryEntry
+import de.westnordost.streetcomplete.util.ktx.format
+import de.westnordost.streetcomplete.util.ktx.nowAsEpochMilliseconds
+import java.util.concurrent.CopyOnWriteArrayList
+
+/** Controller to access element data and its geometry and handle updates to it (from OSM API) */
+<span class="pc" id="L14">class MapDataController internal constructor(</span>
+<span class="fc" id="L15">    private val nodeDB: NodeDao,</span>
+<span class="fc" id="L16">    private val wayDB: WayDao,</span>
+<span class="fc" id="L17">    private val relationDB: RelationDao,</span>
+<span class="fc" id="L18">    private val elementDB: ElementDao,</span>
+<span class="fc" id="L19">    private val geometryDB: ElementGeometryDao,</span>
+<span class="fc" id="L20">    private val elementGeometryCreator: ElementGeometryCreator,</span>
+<span class="fc" id="L21">    private val createdElementsController: CreatedElementsController</span>
+) : MapDataRepository {
+
+    /* Must be a singleton because there is a listener that should respond to a change in the
+     * database table */
+
+    /** Interface to be notified of new or updated OSM elements */
+    interface Listener {
+        /** Called when a number of elements have been updated or deleted */
+        fun onUpdated(updated: MutableMapDataWithGeometry, deleted: Collection&lt;ElementKey&gt;)
+
+        /** Called when all elements in the given bounding box should be replaced with the elements
+         *  in the mapDataWithGeometry */
+        fun onReplacedForBBox(bbox: BoundingBox, mapDataWithGeometry: MutableMapDataWithGeometry)
+
+        /** Called when all elements have been cleared */
+        fun onCleared()
+    }
+<span class="fc" id="L39">    private val listeners: MutableList&lt;Listener&gt; = CopyOnWriteArrayList()</span>
+
+<span class="fc" id="L41">    private val cache = MapDataCache(</span>
+<span class="fc" id="L42">        SPATIAL_CACHE_TILE_ZOOM,</span>
+<span class="fc" id="L43">        SPATIAL_CACHE_TILES,</span>
+<span class="fc" id="L44">        SPATIAL_CACHE_INITIAL_CAPACITY,</span>
+<span class="fc" id="L45">        { bbox -&gt;</span>
+<span class="nc" id="L46">            val elements = elementDB.getAll(bbox)</span>
+<span class="nc" id="L47">            val elementGeometries = geometryDB.getAllEntries(</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">                elements.mapNotNull { if (it !is Node) it.key else null }</span>
+            )
+<span class="nc" id="L50">            elements to elementGeometries</span>
+        },
+<span class="pc" id="L52">        { nodeDB.getAll(it) },</span>
+    )
+
+    /** update element data with [mapData] in the given [bbox] (fresh data from the OSM API has been
+     *  downloaded) */
+    fun putAllForBBox(bbox: BoundingBox, mapData: MutableMapData) {
+<span class="nc" id="L58">        val time = nowAsEpochMilliseconds()</span>
+
+<span class="nc" id="L60">        val oldElementKeys: Set&lt;ElementKey&gt;</span>
+<span class="nc" id="L61">        val geometryEntries: Collection&lt;ElementGeometryEntry&gt;</span>
+<span class="nc" id="L62">        synchronized(this) {</span>
+            // for incompletely downloaded relations, complete the map data (as far as possible) with
+            // local data, i.e. with local nodes and ways (still) in local storage
+<span class="nc" id="L65">            completeMapData(mapData)</span>
+
+<span class="nc" id="L67">            geometryEntries = createGeometries(mapData, mapData)</span>
+
+            // don't use cache here, because if not everything is already cached, db call will be faster
+<span class="nc" id="L70">            oldElementKeys = elementDB.getAllKeys(mapData.boundingBox!!).toMutableSet()</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            for (element in mapData) {</span>
+<span class="nc" id="L72">                oldElementKeys.remove(element.key)</span>
+            }
+
+            // for the cache, use bbox and not mapData.boundingBox because the latter is padded,
+            // see comment for QUEST_FILTER_PADDING
+<span class="nc" id="L77">            cache.update(oldElementKeys, mapData, geometryEntries, bbox)</span>
+
+<span class="nc" id="L79">            elementDB.deleteAll(oldElementKeys)</span>
+<span class="nc" id="L80">            geometryDB.deleteAll(oldElementKeys)</span>
+<span class="nc" id="L81">            geometryDB.putAll(geometryEntries)</span>
+<span class="nc" id="L82">            elementDB.putAll(mapData)</span>
+<span class="nc" id="L83">        }</span>
+
+<span class="nc" id="L85">        Log.i(TAG,</span>
+<span class="nc" id="L86">            &quot;Persisted ${geometryEntries.size} and deleted ${oldElementKeys.size} elements and geometries&quot; +</span>
+<span class="nc" id="L87">            &quot; in ${((nowAsEpochMilliseconds() - time) / 1000.0).format(1)}s&quot;</span>
+        )
+
+<span class="nc" id="L90">        val mapDataWithGeometry = MutableMapDataWithGeometry(mapData, geometryEntries)</span>
+<span class="nc" id="L91">        mapDataWithGeometry.boundingBox = mapData.boundingBox</span>
+
+<span class="nc" id="L93">        onReplacedForBBox(bbox, mapDataWithGeometry)</span>
+<span class="nc" id="L94">    }</span>
+
+    /** incorporate the [mapDataUpdates] (data has been updated after upload) */
+    fun updateAll(mapDataUpdates: MapDataUpdates) {
+<span class="nc" id="L98">        val elements = mapDataUpdates.updated</span>
+        // need mapData in order to create (updated) geometry
+<span class="nc" id="L100">        val mapData = MutableMapData(elements)</span>
+
+<span class="nc" id="L102">        val deletedKeys: List&lt;ElementKey&gt;</span>
+<span class="nc" id="L103">        val geometryEntries: Collection&lt;ElementGeometryEntry&gt;</span>
+<span class="nc" id="L104">        synchronized(this) {</span>
+<span class="nc" id="L105">            completeMapData(mapData)</span>
+
+<span class="nc" id="L107">            geometryEntries = createGeometries(elements, mapData)</span>
+
+<span class="nc" id="L109">            val newElementKeys = mapDataUpdates.idUpdates.map { ElementKey(it.elementType, it.newElementId) }</span>
+<span class="nc" id="L110">            val oldElementKeys = mapDataUpdates.idUpdates.map { ElementKey(it.elementType, it.oldElementId) }</span>
+<span class="nc" id="L111">            deletedKeys = mapDataUpdates.deleted + oldElementKeys</span>
+
+<span class="nc" id="L113">            cache.update(deletedKeys, elements, geometryEntries)</span>
+
+<span class="nc" id="L115">            elementDB.deleteAll(deletedKeys)</span>
+<span class="nc" id="L116">            geometryDB.deleteAll(deletedKeys)</span>
+<span class="nc" id="L117">            geometryDB.putAll(geometryEntries)</span>
+<span class="nc" id="L118">            elementDB.putAll(elements)</span>
+<span class="nc" id="L119">            createdElementsController.putAll(newElementKeys)</span>
+<span class="nc" id="L120">        }</span>
+
+<span class="nc" id="L122">        val mapDataWithGeom = MutableMapDataWithGeometry(elements, geometryEntries)</span>
+<span class="nc" id="L123">        mapDataWithGeom.boundingBox = mapData.boundingBox</span>
+
+<span class="nc" id="L125">        onUpdated(updated = mapDataWithGeom, deleted = deletedKeys)</span>
+<span class="nc" id="L126">    }</span>
+
+    /** Create ElementGeometryEntries for [elements] using [mapData] to supply the necessary geometry */
+    private fun createGeometries(elements: Iterable&lt;Element&gt;, mapData: MapData): Collection&lt;ElementGeometryEntry&gt; =
+<span class="nc" id="L130">        elements.mapNotNull { element -&gt;</span>
+<span class="nc" id="L131">            val geometry = elementGeometryCreator.create(element, mapData, true)</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            geometry?.let { ElementGeometryEntry(element.type, element.id, geometry) }</span>
+<span class="nc" id="L133">        }</span>
+
+    private fun completeMapData(mapData: MutableMapData) {
+<span class="nc" id="L136">        val missingNodeIds = mutableListOf&lt;Long&gt;()</span>
+<span class="nc" id="L137">        val missingWayIds = mutableListOf&lt;Long&gt;()</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        for (relation in mapData.relations) {</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            for (member in relation.members) {</span>
+<span class="nc bnc" id="L140" title="All 4 branches missed.">                if (member.type == ElementType.NODE &amp;&amp; mapData.getNode(member.ref) == null) {</span>
+<span class="nc" id="L141">                    missingNodeIds.add(member.ref)</span>
+                }
+<span class="nc bnc" id="L143" title="All 4 branches missed.">                if (member.type == ElementType.WAY &amp;&amp; mapData.getWay(member.ref) == null) {</span>
+<span class="nc" id="L144">                    missingWayIds.add(member.ref)</span>
+                }
+                /* deliberately not recursively looking for relations of relations
+                   because that is also not how the OSM API works */
+            }
+        }
+
+<span class="nc" id="L151">        val ways = getWays(missingWayIds)</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        for (way in mapData.ways + ways) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            for (nodeId in way.nodeIds) {</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                if (mapData.getNode(nodeId) == null) {</span>
+<span class="nc" id="L155">                    missingNodeIds.add(nodeId)</span>
+                }
+            }
+        }
+<span class="nc" id="L159">        val nodes = getNodes(missingNodeIds)</span>
+
+<span class="nc" id="L161">        mapData.addAll(nodes)</span>
+<span class="nc" id="L162">        mapData.addAll(ways)</span>
+<span class="nc" id="L163">    }</span>
+
+<span class="nc" id="L165">    fun getGeometry(type: ElementType, id: Long): ElementGeometry? = cache.getGeometry(type, id, geometryDB::get)</span>
+
+<span class="fc" id="L167">    fun getGeometries(keys: Collection&lt;ElementKey&gt;): List&lt;ElementGeometryEntry&gt; = cache.getGeometries(keys, geometryDB::getAllEntries)</span>
+
+    fun getMapDataWithGeometry(bbox: BoundingBox): MutableMapDataWithGeometry {
+<span class="nc" id="L170">        val time = nowAsEpochMilliseconds()</span>
+<span class="nc" id="L171">        val result = cache.getMapDataWithGeometry(bbox)</span>
+<span class="nc" id="L172">        Log.i(TAG, &quot;Fetched ${result.size} elements and geometries in ${nowAsEpochMilliseconds() - time}ms&quot;)</span>
+
+<span class="nc" id="L174">        return result</span>
+    }
+
+<span class="nc" id="L177">    data class ElementCounts(val nodes: Int, val ways: Int, val relations: Int)</span>
+    // this is used after downloading one tile with auto-download, so we should always have it cached
+    fun getElementCounts(bbox: BoundingBox): ElementCounts {
+<span class="nc" id="L180">        val data = getMapDataWithGeometry(bbox)</span>
+<span class="nc" id="L181">        return ElementCounts(</span>
+<span class="nc" id="L182">            data.count { it is Node },</span>
+<span class="nc" id="L183">            data.count { it is Way },</span>
+<span class="nc" id="L184">            data.count { it is Relation }</span>
+        )
+    }
+
+<span class="nc bnc" id="L188" title="All 2 branches missed.">    override fun getNode(id: Long): Node? = cache.getElement(ElementType.NODE, id, elementDB::get) as? Node</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">    override fun getWay(id: Long): Way? = cache.getElement(ElementType.WAY, id, elementDB::get) as? Way</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">    override fun getRelation(id: Long): Relation? = cache.getElement(ElementType.RELATION, id, elementDB::get) as? Relation</span>
+
+    fun getAll(elementKeys: Collection&lt;ElementKey&gt;): List&lt;Element&gt; =
+<span class="nc" id="L193">        cache.getElements(elementKeys, elementDB::getAll)</span>
+
+<span class="nc" id="L195">    fun getNodes(ids: Collection&lt;Long&gt;): List&lt;Node&gt; = cache.getNodes(ids, nodeDB::getAll)</span>
+<span class="nc" id="L196">    fun getWays(ids: Collection&lt;Long&gt;): List&lt;Way&gt; = cache.getWays(ids, wayDB::getAll)</span>
+<span class="nc" id="L197">    fun getRelations(ids: Collection&lt;Long&gt;): List&lt;Relation&gt; = cache.getRelations(ids, relationDB::getAll)</span>
+
+<span class="nc" id="L199">    override fun getWaysForNode(id: Long): List&lt;Way&gt; = cache.getWaysForNode(id, wayDB::getAllForNode)</span>
+<span class="nc" id="L200">    override fun getRelationsForNode(id: Long): List&lt;Relation&gt; = cache.getRelationsForNode(id, relationDB::getAllForNode)</span>
+<span class="nc" id="L201">    override fun getRelationsForWay(id: Long): List&lt;Relation&gt; = cache.getRelationsForWay(id, relationDB::getAllForWay)</span>
+<span class="nc" id="L202">    override fun getRelationsForRelation(id: Long): List&lt;Relation&gt; = cache.getRelationsForRelation(id, relationDB::getAllForRelation)</span>
+
+    override fun getWayComplete(id: Long): MapData? {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        val way = getWay(id) ?: return null</span>
+<span class="nc" id="L206">        val nodeIds = way.nodeIds.toSet()</span>
+<span class="nc" id="L207">        val nodes = getNodes(nodeIds)</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        if (nodes.size &lt; nodeIds.size) return null</span>
+<span class="nc" id="L209">        return MutableMapData(nodes + way)</span>
+    }
+
+    override fun getRelationComplete(id: Long): MapData? {
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        val relation = getRelation(id) ?: return null</span>
+<span class="nc" id="L214">        val elementKeys = relation.members.map { it.key }.toSet()</span>
+<span class="nc" id="L215">        val elements = getAll(elementKeys)</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (elements.size &lt; elementKeys.size) return null</span>
+<span class="nc" id="L217">        return MutableMapData(elements + relation)</span>
+    }
+
+<span class="nc" id="L220">    fun deleteOlderThan(timestamp: Long, limit: Int? = null): Int {</span>
+<span class="nc" id="L221">        val elements: List&lt;ElementKey&gt;</span>
+<span class="nc" id="L222">        val elementCount: Int</span>
+<span class="nc" id="L223">        val geometryCount: Int</span>
+<span class="nc" id="L224">        synchronized(this) {</span>
+<span class="nc" id="L225">            val relations = relationDB.getIdsOlderThan(timestamp, limit).map { ElementKey(ElementType.RELATION, it) }</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            val ways = wayDB.getIdsOlderThan(timestamp, limit?.minus(relations.size)).map { ElementKey(ElementType.WAY, it) }</span>
+
+            // delete now, so filterNodeIdsWithoutWays works as intended
+<span class="nc" id="L229">            cache.update(deletedKeys = ways + relations)</span>
+<span class="nc" id="L230">            val wayAndRelationCount = elementDB.deleteAll(ways + relations)</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">            val nodes = nodeDB.getIdsOlderThan(timestamp, limit?.minus(relations.size + ways.size))</span>
+            // filter nodes to only delete nodes that are not part of a ways in the database
+<span class="nc" id="L233">            val filteredNodes = wayDB.filterNodeIdsWithoutWays(nodes).map { ElementKey(ElementType.NODE, it) }</span>
+
+<span class="nc" id="L235">            elements = relations + ways + filteredNodes</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            if (elements.isEmpty()) return 0</span>
+
+<span class="nc" id="L238">            cache.update(deletedKeys = filteredNodes)</span>
+<span class="nc" id="L239">            elementCount = wayAndRelationCount + elementDB.deleteAll(filteredNodes)</span>
+<span class="nc" id="L240">            geometryCount = geometryDB.deleteAll(elements)</span>
+<span class="nc" id="L241">            createdElementsController.deleteAll(elements)</span>
+<span class="nc" id="L242">        }</span>
+<span class="nc" id="L243">        Log.i(TAG, &quot;Deleted $elementCount old elements and $geometryCount geometries&quot;)</span>
+
+<span class="nc" id="L245">        onUpdated(deleted = elements)</span>
+
+<span class="nc" id="L247">        return elementCount</span>
+    }
+
+    fun clear() {
+<span class="nc" id="L251">        synchronized(this) {</span>
+<span class="nc" id="L252">            clearCache()</span>
+<span class="nc" id="L253">            elementDB.clear()</span>
+<span class="nc" id="L254">            geometryDB.clear()</span>
+<span class="nc" id="L255">            createdElementsController.clear()</span>
+<span class="nc" id="L256">        }</span>
+<span class="nc" id="L257">        onCleared()</span>
+<span class="nc" id="L258">    }</span>
+
+<span class="nc" id="L260">    fun clearCache() = synchronized(this) { cache.clear() }</span>
+
+<span class="nc" id="L262">    fun trimCache() = synchronized(this) { cache.trim(SPATIAL_CACHE_TILES / 3) }</span>
+
+    fun addListener(listener: Listener) {
+<span class="fc" id="L265">        listeners.add(listener)</span>
+<span class="fc" id="L266">    }</span>
+    fun removeListener(listener: Listener) {
+<span class="nc" id="L268">        listeners.remove(listener)</span>
+<span class="nc" id="L269">    }</span>
+
+<span class="nc" id="L271">    private fun onUpdated(</span>
+<span class="nc" id="L272">        updated: MutableMapDataWithGeometry = MutableMapDataWithGeometry(),</span>
+<span class="nc" id="L273">        deleted: Collection&lt;ElementKey&gt; = emptyList()</span>
+    ) {
+<span class="nc bnc" id="L275" title="All 8 branches missed.">        if (updated.nodes.isEmpty() &amp;&amp; updated.ways.isEmpty() &amp;&amp; updated.relations.isEmpty() &amp;&amp; deleted.isEmpty()) return</span>
+
+<span class="nc" id="L277">        listeners.forEach { it.onUpdated(updated, deleted) }</span>
+<span class="nc" id="L278">    }</span>
+
+    private fun onReplacedForBBox(bbox: BoundingBox, mapDataWithGeometry: MutableMapDataWithGeometry) {
+<span class="nc" id="L281">        listeners.forEach { it.onReplacedForBBox(bbox, mapDataWithGeometry) }</span>
+<span class="nc" id="L282">    }</span>
+
+    private fun onCleared() {
+<span class="nc" id="L285">        listeners.forEach { it.onCleared() }</span>
+<span class="nc" id="L286">    }</span>
+
+    companion object {
+        private const val TAG = &quot;MapDataController&quot;
+    }
+}
+
+// StyleableOverlayManager loads z16 tiles, but we want smaller tiles. Small tiles make db fetches for
+// typical getMapDataWithGeometry calls noticeably faster than z16, as they usually only require a small area.
+private const val SPATIAL_CACHE_TILE_ZOOM = 17
+
+// Three times the maximum number of tiles that can be loaded at once in StyleableOverlayManager (translated from z16 tiles).
+// We don't want to drop tiles from cache already when scrolling the map just a bit, especially
+// considering automatic trim may temporarily reduce cache size to 2/3 of maximum.
+private const val SPATIAL_CACHE_TILES = 192
+
+// In a city this is roughly the number of nodes in ~20-40 z16 tiles
+private const val SPATIAL_CACHE_INITIAL_CAPACITY = 100000
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

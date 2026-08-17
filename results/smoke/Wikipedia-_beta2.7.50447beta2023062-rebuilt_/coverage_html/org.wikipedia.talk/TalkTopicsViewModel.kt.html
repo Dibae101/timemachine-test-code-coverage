@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TalkTopicsViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wikipedia</a> &gt; <a href="index.source.html" class="el_package">org.wikipedia.talk</a> &gt; <span class="el_source">TalkTopicsViewModel.kt</span></div><h1>TalkTopicsViewModel.kt</h1><pre class="source lang-java linenums">package org.wikipedia.talk
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.wikipedia.WikipediaApp
+import org.wikipedia.analytics.eventplatform.WatchlistAnalyticsHelper
+import org.wikipedia.csrf.CsrfTokenClient
+import org.wikipedia.database.AppDatabase
+import org.wikipedia.dataclient.ServiceFactory
+import org.wikipedia.dataclient.discussiontools.ThreadItem
+import org.wikipedia.dataclient.mwapi.MwQueryPage
+import org.wikipedia.dataclient.okhttp.OfflineCacheInterceptor
+import org.wikipedia.edit.Edit
+import org.wikipedia.page.Namespace
+import org.wikipedia.page.PageTitle
+import org.wikipedia.richtext.RichTextUtil
+import org.wikipedia.settings.Prefs
+import org.wikipedia.staticdata.TalkAliasData
+import org.wikipedia.staticdata.UserTalkAliasData
+import org.wikipedia.talk.db.TalkPageSeen
+import org.wikipedia.util.UriUtil
+import org.wikipedia.views.TalkTopicsSortOverflowView
+import org.wikipedia.watchlist.WatchlistExpiry
+
+<span class="nc" id="L28">class TalkTopicsViewModel(var pageTitle: PageTitle, private val sidePanel: Boolean) : ViewModel() {</span>
+
+<span class="nc" id="L30">    private val talkPageDao = AppDatabase.instance.talkPageSeenDao()</span>
+<span class="nc" id="L31">    private val handler = CoroutineExceptionHandler { _, throwable -&gt;</span>
+<span class="nc" id="L32">        uiState.value = UiState.LoadError(throwable)</span>
+<span class="nc" id="L33">    }</span>
+<span class="nc" id="L34">    private val actionHandler = CoroutineExceptionHandler { _, throwable -&gt;</span>
+<span class="nc" id="L35">        uiState.value = UiState.ActionError(throwable)</span>
+<span class="nc" id="L36">    }</span>
+
+<span class="nc" id="L38">    private val threadItems = mutableListOf&lt;ThreadItem&gt;()</span>
+<span class="nc" id="L39">    var sortedThreadItems = listOf&lt;ThreadItem&gt;()</span>
+<span class="nc" id="L40">    var watchlistExpiryChanged = false</span>
+<span class="nc" id="L41">    var isWatched = false</span>
+<span class="nc" id="L42">    var hasWatchlistExpiry = false</span>
+<span class="nc" id="L43">    var lastWatchExpiry = WatchlistExpiry.NEVER</span>
+<span class="nc" id="L44">    var currentSearchQuery: String? = null</span>
+        set(value) {
+<span class="nc" id="L46">            field = value</span>
+<span class="nc" id="L47">            sortAndFilterThreadItems()</span>
+<span class="nc" id="L48">        }</span>
+<span class="nc" id="L49">    var currentSortMode = Prefs.talkTopicsSortMode</span>
+        set(value) {
+<span class="nc" id="L51">            field = value</span>
+<span class="nc" id="L52">            Prefs.talkTopicsSortMode = field</span>
+<span class="nc" id="L53">            sortAndFilterThreadItems()</span>
+<span class="nc" id="L54">        }</span>
+
+<span class="nc" id="L56">    val uiState = MutableStateFlow(UiState())</span>
+
+<span class="nc" id="L58">    init {</span>
+<span class="nc" id="L59">        loadTopics()</span>
+<span class="nc" id="L60">    }</span>
+
+    fun loadTopics() {
+        // Determine whether we need to resolve the PageTitle, since the calling activity might
+        // have given us a non-Talk page, and we need to prepend the correct namespace.
+<span class="nc" id="L65">        var resolveTitleRequired = false</span>
+<span class="nc bnc" id="L66" title="All 4 branches missed.">        if (pageTitle.namespace.isEmpty()) {</span>
+<span class="nc" id="L67">            pageTitle.namespace = TalkAliasData.valueFor(pageTitle.wikiSite.languageCode)</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        } else if (pageTitle.isUserPage) {</span>
+<span class="nc" id="L69">            pageTitle.namespace = UserTalkAliasData.valueFor(pageTitle.wikiSite.languageCode)</span>
+<span class="nc bnc" id="L70" title="All 4 branches missed.">        } else if (pageTitle.namespace() != Namespace.TALK &amp;&amp; pageTitle.namespace() != Namespace.USER_TALK) {</span>
+            // defer resolution of Talk page title for an API call.
+<span class="nc" id="L72">            resolveTitleRequired = true</span>
+        }
+
+<span class="nc" id="L75">        uiState.value = UiState.UpdateNamespace(pageTitle)</span>
+
+<span class="nc" id="L77">        viewModelScope.launch(handler) {</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (resolveTitleRequired) {</span>
+<span class="nc" id="L79">                val siteInfoResponse = ServiceFactory.get(pageTitle.wikiSite).getPageNamespaceWithSiteInfo(pageTitle.prefixedText,</span>
+<span class="nc" id="L80">                        OfflineCacheInterceptor.SAVE_HEADER_SAVE, pageTitle.wikiSite.languageCode, UriUtil.encodeURL(pageTitle.prefixedText))</span>
+<span class="nc" id="L81">                resolveTitleRequired = false</span>
+<span class="nc bnc" id="L82" title="All 4 branches missed.">                siteInfoResponse.query?.namespaces?.let { namespaces -&gt;</span>
+<span class="nc bnc" id="L83" title="All 4 branches missed.">                    siteInfoResponse.query?.firstPage()?.let { page -&gt;</span>
+                        // In MediaWiki, namespaces that are even-numbered are &quot;regular&quot; pages,
+                        // and namespaces that are odd-numbered are the &quot;Talk&quot; versions of the
+                        // corresponding even-numbered namespace. For example, &quot;User&quot;=2, &quot;User talk&quot;=3.
+                        // So then, if the namespace of our pageTitle is even (i.e. not a Talk page),
+                        // then increment the namespace by 1, and update the pageTitle with it.
+<span class="nc bnc" id="L89" title="All 6 branches missed.">                        val newNs = namespaces.values.find { it.id == page.namespace().code() + 1 }</span>
+<span class="nc bnc" id="L90" title="All 4 branches missed.">                        if (page.namespace().code() % 2 == 0 &amp;&amp; newNs != null) {</span>
+<span class="nc" id="L91">                            pageTitle.namespace = newNs.name</span>
+                        }
+<span class="nc" id="L93">                    }</span>
+                }
+            }
+
+<span class="nc" id="L97">            val discussionToolsInfoResponse = ServiceFactory.get(pageTitle.wikiSite).getTalkPageTopics(pageTitle.prefixedText,</span>
+<span class="nc" id="L98">                    OfflineCacheInterceptor.SAVE_HEADER_SAVE, pageTitle.wikiSite.languageCode, UriUtil.encodeURL(pageTitle.prefixedText))</span>
+
+<span class="nc" id="L100">            threadItems.clear()</span>
+<span class="nc bnc" id="L101" title="All 4 branches missed.">            threadItems.addAll(discussionToolsInfoResponse.pageInfo?.threads ?: emptyList())</span>
+<span class="nc" id="L102">            sortAndFilterThreadItems()</span>
+
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (WikipediaApp.instance.isOnline) {</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                val watchStatus = if (!sidePanel) ServiceFactory.get(pageTitle.wikiSite)</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                        .getWatchedStatus(pageTitle.prefixedText).query?.firstPage()!! else MwQueryPage()</span>
+<span class="nc" id="L107">                isWatched = watchStatus.watched</span>
+<span class="nc" id="L108">                hasWatchlistExpiry = watchStatus.hasWatchlistExpiry()</span>
+            }
+
+<span class="nc" id="L111">            uiState.value = UiState.LoadTopic(pageTitle, threadItems)</span>
+<span class="nc" id="L112">        }</span>
+<span class="nc" id="L113">    }</span>
+
+    fun updatePageTitle(pageTitle: PageTitle) {
+<span class="nc" id="L116">        this.pageTitle = pageTitle.copy()</span>
+<span class="nc" id="L117">        loadTopics()</span>
+<span class="nc" id="L118">    }</span>
+
+    fun undoSave(newRevisionId: Long, undoneSubject: CharSequence, undoneBody: CharSequence) {
+<span class="nc" id="L121">        viewModelScope.launch(actionHandler) {</span>
+<span class="nc" id="L122">            val token = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L123">                CsrfTokenClient.getToken(pageTitle.wikiSite).blockingFirst()</span>
+            }
+<span class="nc" id="L125">            val undoResponse = ServiceFactory.get(pageTitle.wikiSite).postUndoEdit(title = pageTitle.prefixedText, undoRevId = newRevisionId, token = token)</span>
+<span class="nc" id="L126">            uiState.value = UiState.UndoEdit(undoResponse, undoneSubject, undoneBody)</span>
+<span class="nc" id="L127">        }</span>
+<span class="nc" id="L128">    }</span>
+
+<span class="nc" id="L130">    fun markAsSeen(threadItem: ThreadItem?, force: Boolean = false) {</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        threadSha(threadItem)?.let {</span>
+<span class="nc" id="L132">            viewModelScope.launch(actionHandler) {</span>
+<span class="nc" id="L133">                withContext(Dispatchers.Main) {</span>
+<span class="nc bnc" id="L134" title="All 4 branches missed.">                    if (topicSeen(threadItem) &amp;&amp; !force) {</span>
+<span class="nc" id="L135">                        talkPageDao.deleteTalkPageSeen(it)</span>
+                    } else {
+<span class="nc" id="L137">                        talkPageDao.insertTalkPageSeen(TalkPageSeen(it))</span>
+                    }
+<span class="nc" id="L139">                }</span>
+<span class="nc" id="L140">            }</span>
+        }
+<span class="nc" id="L142">    }</span>
+
+    fun topicSeen(threadItem: ThreadItem?): Boolean {
+<span class="nc bnc" id="L145" title="All 4 branches missed.">        return threadSha(threadItem)?.run { talkPageDao.getTalkPageSeen(this) != null } ?: false</span>
+    }
+
+    private fun threadSha(threadItem: ThreadItem?): String? {
+<span class="nc bnc" id="L149" title="All 8 branches missed.">        return threadItem?.let { it.id + &quot;|&quot; + it.allReplies.maxOfOrNull { reply -&gt; reply.timestamp } }</span>
+    }
+
+    fun subscribeTopic(commentName: String, subscribed: Boolean) {
+<span class="nc" id="L153">        viewModelScope.launch(actionHandler) {</span>
+<span class="nc" id="L154">            val token = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L155">                CsrfTokenClient.getToken(pageTitle.wikiSite).blockingFirst()</span>
+            }
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            ServiceFactory.get(pageTitle.wikiSite).subscribeTalkPageTopic(pageTitle.prefixedText, commentName, token, if (!subscribed) true else null)</span>
+<span class="nc" id="L158">        }</span>
+<span class="nc" id="L159">    }</span>
+
+    private fun sortAndFilterThreadItems() {
+<span class="nc bnc" id="L162" title="All 7 branches missed.">        when (currentSortMode) {</span>
+            TalkTopicsSortOverflowView.SORT_BY_DATE_PUBLISHED_DESCENDING -&gt; {
+<span class="nc" id="L164">                threadItems.sortByDescending { it.replies.firstOrNull()?.date }</span>
+            }
+            TalkTopicsSortOverflowView.SORT_BY_DATE_PUBLISHED_ASCENDING -&gt; {
+<span class="nc" id="L167">                threadItems.sortBy { it.replies.firstOrNull()?.date }</span>
+            }
+            TalkTopicsSortOverflowView.SORT_BY_TOPIC_NAME_DESCENDING -&gt; {
+<span class="nc" id="L170">                threadItems.sortByDescending { RichTextUtil.stripHtml(it.html) }</span>
+            }
+            TalkTopicsSortOverflowView.SORT_BY_TOPIC_NAME_ASCENDING -&gt; {
+<span class="nc" id="L173">                threadItems.sortBy { RichTextUtil.stripHtml(it.html) }</span>
+            }
+            TalkTopicsSortOverflowView.SORT_BY_DATE_UPDATED_DESCENDING -&gt; {
+<span class="nc" id="L176">                threadItems.sortByDescending { it.replies.lastOrNull()?.date }</span>
+            }
+            TalkTopicsSortOverflowView.SORT_BY_DATE_UPDATED_ASCENDING -&gt; {
+<span class="nc" id="L179">                threadItems.sortBy { it.replies.lastOrNull()?.date }</span>
+            }
+        }
+
+        // Regardless of sort order, always put header template at the top, if we have one.
+<span class="nc bnc" id="L184" title="All 10 branches missed.">        val headerItem = threadItems.find { it.othercontent.isNotEmpty() &amp;&amp; TalkTopicActivity.isHeaderTemplate(it) }</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (headerItem != null) {</span>
+<span class="nc" id="L186">            threadItems.remove(headerItem)</span>
+<span class="nc" id="L187">            threadItems.add(0, headerItem)</span>
+        }
+
+<span class="nc bnc" id="L190" title="All 4 branches missed.">        sortedThreadItems = threadItems.filter { it.plainText.contains(currentSearchQuery.orEmpty(), true) ||</span>
+<span class="nc bnc" id="L191" title="All 4 branches missed.">                it.plainOtherContent.contains(currentSearchQuery.orEmpty(), true) ||</span>
+<span class="nc bnc" id="L192" title="All 4 branches missed.">                it.allReplies.any { reply -&gt; reply.plainText.contains(currentSearchQuery.orEmpty(), true) ||</span>
+<span class="nc bnc" id="L193" title="All 4 branches missed.">                        reply.author.contains(currentSearchQuery.orEmpty(), true) } }</span>
+<span class="nc" id="L194">    }</span>
+
+<span class="nc" id="L196">    suspend fun isSubscribed(commentName: String): Boolean {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        if (!WikipediaApp.instance.isOnline) {</span>
+<span class="nc" id="L198">            return false</span>
+        }
+<span class="nc" id="L200">        val response = ServiceFactory.get(pageTitle.wikiSite).getTalkPageTopicSubscriptions(commentName)</span>
+<span class="nc bnc" id="L201" title="All 4 branches missed.">        return response.subscriptions[commentName] == 1</span>
+    }
+
+    fun watchOrUnwatch(expiry: WatchlistExpiry, unwatch: Boolean) {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        if (isWatched) {</span>
+<span class="nc" id="L206">            WatchlistAnalyticsHelper.logRemovedFromWatchlist(pageTitle)</span>
+        } else {
+<span class="nc" id="L208">            WatchlistAnalyticsHelper.logAddedToWatchlist(pageTitle)</span>
+        }
+<span class="nc" id="L210">        viewModelScope.launch(actionHandler) {</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            val token = ServiceFactory.get(pageTitle.wikiSite).getWatchToken().query?.watchToken()</span>
+<span class="nc" id="L212">            val response = ServiceFactory.get(pageTitle.wikiSite)</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                .watch(if (unwatch) 1 else null, null, pageTitle.prefixedText, expiry.expiry, token!!)</span>
+
+<span class="nc" id="L215">            lastWatchExpiry = expiry</span>
+<span class="nc bnc" id="L216" title="All 4 branches missed.">            if (watchlistExpiryChanged &amp;&amp; unwatch) {</span>
+<span class="nc" id="L217">                watchlistExpiryChanged = false</span>
+            }
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (unwatch) {</span>
+<span class="nc" id="L220">                WatchlistAnalyticsHelper.logRemovedFromWatchlistSuccess(pageTitle)</span>
+            } else {
+<span class="nc" id="L222">                WatchlistAnalyticsHelper.logAddedToWatchlistSuccess(pageTitle)</span>
+            }
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            response.getFirst()?.let {</span>
+<span class="nc" id="L225">                isWatched = it.watched</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                hasWatchlistExpiry = lastWatchExpiry != WatchlistExpiry.NEVER</span>
+                // We have to send values to the object, even if we use the variables from ViewModel.
+                // Otherwise the status will not be updated in the activity since the values in the object remains the same.
+<span class="nc" id="L229">                uiState.value = UiState.DoWatch(isWatched, hasWatchlistExpiry)</span>
+<span class="nc" id="L230">            }</span>
+<span class="nc" id="L231">        }</span>
+<span class="nc" id="L232">    }</span>
+
+<span class="nc" id="L234">    class Factory(private val pageTitle: PageTitle, private val sidePanel: Boolean = false) : ViewModelProvider.Factory {</span>
+        @Suppress(&quot;unchecked_cast&quot;)
+        override fun &lt;T : ViewModel&gt; create(modelClass: Class&lt;T&gt;): T {
+<span class="nc" id="L237">            return TalkTopicsViewModel(pageTitle.copy(), sidePanel) as T</span>
+        }
+<span class="nc" id="L239">    }</span>
+
+<span class="nc" id="L241">    open class UiState {</span>
+<span class="nc" id="L242">        data class UpdateNamespace(val pageTitle: PageTitle) : UiState()</span>
+<span class="nc" id="L243">        data class LoadTopic(val pageTitle: PageTitle,</span>
+<span class="nc" id="L244">                             val threadItems: List&lt;ThreadItem&gt;) : UiState()</span>
+<span class="nc" id="L245">        data class LoadError(val throwable: Throwable) : UiState()</span>
+<span class="nc" id="L246">        data class UndoEdit(val edit: Edit, val undoneSubject: CharSequence, val undoneBody: CharSequence) : UiState()</span>
+<span class="nc" id="L247">        data class DoWatch(val isWatched: Boolean, val hasWatchlistExpiry: Boolean) : UiState()</span>
+<span class="nc" id="L248">        data class ActionError(val throwable: Throwable) : UiState()</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

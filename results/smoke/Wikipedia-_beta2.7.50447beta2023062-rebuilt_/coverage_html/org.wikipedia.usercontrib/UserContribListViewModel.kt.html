@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UserContribListViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wikipedia</a> &gt; <a href="index.source.html" class="el_package">org.wikipedia.usercontrib</a> &gt; <span class="el_source">UserContribListViewModel.kt</span></div><h1>UserContribListViewModel.kt</h1><pre class="source lang-java linenums">package org.wikipedia.usercontrib
+
+import android.os.Bundle
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.paging.*
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import org.wikipedia.Constants
+import org.wikipedia.WikipediaApp
+import org.wikipedia.dataclient.Service
+import org.wikipedia.dataclient.ServiceFactory
+import org.wikipedia.dataclient.WikiSite
+import org.wikipedia.dataclient.mwapi.UserContribution
+import org.wikipedia.settings.Prefs
+import org.wikipedia.util.DateUtil
+import org.wikipedia.util.Resource
+import org.wikipedia.util.log.L
+import retrofit2.HttpException
+import java.io.IOException
+import java.util.*
+
+<span class="nc" id="L26">class UserContribListViewModel(bundle: Bundle) : ViewModel() {</span>
+
+<span class="nc" id="L28">    val userContribStatsData = MutableLiveData&lt;Resource&lt;UserContribStats&gt;&gt;()</span>
+
+<span class="nc" id="L30">    var userName: String = bundle.getString(UserContribListActivity.INTENT_EXTRA_USER_NAME)!!</span>
+<span class="nc" id="L31">    var langCode: String = WikipediaApp.instance.appOrSystemLanguageCode</span>
+
+    val wikiSite get(): WikiSite {
+<span class="nc" id="L34">        return when (langCode) {</span>
+<span class="nc bnc" id="L35" title="All 2 branches missed.">            Constants.WIKI_CODE_COMMONS -&gt; WikiSite(Service.COMMONS_URL)</span>
+<span class="nc bnc" id="L36" title="All 2 branches missed.">            Constants.WIKI_CODE_WIKIDATA -&gt; WikiSite(Service.WIKIDATA_URL)</span>
+<span class="nc" id="L37">            else -&gt; WikiSite.forLanguageCode(langCode)</span>
+        }
+    }
+
+<span class="nc" id="L41">    var currentQuery = &quot;&quot;</span>
+<span class="nc" id="L42">    var actionModeActive = false</span>
+
+<span class="nc" id="L44">    var userContribSource: UserContribPagingSource? = null</span>
+<span class="nc" id="L45">    private val cachedContribs = mutableListOf&lt;UserContribution&gt;()</span>
+    private var cachedContinueKey: String? = null
+
+<span class="nc" id="L48">    val userContribFlow = Pager(PagingConfig(pageSize = 50), pagingSourceFactory = {</span>
+<span class="nc" id="L49">        userContribSource = UserContribPagingSource()</span>
+<span class="nc" id="L50">        userContribSource!!</span>
+<span class="nc" id="L51">    }).flow.map { pagingData -&gt;</span>
+<span class="nc" id="L52">        pagingData.filter {</span>
+<span class="nc bnc" id="L53" title="All 4 branches missed.">            if (currentQuery.isNotEmpty()) {</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">                it.comment.contains(currentQuery, true) ||</span>
+<span class="nc bnc" id="L55" title="All 2 branches missed.">                        it.title.contains(currentQuery, true)</span>
+<span class="nc" id="L56">            } else true</span>
+<span class="nc" id="L57">        }.map {</span>
+<span class="nc" id="L58">            UserContribItem(it)</span>
+<span class="nc" id="L59">        }.insertSeparators { before, after -&gt;</span>
+<span class="nc bnc" id="L60" title="All 6 branches missed.">            val dateBefore = before?.item?.parsedDateTime?.toLocalDate()</span>
+<span class="nc bnc" id="L61" title="All 6 branches missed.">            val dateAfter = after?.item?.parsedDateTime?.toLocalDate()</span>
+<span class="nc bnc" id="L62" title="All 4 branches missed.">            if (dateAfter != null &amp;&amp; dateAfter != dateBefore) {</span>
+<span class="nc" id="L63">                UserContribSeparator(DateUtil.getShortDateString(dateAfter))</span>
+            } else {
+<span class="nc" id="L65">                null</span>
+            }
+        }
+<span class="nc" id="L68">    }.cachedIn(viewModelScope)</span>
+
+<span class="nc" id="L70">    init {</span>
+<span class="nc" id="L71">        loadStats()</span>
+<span class="nc" id="L72">    }</span>
+
+    fun excludedFiltersCount(): Int {
+<span class="nc" id="L75">        val excludedNsFilter = Prefs.userContribFilterExcludedNs</span>
+<span class="nc" id="L76">        return UserContribFilterActivity.NAMESPACE_LIST.count { excludedNsFilter.contains(it) }</span>
+    }
+
+    fun loadStats() {
+<span class="nc" id="L80">        viewModelScope.launch(CoroutineExceptionHandler { _, throwable -&gt;</span>
+<span class="nc" id="L81">            L.e(throwable)</span>
+<span class="nc" id="L82">        }) {</span>
+<span class="nc" id="L83">            val messageName = &quot;project-localized-name-${wikiSite.dbName()}&quot;</span>
+<span class="nc" id="L84">            val query = ServiceFactory.get(wikiSite).userInfoWithMessages(userName, messageName).query</span>
+
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            userContribStatsData.postValue(Resource.Success(UserContribStats(query?.users!![0].editCount,</span>
+<span class="nc bnc" id="L87" title="All 10 branches missed.">                    query.users[0].registrationDate, query.allmessages.orEmpty().getOrNull(0)?.content.orEmpty().ifEmpty { wikiSite.dbName() })))</span>
+<span class="nc" id="L88">        }</span>
+<span class="nc" id="L89">    }</span>
+
+    fun clearCache() {
+<span class="nc" id="L92">        cachedContribs.clear()</span>
+<span class="nc" id="L93">    }</span>
+
+<span class="nc" id="L95">    inner class UserContribPagingSource : PagingSource&lt;String, UserContribution&gt;() {</span>
+<span class="nc" id="L96">        override suspend fun load(params: LoadParams&lt;String&gt;): LoadResult&lt;String, UserContribution&gt; {</span>
+<span class="nc" id="L97">            return try {</span>
+<span class="nc bnc" id="L98" title="All 6 branches missed.">                if (params.key == null &amp;&amp; cachedContribs.isNotEmpty()) {</span>
+<span class="nc" id="L99">                    return LoadResult.Page(cachedContribs, null, cachedContinueKey)</span>
+                }
+
+<span class="nc bnc" id="L102" title="All 2 branches missed.">                if (excludedFiltersCount() == UserContribFilterActivity.NAMESPACE_LIST.size) {</span>
+<span class="nc" id="L103">                    return LoadResult.Page(emptyList(), null, null)</span>
+                }
+
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                val nsFilter = if (Prefs.userContribFilterExcludedNs.isEmpty()) &quot;&quot; else</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                    UserContribFilterActivity.NAMESPACE_LIST.filter { !Prefs.userContribFilterExcludedNs.contains(it) }.joinToString(&quot;|&quot;)</span>
+
+<span class="nc bnc" id="L109" title="All 4 branches missed.">                val response = ServiceFactory.get(wikiSite).getUserContrib(userName, 500, nsFilter.ifEmpty { null }, null, params.key)</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                val contribs = response.query?.userContributions!!</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                cachedContinueKey = response.continuation?.ucContinuation</span>
+<span class="nc" id="L113">                cachedContribs.addAll(contribs)</span>
+
+<span class="nc" id="L115">                LoadResult.Page(contribs, null, cachedContinueKey)</span>
+<span class="nc" id="L116">            } catch (e: IOException) {</span>
+<span class="nc" id="L117">                LoadResult.Error(e)</span>
+<span class="nc" id="L118">            } catch (e: HttpException) {</span>
+<span class="nc" id="L119">                LoadResult.Error(e)</span>
+            }
+        }
+
+        override fun getRefreshKey(state: PagingState&lt;String, UserContribution&gt;): String? {
+<span class="nc" id="L124">            return null</span>
+        }
+    }
+
+<span class="nc" id="L128">    open class UserContribItemModel</span>
+<span class="nc" id="L129">    class UserContribItem(val item: UserContribution) : UserContribItemModel()</span>
+<span class="nc" id="L130">    class UserContribSeparator(val date: String) : UserContribItemModel()</span>
+<span class="nc" id="L131">    class UserContribStats(val totalEdits: Int, val registrationDate: Date, val projectName: String) : UserContribItemModel()</span>
+
+<span class="nc" id="L133">    class Factory(private val bundle: Bundle) : ViewModelProvider.Factory {</span>
+        @Suppress(&quot;unchecked_cast&quot;)
+        override fun &lt;T : ViewModel&gt; create(modelClass: Class&lt;T&gt;): T {
+<span class="nc" id="L136">            return UserContribListViewModel(bundle) as T</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

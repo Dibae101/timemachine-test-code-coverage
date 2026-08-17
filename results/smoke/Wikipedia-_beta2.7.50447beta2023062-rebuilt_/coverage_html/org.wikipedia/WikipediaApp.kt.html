@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WikipediaApp.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wikipedia</a> &gt; <a href="index.source.html" class="el_package">org.wikipedia</a> &gt; <span class="el_source">WikipediaApp.kt</span></div><h1>WikipediaApp.kt</h1><pre class="source lang-java linenums">package org.wikipedia
+
+import android.annotation.SuppressLint
+import android.app.Application
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Handler
+import android.speech.RecognizerIntent
+import android.view.Window
+import android.webkit.WebView
+import androidx.appcompat.app.AppCompatDelegate
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
+import io.reactivex.rxjava3.internal.functions.Functions
+import io.reactivex.rxjava3.plugins.RxJavaPlugins
+import io.reactivex.rxjava3.schedulers.Schedulers
+import org.wikipedia.analytics.InstallReferrerListener
+import org.wikipedia.analytics.eventplatform.AppSessionEvent
+import org.wikipedia.analytics.eventplatform.EventPlatformClient
+import org.wikipedia.appshortcuts.AppShortcuts
+import org.wikipedia.auth.AccountUtil
+import org.wikipedia.concurrency.RxBus
+import org.wikipedia.connectivity.ConnectionStateMonitor
+import org.wikipedia.dataclient.ServiceFactory
+import org.wikipedia.dataclient.SharedPreferenceCookieManager
+import org.wikipedia.dataclient.WikiSite
+import org.wikipedia.events.ChangeTextSizeEvent
+import org.wikipedia.events.ThemeFontChangeEvent
+import org.wikipedia.language.AcceptLanguageUtil
+import org.wikipedia.language.AppLanguageState
+import org.wikipedia.notifications.NotificationCategory
+import org.wikipedia.notifications.NotificationPollBroadcastReceiver
+import org.wikipedia.page.tabs.Tab
+import org.wikipedia.push.WikipediaFirebaseMessagingService
+import org.wikipedia.settings.Prefs
+import org.wikipedia.settings.SiteInfoClient
+import org.wikipedia.theme.Theme
+import org.wikipedia.util.DimenUtil
+import org.wikipedia.util.ReleaseUtil
+import org.wikipedia.util.log.L
+import java.util.*
+
+<span class="fc" id="L43">class WikipediaApp : Application() {</span>
+<span class="fc" id="L44">    init {</span>
+<span class="fc" id="L45">        instance = this</span>
+<span class="fc" id="L46">    }</span>
+
+<span class="fc" id="L48">    val mainThreadHandler by lazy { Handler(mainLooper) }</span>
+<span class="fc" id="L49">    val languageState by lazy { AppLanguageState(this) }</span>
+<span class="fc" id="L50">    val appSessionEvent by lazy { AppSessionEvent() }</span>
+
+<span class="fc" id="L52">    val userAgent by lazy {</span>
+<span class="fc" id="L53">        var channel = ReleaseUtil.getChannel(this)</span>
+<span class="pc bpc" id="L54" title="1 of 2 branches missed.">        channel = if (channel.isBlank()) &quot;&quot; else &quot; $channel&quot;</span>
+<span class="fc" id="L55">        String.format(&quot;WikipediaApp/%s (Android %s; %s; %s Build/%s)%s&quot;,</span>
+<span class="fc" id="L56">            BuildConfig.VERSION_NAME,</span>
+<span class="fc" id="L57">            Build.VERSION.RELEASE,</span>
+<span class="fc" id="L58">            getString(R.string.device_type),</span>
+<span class="fc" id="L59">            Build.MODEL,</span>
+<span class="fc" id="L60">            Build.ID,</span>
+<span class="fc" id="L61">            channel</span>
+        )
+    }
+
+<span class="fc" id="L65">    private val activityLifecycleHandler = ActivityLifecycleHandler()</span>
+    private var defaultWikiSite: WikiSite? = null
+
+<span class="fc" id="L68">    val connectionStateMonitor = ConnectionStateMonitor()</span>
+<span class="fc" id="L69">    val bus = RxBus()</span>
+<span class="pc" id="L70">    val tabList = mutableListOf&lt;Tab&gt;()</span>
+
+<span class="fc" id="L72">    var currentTheme = Theme.fallback</span>
+        set(value) {
+<span class="pc bpc" id="L74" title="1 of 2 branches missed.">            if (value !== field) {</span>
+<span class="nc" id="L75">                field = value</span>
+<span class="nc" id="L76">                Prefs.currentThemeId = currentTheme.marshallingId</span>
+<span class="nc" id="L77">                bus.post(ThemeFontChangeEvent())</span>
+            }
+<span class="fc" id="L79">        }</span>
+
+    val appOrSystemLanguageCode: String
+        get() {
+<span class="nc" id="L83">            val code = languageState.appLanguageCode</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (AccountUtil.getUserIdForLanguage(code) == 0) {</span>
+<span class="nc" id="L85">                getUserIdForLanguage(code)</span>
+            }
+<span class="nc" id="L87">            return code</span>
+        }
+
+    val versionCode: Int
+        get() {
+            // When we had ABI-specific version codes, they were structured in increments of 10000,
+            // so just take the actual version code modulo the increment.
+<span class="nc" id="L94">            return BuildConfig.VERSION_CODE % 10000</span>
+        }
+
+    val appInstallID: String
+        get() {
+<span class="fc" id="L99">            var id = Prefs.appInstallId</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">            if (id == null) {</span>
+<span class="fc" id="L101">                id = UUID.randomUUID().toString()</span>
+<span class="fc" id="L102">                Prefs.appInstallId = id</span>
+            }
+<span class="fc" id="L104">            return id</span>
+        }
+
+    /**
+     * Default &quot;home&quot; wiki for the app
+     * Use PageTitle.getWikiSite() to get the article wiki
+     */
+    @get:Synchronized
+    val wikiSite: WikiSite
+        get() {
+            // TODO: why don't we ensure that the app language hasn't changed here instead of the client?
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (defaultWikiSite == null) {</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                val lang = if (Prefs.mediaWikiBaseUriSupportsLangCode) appOrSystemLanguageCode else &quot;&quot;</span>
+<span class="nc" id="L117">                val newWiki = WikiSite.forLanguageCode(lang)</span>
+                // Kick off a task to retrieve the site info for the current wiki
+<span class="nc" id="L119">                SiteInfoClient.updateFor(newWiki)</span>
+<span class="nc" id="L120">                defaultWikiSite = newWiki</span>
+            }
+<span class="nc" id="L122">            return defaultWikiSite!!</span>
+        }
+
+    // handle the case where we have a single tab with an empty backstack, which shouldn't count as a valid tab:
+    val tabCount
+<span class="nc bnc" id="L127" title="All 6 branches missed.">        get() = if (tabList.size &gt; 1) tabList.size else if (tabList.isEmpty()) 0 else if (tabList[0].backStack.isEmpty()) 0 else tabList.size</span>
+
+    val isOnline
+<span class="fc" id="L130">        get() = connectionStateMonitor.isOnline()</span>
+
+    val haveMainActivity
+<span class="nc" id="L133">        get() = activityLifecycleHandler.haveMainActivity()</span>
+
+    val isAnyActivityResumed
+<span class="nc" id="L136">        get() = activityLifecycleHandler.isAnyActivityResumed</span>
+
+<span class="pc" id="L138">    val voiceRecognitionAvailable by lazy {</span>
+<span class="nc" id="L139">        try {</span>
+<span class="nc" id="L140">            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY).isNotEmpty()</span>
+<span class="nc" id="L142">        } catch (e: Exception) {</span>
+<span class="nc" id="L143">            L.e(e)</span>
+<span class="nc" id="L144">            false</span>
+        }
+    }
+
+    override fun onCreate() {
+<span class="fc" id="L149">        super.onCreate()</span>
+
+<span class="fc" id="L151">        WikiSite.setDefaultBaseUrl(Prefs.mediaWikiBaseUrl)</span>
+
+<span class="fc" id="L153">        connectionStateMonitor.enable()</span>
+
+<span class="fc" id="L155">        setupLeakCanary()</span>
+
+        // See Javadocs and http://developer.android.com/tools/support-library/index.html#rev23-4-0
+<span class="fc" id="L158">        AppCompatDelegate.setCompatVectorFromResourcesEnabled(true)</span>
+
+        // This handler will catch exceptions thrown from Observables after they are disposed,
+        // or from Observables that are (deliberately or not) missing an onError handler.
+        // TODO: consider more comprehensive handling of these errors.
+<span class="fc" id="L163">        RxJavaPlugins.setErrorHandler(Functions.emptyConsumer())</span>
+
+<span class="fc" id="L165">        currentTheme = unmarshalTheme(Prefs.currentThemeId)</span>
+
+<span class="fc" id="L167">        initTabs()</span>
+<span class="fc" id="L168">        enableWebViewDebugging()</span>
+<span class="fc" id="L169">        registerActivityLifecycleCallbacks(activityLifecycleHandler)</span>
+<span class="fc" id="L170">        registerComponentCallbacks(activityLifecycleHandler)</span>
+<span class="fc" id="L171">        NotificationCategory.createNotificationChannels(this)</span>
+<span class="fc" id="L172">        AppShortcuts.setShortcuts(this)</span>
+
+        // Kick the notification receiver, in case it hasn't yet been started by the system.
+<span class="fc" id="L175">        NotificationPollBroadcastReceiver.startPollTask(this)</span>
+<span class="fc" id="L176">        InstallReferrerListener.newInstance(this)</span>
+
+        // For good measure, explicitly call our token subscription function, in case the
+        // API failed in previous attempts.
+<span class="fc" id="L180">        WikipediaFirebaseMessagingService.updateSubscription()</span>
+
+<span class="fc" id="L182">        EventPlatformClient.setUpStreamConfigs()</span>
+<span class="fc" id="L183">    }</span>
+
+    /**
+     * @return the value that should go in the Accept-Language header.
+     */
+    fun getAcceptLanguage(wiki: WikiSite?): String {
+<span class="pc bpc" id="L189" title="2 of 4 branches missed.">        val wikiLang = if (wiki == null || &quot;meta&quot; == wiki.languageCode) &quot;&quot; else wiki.languageCode</span>
+<span class="fc" id="L190">        return AcceptLanguageUtil.getAcceptLanguage(</span>
+<span class="fc" id="L191">            languageState.getBcp47LanguageCode(wikiLang),</span>
+<span class="fc" id="L192">            languageState.getBcp47LanguageCode(languageState.appLanguageCode),</span>
+<span class="fc" id="L193">                languageState.getBcp47LanguageCode(languageState.systemLanguageCode))</span>
+    }
+
+    fun constrainFontSizeMultiplier(mult: Int): Int {
+<span class="nc" id="L197">        return mult.coerceIn(resources.getInteger(R.integer.minTextSizeMultiplier),</span>
+<span class="nc" id="L198">                resources.getInteger(R.integer.maxTextSizeMultiplier))</span>
+    }
+
+    fun setFontSizeMultiplier(mult: Int): Boolean {
+<span class="nc" id="L202">        val multiplier = constrainFontSizeMultiplier(mult)</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (multiplier != Prefs.textSizeMultiplier) {</span>
+<span class="nc" id="L204">            Prefs.textSizeMultiplier = multiplier</span>
+<span class="nc" id="L205">            bus.post(ChangeTextSizeEvent())</span>
+<span class="nc" id="L206">            return true</span>
+        }
+<span class="nc" id="L208">        return false</span>
+    }
+
+    fun setFontFamily(fontFamily: String) {
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (fontFamily != Prefs.fontFamily) {</span>
+<span class="nc" id="L213">            Prefs.fontFamily = fontFamily</span>
+<span class="nc" id="L214">            bus.post(ThemeFontChangeEvent())</span>
+        }
+<span class="nc" id="L216">    }</span>
+
+    fun putCrashReportProperty(key: String?, value: String?) {
+        // TODO: add custom properties to crash report
+<span class="nc" id="L220">    }</span>
+
+    fun logCrashManually(throwable: Throwable) {
+<span class="nc" id="L223">        L.e(throwable)</span>
+        // TODO: send exception to custom crash reporting system
+<span class="nc" id="L225">    }</span>
+
+    fun commitTabState() {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        if (tabList.isEmpty()) {</span>
+<span class="nc" id="L229">            Prefs.clearTabs()</span>
+<span class="nc" id="L230">            initTabs()</span>
+        } else {
+<span class="nc" id="L232">            Prefs.tabs = tabList</span>
+        }
+<span class="nc" id="L234">    }</span>
+
+    /**
+     * Gets the current size of the app's font. This is given as a device-specific size (not &quot;sp&quot;),
+     * and can be passed directly to setTextSize() functions.
+     * @param window The window on which the font will be displayed.
+     * @return Actual current size of the font.
+     */
+<span class="nc" id="L242">    fun getFontSize(window: Window, editing: Boolean = false): Float {</span>
+<span class="nc" id="L243">        return DimenUtil.getFontSizeFromSp(window,</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                resources.getDimension(R.dimen.textSize)) * (1.0f + (if (editing) Prefs.editingTextSizeMultiplier else Prefs.textSizeMultiplier) *</span>
+<span class="nc" id="L245">                DimenUtil.getFloat(R.dimen.textSizeMultiplierFactor))</span>
+    }
+
+    @Synchronized
+    fun resetWikiSite() {
+<span class="fc" id="L250">        defaultWikiSite = null</span>
+<span class="fc" id="L251">    }</span>
+
+    @SuppressLint(&quot;CheckResult&quot;)
+    fun logOut() {
+<span class="nc" id="L255">        L.d(&quot;Logging out&quot;)</span>
+<span class="nc" id="L256">        AccountUtil.removeAccount()</span>
+<span class="nc" id="L257">        Prefs.isPushNotificationTokenSubscribed = false</span>
+<span class="nc" id="L258">        Prefs.pushNotificationTokenOld = &quot;&quot;</span>
+<span class="nc" id="L259">        ServiceFactory.get(wikiSite).getTokenObservable()</span>
+<span class="nc" id="L260">                .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L261">                .flatMap {</span>
+<span class="nc" id="L262">                    val csrfToken = it.query!!.csrfToken()</span>
+<span class="nc" id="L263">                    WikipediaFirebaseMessagingService.unsubscribePushToken(csrfToken!!, Prefs.pushNotificationToken)</span>
+<span class="nc" id="L264">                            .flatMap { ServiceFactory.get(wikiSite).postLogout(csrfToken).subscribeOn(Schedulers.io()) }</span>
+                }
+<span class="nc" id="L266">                .doFinally { SharedPreferenceCookieManager.instance.clearAllCookies() }</span>
+<span class="nc" id="L267">                .subscribe({ L.d(&quot;Logout complete.&quot;) }) { L.e(it) }</span>
+<span class="nc" id="L268">    }</span>
+
+    private fun enableWebViewDebugging() {
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">        if (BuildConfig.DEBUG) {</span>
+<span class="fc" id="L272">            WebView.setWebContentsDebuggingEnabled(true)</span>
+        }
+<span class="fc" id="L274">    }</span>
+
+    fun unmarshalTheme(themeId: Int): Theme {
+<span class="fc" id="L277">        var result = Theme.ofMarshallingId(themeId)</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L279">            L.d(&quot;Theme id=$themeId is invalid, using fallback.&quot;)</span>
+<span class="nc" id="L280">            result = Theme.fallback</span>
+        }
+<span class="fc" id="L282">        return result</span>
+    }
+
+    @SuppressLint(&quot;CheckResult&quot;)
+    private fun getUserIdForLanguage(code: String) {
+<span class="nc bnc" id="L287" title="All 8 branches missed.">        if (!AccountUtil.isLoggedIn || AccountUtil.userName.isNullOrEmpty()) {</span>
+<span class="nc" id="L288">            return</span>
+        }
+<span class="nc" id="L290">        val wikiSite = WikiSite.forLanguageCode(code)</span>
+<span class="nc" id="L291">        ServiceFactory.get(wikiSite).userInfo</span>
+<span class="nc" id="L292">                .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L293">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L294">                .subscribe({</span>
+<span class="nc bnc" id="L295" title="All 4 branches missed.">                    if (AccountUtil.isLoggedIn &amp;&amp; it.query!!.userInfo != null) {</span>
+                        // noinspection ConstantConditions
+<span class="nc" id="L297">                        val id = it.query!!.userInfo!!.id</span>
+<span class="nc" id="L298">                        AccountUtil.putUserIdForLanguage(code, id)</span>
+<span class="nc" id="L299">                        L.d(&quot;Found user ID $id for $code&quot;)</span>
+                    }
+<span class="nc" id="L301">                }) { L.e(&quot;Failed to get user ID for $code&quot;, it) }</span>
+<span class="nc" id="L302">    }</span>
+
+    private fun initTabs() {
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">        if (Prefs.hasTabs) {</span>
+<span class="nc" id="L306">            tabList.addAll(Prefs.tabs)</span>
+        }
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">        if (tabList.isEmpty()) {</span>
+<span class="fc" id="L309">            tabList.add(Tab())</span>
+        }
+<span class="fc" id="L311">    }</span>
+
+    companion object {
+<span class="fc" id="L314">        lateinit var instance: WikipediaApp</span>
+            private set
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>
