@@ -1,0 +1,541 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CopyService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">TimeMachine coverage</a> &gt; <a href="index.source.html" class="el_package">com.amaze.filemanager.asynchronous.services</a> &gt; <span class="el_source">CopyService.java</span></div><h1>CopyService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2014 Arpit Khurana &lt;arpitkh96@gmail.com&gt;, Vishal Nehra &lt;vishalmeham2@gmail.com&gt;,
+ *                      Emmanuel Messulam&lt;emmanuelbendavid@gmail.com&gt;
+ *
+ * This file is part of Amaze File Manager.
+ *
+ * Amaze File Manager is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.amaze.filemanager.asynchronous.services;
+
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.preference.PreferenceManager;
+import androidx.annotation.StringRes;
+import androidx.core.app.NotificationCompat;
+import android.util.Log;
+import android.widget.RemoteViews;
+import android.widget.Toast;
+
+import com.amaze.filemanager.R;
+import com.amaze.filemanager.activities.MainActivity;
+import com.amaze.filemanager.asynchronous.asynctasks.DeleteTask;
+import com.amaze.filemanager.database.CryptHandler;
+import com.amaze.filemanager.database.models.EncryptedEntry;
+import com.amaze.filemanager.exceptions.ShellNotRunningException;
+import com.amaze.filemanager.filesystem.FileUtil;
+import com.amaze.filemanager.filesystem.HybridFile;
+import com.amaze.filemanager.filesystem.HybridFileParcelable;
+import com.amaze.filemanager.filesystem.Operations;
+import com.amaze.filemanager.filesystem.RootHelper;
+import com.amaze.filemanager.ui.notifications.NotificationConstants;
+import com.amaze.filemanager.utils.DatapointParcelable;
+import com.amaze.filemanager.utils.ObtainableServiceBinder;
+import com.amaze.filemanager.utils.OpenMode;
+import com.amaze.filemanager.utils.ProgressHandler;
+import com.amaze.filemanager.utils.RootUtils;
+import com.amaze.filemanager.utils.ServiceWatcherUtil;
+import com.amaze.filemanager.utils.application.AppConfig;
+import com.amaze.filemanager.utils.files.CryptUtil;
+import com.amaze.filemanager.utils.files.FileUtils;
+import com.amaze.filemanager.utils.files.GenericCopyUtil;
+
+import java.io.IOException;
+import java.util.ArrayList;
+
+<span class="nc" id="L66">public class CopyService extends AbstractProgressiveService {</span>
+
+    public static final String TAG_IS_ROOT_EXPLORER = &quot;is_root&quot;;
+    public static final String TAG_COPY_TARGET = &quot;COPY_DIRECTORY&quot;;
+    public static final String TAG_COPY_SOURCES = &quot;FILE_PATHS&quot;;
+    public static final String TAG_COPY_OPEN_MODE = &quot;MODE&quot;; // target open mode
+    public static final String TAG_COPY_MOVE = &quot;move&quot;;
+    private static final String TAG_COPY_START_ID = &quot;id&quot;;
+
+    public static final String TAG_BROADCAST_COPY_CANCEL = &quot;copycancel&quot;;
+
+    private NotificationManager mNotifyManager;
+    private NotificationCompat.Builder mBuilder;
+    private Context c;
+
+<span class="nc" id="L81">    private final IBinder mBinder = new ObtainableServiceBinder&lt;&gt;(this);</span>
+    private ServiceWatcherUtil watcherUtil;
+<span class="nc" id="L83">    private ProgressHandler progressHandler = new ProgressHandler();</span>
+    private ProgressListener progressListener;
+    // list of data packages, to initiate chart in process viewer fragment
+<span class="nc" id="L86">    private ArrayList&lt;DatapointParcelable&gt; dataPackages = new ArrayList&lt;&gt;();</span>
+    private int accentColor;
+    private SharedPreferences sharedPreferences;
+    private RemoteViews customSmallContentViews, customBigContentViews;
+
+    private boolean isRootExplorer;
+<span class="nc" id="L92">    private long totalSize = 0L;</span>
+<span class="nc" id="L93">    private int totalSourceFiles = 0;</span>
+<span class="nc" id="L94">    private int sourceProgress = 0;</span>
+
+    @Override
+    public void onCreate() {
+<span class="nc" id="L98">        super.onCreate();</span>
+<span class="nc" id="L99">        c = getApplicationContext();</span>
+<span class="nc" id="L100">        registerReceiver(receiver3, new IntentFilter(TAG_BROADCAST_COPY_CANCEL));</span>
+<span class="nc" id="L101">    }</span>
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, final int startId) {
+
+<span class="nc" id="L106">        Bundle b = new Bundle();</span>
+<span class="nc" id="L107">        isRootExplorer = intent.getBooleanExtra(TAG_IS_ROOT_EXPLORER ,false);</span>
+<span class="nc" id="L108">        ArrayList&lt;HybridFileParcelable&gt; files = intent.getParcelableArrayListExtra(TAG_COPY_SOURCES);</span>
+<span class="nc" id="L109">        String targetPath = intent.getStringExtra(TAG_COPY_TARGET);</span>
+<span class="nc" id="L110">        int mode = intent.getIntExtra(TAG_COPY_OPEN_MODE, OpenMode.UNKNOWN.ordinal());</span>
+<span class="nc" id="L111">        final boolean move = intent.getBooleanExtra(TAG_COPY_MOVE, false);</span>
+<span class="nc" id="L112">        sharedPreferences = PreferenceManager.getDefaultSharedPreferences(c);</span>
+<span class="nc" id="L113">        accentColor = ((AppConfig) getApplication()).getUtilsProvider()</span>
+<span class="nc" id="L114">                .getColorPreference()</span>
+<span class="nc" id="L115">                .getCurrentUserColorPreferences(this, sharedPreferences).accent;</span>
+
+<span class="nc" id="L117">        mNotifyManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);</span>
+<span class="nc" id="L118">        b.putInt(TAG_COPY_START_ID, startId);</span>
+
+<span class="nc" id="L120">        Intent notificationIntent = new Intent(this, MainActivity.class);</span>
+<span class="nc" id="L121">        notificationIntent.setAction(Intent.ACTION_MAIN);</span>
+<span class="nc" id="L122">        notificationIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L123">        notificationIntent.putExtra(MainActivity.KEY_INTENT_PROCESS_VIEWER, true);</span>
+<span class="nc" id="L124">        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0);</span>
+
+<span class="nc" id="L126">        customSmallContentViews = new RemoteViews(getPackageName(), R.layout.notification_service_small);</span>
+<span class="nc" id="L127">        customBigContentViews = new RemoteViews(getPackageName(), R.layout.notification_service_big);</span>
+
+<span class="nc" id="L129">        Intent stopIntent = new Intent(TAG_BROADCAST_COPY_CANCEL);</span>
+<span class="nc" id="L130">        PendingIntent stopPendingIntent = PendingIntent.getBroadcast(c, 1234, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT);</span>
+<span class="nc" id="L131">        NotificationCompat.Action action = new NotificationCompat.Action(R.drawable.ic_content_copy_white_36dp,</span>
+<span class="nc" id="L132">               getString(R.string.stop_ftp), stopPendingIntent);</span>
+
+<span class="nc" id="L134">        mBuilder = new NotificationCompat.Builder(c, NotificationConstants.CHANNEL_NORMAL_ID)</span>
+<span class="nc" id="L135">                .setContentIntent(pendingIntent)</span>
+<span class="nc" id="L136">                .setSmallIcon(R.drawable.ic_content_copy_white_36dp)</span>
+<span class="nc" id="L137">                .setCustomContentView(customSmallContentViews)</span>
+<span class="nc" id="L138">                .setCustomBigContentView(customBigContentViews)</span>
+<span class="nc" id="L139">                .setCustomHeadsUpContentView(customSmallContentViews)</span>
+<span class="nc" id="L140">                .setStyle(new NotificationCompat.DecoratedCustomViewStyle())</span>
+<span class="nc" id="L141">                .addAction(action)</span>
+<span class="nc" id="L142">                .setOngoing(true)</span>
+<span class="nc" id="L143">                .setColor(accentColor);</span>
+
+        // set default notification views text
+
+<span class="nc" id="L147">        NotificationConstants.setMetadata(c, mBuilder, NotificationConstants.TYPE_NORMAL);</span>
+
+<span class="nc" id="L149">        startForeground(NotificationConstants.COPY_ID, mBuilder.build());</span>
+<span class="nc" id="L150">        initNotificationViews();</span>
+
+<span class="nc" id="L152">        b.putBoolean(TAG_COPY_MOVE, move);</span>
+<span class="nc" id="L153">        b.putString(TAG_COPY_TARGET, targetPath);</span>
+<span class="nc" id="L154">        b.putInt(TAG_COPY_OPEN_MODE, mode);</span>
+<span class="nc" id="L155">        b.putParcelableArrayList(TAG_COPY_SOURCES, files);</span>
+
+<span class="nc" id="L157">        super.onStartCommand(intent, flags, startId);</span>
+<span class="nc" id="L158">        super.progressHalted();</span>
+        //going async
+<span class="nc" id="L160">        new DoInBackground(isRootExplorer).execute(b);</span>
+
+        // If we get killed, after returning from here, restart
+<span class="nc" id="L163">        return START_STICKY;</span>
+    }
+
+    @Override
+    protected NotificationManager getNotificationManager() {
+<span class="nc" id="L168">        return mNotifyManager;</span>
+    }
+
+    @Override
+    protected NotificationCompat.Builder getNotificationBuilder() {
+<span class="nc" id="L173">        return mBuilder;</span>
+    }
+
+    @Override
+    protected int getNotificationId() {
+<span class="nc" id="L178">        return NotificationConstants.COPY_ID;</span>
+    }
+
+    @Override
+    protected RemoteViews getNotificationCustomViewSmall() {
+<span class="nc" id="L183">        return customSmallContentViews;</span>
+    }
+
+    @Override
+    protected RemoteViews getNotificationCustomViewBig() {
+<span class="nc" id="L188">        return customBigContentViews;</span>
+    }
+
+    @Override
+    @StringRes
+    protected int getTitle(boolean move) {
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        return move ? R.string.moving : R.string.copying;</span>
+    }
+    public ProgressListener getProgressListener() {
+<span class="nc" id="L197">        return progressListener;</span>
+    }
+
+    @Override
+    public void setProgressListener(ProgressListener progressListener) {
+<span class="nc" id="L202">        this.progressListener = progressListener;</span>
+<span class="nc" id="L203">    }</span>
+
+    @Override
+    protected ArrayList&lt;DatapointParcelable&gt; getDataPackages() {
+<span class="nc" id="L207">        return dataPackages;</span>
+    }
+
+    @Override
+    protected ProgressHandler getProgressHandler() {
+<span class="nc" id="L212">        return progressHandler;</span>
+    }
+
+    public void onDestroy() {
+<span class="nc" id="L216">        this.unregisterReceiver(receiver3);</span>
+<span class="nc" id="L217">    }</span>
+
+    private class DoInBackground extends AsyncTask&lt;Bundle, Void, Void&gt; {
+        ArrayList&lt;HybridFileParcelable&gt; sourceFiles;
+        boolean move;
+        Copy copy;
+        private String targetPath;
+        private OpenMode openMode;
+        private boolean isRootExplorer;
+
+<span class="nc" id="L227">        private DoInBackground(boolean isRootExplorer) {</span>
+<span class="nc" id="L228">            this.isRootExplorer = isRootExplorer;</span>
+<span class="nc" id="L229">        }</span>
+
+        protected Void doInBackground(Bundle... p1) {
+
+<span class="nc" id="L233">            sourceFiles = p1[0].getParcelableArrayList(TAG_COPY_SOURCES);</span>
+
+            // setting up service watchers and initial data packages
+            // finding total size on background thread (this is necessary condition for SMB!)
+<span class="nc" id="L237">            totalSize = FileUtils.getTotalBytes(sourceFiles, c);</span>
+<span class="nc" id="L238">            totalSourceFiles = sourceFiles.size();</span>
+
+<span class="nc" id="L240">            progressHandler.setSourceSize(totalSourceFiles);</span>
+<span class="nc" id="L241">            progressHandler.setTotalSize(totalSize);</span>
+
+<span class="nc" id="L243">            progressHandler.setProgressListener((speed) -&gt;</span>
+<span class="nc" id="L244">                publishResults(speed, false, move));</span>
+
+<span class="nc" id="L246">            watcherUtil = new ServiceWatcherUtil(progressHandler);</span>
+
+<span class="nc" id="L248">            addFirstDatapoint(sourceFiles.get(0).getName(), sourceFiles.size(), totalSize, move);</span>
+
+<span class="nc" id="L250">            targetPath = p1[0].getString(TAG_COPY_TARGET);</span>
+<span class="nc" id="L251">            move = p1[0].getBoolean(TAG_COPY_MOVE);</span>
+<span class="nc" id="L252">            openMode = OpenMode.getOpenMode(p1[0].getInt(TAG_COPY_OPEN_MODE));</span>
+<span class="nc" id="L253">            copy = new Copy();</span>
+<span class="nc" id="L254">            copy.execute(sourceFiles, targetPath, move, openMode);</span>
+
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            if (copy.failedFOps.size() == 0) {</span>
+
+                // adding/updating new encrypted db entry if any encrypted file was copied/moved
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                for (HybridFileParcelable sourceFile : sourceFiles) {</span>
+                    try {
+<span class="nc" id="L261">                        findAndReplaceEncryptedEntry(sourceFile);</span>
+<span class="nc" id="L262">                    } catch (Exception e) {</span>
+                        // unable to modify encrypted entry in database
+<span class="nc" id="L264">                        Toast.makeText(c, getString(R.string.encryption_fail_copy), Toast.LENGTH_SHORT).show();</span>
+<span class="nc" id="L265">                    }</span>
+<span class="nc" id="L266">                }</span>
+            }
+<span class="nc" id="L268">            return null;</span>
+        }
+
+        @Override
+        public void onPostExecute(Void b) {
+
+<span class="nc" id="L274">            super.onPostExecute(b);</span>
+            //  publishResults(b, &quot;&quot;, totalSourceFiles, totalSourceFiles, totalSize, totalSize, 0, true, move);
+            // stopping watcher if not yet finished
+<span class="nc" id="L277">            watcherUtil.stopWatch();</span>
+<span class="nc" id="L278">            finalizeNotification(copy.failedFOps, move);</span>
+
+<span class="nc" id="L280">            Intent intent = new Intent(MainActivity.KEY_INTENT_LOAD_LIST);</span>
+<span class="nc" id="L281">            intent.putExtra(MainActivity.KEY_INTENT_LOAD_LIST_FILE, targetPath);</span>
+<span class="nc" id="L282">            sendBroadcast(intent);</span>
+<span class="nc" id="L283">            stopSelf();</span>
+<span class="nc" id="L284">        }</span>
+
+        /**
+         * Iterates through every file to find an encrypted file and update/add a new entry about it's
+         * metadata in the database
+         * @param sourceFile the file which is to be iterated
+         */
+        private void findAndReplaceEncryptedEntry(HybridFileParcelable sourceFile) {
+
+            // even directories can end with CRYPT_EXTENSION
+<span class="nc bnc" id="L294" title="All 4 branches missed.">            if (sourceFile.isDirectory() &amp;&amp; !sourceFile.getName().endsWith(CryptUtil.CRYPT_EXTENSION)) {</span>
+<span class="nc" id="L295">                sourceFile.forEachChildrenFile(getApplicationContext(), isRootExplorer, file -&gt; {</span>
+                    // iterating each file inside source files which were copied to find instance of
+                    // any copied / moved encrypted file
+<span class="nc" id="L298">                    findAndReplaceEncryptedEntry(file);</span>
+<span class="nc" id="L299">                });</span>
+            } else {
+
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                if (sourceFile.getName().endsWith(CryptUtil.CRYPT_EXTENSION)) {</span>
+                    try {
+
+<span class="nc" id="L305">                        CryptHandler cryptHandler = new CryptHandler(getApplicationContext());</span>
+<span class="nc" id="L306">                        EncryptedEntry oldEntry = cryptHandler.findEntry(sourceFile.getPath());</span>
+<span class="nc" id="L307">                        EncryptedEntry newEntry = new EncryptedEntry();</span>
+
+<span class="nc" id="L309">                        newEntry.setPassword(oldEntry.getPassword());</span>
+<span class="nc" id="L310">                        newEntry.setPath(targetPath + &quot;/&quot; + sourceFile.getName());</span>
+
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                        if (move) {</span>
+
+                            // file was been moved, update the existing entry
+<span class="nc" id="L315">                            newEntry.setId(oldEntry.getId());</span>
+<span class="nc" id="L316">                            cryptHandler.updateEntry(oldEntry, newEntry);</span>
+                        } else {
+                            // file was copied, create a new entry with same data
+<span class="nc" id="L319">                            cryptHandler.addEntry(newEntry);</span>
+                        }
+<span class="nc" id="L321">                    } catch (Exception e) {</span>
+<span class="nc" id="L322">                        e.printStackTrace();</span>
+                        // couldn't change the entry, leave it alone
+<span class="nc" id="L324">                    }</span>
+                }
+            }
+<span class="nc" id="L327">        }</span>
+
+        class Copy {
+
+            ArrayList&lt;HybridFile&gt; failedFOps;
+            ArrayList&lt;HybridFileParcelable&gt; toDelete;
+
+<span class="nc" id="L334">            Copy() {</span>
+<span class="nc" id="L335">                failedFOps = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L336">                toDelete = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L337">            }</span>
+
+            /**
+             * Method iterate through files to be copied
+             *
+             * @param mode target file open mode (current path's open mode)
+             */
+            public void execute(final ArrayList&lt;HybridFileParcelable&gt; sourceFiles, final String targetPath,
+                                final boolean move, OpenMode mode) {
+
+                // initial start of copy, initiate the watcher
+<span class="nc" id="L348">                watcherUtil.watch(CopyService.this);</span>
+
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                if (FileUtil.checkFolder((targetPath), c) == 1) {</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                    for (int i = 0; i &lt; sourceFiles.size(); i++) {</span>
+<span class="nc" id="L352">                        sourceProgress = i;</span>
+<span class="nc" id="L353">                        HybridFileParcelable f1 = (sourceFiles.get(i));</span>
+
+                        try {
+
+                            HybridFile hFile;
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                            if (targetPath.contains(getExternalCacheDir().getPath())) {</span>
+                                // the target open mode is not the one we're currently in!
+                                // we're processing the file for cache
+<span class="nc" id="L361">                                hFile = new HybridFile(OpenMode.FILE, targetPath, sourceFiles.get(i).getName(),</span>
+<span class="nc" id="L362">                                        f1.isDirectory());</span>
+                            } else {
+
+                                // the target open mode is where we're currently at
+<span class="nc" id="L366">                                hFile = new HybridFile(mode, targetPath, sourceFiles.get(i).getName(),</span>
+<span class="nc" id="L367">                                        f1.isDirectory());</span>
+                            }
+
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                            if (!progressHandler.getCancelled()) {</span>
+
+<span class="nc bnc" id="L372" title="All 4 branches missed.">                                if ((f1.getMode() == OpenMode.ROOT || mode == OpenMode.ROOT)</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                                        &amp;&amp; isRootExplorer) {</span>
+                                    // either source or target are in root
+<span class="nc" id="L375">                                    Log.d(getClass().getSimpleName(), &quot;either source or target are in root&quot;);</span>
+<span class="nc" id="L376">                                    progressHandler.setSourceFilesProcessed(++sourceProgress);</span>
+<span class="nc" id="L377">                                    copyRoot(f1, hFile, move);</span>
+<span class="nc" id="L378">                                    continue;</span>
+                                }
+<span class="nc" id="L380">                                progressHandler.setSourceFilesProcessed(++sourceProgress);</span>
+<span class="nc" id="L381">                                copyFiles((f1), hFile, progressHandler);</span>
+                            } else {
+<span class="nc" id="L383">                                break;</span>
+                            }
+<span class="nc" id="L385">                        } catch (Exception e) {</span>
+<span class="nc" id="L386">                            e.printStackTrace();</span>
+<span class="nc" id="L387">                            Log.e(&quot;CopyService&quot;, &quot;Got exception checkout: &quot; + f1.getPath());</span>
+
+<span class="nc" id="L389">                            failedFOps.add(sourceFiles.get(i));</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                            for (int j = i + 1; j &lt; sourceFiles.size(); j++)</span>
+<span class="nc" id="L391">                                failedFOps.add(sourceFiles.get(j));</span>
+<span class="nc" id="L392">                            break;</span>
+<span class="nc" id="L393">                        }</span>
+                    }
+
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                } else if (isRootExplorer) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                    for (int i = 0; i &lt; sourceFiles.size(); i++) {</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">                        if (!progressHandler.getCancelled()) {</span>
+<span class="nc" id="L399">                            HybridFile hFile = new HybridFile(mode, targetPath, sourceFiles.get(i).getName(),</span>
+<span class="nc" id="L400">                                    sourceFiles.get(i).isDirectory());</span>
+<span class="nc" id="L401">                            progressHandler.setSourceFilesProcessed(++sourceProgress);</span>
+<span class="nc" id="L402">                            progressHandler.setFileName(sourceFiles.get(i).getName());</span>
+<span class="nc" id="L403">                            copyRoot(sourceFiles.get(i), hFile, move);</span>
+                            /*if(checkFiles(new HybridFile(sourceFiles.get(i).getMode(),path),
+                            new HybridFile(OpenMode.ROOT,targetPath+&quot;/&quot;+name))){
+                                failedFOps.add(sourceFiles.get(i));
+                            }*/
+                        }
+                    }
+                } else {
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                    for (HybridFileParcelable f : sourceFiles) failedFOps.add(f);</span>
+<span class="nc" id="L412">                    return;</span>
+                }
+
+                // making sure to delete files after copy operation is done
+                // and not if the copy was cancelled
+<span class="nc bnc" id="L417" title="All 4 branches missed.">                if (move &amp;&amp; !progressHandler.getCancelled()) {</span>
+<span class="nc" id="L418">                    ArrayList&lt;HybridFileParcelable&gt; toDelete = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                    for (HybridFileParcelable a : sourceFiles) {</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">                        if (!failedFOps.contains(a))</span>
+<span class="nc" id="L421">                            toDelete.add(a);</span>
+<span class="nc" id="L422">                    }</span>
+<span class="nc" id="L423">                    new DeleteTask(c).execute((toDelete));</span>
+                }
+<span class="nc" id="L425">            }</span>
+
+            void copyRoot(HybridFileParcelable sourceFile, HybridFile targetFile, boolean move) {
+
+                try {
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                    if (!move) RootUtils.copy(sourceFile.getPath(), targetFile.getPath());</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">                    else if (move) RootUtils.move(sourceFile.getPath(), targetFile.getPath());</span>
+<span class="nc" id="L432">                    ServiceWatcherUtil.position += sourceFile.getSize();</span>
+<span class="nc" id="L433">                } catch (ShellNotRunningException e) {</span>
+<span class="nc" id="L434">                    e.printStackTrace();</span>
+<span class="nc" id="L435">                    failedFOps.add(sourceFile);</span>
+<span class="nc" id="L436">                }</span>
+<span class="nc" id="L437">                FileUtils.scanFile(targetFile.getFile(), c);</span>
+<span class="nc" id="L438">            }</span>
+
+            private void copyFiles(final HybridFileParcelable sourceFile, final HybridFile targetFile,
+                                   final ProgressHandler progressHandler) throws IOException {
+
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                if (progressHandler.getCancelled()) return;</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                if (sourceFile.isDirectory()) {</span>
+
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                    if (!targetFile.exists()) targetFile.mkdir(c);</span>
+
+                    // various checks
+                    // 1. source file and target file doesn't end up in loop
+                    // 2. source file has a valid name or not
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                    if (!Operations.isFileNameValid(sourceFile.getName())</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                            || Operations.isCopyLoopPossible(sourceFile, targetFile)) {</span>
+<span class="nc" id="L453">                        failedFOps.add(sourceFile);</span>
+<span class="nc" id="L454">                        return;</span>
+                    }
+<span class="nc" id="L456">                    targetFile.setLastModified(sourceFile.lastModified());</span>
+
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                    if(progressHandler.getCancelled()) return;</span>
+<span class="nc" id="L459">                    sourceFile.forEachChildrenFile(c, false, file -&gt; {</span>
+<span class="nc" id="L460">                        HybridFile destFile = new HybridFile(targetFile.getMode(), targetFile.getPath(),</span>
+<span class="nc" id="L461">                                file.getName(), file.isDirectory());</span>
+                        try {
+<span class="nc" id="L463">                            copyFiles(file, destFile, progressHandler);</span>
+<span class="nc" id="L464">                        } catch (IOException e) {</span>
+<span class="nc" id="L465">                            throw new IllegalStateException(e);//throw unchecked exception, no throws needed</span>
+<span class="nc" id="L466">                        }</span>
+<span class="nc" id="L467">                    });</span>
+                } else {
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                    if (!Operations.isFileNameValid(sourceFile.getName())) {</span>
+<span class="nc" id="L470">                        failedFOps.add(sourceFile);</span>
+<span class="nc" id="L471">                        return;</span>
+                    }
+
+<span class="nc" id="L474">                    GenericCopyUtil copyUtil = new GenericCopyUtil(c, progressHandler);</span>
+
+<span class="nc" id="L476">                    progressHandler.setFileName(sourceFile.getName());</span>
+<span class="nc" id="L477">                    copyUtil.copy(sourceFile, targetFile);</span>
+                }
+<span class="nc" id="L479">            }</span>
+        }
+    }
+
+    //check if copy is successful
+    // avoid using the method as there is no way to know when we would be returning from command callbacks
+    // rather confirm from the command result itself, inside it's callback
+    boolean checkFiles(HybridFile hFile1, HybridFile hFile2) throws ShellNotRunningException {
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        if (RootHelper.isDirectory(hFile1.getPath(), isRootExplorer, 5)) {</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">            if (RootHelper.fileExists(hFile2.getPath())) return false;</span>
+<span class="nc" id="L489">            ArrayList&lt;HybridFileParcelable&gt; baseFiles = RootHelper.getFilesList(hFile1.getPath(), true, true, null);</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">            if (baseFiles.size() &gt; 0) {</span>
+<span class="nc" id="L491">                boolean b = true;</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">                for (HybridFileParcelable baseFile : baseFiles) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">                    if (!checkFiles(new HybridFile(baseFile.getMode(), baseFile.getPath()),</span>
+<span class="nc" id="L494">                            new HybridFile(hFile2.getMode(), hFile2.getPath() + &quot;/&quot; + (baseFile.getName()))))</span>
+<span class="nc" id="L495">                        b = false;</span>
+<span class="nc" id="L496">                }</span>
+<span class="nc" id="L497">                return b;</span>
+            }
+<span class="nc" id="L499">            return RootHelper.fileExists(hFile2.getPath());</span>
+        } else {
+<span class="nc" id="L501">            ArrayList&lt;HybridFileParcelable&gt; baseFiles = RootHelper.getFilesList(hFile1.getParent(), true, true, null);</span>
+<span class="nc" id="L502">            int i = -1;</span>
+<span class="nc" id="L503">            int index = -1;</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">            for (HybridFileParcelable b : baseFiles) {</span>
+<span class="nc" id="L505">                i++;</span>
+<span class="nc bnc" id="L506" title="All 2 branches missed.">                if (b.getPath().equals(hFile1.getPath())) {</span>
+<span class="nc" id="L507">                    index = i;</span>
+<span class="nc" id="L508">                    break;</span>
+                }
+<span class="nc" id="L510">            }</span>
+<span class="nc" id="L511">            ArrayList&lt;HybridFileParcelable&gt; baseFiles1 = RootHelper.getFilesList(hFile1.getParent(), true, true, null);</span>
+<span class="nc" id="L512">            int i1 = -1;</span>
+<span class="nc" id="L513">            int index1 = -1;</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">            for (HybridFileParcelable b : baseFiles1) {</span>
+<span class="nc" id="L515">                i1++;</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">                if (b.getPath().equals(hFile1.getPath())) {</span>
+<span class="nc" id="L517">                    index1 = i1;</span>
+<span class="nc" id="L518">                    break;</span>
+                }
+<span class="nc" id="L520">            }</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">            return baseFiles.get(index).getSize() == baseFiles1.get(index1).getSize();</span>
+        }
+    }
+
+<span class="nc" id="L525">    private BroadcastReceiver receiver3 = new BroadcastReceiver() {</span>
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            //cancel operation
+<span class="nc" id="L530">            progressHandler.setCancelled(true);</span>
+<span class="nc" id="L531">        }</span>
+    };
+
+    @Override
+    public IBinder onBind(Intent arg0) {
+        // TODO Auto-generated method stub
+<span class="nc" id="L537">        return mBinder;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>
