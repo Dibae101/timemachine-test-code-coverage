@@ -26,5 +26,12 @@ done
 echo $EC_FILES
 
 var=`date +"%T"`
-java -jar $JACOCO_PATH report $EC_FILES $CLASS_FILES --xml $OUTPUT_DIR/coverage.xml
+# --html needs the --sourcefiles entries that executor.py now appends to
+# $CLASS_FILES; without them the HTML report renders class outlines but no
+# annotated source. Set TM_HTML_REPORT=0 to skip it on slow hosts.
+if [ "${TM_HTML_REPORT:-1}" = "1" ]; then
+    java -jar $JACOCO_PATH report $EC_FILES $CLASS_FILES --xml $OUTPUT_DIR/coverage.xml --html $OUTPUT_DIR/coverage_html --name "TimeMachine coverage"
+else
+    java -jar $JACOCO_PATH report $EC_FILES $CLASS_FILES --xml $OUTPUT_DIR/coverage.xml
+fi
 cp $OUTPUT_DIR/coverage.xml $OUTPUT_DIR/coverage_$var.xml

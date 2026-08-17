@@ -21,28 +21,37 @@ host_machine_name=`hostname`
 
 AVD_PORT=${AVD_SERIAL:9:13}
 
+# Extra flags appended to every emulator launch. On hosts without KVM
+# (no vmx/svm, e.g. a nested VM) set:
+#   export EMU_EXTRA_ARGS="-accel off -gpu guest"
+EMU_EXTRA_ARGS=${EMU_EXTRA_ARGS:-}
+
+# Number of 5s waits before giving up on a boot. Software-emulated (TCG)
+# boots need far more than the hardware-accelerated default of 10.
+BOOT_WAIT_TRIES=${BOOT_WAIT_TRIES:-10}
+
 # wait for the target device
 function wait_for_device(){
     avd_serial=$1
     timeout 5s adb -s $avd_serial wait-for-device
-    OUT=`adb -s $avd_serial shell getprop init.svc.bootanim`
+    OUT=`adb -s $avd_serial shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'`
     i=0
-    while [[ ${OUT:0:7}  != 'stopped' ]]; do
+    while [[ ${OUT} != '1' ]]; do
       echo "   Waiting for emulator (${avd_serial}) to fully boot (#${i} times) ..."
       sleep 5
       i=$(expr $i + 1)
-      if [[ $i == 10 ]]
+      if [[ $i -ge $BOOT_WAIT_TRIES ]]
       then
             echo "Cannot connect to the device: (${avd_serial}) after (#${i} times)..."
             break
       fi
-      OUT=`adb -s $avd_serial shell getprop init.svc.bootanim`
+      OUT=`adb -s $avd_serial shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'`
     done
 }
 
 
 echo "clean cache for emulator ..."
-emulator -port $AVD_PORT -avd $AVD_NAME -writable-system -no-window -no-cache > /dev/null 2>&1 &
+emulator -port $AVD_PORT -avd $AVD_NAME -writable-system -no-window -no-cache $EMU_EXTRA_ARGS > /dev/null 2>&1 &
 # wait for the emulator
 wait_for_device $AVD_SERIAL > /dev/null 2>&1
 adb -s $AVD_SERIAL emu kill > /dev/null 2>&1
@@ -53,18 +62,18 @@ do
     echo "try to start the emulator (${AVD_SERIAL})..."
     sleep 5
     # start the emulator
-    emulator -port $AVD_PORT -avd $AVD_NAME -writable-system $HEADLESS &
+    emulator -port $AVD_PORT -avd $AVD_NAME -writable-system $HEADLESS $EMU_EXTRA_ARGS &
     sleep 5
     # wait for the emulator
     wait_for_device $AVD_SERIAL
 
     # check whether the emualtor is online
-    OUT=`adb -s $avd_serial shell getprop init.svc.bootanim`
-    if [[ ${OUT:0:7}  != 'stopped' ]]
+    OUT=`adb -s $AVD_SERIAL shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'`
+    if [[ ${OUT} != '1' ]]
     then
-        adb -s $avd_serial emu kill
+        adb -s $AVD_SERIAL emu kill
         echo "try to restart the emulator (${AVD_SERIAL})..."
-        if [[ $i == RETRY_TIMES ]]
+        if [[ $i -ge $RETRY_TIMES ]]
         then
             echo "we give up the emulator (${AVD_SERIAL})..."
             exit

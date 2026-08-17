@@ -434,6 +434,14 @@ if __name__ == '__main__':
     CLASS_FILES_PATH = ""
     for class_files_path in class_files_path_list:
         CLASS_FILES_PATH += ' --classfiles ' + os.path.join(RunParameters.APP_DIR , class_files_path)
+
+    # class_files.json already declares "sourcefiles" for every bundled app but
+    # nothing used to read it. Passing it to jacococli is what lets the report
+    # step emit the annotated HTML with the app's source lines colour-coded.
+    source_files_path_list = app_path_info_dict.get('sourcefiles', [])
+    for source_files_path in source_files_path_list:
+        CLASS_FILES_PATH += ' --sourcefiles ' + os.path.join(RunParameters.APP_DIR , source_files_path)
+
     print "CLASS_FILE_PATH: " + CLASS_FILES_PATH
 
     # record testing starting time
