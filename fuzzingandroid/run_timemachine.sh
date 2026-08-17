@@ -50,11 +50,18 @@ function wait_for_device(){
 }
 
 
-echo "clean cache for emulator ..."
-emulator -port $AVD_PORT -avd $AVD_NAME -writable-system -no-window -no-cache $EMU_EXTRA_ARGS > /dev/null 2>&1 &
-# wait for the emulator
-wait_for_device $AVD_SERIAL > /dev/null 2>&1
-adb -s $AVD_SERIAL emu kill > /dev/null 2>&1
+# This first boot exists only to clear the emulator cache, then throws the
+# emulator away. It costs a full boot (~4 min under software emulation) and
+# quickboot resets state anyway. Set TM_SKIP_CACHE_BOOT=1 to skip it.
+if [ "${TM_SKIP_CACHE_BOOT:-0}" = "1" ]; then
+    echo "skipping cache-clean boot (TM_SKIP_CACHE_BOOT=1) ..."
+else
+    echo "clean cache for emulator ..."
+    emulator -port $AVD_PORT -avd $AVD_NAME -writable-system -no-window -no-cache $EMU_EXTRA_ARGS > /dev/null 2>&1 &
+    # wait for the emulator
+    wait_for_device $AVD_SERIAL > /dev/null 2>&1
+    adb -s $AVD_SERIAL emu kill > /dev/null 2>&1
+fi
 
 RETRY_TIMES=5
 for i in $(seq 1 $RETRY_TIMES);
