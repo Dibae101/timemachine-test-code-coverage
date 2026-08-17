@@ -1,0 +1,1712 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TorrentDownloadImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE LibreTorrent</a> &gt; <a href="index.source.html" class="el_package">org.proninyaroslav.libretorrent.core.model.session</a> &gt; <span class="el_source">TorrentDownloadImpl.java</span></div><h1>TorrentDownloadImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2016-2022 Yaroslav Pronin &lt;proninyaroslav@mail.ru&gt;
+ *
+ * This file is part of LibreTorrent.
+ *
+ * LibreTorrent is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * LibreTorrent is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with LibreTorrent.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package org.proninyaroslav.libretorrent.core.model.session;
+
+import static org.proninyaroslav.libretorrent.core.model.data.TorrentInfo.MAX_ETA;
+
+import android.net.Uri;
+import android.text.TextUtils;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.VisibleForTesting;
+import androidx.core.util.Pair;
+
+import org.libtorrent4j.AlertListener;
+import org.libtorrent4j.AnnounceEntry;
+import org.libtorrent4j.ErrorCode;
+import org.libtorrent4j.FileStorage;
+import org.libtorrent4j.MoveFlags;
+import org.libtorrent4j.PieceIndexBitfield;
+import org.libtorrent4j.SessionHandle;
+import org.libtorrent4j.SessionManager;
+import org.libtorrent4j.TorrentFlags;
+import org.libtorrent4j.TorrentHandle;
+import org.libtorrent4j.TorrentInfo;
+import org.libtorrent4j.TorrentStatus;
+import org.libtorrent4j.Vectors;
+import org.libtorrent4j.alerts.Alert;
+import org.libtorrent4j.alerts.AlertType;
+import org.libtorrent4j.alerts.FastresumeRejectedAlert;
+import org.libtorrent4j.alerts.FileErrorAlert;
+import org.libtorrent4j.alerts.MetadataFailedAlert;
+import org.libtorrent4j.alerts.MetadataReceivedAlert;
+import org.libtorrent4j.alerts.PieceFinishedAlert;
+import org.libtorrent4j.alerts.ReadPieceAlert;
+import org.libtorrent4j.alerts.SaveResumeDataAlert;
+import org.libtorrent4j.alerts.StateChangedAlert;
+import org.libtorrent4j.alerts.TorrentAlert;
+import org.libtorrent4j.alerts.TorrentErrorAlert;
+import org.libtorrent4j.swig.announce_entry;
+import org.libtorrent4j.swig.byte_vector;
+import org.libtorrent4j.swig.libtorrent;
+import org.libtorrent4j.swig.libtorrent_errors;
+import org.libtorrent4j.swig.peer_info_vector;
+import org.libtorrent4j.swig.torrent_handle;
+import org.proninyaroslav.libretorrent.core.exception.DecodeException;
+import org.proninyaroslav.libretorrent.core.exception.FreeSpaceException;
+import org.proninyaroslav.libretorrent.core.exception.UnknownUriException;
+import org.proninyaroslav.libretorrent.core.model.TorrentEngineListener;
+import org.proninyaroslav.libretorrent.core.model.data.PeerInfo;
+import org.proninyaroslav.libretorrent.core.model.data.Priority;
+import org.proninyaroslav.libretorrent.core.model.data.ReadPieceInfo;
+import org.proninyaroslav.libretorrent.core.model.data.TorrentStateCode;
+import org.proninyaroslav.libretorrent.core.model.data.TrackerInfo;
+import org.proninyaroslav.libretorrent.core.model.data.entity.FastResume;
+import org.proninyaroslav.libretorrent.core.model.data.entity.Torrent;
+import org.proninyaroslav.libretorrent.core.model.data.metainfo.TorrentMetaInfo;
+import org.proninyaroslav.libretorrent.core.model.stream.TorrentStream;
+import org.proninyaroslav.libretorrent.core.storage.TorrentRepository;
+import org.proninyaroslav.libretorrent.core.system.FileSystemFacade;
+
+import java.io.FileNotFoundException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+
+import io.reactivex.Completable;
+import io.reactivex.disposables.Disposable;
+
+/*
+ * This class encapsulate one stream with running torrent.
+ */
+
+class TorrentDownloadImpl implements TorrentDownload
+{
+<span class="nc" id="L101">    private static final String TAG = TorrentDownload.class.getSimpleName();</span>
+
+    private static final long SAVE_RESUME_SYNC_TIME = 10000; /* ms */
+    private static final long CRITICAL_WORK_WAIT_TIMEOUT = 30000; /* ms */
+    private static final double MAX_RATIO = 9999.;
+    /* For streaming */
+    private final static int PRELOAD_PIECES_COUNT = 5;
+    private static final int DEFAULT_PIECE_DEADLINE = 1000; /* ms */
+
+<span class="nc" id="L110">    private static final int[] INNER_LISTENER_TYPES = new int[] {</span>
+<span class="nc" id="L111">            AlertType.STATE_CHANGED.swig(),</span>
+<span class="nc" id="L112">            AlertType.TORRENT_FINISHED.swig(),</span>
+<span class="nc" id="L113">            AlertType.TORRENT_REMOVED.swig(),</span>
+<span class="nc" id="L114">            AlertType.TORRENT_PAUSED.swig(),</span>
+<span class="nc" id="L115">            AlertType.TORRENT_RESUMED.swig(),</span>
+<span class="nc" id="L116">            AlertType.SAVE_RESUME_DATA.swig(),</span>
+<span class="nc" id="L117">            AlertType.STORAGE_MOVED.swig(),</span>
+<span class="nc" id="L118">            AlertType.STORAGE_MOVED_FAILED.swig(),</span>
+<span class="nc" id="L119">            AlertType.METADATA_RECEIVED.swig(),</span>
+<span class="nc" id="L120">            AlertType.PIECE_FINISHED.swig(),</span>
+<span class="nc" id="L121">            AlertType.READ_PIECE.swig(),</span>
+<span class="nc" id="L122">            AlertType.TORRENT_ERROR.swig(),</span>
+<span class="nc" id="L123">            AlertType.METADATA_FAILED.swig(),</span>
+<span class="nc" id="L124">            AlertType.FILE_ERROR.swig(),</span>
+<span class="nc" id="L125">            AlertType.FASTRESUME_REJECTED.swig(),</span>
+<span class="nc" id="L126">            AlertType.TORRENT_CHECKED.swig(),</span>
+    };
+
+    private SessionManager sessionManager;
+    private TorrentHandle th;
+    private String id;
+    private TorrentRepository repo;
+    private FileSystemFacade fs;
+    private Queue&lt;TorrentEngineListener&gt; listeners;
+    private InnerListener listener;
+    private Uri partsFile;
+    private long lastSaveResumeTime;
+    private AtomicReference&lt;String&gt; name;
+<span class="nc" id="L139">    private TorrentCriticalWork criticalWork = new TorrentCriticalWork();</span>
+    private boolean autoManaged;
+<span class="nc" id="L141">    private boolean stopRequested = false;</span>
+<span class="nc" id="L142">    private boolean stopped = false;</span>
+    private Completable stopEvent;
+    private boolean resumeDataRejected;
+    private boolean hasMissingFiles;
+    private boolean hasFirstLastPiecePriority;
+
+    public TorrentDownloadImpl(SessionManager sessionManager,
+                               TorrentRepository repo,
+                               FileSystemFacade fs,
+                               final Queue&lt;TorrentEngineListener&gt; listeners,
+                               String id,
+                               TorrentHandle handle,
+                               boolean autoManaged)
+<span class="nc" id="L155">    {</span>
+<span class="nc" id="L156">        this.id = id;</span>
+<span class="nc" id="L157">        this.repo = repo;</span>
+<span class="nc" id="L158">        this.fs = fs;</span>
+<span class="nc" id="L159">        this.sessionManager = sessionManager;</span>
+<span class="nc" id="L160">        this.autoManaged = autoManaged;</span>
+<span class="nc" id="L161">        this.listeners = listeners;</span>
+<span class="nc" id="L162">        this.th = handle;</span>
+<span class="nc" id="L163">        this.name = new AtomicReference&lt;&gt;(handle.getName());</span>
+<span class="nc" id="L164">        partsFile = getPartsFile();</span>
+<span class="nc" id="L165">        listener = new InnerListener();</span>
+<span class="nc" id="L166">        sessionManager.addListener(listener);</span>
+
+<span class="nc" id="L168">        var torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (torrent != null) {</span>
+<span class="nc" id="L170">            hasFirstLastPiecePriority = torrent.firstLastPiecePriority;</span>
+<span class="nc" id="L171">            applyFirstLastPiecePriority(hasFirstLastPiecePriority);</span>
+        }
+
+        /*
+         * Save resume data after first start, if needed
+         * (e.g torrent just added)
+         */
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        if (th.needSaveResumeData())</span>
+<span class="nc" id="L179">            saveResumeData(true);</span>
+<span class="nc" id="L180">    }</span>
+
+    private interface CallListener
+    {
+        void apply(TorrentEngineListener listener);
+    }
+
+    private void notifyListeners(@NonNull CallListener l)
+    {
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        for (TorrentEngineListener listener : listeners) {</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            if (listener != null)</span>
+<span class="nc" id="L191">                l.apply(listener);</span>
+<span class="nc" id="L192">        }</span>
+<span class="nc" id="L193">    }</span>
+
+    private boolean operationNotAllowed()
+    {
+<span class="nc bnc" id="L197" title="All 4 branches missed.">        return !th.isValid() || stopped;</span>
+    }
+
+    private boolean hasMetadata() {
+<span class="nc" id="L201">        var ti = th.torrentFile();</span>
+<span class="nc bnc" id="L202" title="All 6 branches missed.">        return !operationNotAllowed() &amp;&amp; ti != null &amp;&amp; ti.numFiles() &gt; 0;</span>
+    }
+
+<span class="nc" id="L205">    private final class InnerListener implements AlertListener</span>
+    {
+        @Override
+        public int[] types()
+        {
+<span class="nc" id="L210">            return INNER_LISTENER_TYPES;</span>
+        }
+
+        @Override
+        public void alert(Alert&lt;?&gt; alert)
+        {
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (!(alert instanceof TorrentAlert&lt;?&gt;))</span>
+<span class="nc" id="L217">                return;</span>
+
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (!((TorrentAlert&lt;?&gt;) alert).handle().swig().eq(th.swig()))</span>
+<span class="nc" id="L220">                return;</span>
+
+<span class="nc" id="L222">            AlertType type = alert.type();</span>
+<span class="nc bnc" id="L223" title="All 13 branches missed.">            switch (type) {</span>
+                case STATE_CHANGED:
+<span class="nc" id="L225">                    StateChangedAlert a = ((StateChangedAlert)alert);</span>
+<span class="nc" id="L226">                    notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L227">                            listener.onTorrentStateChanged(id,</span>
+<span class="nc" id="L228">                                    stateToStateCode(a.getPrevState()),</span>
+<span class="nc" id="L229">                                    stateToStateCode(a.getState())));</span>
+<span class="nc" id="L230">                    break;</span>
+                case TORRENT_FINISHED:
+<span class="nc" id="L232">                    handleTorrentFinished();</span>
+<span class="nc" id="L233">                    break;</span>
+                case TORRENT_REMOVED:
+<span class="nc" id="L235">                    torrentRemoved();</span>
+<span class="nc" id="L236">                    break;</span>
+                case TORRENT_PAUSED:
+<span class="nc" id="L238">                    notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L239">                            listener.onTorrentPaused(id));</span>
+<span class="nc" id="L240">                    break;</span>
+                case TORRENT_RESUMED:
+<span class="nc" id="L242">                    resetTorrentError();</span>
+
+<span class="nc" id="L244">                    notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L245">                            listener.onTorrentResumed(id));</span>
+<span class="nc" id="L246">                    break;</span>
+                case SAVE_RESUME_DATA:
+<span class="nc" id="L248">                    serializeResumeData((SaveResumeDataAlert)alert);</span>
+<span class="nc" id="L249">                    break;</span>
+                case STORAGE_MOVED:
+<span class="nc" id="L251">                    onStorageMoved(true);</span>
+<span class="nc" id="L252">                    break;</span>
+                case STORAGE_MOVED_FAILED:
+<span class="nc" id="L254">                    onStorageMoved(false);</span>
+<span class="nc" id="L255">                    break;</span>
+                case PIECE_FINISHED:
+<span class="nc" id="L257">                    saveResumeData(false);</span>
+<span class="nc" id="L258">                    int piece = ((PieceFinishedAlert)alert).pieceIndex();</span>
+<span class="nc" id="L259">                    notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L260">                            listener.onPieceFinished(id, piece));</span>
+<span class="nc" id="L261">                    break;</span>
+                case METADATA_RECEIVED:
+<span class="nc" id="L263">                    handleMetadata((MetadataReceivedAlert)alert);</span>
+                    // If first/last piece priority was specified when adding this torrent,
+                    // we should apply it now that we have metadata.
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                    if (hasFirstLastPiecePriority) {</span>
+<span class="nc" id="L267">                        applyFirstLastPiecePriority(true);</span>
+                    }
+<span class="nc" id="L269">                    saveResumeData(true);</span>
+<span class="nc" id="L270">                    break;</span>
+                case READ_PIECE:
+<span class="nc" id="L272">                    handleReadPiece((ReadPieceAlert)alert);</span>
+<span class="nc" id="L273">                    break;</span>
+                case TORRENT_CHECKED:
+<span class="nc" id="L275">                    handleTorrentChecked();</span>
+<span class="nc" id="L276">                    break;</span>
+                default:
+<span class="nc" id="L278">                    checkError(alert);</span>
+                    break;
+            }
+<span class="nc" id="L281">        }</span>
+    }
+
+    private void onStorageMoved(boolean success)
+    {
+<span class="nc" id="L286">        criticalWork.setMoving(false);</span>
+<span class="nc" id="L287">        notifyListeners((listener) -&gt; listener.onTorrentMoved(id, success));</span>
+
+<span class="nc" id="L289">        saveResumeData(true);</span>
+<span class="nc" id="L290">    }</span>
+
+    private void resetTorrentError()
+    {
+<span class="nc" id="L294">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L296">            return;</span>
+
+<span class="nc" id="L298">        torrent.error = null;</span>
+<span class="nc" id="L299">        repo.updateTorrent(torrent);</span>
+<span class="nc" id="L300">    }</span>
+
+    private void checkError(Alert&lt;?&gt; alert)
+    {
+<span class="nc" id="L304">        Pair&lt;String, Boolean&gt; res = getErrorMsg(alert);</span>
+<span class="nc" id="L305">        String errorMsg = res.first;</span>
+<span class="nc" id="L306">        boolean isNonCritical = res.second;</span>
+
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (alert.type() == AlertType.FASTRESUME_REJECTED) {</span>
+<span class="nc" id="L309">            resumeDataRejected = true;</span>
+<span class="nc" id="L310">            if (((FastresumeRejectedAlert)alert).error().getValue() ==</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                    libtorrent_errors.mismatching_file_size.swigValue()) {</span>
+<span class="nc" id="L312">                hasMissingFiles = true;</span>
+            }
+        }
+
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (errorMsg != null) {</span>
+<span class="nc" id="L317">            Log.e(TAG, &quot;Torrent &quot; + id + &quot;: &quot; + errorMsg);</span>
+
+<span class="nc bnc" id="L319" title="All 2 branches missed.">            if (isNonCritical) {</span>
+<span class="nc" id="L320">                resume();</span>
+
+<span class="nc" id="L322">                return;</span>
+            }
+
+<span class="nc" id="L325">            Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            if (torrent != null) {</span>
+<span class="nc" id="L327">                torrent.error = errorMsg;</span>
+<span class="nc" id="L328">                repo.updateTorrent(torrent);</span>
+            }
+
+<span class="nc" id="L331">            pause();</span>
+        }
+
+<span class="nc" id="L334">        notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L335">                listener.onTorrentError(id, new Exception(errorMsg)));</span>
+<span class="nc" id="L336">    }</span>
+
+    private Pair&lt;String, Boolean&gt; getErrorMsg(Alert&lt;?&gt; alert)
+    {
+<span class="nc" id="L340">        String errorMsg = null;</span>
+<span class="nc" id="L341">        boolean isNonCritical = false;</span>
+<span class="nc bnc" id="L342" title="All 5 branches missed.">        switch (alert.type()) {</span>
+            case TORRENT_ERROR: {
+<span class="nc" id="L344">                TorrentErrorAlert errorAlert = (TorrentErrorAlert)alert;</span>
+<span class="nc" id="L345">                ErrorCode error = errorAlert.error();</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                if (error.isError()) {</span>
+<span class="nc" id="L347">                    StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L348">                    String filename = errorAlert.filename().substring(</span>
+<span class="nc" id="L349">                            errorAlert.filename().lastIndexOf(&quot;/&quot;) + 1);</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                    if (errorAlert.filename() != null)</span>
+<span class="nc" id="L351">                        sb.append(&quot;[&quot;).append(filename).append(&quot;] &quot;);</span>
+<span class="nc" id="L352">                    sb.append(SessionErrors.getErrorMsg(error));</span>
+<span class="nc" id="L353">                    errorMsg = sb.toString();</span>
+
+<span class="nc" id="L355">                    isNonCritical = SessionErrors.isNonCritical(error);</span>
+<span class="nc" id="L356">                }</span>
+                break;
+            } case METADATA_FAILED: {
+<span class="nc" id="L359">                MetadataFailedAlert metadataFailedAlert = (MetadataFailedAlert)alert;</span>
+<span class="nc" id="L360">                ErrorCode error = metadataFailedAlert.getError();</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                if (error.isError())</span>
+<span class="nc" id="L362">                    errorMsg = SessionErrors.getErrorMsg(error);</span>
+                break;
+            } case FILE_ERROR: {
+<span class="nc" id="L365">                FileErrorAlert fileErrorAlert = (FileErrorAlert)alert;</span>
+<span class="nc" id="L366">                ErrorCode error = fileErrorAlert.error();</span>
+<span class="nc" id="L367">                String filename = fileErrorAlert.filename().substring(</span>
+<span class="nc" id="L368">                        fileErrorAlert.filename().lastIndexOf(&quot;/&quot;) + 1);</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">                if (error.isError()) {</span>
+<span class="nc" id="L370">                    errorMsg = &quot;[&quot; + fileErrorAlert.operation() + &quot;][&quot; + filename + &quot;] &quot; +</span>
+<span class="nc" id="L371">                            SessionErrors.getErrorMsg(error);</span>
+<span class="nc" id="L372">                    isNonCritical = SessionErrors.isNonCritical(error);</span>
+                }
+                break;
+            } case FASTRESUME_REJECTED: {
+<span class="nc" id="L376">                FastresumeRejectedAlert resumeRejectedAlert = (FastresumeRejectedAlert)alert;</span>
+<span class="nc" id="L377">                ErrorCode error = resumeRejectedAlert.error();</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">                if (error.isError()) {</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                    if (error.getValue() == libtorrent_errors.mismatching_file_size.swigValue())</span>
+<span class="nc" id="L380">                        errorMsg = &quot;file sizes mismatch&quot;;</span>
+                    else
+<span class="nc" id="L382">                        errorMsg = &quot;fast resume data was rejected, reason: &quot; + SessionErrors.getErrorMsg(error);</span>
+                }
+                break;
+            }
+        }
+
+<span class="nc" id="L388">        return Pair.create(errorMsg, isNonCritical);</span>
+    }
+
+    private void handleMetadata(MetadataReceivedAlert alert)
+    {
+<span class="nc" id="L393">        Exception[] err = new Exception[1];</span>
+<span class="nc" id="L394">        String newName = null;</span>
+        Torrent torrent;
+        try {
+<span class="nc" id="L397">            torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (torrent == null)</span>
+<span class="nc" id="L399">                throw new NullPointerException(id + &quot; doesn't exists&quot;);</span>
+<span class="nc" id="L400">            TorrentHandle th = alert.handle();</span>
+<span class="nc" id="L401">            TorrentInfo ti = th.torrentFile();</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            if (ti == null) {</span>
+<span class="nc" id="L403">                return;</span>
+            }
+
+<span class="nc" id="L406">            TorrentMetaInfo info = new TorrentMetaInfo(ti);</span>
+
+            /* Skip if default name is changed */
+<span class="nc" id="L409">            String name = this.name.get();</span>
+<span class="nc bnc" id="L410" title="All 4 branches missed.">            if (info.sha1Hash.equals(name) || TextUtils.isEmpty(name)) {</span>
+<span class="nc" id="L411">                this.name.set(info.torrentName);</span>
+<span class="nc" id="L412">                newName = info.torrentName;</span>
+            }
+
+<span class="nc" id="L415">            long availableBytes = fs.getDirAvailableBytes(torrent.downloadPath);</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">            if (availableBytes &lt; info.torrentSize)</span>
+<span class="nc" id="L417">                throw new FreeSpaceException(&quot;Not enough free space&quot;);</span>
+
+<span class="nc" id="L419">        } catch (Exception e) {</span>
+<span class="nc" id="L420">            err[0] = e;</span>
+<span class="nc" id="L421">            pause();</span>
+<span class="nc" id="L422">            notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L423">                    listener.onTorrentError(id, e));</span>
+
+        } finally {
+<span class="nc" id="L426">            torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            if (torrent != null) {</span>
+<span class="nc" id="L428">                torrent.setMagnetUri(null);</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">                if (newName != null)</span>
+<span class="nc" id="L430">                    torrent.name = newName;</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">                if (err[0] != null)</span>
+<span class="nc" id="L432">                    torrent.error = err[0].toString();</span>
+
+<span class="nc" id="L434">                repo.updateTorrent(torrent);</span>
+            }
+        }
+
+<span class="nc" id="L438">        notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L439">                listener.onTorrentMetadataLoaded(id, err[0]));</span>
+<span class="nc" id="L440">    }</span>
+
+    private void handleReadPiece(ReadPieceAlert alert)
+    {
+<span class="nc" id="L444">        Exception err = null;</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        if (alert.error().isError())</span>
+<span class="nc" id="L446">            err = new Exception(alert.error().getMessage());</span>
+<span class="nc" id="L447">        ReadPieceInfo info = new ReadPieceInfo(alert.piece(),</span>
+<span class="nc" id="L448">                alert.size(),</span>
+<span class="nc" id="L449">                alert.bufferPtr(),</span>
+                err);
+
+<span class="nc" id="L452">        notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L453">                listener.onReadPiece(id, info));</span>
+<span class="nc" id="L454">    }</span>
+
+    private void torrentRemoved()
+    {
+<span class="nc" id="L458">        notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L459">                listener.onTorrentRemoved(id));</span>
+
+<span class="nc" id="L461">        forceStop();</span>
+
+<span class="nc bnc" id="L463" title="All 2 branches missed.">        if (partsFile != null) {</span>
+            try {
+<span class="nc" id="L465">                fs.deleteFile(partsFile);</span>
+<span class="nc" id="L466">            } catch (FileNotFoundException | UnknownUriException e) {</span>
+                /* Ignore */
+<span class="nc" id="L468">            }</span>
+        }
+<span class="nc" id="L470">    }</span>
+
+    private void handleTorrentChecked()
+    {
+<span class="nc bnc" id="L474" title="All 4 branches missed.">        if (resumeDataRejected &amp;&amp; !hasMissingFiles)</span>
+<span class="nc" id="L475">            saveResumeData(true);</span>
+<span class="nc" id="L476">    }</span>
+
+    private void handleTorrentFinished()
+    {
+<span class="nc" id="L480">        hasMissingFiles = false;</span>
+
+<span class="nc" id="L482">        notifyListeners((listener) -&gt;</span>
+<span class="nc" id="L483">                listener.onTorrentFinished(id));</span>
+<span class="nc" id="L484">        saveResumeData(true);</span>
+<span class="nc" id="L485">    }</span>
+
+    /*
+     * Generate fast-resume data for the torrent, see libtorrent documentation
+     */
+
+    @Override
+    public void saveResumeData(boolean force)
+    {
+<span class="nc" id="L494">        long now = System.currentTimeMillis();</span>
+
+<span class="nc bnc" id="L496" title="All 4 branches missed.">        if (force || (now - lastSaveResumeTime) &gt;= SAVE_RESUME_SYNC_TIME)</span>
+<span class="nc" id="L497">            lastSaveResumeTime = now;</span>
+        else
+            /* Skip, too fast, see SAVE_RESUME_SYNC_TIME */
+<span class="nc" id="L500">            return;</span>
+
+        try {
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if (th.isValid()) {</span>
+<span class="nc" id="L504">                criticalWork.setSaveResume(true);</span>
+<span class="nc" id="L505">                th.saveResumeData(TorrentHandle.SAVE_INFO_DICT);</span>
+            }
+
+<span class="nc" id="L508">        } catch (Exception e) {</span>
+<span class="nc" id="L509">            Log.w(TAG, &quot;Error triggering resume data of &quot; + id + &quot;:&quot;);</span>
+<span class="nc" id="L510">            Log.w(TAG, Log.getStackTraceString(e));</span>
+
+<span class="nc" id="L512">            criticalWork.setSaveResume(false);</span>
+<span class="nc" id="L513">        }</span>
+<span class="nc" id="L514">    }</span>
+
+    private void serializeResumeData(SaveResumeDataAlert alert)
+    {
+        try {
+<span class="nc" id="L519">            byte_vector data = libtorrent.write_resume_data(alert.params().swig()).bencode();</span>
+<span class="nc" id="L520">            repo.addFastResume(new FastResume(id, Vectors.byte_vector2bytes(data)));</span>
+
+<span class="nc" id="L522">        } catch (Throwable e) {</span>
+<span class="nc" id="L523">            Log.e(TAG, Log.getStackTraceString(e));</span>
+
+        } finally {
+<span class="nc" id="L526">            criticalWork.setSaveResume(false);</span>
+        }
+<span class="nc" id="L528">    }</span>
+
+    @Override
+    public String getTorrentId()
+    {
+<span class="nc" id="L533">        return id;</span>
+    }
+
+    @Override
+    public Completable requestStop()
+    {
+<span class="nc bnc" id="L539" title="All 6 branches missed.">        if (stopEvent != null &amp;&amp; (stopRequested || stopped))</span>
+<span class="nc" id="L540">            return stopEvent;</span>
+
+<span class="nc" id="L542">        stopRequested = true;</span>
+
+        /* Wait to complete critical works */
+<span class="nc" id="L545">        stopEvent = Completable.create((emitter) -&gt; {</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">            if (emitter.isDisposed())</span>
+<span class="nc" id="L547">                return;</span>
+
+<span class="nc" id="L549">            AtomicLong recentChangeTime = new AtomicLong(-1);</span>
+<span class="nc" id="L550">            Disposable d = criticalWork.observeStateChanging()</span>
+<span class="nc" id="L551">                    .timeout(CRITICAL_WORK_WAIT_TIMEOUT, TimeUnit.MILLISECONDS) /* Avoid infinite wait */</span>
+<span class="nc" id="L552">                    .subscribe(</span>
+                            (state) -&gt; {
+<span class="nc bnc" id="L554" title="All 2 branches missed.">                                if (state.changeTime &lt; recentChangeTime.get())</span>
+<span class="nc" id="L555">                                    return;</span>
+<span class="nc" id="L556">                                recentChangeTime.set(state.changeTime);</span>
+<span class="nc bnc" id="L557" title="All 4 branches missed.">                                if (!(emitter.isDisposed() || state.isDuringChange())) {</span>
+<span class="nc" id="L558">                                    doStop();</span>
+<span class="nc" id="L559">                                    emitter.onComplete();</span>
+                                }
+<span class="nc" id="L561">                            },</span>
+                            (err) -&gt; {
+<span class="nc" id="L563">                                Log.e(TAG, &quot;Error waiting for critical work: &quot;</span>
+<span class="nc" id="L564">                                        + Log.getStackTraceString(err));</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">                                if (!emitter.isDisposed()) {</span>
+<span class="nc" id="L566">                                    doStop();</span>
+<span class="nc" id="L567">                                    emitter.onComplete();</span>
+                                }
+<span class="nc" id="L569">                            });</span>
+<span class="nc" id="L570">            emitter.setDisposable(d);</span>
+<span class="nc" id="L571">        });</span>
+
+<span class="nc" id="L573">        return stopEvent;</span>
+    }
+
+    private void forceStop()
+    {
+<span class="nc" id="L578">        stopRequested = true;</span>
+<span class="nc" id="L579">        doStop();</span>
+<span class="nc" id="L580">    }</span>
+
+    private void doStop()
+    {
+<span class="nc bnc" id="L584" title="All 4 branches missed.">        if (!stopRequested || stopped)</span>
+<span class="nc" id="L585">            return;</span>
+
+<span class="nc" id="L587">        sessionManager.removeListener(listener);</span>
+<span class="nc" id="L588">        stopRequested = false;</span>
+<span class="nc" id="L589">        stopped = true;</span>
+<span class="nc" id="L590">        stopEvent = null;</span>
+<span class="nc" id="L591">    }</span>
+
+    @Override
+    public void pause()
+    {
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L597">            return;</span>
+
+<span class="nc" id="L599">        doPause();</span>
+<span class="nc" id="L600">    }</span>
+
+    @Override
+    public void resume()
+    {
+<span class="nc bnc" id="L605" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L606">            return;</span>
+
+<span class="nc" id="L608">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L609" title="All 4 branches missed.">        if (torrent == null || torrent.manuallyPaused)</span>
+<span class="nc" id="L610">            return;</span>
+
+<span class="nc" id="L612">        doResume();</span>
+<span class="nc" id="L613">    }</span>
+
+    @Override
+    public void pauseManually()
+    {
+<span class="nc bnc" id="L618" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L619">            return;</span>
+
+<span class="nc" id="L621">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L623">            return;</span>
+
+<span class="nc" id="L625">        torrent.manuallyPaused = true;</span>
+<span class="nc" id="L626">        repo.updateTorrent(torrent);</span>
+
+<span class="nc" id="L628">        doPause();</span>
+<span class="nc" id="L629">    }</span>
+
+    @Override
+    public void resumeManually()
+    {
+<span class="nc bnc" id="L634" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L635">            return;</span>
+
+<span class="nc" id="L637">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L639">            return;</span>
+
+<span class="nc" id="L641">        torrent.manuallyPaused = false;</span>
+<span class="nc" id="L642">        repo.updateTorrent(torrent);</span>
+
+<span class="nc" id="L644">        doResume();</span>
+<span class="nc" id="L645">    }</span>
+
+    private void doPause()
+    {
+<span class="nc bnc" id="L649" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L650">            return;</span>
+
+<span class="nc" id="L652">        th.unsetFlags(TorrentFlags.AUTO_MANAGED);</span>
+<span class="nc" id="L653">        th.pause();</span>
+<span class="nc" id="L654">        saveResumeData(true);</span>
+<span class="nc" id="L655">    }</span>
+
+    private void doResume()
+    {
+<span class="nc bnc" id="L659" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L660">            return;</span>
+
+<span class="nc bnc" id="L662" title="All 2 branches missed.">        if (hasMissingFiles) {</span>
+<span class="nc" id="L663">            hasMissingFiles = false;</span>
+<span class="nc" id="L664">            forceRecheck();</span>
+        }
+
+<span class="nc bnc" id="L667" title="All 2 branches missed.">        if (autoManaged)</span>
+<span class="nc" id="L668">            th.setFlags(TorrentFlags.AUTO_MANAGED);</span>
+        else
+<span class="nc" id="L670">            th.unsetFlags(TorrentFlags.AUTO_MANAGED);</span>
+<span class="nc" id="L671">        th.resume();</span>
+<span class="nc" id="L672">        saveResumeData(true);</span>
+<span class="nc" id="L673">    }</span>
+
+    @Override
+    public void setAutoManaged(boolean autoManaged)
+    {
+<span class="nc bnc" id="L678" title="All 4 branches missed.">        if (operationNotAllowed() || isPaused())</span>
+<span class="nc" id="L679">            return;</span>
+
+<span class="nc" id="L681">        this.autoManaged = autoManaged;</span>
+
+<span class="nc bnc" id="L683" title="All 2 branches missed.">        if (autoManaged)</span>
+<span class="nc" id="L684">            th.setFlags(TorrentFlags.AUTO_MANAGED);</span>
+        else
+<span class="nc" id="L686">            th.unsetFlags(TorrentFlags.AUTO_MANAGED);</span>
+<span class="nc" id="L687">    }</span>
+
+    @Override
+    public boolean isAutoManaged()
+    {
+<span class="nc bnc" id="L692" title="All 4 branches missed.">        return !operationNotAllowed() &amp;&amp; th.status().flags().and_(TorrentFlags.AUTO_MANAGED).non_zero();</span>
+    }
+
+    @Override
+    public int getProgress()
+    {
+<span class="nc bnc" id="L698" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L699">            return 0;</span>
+
+<span class="nc" id="L701">        TorrentStatus ts = th.status();</span>
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        if (ts == null)</span>
+<span class="nc" id="L703">            return 0;</span>
+
+<span class="nc" id="L705">        float fp = ts.progress();</span>
+<span class="nc bnc" id="L706" title="All 2 branches missed.">        if (Float.compare(fp, 1f) == 0)</span>
+<span class="nc" id="L707">            return 100;</span>
+
+<span class="nc" id="L709">        int p = (int)(fp * 100);</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">        if (p &gt; 0)</span>
+<span class="nc" id="L711">            return Math.min(p, 100);</span>
+
+<span class="nc" id="L713">        return 0;</span>
+    }
+
+    @Override
+    public void prioritizeFiles(@NonNull Priority[] priorities)
+    {
+<span class="nc bnc" id="L719" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L720">            return;</span>
+        }
+
+<span class="nc" id="L723">        TorrentInfo ti = th.torrentFile();</span>
+<span class="nc bnc" id="L724" title="All 2 branches missed.">        if (ti == null)</span>
+<span class="nc" id="L725">            return;</span>
+
+<span class="nc" id="L727">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L729">            return;</span>
+
+<span class="nc" id="L731">        org.libtorrent4j.Priority[] p = PriorityConverter.convert(priorities);</span>
+        /* Priorities for all files, priorities list for some selected files not supported */
+<span class="nc bnc" id="L733" title="All 2 branches missed.">        if (ti.numFiles() != p.length)</span>
+<span class="nc" id="L734">            return;</span>
+
+<span class="nc" id="L736">        th.prioritizeFiles(p);</span>
+
+        // Restore first/last piece first option if necessary
+<span class="nc bnc" id="L739" title="All 2 branches missed.">        if (hasFirstLastPiecePriority) {</span>
+<span class="nc" id="L740">            applyFirstLastPiecePriority(true, priorities);</span>
+        }
+<span class="nc" id="L742">    }</span>
+
+    @Override
+    public long getSize()
+    {
+<span class="nc bnc" id="L747" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L748">            return 0;</span>
+        }
+
+<span class="nc" id="L751">        TorrentInfo info = th.torrentFile();</span>
+
+<span class="nc bnc" id="L753" title="All 2 branches missed.">        return info != null ? info.totalSize() : 0;</span>
+    }
+
+    @Override
+    public long getDownloadSpeed()
+    {
+<span class="nc bnc" id="L759" title="All 8 branches missed.">        return operationNotAllowed() || isFinished() || isPaused() || isSeeding() ?</span>
+<span class="nc" id="L760">                0 :</span>
+<span class="nc" id="L761">                th.status().downloadPayloadRate();</span>
+    }
+
+    @Override
+    public long getUploadSpeed()
+    {
+<span class="nc bnc" id="L767" title="All 8 branches missed.">        return operationNotAllowed() || isFinished() &amp;&amp; !isSeeding() || isPaused() ?</span>
+<span class="nc" id="L768">                0 :</span>
+<span class="nc" id="L769">                th.status().uploadPayloadRate();</span>
+    }
+
+    @Override
+    public void remove(boolean withFiles)
+    {
+<span class="nc" id="L775">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L776" title="All 2 branches missed.">        if (torrent != null) {</span>
+<span class="nc" id="L777">            repo.deleteTorrent(torrent);</span>
+        }
+
+<span class="nc bnc" id="L780" title="All 2 branches missed.">        if (!operationNotAllowed()) {</span>
+<span class="nc bnc" id="L781" title="All 2 branches missed.">            if (withFiles)</span>
+<span class="nc" id="L782">                sessionManager.remove(th, SessionHandle.DELETE_FILES);</span>
+            else
+<span class="nc" id="L784">                sessionManager.remove(th, SessionHandle.DELETE_PARTFILE);</span>
+        }
+<span class="nc" id="L786">    }</span>
+
+    @Override
+    public long getActiveTime()
+    {
+<span class="nc bnc" id="L791" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().activeDuration() / 1000L;</span>
+    }
+
+    @Override
+    public long getSeedingTime()
+    {
+<span class="nc bnc" id="L797" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().seedingDuration() / 1000L;</span>
+    }
+
+    @Override
+    public long getReceivedBytes()
+    {
+<span class="nc bnc" id="L803" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().totalDone();</span>
+    }
+
+    @Override
+    public long getTotalSentBytes()
+    {
+<span class="nc bnc" id="L809" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().allTimeUpload();</span>
+    }
+
+    @Override
+    public int getConnectedPeers()
+    {
+<span class="nc bnc" id="L815" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().numPeers();</span>
+    }
+
+    @Override
+    public int getConnectedSeeds()
+    {
+<span class="nc bnc" id="L821" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().numSeeds();</span>
+    }
+
+    @Override
+    public int getConnectedLeechers()
+    {
+<span class="nc bnc" id="L827" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L828">            return 0;</span>
+
+<span class="nc" id="L830">        TorrentStatus ts = th.status();</span>
+
+<span class="nc" id="L832">        return ts.numPeers() - ts.numSeeds();</span>
+    }
+
+    @Override
+    public int getTotalPeers()
+    {
+<span class="nc bnc" id="L838" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L839">            return 0;</span>
+
+<span class="nc" id="L841">        TorrentStatus ts = th.status();</span>
+<span class="nc" id="L842">        int peers = ts.numComplete() + ts.numIncomplete();</span>
+
+<span class="nc bnc" id="L844" title="All 2 branches missed.">        return (peers &gt; 0 ? peers : ts.listPeers());</span>
+    }
+
+    @Override
+    public int getTotalSeeds()
+    {
+<span class="nc bnc" id="L850" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L851">            return 0;</span>
+
+<span class="nc" id="L853">        TorrentStatus ts = th.status();</span>
+<span class="nc" id="L854">        int numComplete = ts.numComplete();</span>
+
+<span class="nc bnc" id="L856" title="All 2 branches missed.">        return (numComplete &gt; 0 ? numComplete : ts.listSeeds());</span>
+    }
+
+    @Override
+    public int getTotalLeechers()
+    {
+<span class="nc bnc" id="L862" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L863">            return 0;</span>
+
+<span class="nc" id="L865">        TorrentStatus ts = th.status();</span>
+<span class="nc" id="L866">        int numIncomplete = ts.numIncomplete();</span>
+
+<span class="nc bnc" id="L868" title="All 2 branches missed.">        return (numIncomplete &gt; 0 ? numIncomplete : ts.listPeers() - ts.listSeeds());</span>
+    }
+
+    @Override
+    public void requestTrackerAnnounce()
+    {
+<span class="nc bnc" id="L874" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L875">            return;</span>
+
+<span class="nc" id="L877">        th.forceReannounce();</span>
+<span class="nc" id="L878">    }</span>
+
+    @Override
+    public Set&lt;String&gt; getTrackersUrl()
+    {
+<span class="nc bnc" id="L883" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L884">            return new HashSet&lt;&gt;();</span>
+
+<span class="nc" id="L886">        List&lt;AnnounceEntry&gt; trackers = th.trackers();</span>
+<span class="nc" id="L887">        Set&lt;String&gt; urls = new HashSet&lt;&gt;(trackers.size());</span>
+
+<span class="nc bnc" id="L889" title="All 2 branches missed.">        for (AnnounceEntry entry : trackers)</span>
+<span class="nc" id="L890">            urls.add(entry.url());</span>
+
+<span class="nc" id="L892">        return urls;</span>
+    }
+
+    @Override
+    public List&lt;TrackerInfo&gt; getTrackerInfoList()
+    {
+<span class="nc bnc" id="L898" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L899">            return new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L901">        List&lt;AnnounceEntry&gt; trackers = th.trackers();</span>
+<span class="nc" id="L902">        ArrayList&lt;TrackerInfo&gt; states = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L904" title="All 2 branches missed.">        for (AnnounceEntry entry : trackers)</span>
+<span class="nc" id="L905">            states.add(new TrackerInfo(entry));</span>
+
+<span class="nc" id="L907">        return states;</span>
+    }
+
+    @Override
+    public List&lt;PeerInfo&gt; getPeerInfoList()
+    {
+<span class="nc bnc" id="L913" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L914">            return new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L916">        ArrayList&lt;PeerInfo&gt; infoList = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L917">        List&lt;AdvancedPeerInfo&gt; peers = advancedPeerInfo();</span>
+
+<span class="nc" id="L919">        TorrentStatus status = th.status();</span>
+<span class="nc bnc" id="L920" title="All 2 branches missed.">        if (status == null)</span>
+<span class="nc" id="L921">            return infoList;</span>
+
+<span class="nc bnc" id="L923" title="All 2 branches missed.">        for (AdvancedPeerInfo peer : peers) {</span>
+<span class="nc" id="L924">            PeerInfo state = new PeerInfo(peer, status);</span>
+<span class="nc" id="L925">            infoList.add(state);</span>
+<span class="nc" id="L926">        }</span>
+
+<span class="nc" id="L928">        return infoList;</span>
+    }
+
+    /*
+     * This function is similar as TorrentHandle::peerInfo()
+     */
+
+    private List&lt;AdvancedPeerInfo&gt; advancedPeerInfo()
+    {
+<span class="nc" id="L937">        torrent_handle th_swig = th.swig();</span>
+<span class="nc" id="L938">        peer_info_vector v = new peer_info_vector();</span>
+<span class="nc" id="L939">        th_swig.get_peer_info(v);</span>
+
+<span class="nc" id="L941">        int size = v.size();</span>
+<span class="nc" id="L942">        ArrayList&lt;AdvancedPeerInfo&gt; l = new ArrayList&lt;&gt;(size);</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        for (int i = 0; i &lt; size; i++)</span>
+<span class="nc" id="L944">            l.add(new AdvancedPeerInfo(v.get(i)));</span>
+
+<span class="nc" id="L946">        return l;</span>
+    }
+
+    /*
+     * The total number of bytes we want to download. This may be smaller than the total
+     * torrent size in case any pieces are prioritized to 0, i.e. not wanted.
+     */
+
+    @Override
+    public long getTotalWanted()
+    {
+<span class="nc bnc" id="L957" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().totalWanted();</span>
+    }
+
+    @Override
+    public void replaceTrackers(@NonNull Set&lt;String&gt; trackers)
+    {
+<span class="nc" id="L963">        List&lt;AnnounceEntry&gt; urls = new ArrayList&lt;&gt;(trackers.size());</span>
+<span class="nc bnc" id="L964" title="All 2 branches missed.">        for (String url : trackers) {</span>
+<span class="nc" id="L965">            announce_entry e = new announce_entry();</span>
+<span class="nc" id="L966">            e.setUrl(url);</span>
+<span class="nc" id="L967">            urls.add(new AnnounceEntry(e));</span>
+<span class="nc" id="L968">        }</span>
+
+<span class="nc bnc" id="L970" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L971">            return;</span>
+<span class="nc" id="L972">        th.replaceTrackers(urls);</span>
+<span class="nc" id="L973">        saveResumeData(true);</span>
+<span class="nc" id="L974">    }</span>
+
+    @Override
+    public void addTrackers(@NonNull Set&lt;String&gt; trackers)
+    {
+<span class="nc bnc" id="L979" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L980">            return;</span>
+
+<span class="nc bnc" id="L982" title="All 2 branches missed.">        for (String url : trackers) {</span>
+<span class="nc bnc" id="L983" title="All 2 branches missed.">            if (url == null)</span>
+<span class="nc" id="L984">                continue;</span>
+<span class="nc" id="L985">            announce_entry e = new announce_entry();</span>
+<span class="nc" id="L986">            e.setUrl(url);</span>
+<span class="nc" id="L987">            th.addTracker(new AnnounceEntry(e));</span>
+<span class="nc" id="L988">        }</span>
+<span class="nc" id="L989">        saveResumeData(true);</span>
+<span class="nc" id="L990">    }</span>
+
+    @Override
+    public boolean[] pieces()
+    {
+<span class="nc bnc" id="L995" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L996">            return new boolean[0];</span>
+
+<span class="nc" id="L998">        PieceIndexBitfield bitfield = th.status(TorrentHandle.QUERY_PIECES).pieces();</span>
+<span class="nc" id="L999">        boolean[] pieces = new boolean[bitfield.size()];</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">        for (int i = 0; i &lt; bitfield.size(); i++)</span>
+<span class="nc" id="L1001">            pieces[i] = bitfield.getBit(i);</span>
+
+<span class="nc" id="L1003">        return pieces;</span>
+    }
+
+    @Override
+    public String makeMagnet(boolean includePriorities)
+    {
+<span class="nc bnc" id="L1009" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1010">            return null;</span>
+
+<span class="nc" id="L1012">        String uri = th.makeMagnetUri();</span>
+
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">        if (includePriorities) {</span>
+<span class="nc" id="L1015">            String indices = getFileIndicesBep53(th.filePriorities());</span>
+<span class="nc bnc" id="L1016" title="All 2 branches missed.">            if (!TextUtils.isEmpty(indices))</span>
+<span class="nc" id="L1017">                uri += &quot;&amp;so=&quot; + indices;</span>
+        }
+
+<span class="nc" id="L1020">        return uri;</span>
+    }
+
+    @VisibleForTesting
+    public static String getFileIndicesBep53(org.libtorrent4j.Priority[] priorities)
+    {
+<span class="nc" id="L1026">        ArrayList&lt;String&gt; buf = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1027">        int startIndex = -1;</span>
+<span class="nc" id="L1028">        int endIndex = -1;</span>
+
+        String indicesStr;
+<span class="nc bnc" id="L1031" title="All 2 branches missed.">        for (int i = 0; i &lt; priorities.length; i++) {</span>
+<span class="nc bnc" id="L1032" title="All 2 branches missed.">            if (priorities[i].swig() == org.libtorrent4j.Priority.IGNORE.swig()) {</span>
+<span class="nc bnc" id="L1033" title="All 2 branches missed.">                if ((indicesStr = indicesToStr(startIndex, endIndex)) != null)</span>
+<span class="nc" id="L1034">                    buf.add(indicesStr);</span>
+<span class="nc" id="L1035">                startIndex = -1;</span>
+
+            } else {
+<span class="nc" id="L1038">                endIndex = i;</span>
+<span class="nc bnc" id="L1039" title="All 2 branches missed.">                if (startIndex == -1)</span>
+<span class="nc" id="L1040">                    startIndex = endIndex;</span>
+            }
+        }
+<span class="nc bnc" id="L1043" title="All 2 branches missed.">        if ((indicesStr = indicesToStr(startIndex, endIndex)) != null)</span>
+<span class="nc" id="L1044">            buf.add(indicesStr);</span>
+
+<span class="nc" id="L1046">        return TextUtils.join(&quot;,&quot;, buf);</span>
+    }
+
+    /*
+     * Returns files indices whose priorities are higher than IGNORE.
+     * For more about see BEP53 http://www.bittorrent.org/beps/bep_0053.html
+     */
+
+    private static String indicesToStr(int startIndex, int endIndex)
+    {
+<span class="nc bnc" id="L1056" title="All 4 branches missed.">        if (startIndex == -1 || endIndex == -1)</span>
+<span class="nc" id="L1057">            return null;</span>
+
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">        return (startIndex == endIndex ?</span>
+<span class="nc" id="L1060">                Integer.toString(endIndex) :</span>
+<span class="nc" id="L1061">                String.format(Locale.ENGLISH, &quot;%d-%d&quot;, startIndex, endIndex));</span>
+    }
+
+    @Override
+    public void setSequentialDownload(boolean sequential)
+    {
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1068">            return;</span>
+
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">        if (sequential)</span>
+<span class="nc" id="L1071">            th.setFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD);</span>
+        else
+<span class="nc" id="L1073">            th.unsetFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD);</span>
+
+<span class="nc" id="L1075">        saveResumeData(true);</span>
+
+<span class="nc" id="L1077">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L1078" title="All 2 branches missed.">        if (torrent != null) {</span>
+<span class="nc" id="L1079">            torrent.sequentialDownload = sequential;</span>
+<span class="nc" id="L1080">            repo.updateTorrent(torrent);</span>
+        }
+<span class="nc" id="L1082">    }</span>
+
+    @Override
+    public void setFirstLastPiecePriority(boolean enabled) {
+<span class="nc bnc" id="L1086" title="All 2 branches missed.">        if (hasFirstLastPiecePriority == enabled) {</span>
+<span class="nc" id="L1087">            return;</span>
+        }
+<span class="nc" id="L1089">        hasFirstLastPiecePriority = enabled;</span>
+<span class="nc bnc" id="L1090" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L1091">            return;</span>
+        }
+
+<span class="nc" id="L1094">        applyFirstLastPiecePriority(enabled);</span>
+<span class="nc" id="L1095">        saveResumeData(true);</span>
+
+<span class="nc" id="L1097">        var torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L1098" title="All 2 branches missed.">        if (torrent != null) {</span>
+<span class="nc" id="L1099">            torrent.firstLastPiecePriority = enabled;</span>
+<span class="nc" id="L1100">            repo.updateTorrent(torrent);</span>
+        }
+<span class="nc" id="L1102">    }</span>
+
+    @Override
+    public boolean isFirstLastPiecePriority() {
+<span class="nc" id="L1106">        return hasFirstLastPiecePriority;</span>
+    }
+
+    private void applyFirstLastPiecePriority(boolean enabled) {
+<span class="nc" id="L1110">        applyFirstLastPiecePriority(enabled, new Priority[]{});</span>
+<span class="nc" id="L1111">    }</span>
+
+    // Download first and last pieces first for every file in the torrent
+    private void applyFirstLastPiecePriority(boolean enabled, Priority[] updatedFilePriorities) {
+<span class="nc bnc" id="L1115" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L1116">            return;</span>
+        }
+
+<span class="nc" id="L1119">        Log.i(TAG, &quot;Download first and last piece first: &quot; + id);</span>
+
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">        var filePriorities = updatedFilePriorities.length != 0</span>
+<span class="nc" id="L1122">                ? updatedFilePriorities</span>
+<span class="nc" id="L1123">                : getFilePriorities();</span>
+<span class="nc" id="L1124">        var piecePriorities = th.piecePriorities();</span>
+
+        // Updating file priorities is an async operation in libtorrent,
+        // when we just updated it and immediately query it we might get the old/wrong values,
+        // so we rely on `updatedFilePriorities` in this case.
+<span class="nc" id="L1129">        var ti = th.torrentFile();</span>
+<span class="nc" id="L1130">        var files = ti.files();</span>
+<span class="nc bnc" id="L1131" title="All 2 branches missed.">        for (var index = 0; index &lt; filePriorities.length; index++) {</span>
+<span class="nc" id="L1132">            var filePriority = filePriorities[index];</span>
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">            if (filePriority == Priority.IGNORE) {</span>
+<span class="nc" id="L1134">                continue;</span>
+            }
+
+            // Determine the priority to set
+<span class="nc bnc" id="L1138" title="All 2 branches missed.">            var newPriority = enabled ? Priority.TOP_PRIORITY : filePriority;</span>
+<span class="nc" id="L1139">            var piecePriority = PriorityConverter.convert(newPriority);</span>
+<span class="nc" id="L1140">            var filePieces = getFilePieces(ti, index);</span>
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">            if (filePieces == null) {</span>
+<span class="nc" id="L1142">                continue;</span>
+            }
+            // Worst case: AVI index = 1% of total file size (at the end of the file)
+<span class="nc" id="L1145">            var numPieces = Math.ceil(files.fileSize(index) * 0.01 / ti.pieceLength());</span>
+<span class="nc bnc" id="L1146" title="All 2 branches missed.">            for (var i = 0; i &lt; numPieces; i++) {</span>
+<span class="nc" id="L1147">                piecePriorities[filePieces.first + i] = piecePriority;</span>
+<span class="nc" id="L1148">                piecePriorities[filePieces.second - i] = piecePriority;</span>
+            }
+        }
+
+<span class="nc" id="L1152">        th.prioritizePieces(piecePriorities);</span>
+<span class="nc" id="L1153">    }</span>
+
+    @Override
+    public void setTorrentName(@NonNull String name)
+    {
+<span class="nc" id="L1158">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L1160">            return;</span>
+
+<span class="nc" id="L1162">        torrent.name = name;</span>
+<span class="nc" id="L1163">        repo.updateTorrent(torrent);</span>
+<span class="nc" id="L1164">    }</span>
+
+    @Override
+    public long getETA()
+    {
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1170">            return MAX_ETA;</span>
+<span class="nc bnc" id="L1171" title="All 2 branches missed.">        if (getStateCode() != TorrentStateCode.DOWNLOADING)</span>
+<span class="nc" id="L1172">            return MAX_ETA;</span>
+
+<span class="nc" id="L1174">        TorrentStatus status = th.status();</span>
+<span class="nc" id="L1175">        long left = status.totalWanted() - status.totalWantedDone();</span>
+<span class="nc" id="L1176">        long rate = status.downloadPayloadRate();</span>
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">        if (left &lt;= 0)</span>
+<span class="nc" id="L1178">            return 0;</span>
+<span class="nc bnc" id="L1179" title="All 2 branches missed.">        if (rate &lt;= 0)</span>
+<span class="nc" id="L1180">            return MAX_ETA;</span>
+
+<span class="nc" id="L1182">        return Math.min(left / rate, MAX_ETA);</span>
+    }
+
+    @Override
+    public TorrentMetaInfo getTorrentMetaInfo() throws DecodeException
+    {
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1189">            return null;</span>
+
+<span class="nc" id="L1191">        TorrentInfo ti = th.torrentFile();</span>
+        TorrentMetaInfo info;
+<span class="nc bnc" id="L1193" title="All 2 branches missed.">        if (ti != null) {</span>
+<span class="nc" id="L1194">            info = new TorrentMetaInfo(ti);</span>
+        } else {
+<span class="nc" id="L1196">            String hash = getInfoHash();</span>
+<span class="nc" id="L1197">            String name = getTorrentName();</span>
+<span class="nc bnc" id="L1198" title="All 4 branches missed.">            if (hash == null || name == null)</span>
+<span class="nc" id="L1199">                return null;</span>
+<span class="nc" id="L1200">            info = new TorrentMetaInfo(name, hash);</span>
+        }
+
+<span class="nc" id="L1203">        return info;</span>
+    }
+
+    @Override
+    public String getTorrentName()
+    {
+<span class="nc" id="L1209">        Torrent torrent = repo.getTorrentById(id);</span>
+
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">        return (torrent == null ? null : torrent.name);</span>
+    }
+
+    @Override
+    public synchronized void setDownloadPath(@NonNull Uri path)
+    {
+<span class="nc" id="L1217">        criticalWork.setMoving(true);</span>
+
+<span class="nc" id="L1219">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L1221">            return;</span>
+
+<span class="nc" id="L1223">        torrent.downloadPath = path;</span>
+<span class="nc" id="L1224">        repo.updateTorrent(torrent);</span>
+
+<span class="nc" id="L1226">        notifyListeners((listener) -&gt; listener.onTorrentMoving(id));</span>
+
+        try {
+<span class="nc" id="L1229">            String pathStr = fs.makeFileSystemPath(path);</span>
+<span class="nc" id="L1230">            th.moveStorage(pathStr, MoveFlags.ALWAYS_REPLACE_FILES);</span>
+<span class="nc" id="L1231">        } catch (Exception e) {</span>
+<span class="nc" id="L1232">            Log.e(TAG, &quot;Error changing save path: &quot;);</span>
+<span class="nc" id="L1233">            Log.e(TAG, Log.getStackTraceString(e));</span>
+<span class="nc" id="L1234">        }</span>
+<span class="nc" id="L1235">    }</span>
+
+    @Override
+    public long[] getFilesReceivedBytes()
+    {
+<span class="nc bnc" id="L1240" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1241">            return null;</span>
+
+<span class="nc" id="L1243">        return th.fileProgress(torrent_handle.piece_granularity);</span>
+    }
+
+    @Override
+    public void forceRecheck()
+    {
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1250">            return;</span>
+
+<span class="nc" id="L1252">        th.forceRecheck();</span>
+<span class="nc" id="L1253">    }</span>
+
+    @Override
+    public int getNumDownloadedPieces()
+    {
+<span class="nc bnc" id="L1258" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.status().numPieces();</span>
+    }
+
+    @Override
+    public double getShareRatio()
+    {
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1265">            return 0;</span>
+
+<span class="nc" id="L1267">        TorrentStatus ts = th.status();</span>
+<span class="nc" id="L1268">        long allTimeUpload = ts.allTimeUpload();</span>
+<span class="nc" id="L1269">        long allTimeDownload = ts.allTimeDownload();</span>
+<span class="nc" id="L1270">        long totalDone = ts.totalDone();</span>
+        /*
+         * Special case for a seeder who lost its stats,
+         * also assume nobody will import a 99% done torrent
+         */
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">        long downloaded = (allTimeDownload &lt; totalDone * 0.01 ? totalDone : allTimeDownload);</span>
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">        if (downloaded == 0)</span>
+<span class="nc bnc" id="L1277" title="All 2 branches missed.">            return (allTimeUpload == 0 ? 0.0 : MAX_RATIO);</span>
+<span class="nc" id="L1278">        double ratio = (double)allTimeUpload / (double)downloaded;</span>
+
+<span class="nc" id="L1280">        return Math.min(ratio, MAX_RATIO);</span>
+    }
+
+    @Override
+    public Uri getPartsFile()
+    {
+<span class="nc bnc" id="L1286" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L1287">            return null;</span>
+        }
+
+<span class="nc" id="L1290">        TorrentInfo ti = th.torrentFile();</span>
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">        if (ti == null)</span>
+<span class="nc" id="L1292">            return null;</span>
+
+<span class="nc" id="L1294">        Torrent torrent = repo.getTorrentById(id);</span>
+<span class="nc bnc" id="L1295" title="All 2 branches missed.">        if (torrent == null)</span>
+<span class="nc" id="L1296">            return null;</span>
+
+        try {
+<span class="nc" id="L1299">            return fs.getFileUri(torrent.downloadPath, &quot;.&quot; + ti.infoHash() + &quot;.parts&quot;);</span>
+<span class="nc" id="L1300">        } catch (Exception e) {</span>
+<span class="nc" id="L1301">            Log.e(TAG, &quot;Error changing save path: &quot;);</span>
+<span class="nc" id="L1302">            Log.e(TAG, Log.getStackTraceString(e));</span>
+<span class="nc" id="L1303">            return null;</span>
+        }
+    }
+
+    @Override
+    public void setDownloadSpeedLimit(int limit)
+    {
+<span class="nc bnc" id="L1310" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1311">            return;</span>
+
+<span class="nc" id="L1313">        th.setDownloadLimit(limit);</span>
+<span class="nc" id="L1314">        saveResumeData(true);</span>
+<span class="nc" id="L1315">    }</span>
+
+    @Override
+    public int getDownloadSpeedLimit()
+    {
+<span class="nc bnc" id="L1320" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.getDownloadLimit();</span>
+    }
+
+    @Override
+    public void setUploadSpeedLimit(int limit)
+    {
+<span class="nc bnc" id="L1326" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1327">            return;</span>
+
+<span class="nc" id="L1329">        th.setUploadLimit(limit);</span>
+<span class="nc" id="L1330">        saveResumeData(true);</span>
+<span class="nc" id="L1331">    }</span>
+
+    @Override
+    public int getUploadSpeedLimit()
+    {
+<span class="nc bnc" id="L1336" title="All 2 branches missed.">        return operationNotAllowed() ? 0 : th.getUploadLimit();</span>
+    }
+
+    @Override
+    public String getInfoHash()
+    {
+<span class="nc bnc" id="L1342" title="All 2 branches missed.">        return operationNotAllowed() ? null : th.infoHash().toString();</span>
+    }
+
+    @Override
+    public TorrentStateCode getStateCode()
+    {
+<span class="nc bnc" id="L1348" title="All 2 branches missed.">        if (!sessionManager.isRunning())</span>
+<span class="nc" id="L1349">            return TorrentStateCode.STOPPED;</span>
+
+<span class="nc bnc" id="L1351" title="All 2 branches missed.">        if (isPaused())</span>
+<span class="nc" id="L1352">            return TorrentStateCode.PAUSED;</span>
+
+<span class="nc bnc" id="L1354" title="All 2 branches missed.">        if (!th.isValid())</span>
+<span class="nc" id="L1355">            return TorrentStateCode.ERROR;</span>
+
+<span class="nc" id="L1357">        TorrentStatus status = th.status();</span>
+<span class="nc" id="L1358">        boolean isPaused = isPaused(status);</span>
+
+<span class="nc bnc" id="L1360" title="All 4 branches missed.">        if (isPaused &amp;&amp; status.isFinished())</span>
+<span class="nc" id="L1361">            return TorrentStateCode.FINISHED;</span>
+
+<span class="nc bnc" id="L1363" title="All 4 branches missed.">        if (isPaused &amp;&amp; !status.isFinished())</span>
+<span class="nc" id="L1364">            return TorrentStateCode.PAUSED;</span>
+
+<span class="nc bnc" id="L1366" title="All 4 branches missed.">        if (!isPaused &amp;&amp; status.isFinished())</span>
+<span class="nc" id="L1367">            return TorrentStateCode.SEEDING;</span>
+
+<span class="nc" id="L1369">       return stateToStateCode(status.state());</span>
+    }
+
+    private TorrentStateCode stateToStateCode(TorrentStatus.State state)
+    {
+<span class="nc bnc" id="L1374" title="All 6 branches missed.">        switch (state) {</span>
+            case CHECKING_RESUME_DATA:
+            case CHECKING_FILES:
+<span class="nc" id="L1377">                return TorrentStateCode.CHECKING;</span>
+            case DOWNLOADING_METADATA:
+<span class="nc" id="L1379">                return TorrentStateCode.DOWNLOADING_METADATA;</span>
+            case DOWNLOADING:
+<span class="nc" id="L1381">                return TorrentStateCode.DOWNLOADING;</span>
+            case FINISHED:
+<span class="nc" id="L1383">                return TorrentStateCode.FINISHED;</span>
+            case SEEDING:
+<span class="nc" id="L1385">                return TorrentStateCode.SEEDING;</span>
+            default:
+<span class="nc" id="L1387">                return TorrentStateCode.UNKNOWN;</span>
+        }
+    }
+
+    @Override
+    public boolean isPaused()
+    {
+<span class="nc bnc" id="L1394" title="All 4 branches missed.">        return !operationNotAllowed() &amp;&amp; (isPaused(th.status(true)) ||</span>
+<span class="nc bnc" id="L1395" title="All 4 branches missed.">                sessionManager.isPaused() || !sessionManager.isRunning());</span>
+    }
+
+    private boolean isPaused(TorrentStatus s)
+    {
+<span class="nc" id="L1400">        return s.flags().and_(TorrentFlags.PAUSED).non_zero();</span>
+    }
+
+    @Override
+    public boolean isSeeding()
+    {
+<span class="nc bnc" id="L1406" title="All 4 branches missed.">        return !operationNotAllowed() &amp;&amp; th.status().isSeeding();</span>
+    }
+
+    @Override
+    public boolean isFinished()
+    {
+<span class="nc bnc" id="L1412" title="All 4 branches missed.">        return !operationNotAllowed() &amp;&amp; th.status().isFinished();</span>
+    }
+
+    @Override
+    public boolean isDownloading()
+    {
+<span class="nc bnc" id="L1418" title="All 2 branches missed.">        return getDownloadSpeed() &gt; 0;</span>
+    }
+
+    @Override
+    public boolean isSequentialDownload()
+    {
+<span class="nc bnc" id="L1424" title="All 4 branches missed.">        return !operationNotAllowed() &amp;&amp; th.status().flags().and_(TorrentFlags.SEQUENTIAL_DOWNLOAD).non_zero();</span>
+    }
+
+    @Override
+    public void setMaxConnections(int connections)
+    {
+<span class="nc bnc" id="L1430" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1431">            return;</span>
+<span class="nc" id="L1432">        th.swig().set_max_connections(connections);</span>
+<span class="nc" id="L1433">    }</span>
+
+    @Override
+    public int getMaxConnections()
+    {
+<span class="nc bnc" id="L1438" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1439">            return -1;</span>
+
+<span class="nc" id="L1441">        return th.swig().max_connections();</span>
+    }
+
+    @Override
+    public void setMaxUploads(int uploads)
+    {
+<span class="nc bnc" id="L1447" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1448">            return;</span>
+<span class="nc" id="L1449">        th.swig().set_max_uploads(uploads);</span>
+<span class="nc" id="L1450">    }</span>
+
+    @Override
+    public int getMaxUploads()
+    {
+<span class="nc bnc" id="L1455" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1456">            return -1;</span>
+
+<span class="nc" id="L1458">        return th.swig().max_uploads();</span>
+    }
+
+    @Override
+    public double getAvailability(int[] piecesAvailability)
+    {
+<span class="nc bnc" id="L1464" title="All 4 branches missed.">        if (piecesAvailability == null || piecesAvailability.length == 0)</span>
+<span class="nc" id="L1465">            return 0;</span>
+
+<span class="nc" id="L1467">        int min = Integer.MAX_VALUE;</span>
+<span class="nc bnc" id="L1468" title="All 2 branches missed.">        for (int avail : piecesAvailability)</span>
+<span class="nc bnc" id="L1469" title="All 2 branches missed.">            if (avail &lt; min)</span>
+<span class="nc" id="L1470">                min = avail;</span>
+
+<span class="nc" id="L1472">        int total = 0;</span>
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">        for (int avail : piecesAvailability)</span>
+<span class="nc bnc" id="L1474" title="All 4 branches missed.">            if (avail &gt; 0 &amp;&amp; avail &gt; min)</span>
+<span class="nc" id="L1475">                ++total;</span>
+
+<span class="nc" id="L1477">        return (total / (double)piecesAvailability.length) + min;</span>
+    }
+
+    @Override
+    public double[] getFilesAvailability(int[] piecesAvailability)
+    {
+<span class="nc bnc" id="L1483" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L1484">            return new double[0];</span>
+        }
+
+<span class="nc" id="L1487">        TorrentInfo ti = th.torrentFile();</span>
+<span class="nc bnc" id="L1488" title="All 2 branches missed.">        if (ti == null)</span>
+<span class="nc" id="L1489">            return new double[0];</span>
+<span class="nc" id="L1490">        int numFiles = ti.numFiles();</span>
+<span class="nc bnc" id="L1491" title="All 2 branches missed.">        if (numFiles &lt; 0)</span>
+<span class="nc" id="L1492">            return new double[0];</span>
+
+<span class="nc" id="L1494">        double[] filesAvail = new double[numFiles];</span>
+<span class="nc bnc" id="L1495" title="All 4 branches missed.">        if (piecesAvailability == null || piecesAvailability.length == 0) {</span>
+<span class="nc" id="L1496">            Arrays.fill(filesAvail, -1);</span>
+
+<span class="nc" id="L1498">            return filesAvail;</span>
+        }
+<span class="nc bnc" id="L1500" title="All 2 branches missed.">        for (int i = 0; i &lt; numFiles; i++) {</span>
+<span class="nc" id="L1501">            Pair&lt;Integer, Integer&gt; filePieces = getFilePieces(ti, i);</span>
+<span class="nc bnc" id="L1502" title="All 2 branches missed.">            if (filePieces == null) {</span>
+<span class="nc" id="L1503">                filesAvail[i] = -1;</span>
+<span class="nc" id="L1504">                continue;</span>
+            }
+<span class="nc" id="L1506">            int availablePieces = 0;</span>
+<span class="nc bnc" id="L1507" title="All 2 branches missed.">            for (int p = filePieces.first; p &lt;= filePieces.second; p++)</span>
+<span class="nc bnc" id="L1508" title="All 2 branches missed.">                availablePieces += (piecesAvailability[p] &gt; 0 ? 1 : 0);</span>
+<span class="nc" id="L1509">            filesAvail[i] = (double)availablePieces / (filePieces.second - filePieces.first + 1);</span>
+        }
+
+<span class="nc" id="L1512">        return filesAvail;</span>
+    }
+
+    @Override
+    public int[] getPiecesAvailability()
+    {
+<span class="nc bnc" id="L1518" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1519">            return new int[0];</span>
+
+<span class="nc" id="L1521">        PieceIndexBitfield pieces = th.status(TorrentHandle.QUERY_PIECES).pieces();</span>
+<span class="nc" id="L1522">        List&lt;AdvancedPeerInfo&gt; peers = advancedPeerInfo();</span>
+<span class="nc" id="L1523">        int[] avail = new int[pieces.size()];</span>
+<span class="nc bnc" id="L1524" title="All 2 branches missed.">        for (int i = 0; i &lt; pieces.size(); i++)</span>
+<span class="nc bnc" id="L1525" title="All 2 branches missed.">            avail[i] = (pieces.getBit(i) ? 1 : 0);</span>
+
+<span class="nc bnc" id="L1527" title="All 2 branches missed.">        for (AdvancedPeerInfo peer : peers) {</span>
+<span class="nc" id="L1528">            PieceIndexBitfield peerPieces = peer.pieces();</span>
+<span class="nc bnc" id="L1529" title="All 2 branches missed.">            for (int i = 0; i &lt; pieces.size(); i++)</span>
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">                if (peerPieces.getBit(i))</span>
+<span class="nc" id="L1531">                    ++avail[i];</span>
+<span class="nc" id="L1532">        }</span>
+
+<span class="nc" id="L1534">        return avail;</span>
+    }
+
+    private Pair&lt;Integer, Integer&gt; getFilePieces(TorrentInfo ti, int fileIndex)
+    {
+<span class="nc bnc" id="L1539" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1540">            return null;</span>
+
+<span class="nc bnc" id="L1542" title="All 4 branches missed.">        if (fileIndex &lt; 0 || fileIndex &gt;= ti.numFiles())</span>
+<span class="nc" id="L1543">            return null;</span>
+<span class="nc" id="L1544">        FileStorage fs = ti.files();</span>
+<span class="nc" id="L1545">        long fileSize = fs.fileSize(fileIndex);</span>
+<span class="nc" id="L1546">        long fileOffset = fs.fileOffset(fileIndex);</span>
+
+<span class="nc" id="L1548">        return new Pair&lt;&gt;((int)(fileOffset / ti.pieceLength()),</span>
+<span class="nc" id="L1549">                          (int)((fileOffset + fileSize - 1) / ti.pieceLength()));</span>
+    }
+
+    @Override
+    public boolean havePiece(int pieceIndex)
+    {
+<span class="nc bnc" id="L1555" title="All 4 branches missed.">        return !operationNotAllowed() &amp;&amp; th.havePiece(pieceIndex);</span>
+    }
+
+    @Override
+    public void readPiece(int pieceIndex)
+    {
+<span class="nc bnc" id="L1561" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1562">            return;</span>
+
+<span class="nc" id="L1564">        th.readPiece(pieceIndex);</span>
+<span class="nc" id="L1565">    }</span>
+
+    /*
+     * Set the bytes of the selected file that you're interested in
+     * the piece of that specific offset is selected and that piece plus the 1 preceding and the 3 after it.
+     * These pieces will then be prioritised, which results in continuing the sequential download after that piece
+     */
+
+    @Override
+    public void setInterestedPieces(@NonNull TorrentStream stream, int startPiece, int numPieces)
+    {
+<span class="nc bnc" id="L1576" title="All 4 branches missed.">        if (startPiece &lt; 0 || numPieces &lt; 0)</span>
+<span class="nc" id="L1577">            return;</span>
+
+<span class="nc bnc" id="L1579" title="All 2 branches missed.">        for (int i = 0; i &lt; numPieces; i++) {</span>
+<span class="nc" id="L1580">            int piece = startPiece + i;</span>
+<span class="nc bnc" id="L1581" title="All 2 branches missed.">            if (piece &gt; stream.lastFilePiece)</span>
+<span class="nc" id="L1582">                break;</span>
+
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">            if (i + 1 == numPieces) {</span>
+<span class="nc" id="L1585">                int preloadPieces = PRELOAD_PIECES_COUNT;</span>
+<span class="nc bnc" id="L1586" title="All 2 branches missed.">                for (int p = piece; p &lt;= stream.lastFilePiece; p++) {</span>
+                    /* Set max priority to first found piece that is not confirmed finished */
+<span class="nc bnc" id="L1588" title="All 4 branches missed.">                    if (!operationNotAllowed() &amp;&amp; !th.havePiece(p)) {</span>
+<span class="nc" id="L1589">                        th.piecePriority(p, org.libtorrent4j.Priority.TOP_PRIORITY);</span>
+<span class="nc" id="L1590">                        th.setPieceDeadline(p, DEFAULT_PIECE_DEADLINE);</span>
+<span class="nc" id="L1591">                        preloadPieces--;</span>
+<span class="nc bnc" id="L1592" title="All 2 branches missed.">                        if (preloadPieces == 0)</span>
+<span class="nc" id="L1593">                            break;</span>
+                    }
+                }
+
+<span class="nc" id="L1597">            } else {</span>
+<span class="nc bnc" id="L1598" title="All 4 branches missed.">                if (!operationNotAllowed() &amp;&amp; !th.havePiece(piece)) {</span>
+<span class="nc" id="L1599">                    th.piecePriority(piece, org.libtorrent4j.Priority.TOP_PRIORITY);</span>
+<span class="nc" id="L1600">                    th.setPieceDeadline(piece, DEFAULT_PIECE_DEADLINE);</span>
+                }
+            }
+        }
+<span class="nc" id="L1604">    }</span>
+
+    @Override
+    public TorrentStream getStream(int fileIndex)
+    {
+<span class="nc bnc" id="L1609" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L1610">            return null;</span>
+        }
+
+<span class="nc" id="L1613">        TorrentInfo ti = th.torrentFile();</span>
+<span class="nc bnc" id="L1614" title="All 2 branches missed.">        if (ti == null)</span>
+<span class="nc" id="L1615">            return null;</span>
+<span class="nc" id="L1616">        FileStorage fs = ti.files();</span>
+<span class="nc" id="L1617">        Pair&lt;Integer, Integer&gt; filePieces = getFilePieces(ti, fileIndex);</span>
+<span class="nc bnc" id="L1618" title="All 2 branches missed.">        if (filePieces == null)</span>
+<span class="nc" id="L1619">            throw new IllegalArgumentException(&quot;Incorrect file index&quot;);</span>
+
+<span class="nc" id="L1621">        return new TorrentStream(id, fileIndex,</span>
+<span class="nc" id="L1622">                                 filePieces.first, filePieces.second, ti.pieceLength(),</span>
+<span class="nc" id="L1623">                                 fs.fileOffset(fileIndex), fs.fileSize(fileIndex),</span>
+<span class="nc" id="L1624">                                 ti.pieceSize(filePieces.second));</span>
+
+    }
+
+    @Override
+    public boolean isValid()
+    {
+<span class="nc" id="L1631">        return th.isValid();</span>
+    }
+
+    @Override
+    public boolean isStopped()
+    {
+<span class="nc" id="L1637">        return stopped;</span>
+    }
+
+    @Override
+    public Priority[] getFilePriorities()
+    {
+<span class="nc bnc" id="L1643" title="All 2 branches missed.">        if (operationNotAllowed())</span>
+<span class="nc" id="L1644">            return new Priority[0];</span>
+
+<span class="nc" id="L1646">        return PriorityConverter.convert(th.filePriorities());</span>
+    }
+
+    @Override
+    public byte[] getBencode() {
+<span class="nc bnc" id="L1651" title="All 2 branches missed.">        if (!hasMetadata()) {</span>
+<span class="nc" id="L1652">            return null;</span>
+        }
+
+<span class="nc" id="L1655">        final long alertListenTimeout = 1000; /* ms */</span>
+<span class="nc" id="L1656">        final AtomicReference&lt;byte[]&gt; data = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L1657">        final CountDownLatch signal = new CountDownLatch(1);</span>
+
+<span class="nc" id="L1659">        AlertListener listener = new AlertListener() {</span>
+            @Override
+            public int[] types() {
+<span class="nc" id="L1662">                return new int[] { AlertType.SAVE_RESUME_DATA.swig() };</span>
+            }
+
+            @Override
+            public void alert(Alert&lt;?&gt; alert) {
+<span class="nc" id="L1667">                torrent_handle alertTh = ((TorrentAlert&lt;?&gt;) alert).swig().getHandle();</span>
+<span class="nc bnc" id="L1668" title="All 6 branches missed.">                if (alertTh == null || !alertTh.is_valid() || alertTh.info_hash().ne(th.swig().info_hash())) {</span>
+<span class="nc" id="L1669">                    return;</span>
+                }
+<span class="nc" id="L1671">                AlertType type = alert.type();</span>
+<span class="nc bnc" id="L1672" title="All 2 branches missed.">                if (type.equals(AlertType.SAVE_RESUME_DATA)) {</span>
+                    try {
+<span class="nc" id="L1674">                        byte_vector bytes = libtorrent.write_torrent_file_buf_ex(</span>
+<span class="nc" id="L1675">                                ((SaveResumeDataAlert) alert).params().swig()</span>
+                        );
+<span class="nc" id="L1677">                        data.set(Vectors.byte_vector2bytes(bytes));</span>
+<span class="nc" id="L1678">                    } catch (Throwable e) {</span>
+<span class="nc" id="L1679">                        Log.e(TAG, &quot;Error building torrent data&quot;, e);</span>
+                    } finally {
+<span class="nc" id="L1681">                        signal.countDown();</span>
+                    }
+                }
+<span class="nc bnc" id="L1684" title="All 2 branches missed.">                if (type.equals(AlertType.SAVE_RESUME_DATA_FAILED)) {</span>
+<span class="nc" id="L1685">                    Log.e(TAG, &quot;Error saving resume data&quot;);</span>
+<span class="nc" id="L1686">                    signal.countDown();</span>
+                }
+<span class="nc" id="L1688">            }</span>
+        };
+
+        try {
+<span class="nc" id="L1692">            sessionManager.addListener(listener);</span>
+
+<span class="nc bnc" id="L1694" title="All 2 branches missed.">            if (th.isValid()) {</span>
+<span class="nc" id="L1695">                th.saveResumeData(TorrentHandle.SAVE_INFO_DICT);</span>
+<span class="nc" id="L1696">                signal.await(alertListenTimeout, TimeUnit.MILLISECONDS);</span>
+            }
+<span class="nc" id="L1698">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L1699">            return data.get();</span>
+        } finally {
+<span class="nc" id="L1701">            sessionManager.removeListener(listener);</span>
+        }
+<span class="nc" id="L1703">        return data.get();</span>
+    }
+
+    @Override
+    public boolean hasMissingFiles()
+    {
+<span class="nc" id="L1709">        return hasMissingFiles;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

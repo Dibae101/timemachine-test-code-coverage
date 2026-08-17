@@ -1,0 +1,516 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ZimManageViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Kiwix</a> &gt; <a href="index.source.html" class="el_package">org.kiwix.kiwixmobile.zimManager</a> &gt; <span class="el_source">ZimManageViewModel.kt</span></div><h1>ZimManageViewModel.kt</h1><pre class="source lang-java linenums">/*
+ * Kiwix Android
+ * Copyright (c) 2019 Kiwix &lt;android.kiwix.org&gt;
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ *
+ */
+
+package org.kiwix.kiwixmobile.zimManager
+
+import android.app.Application
+import android.net.ConnectivityManager
+import androidx.annotation.VisibleForTesting
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import io.reactivex.Flowable
+import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.disposables.Disposable
+import io.reactivex.functions.BiFunction
+import io.reactivex.functions.Function6
+import io.reactivex.processors.BehaviorProcessor
+import io.reactivex.processors.PublishProcessor
+import io.reactivex.schedulers.Schedulers
+import org.kiwix.kiwixmobile.core.R
+import org.kiwix.kiwixmobile.core.StorageObserver
+import org.kiwix.kiwixmobile.core.base.SideEffect
+import org.kiwix.kiwixmobile.core.compat.CompatHelper.Companion.isWifi
+import org.kiwix.kiwixmobile.core.dao.FetchDownloadDao
+import org.kiwix.kiwixmobile.core.dao.NewBookDao
+import org.kiwix.kiwixmobile.core.dao.NewLanguagesDao
+import org.kiwix.kiwixmobile.core.data.DataSource
+import org.kiwix.kiwixmobile.core.data.remote.KiwixService
+import org.kiwix.kiwixmobile.core.downloader.model.DownloadModel
+import org.kiwix.kiwixmobile.core.entity.LibraryNetworkEntity
+import org.kiwix.kiwixmobile.core.entity.LibraryNetworkEntity.Book
+import org.kiwix.kiwixmobile.core.extensions.calculateSearchMatches
+import org.kiwix.kiwixmobile.core.extensions.registerReceiver
+import org.kiwix.kiwixmobile.core.utils.BookUtils
+import org.kiwix.kiwixmobile.core.utils.SharedPreferenceUtil
+import org.kiwix.kiwixmobile.core.utils.files.ScanningProgressListener
+import org.kiwix.kiwixmobile.core.zim_manager.Language
+import org.kiwix.kiwixmobile.core.zim_manager.fileselect_view.SelectionMode.MULTI
+import org.kiwix.kiwixmobile.core.zim_manager.fileselect_view.SelectionMode.NORMAL
+import org.kiwix.kiwixmobile.core.zim_manager.fileselect_view.adapter.BooksOnDiskListItem
+import org.kiwix.kiwixmobile.core.zim_manager.fileselect_view.adapter.BooksOnDiskListItem.BookOnDisk
+import org.kiwix.kiwixmobile.zimManager.Fat32Checker.FileSystemState
+import org.kiwix.kiwixmobile.zimManager.NetworkState.CONNECTED
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.MultiModeFinished
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.RequestDeleteMultiSelection
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.RequestMultiSelection
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.RequestNavigateTo
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.RequestSelect
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.RequestShareMultiSelection
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.RestartActionMode
+import org.kiwix.kiwixmobile.zimManager.ZimManageViewModel.FileSelectActions.UserClickedDownloadBooksButton
+import org.kiwix.kiwixmobile.zimManager.fileselectView.FileSelectListState
+import org.kiwix.kiwixmobile.zimManager.fileselectView.effects.DeleteFiles
+import org.kiwix.kiwixmobile.zimManager.fileselectView.effects.NavigateToDownloads
+import org.kiwix.kiwixmobile.zimManager.fileselectView.effects.None
+import org.kiwix.kiwixmobile.zimManager.fileselectView.effects.OpenFileWithNavigation
+import org.kiwix.kiwixmobile.zimManager.fileselectView.effects.ShareFiles
+import org.kiwix.kiwixmobile.zimManager.fileselectView.effects.StartMultiSelection
+import org.kiwix.kiwixmobile.zimManager.libraryView.adapter.LibraryListItem
+import org.kiwix.kiwixmobile.zimManager.libraryView.adapter.LibraryListItem.BookItem
+import org.kiwix.kiwixmobile.zimManager.libraryView.adapter.LibraryListItem.DividerItem
+import org.kiwix.kiwixmobile.zimManager.libraryView.adapter.LibraryListItem.LibraryDownloadItem
+import java.util.LinkedList
+import java.util.Locale
+import java.util.concurrent.TimeUnit.MILLISECONDS
+import javax.inject.Inject
+
+const val DEFAULT_PROGRESS = 0
+const val MAX_PROGRESS = 100
+<span class="nc" id="L84">class ZimManageViewModel @Inject constructor(</span>
+<span class="nc" id="L85">  private val downloadDao: FetchDownloadDao,</span>
+<span class="nc" id="L86">  private val bookDao: NewBookDao,</span>
+<span class="nc" id="L87">  private val languageDao: NewLanguagesDao,</span>
+<span class="nc" id="L88">  private val storageObserver: StorageObserver,</span>
+<span class="nc" id="L89">  private val kiwixService: KiwixService,</span>
+<span class="nc" id="L90">  private val context: Application,</span>
+<span class="nc" id="L91">  private val connectivityBroadcastReceiver: ConnectivityBroadcastReceiver,</span>
+<span class="nc" id="L92">  private val bookUtils: BookUtils,</span>
+<span class="nc" id="L93">  private val fat32Checker: Fat32Checker,</span>
+<span class="nc" id="L94">  private val defaultLanguageProvider: DefaultLanguageProvider,</span>
+<span class="nc" id="L95">  private val dataSource: DataSource,</span>
+<span class="nc" id="L96">  private val connectivityManager: ConnectivityManager,</span>
+<span class="nc" id="L97">  private val sharedPreferenceUtil: SharedPreferenceUtil</span>
+<span class="nc" id="L98">) : ViewModel() {</span>
+  sealed class FileSelectActions {
+<span class="nc" id="L100">    data class RequestNavigateTo(val bookOnDisk: BookOnDisk) : FileSelectActions()</span>
+<span class="nc" id="L101">    data class RequestSelect(val bookOnDisk: BookOnDisk) : FileSelectActions()</span>
+<span class="nc" id="L102">    data class RequestMultiSelection(val bookOnDisk: BookOnDisk) : FileSelectActions()</span>
+<span class="nc" id="L103">    object RequestDeleteMultiSelection : FileSelectActions()</span>
+<span class="nc" id="L104">    object RequestShareMultiSelection : FileSelectActions()</span>
+<span class="nc" id="L105">    object MultiModeFinished : FileSelectActions()</span>
+<span class="nc" id="L106">    object RestartActionMode : FileSelectActions()</span>
+<span class="nc" id="L107">    object UserClickedDownloadBooksButton : FileSelectActions()</span>
+  }
+
+<span class="nc" id="L110">  val sideEffects = PublishProcessor.create&lt;SideEffect&lt;Any?&gt;&gt;()</span>
+<span class="nc" id="L111">  val libraryItems: MutableLiveData&lt;List&lt;LibraryListItem&gt;&gt; = MutableLiveData()</span>
+<span class="nc" id="L112">  val fileSelectListStates: MutableLiveData&lt;FileSelectListState&gt; = MutableLiveData()</span>
+<span class="nc" id="L113">  val deviceListScanningProgress = MutableLiveData&lt;Int&gt;()</span>
+<span class="nc" id="L114">  val libraryListIsRefreshing = MutableLiveData&lt;Boolean&gt;()</span>
+<span class="nc" id="L115">  val shouldShowWifiOnlyDialog = MutableLiveData&lt;Boolean&gt;()</span>
+<span class="nc" id="L116">  val networkStates = MutableLiveData&lt;NetworkState&gt;()</span>
+
+<span class="nc" id="L118">  val requestFileSystemCheck = PublishProcessor.create&lt;Unit&gt;()</span>
+<span class="nc" id="L119">  val fileSelectActions = PublishProcessor.create&lt;FileSelectActions&gt;()</span>
+<span class="nc" id="L120">  val requestDownloadLibrary = BehaviorProcessor.createDefault(Unit)</span>
+<span class="nc" id="L121">  val requestFiltering = BehaviorProcessor.createDefault(&quot;&quot;)</span>
+
+<span class="nc" id="L123">  private var compositeDisposable: CompositeDisposable? = CompositeDisposable()</span>
+
+<span class="nc" id="L125">  init {</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">    compositeDisposable?.addAll(*disposables())</span>
+<span class="nc" id="L127">    context.registerReceiver(connectivityBroadcastReceiver)</span>
+<span class="nc" id="L128">  }</span>
+
+  @VisibleForTesting
+  fun onClearedExposed() {
+<span class="nc" id="L132">    onCleared()</span>
+<span class="nc" id="L133">  }</span>
+
+  override fun onCleared() {
+<span class="nc bnc" id="L136" title="All 2 branches missed.">    compositeDisposable?.clear()</span>
+<span class="nc" id="L137">    context.unregisterReceiver(connectivityBroadcastReceiver)</span>
+<span class="nc" id="L138">    connectivityBroadcastReceiver.stopNetworkState()</span>
+<span class="nc" id="L139">    requestFileSystemCheck.onComplete()</span>
+<span class="nc" id="L140">    fileSelectActions.onComplete()</span>
+<span class="nc" id="L141">    requestDownloadLibrary.onComplete()</span>
+<span class="nc" id="L142">    compositeDisposable = null</span>
+<span class="nc" id="L143">    super.onCleared()</span>
+<span class="nc" id="L144">  }</span>
+
+  private fun disposables(): Array&lt;Disposable&gt; {
+<span class="nc" id="L147">    val downloads = downloadDao.downloads()</span>
+<span class="nc" id="L148">    val booksFromDao = books()</span>
+<span class="nc" id="L149">    val networkLibrary = PublishProcessor.create&lt;LibraryNetworkEntity&gt;()</span>
+<span class="nc" id="L150">    val languages = languageDao.languages()</span>
+<span class="nc" id="L151">    return arrayOf(</span>
+<span class="nc" id="L152">      updateBookItems(),</span>
+<span class="nc" id="L153">      checkFileSystemForBooksOnRequest(booksFromDao),</span>
+<span class="nc" id="L154">      updateLibraryItems(booksFromDao, downloads, networkLibrary, languages),</span>
+<span class="nc" id="L155">      updateLanguagesInDao(networkLibrary, languages),</span>
+<span class="nc" id="L156">      updateNetworkStates(),</span>
+<span class="nc" id="L157">      requestsAndConnectivtyChangesToLibraryRequests(networkLibrary),</span>
+<span class="nc" id="L158">      fileSelectActions()</span>
+    )
+  }
+
+<span class="nc" id="L162">  private fun fileSelectActions() = fileSelectActions.subscribe({</span>
+<span class="nc" id="L163">    sideEffects.offer(</span>
+<span class="nc" id="L164">      when (it) {</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        is RequestNavigateTo -&gt; OpenFileWithNavigation(it.bookOnDisk)</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        is RequestMultiSelection -&gt; startMultiSelectionAndSelectBook(it.bookOnDisk)</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        RequestDeleteMultiSelection -&gt; DeleteFiles(selectionsFromState())</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        RequestShareMultiSelection -&gt; ShareFiles(selectionsFromState())</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        MultiModeFinished -&gt; noSideEffectAndClearSelectionState()</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        is RequestSelect -&gt; noSideEffectSelectBook(it.bookOnDisk)</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        RestartActionMode -&gt; StartMultiSelection(fileSelectActions)</span>
+<span class="nc" id="L172">        UserClickedDownloadBooksButton -&gt; NavigateToDownloads</span>
+      }
+    )
+<span class="nc" id="L175">  }, Throwable::printStackTrace)</span>
+
+  private fun startMultiSelectionAndSelectBook(
+    bookOnDisk: BookOnDisk
+  ): StartMultiSelection {
+<span class="nc bnc" id="L180" title="All 2 branches missed.">    fileSelectListStates.value?.let {</span>
+<span class="nc" id="L181">      fileSelectListStates.postValue(</span>
+<span class="nc" id="L182">        it.copy(</span>
+<span class="nc" id="L183">          bookOnDiskListItems = selectBook(it, bookOnDisk),</span>
+<span class="nc" id="L184">          selectionMode = MULTI</span>
+        )
+      )
+<span class="nc" id="L187">    }</span>
+<span class="nc" id="L188">    return StartMultiSelection(fileSelectActions)</span>
+  }
+
+  private fun selectBook(
+    it: FileSelectListState,
+    bookOnDisk: BookOnDisk
+  ): List&lt;BooksOnDiskListItem&gt; {
+<span class="nc" id="L195">    return it.bookOnDiskListItems.map { listItem -&gt;</span>
+<span class="nc bnc" id="L196" title="All 4 branches missed.">      if (listItem.id == bookOnDisk.id) listItem.apply { isSelected = !isSelected }</span>
+<span class="nc" id="L197">      else listItem</span>
+    }
+  }
+
+  private fun noSideEffectSelectBook(bookOnDisk: BookOnDisk): SideEffect&lt;Unit&gt; {
+<span class="nc bnc" id="L202" title="All 2 branches missed.">    fileSelectListStates.value?.let {</span>
+<span class="nc" id="L203">      fileSelectListStates.postValue(</span>
+<span class="nc" id="L204">        it.copy(bookOnDiskListItems = selectBook(it, bookOnDisk))</span>
+      )
+<span class="nc" id="L206">    }</span>
+<span class="nc" id="L207">    return None</span>
+  }
+
+<span class="nc bnc" id="L210" title="All 4 branches missed.">  private fun selectionsFromState() = fileSelectListStates.value?.selectedBooks ?: emptyList()</span>
+
+  private fun noSideEffectAndClearSelectionState(): SideEffect&lt;Unit&gt; {
+<span class="nc bnc" id="L213" title="All 2 branches missed.">    fileSelectListStates.value?.let {</span>
+<span class="nc" id="L214">      fileSelectListStates.postValue(</span>
+<span class="nc" id="L215">        it.copy(</span>
+<span class="nc" id="L216">          bookOnDiskListItems = it.bookOnDiskListItems.map { booksOnDiskListItem -&gt;</span>
+<span class="nc" id="L217">            booksOnDiskListItem.apply { isSelected = false }</span>
+          },
+<span class="nc" id="L219">          selectionMode = NORMAL</span>
+        )
+      )
+<span class="nc" id="L222">    }</span>
+<span class="nc" id="L223">    return None</span>
+  }
+
+  private fun requestsAndConnectivtyChangesToLibraryRequests(
+    library: PublishProcessor&lt;LibraryNetworkEntity&gt;
+  ) =
+<span class="nc" id="L229">    Flowable.combineLatest(</span>
+<span class="nc" id="L230">      requestDownloadLibrary,</span>
+<span class="nc" id="L231">      connectivityBroadcastReceiver.networkStates.distinctUntilChanged().filter(</span>
+<span class="nc" id="L232">        CONNECTED::equals</span>
+      )
+<span class="nc" id="L234">    ) { _, _ -&gt; }</span>
+<span class="nc" id="L235">      .switchMap {</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (connectivityManager.isWifi()) {</span>
+<span class="nc" id="L237">          Flowable.just(Unit)</span>
+        } else {
+<span class="nc" id="L239">          sharedPreferenceUtil.prefWifiOnlys</span>
+<span class="nc" id="L240">            .doOnNext {</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">              if (it) {</span>
+<span class="nc" id="L242">                shouldShowWifiOnlyDialog.postValue(true)</span>
+              }
+<span class="nc" id="L244">            }</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">            .filter { !it }</span>
+<span class="nc" id="L246">            .map { }</span>
+        }
+      }
+<span class="nc" id="L249">      .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L250">      .observeOn(Schedulers.io())</span>
+<span class="nc" id="L251">      .subscribe(</span>
+        {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">          compositeDisposable?.add(</span>
+<span class="nc" id="L254">            kiwixService.library</span>
+<span class="nc" id="L255">              .retry(5)</span>
+<span class="nc" id="L256">              .subscribe(library::onNext) {</span>
+<span class="nc" id="L257">                it.printStackTrace()</span>
+<span class="nc" id="L258">                library.onNext(LibraryNetworkEntity().apply { book = LinkedList() })</span>
+<span class="nc" id="L259">              }</span>
+          )
+<span class="nc" id="L261">        },</span>
+        Throwable::printStackTrace
+<span class="nc" id="L263">      )</span>
+
+  private fun updateNetworkStates() =
+<span class="nc" id="L266">    connectivityBroadcastReceiver.networkStates.subscribe(</span>
+<span class="nc" id="L267">      networkStates::postValue, Throwable::printStackTrace</span>
+<span class="nc" id="L268">    )</span>
+
+  private fun updateLibraryItems(
+    booksFromDao: Flowable&lt;List&lt;BookOnDisk&gt;&gt;,
+    downloads: Flowable&lt;List&lt;DownloadModel&gt;&gt;,
+    library: Flowable&lt;LibraryNetworkEntity&gt;,
+    languages: Flowable&lt;List&lt;Language&gt;&gt;
+<span class="nc" id="L275">  ) = Flowable.combineLatest(</span>
+<span class="nc" id="L276">    booksFromDao,</span>
+<span class="nc" id="L277">    downloads,</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">    languages.filter(List&lt;Language&gt;::isNotEmpty),</span>
+<span class="nc" id="L279">    library,</span>
+<span class="nc" id="L280">    Flowable.merge(</span>
+<span class="nc" id="L281">      Flowable.just(&quot;&quot;),</span>
+<span class="nc" id="L282">      requestFiltering</span>
+<span class="nc" id="L283">        .doOnNext { libraryListIsRefreshing.postValue(true) }</span>
+<span class="nc" id="L284">        .debounce(500, MILLISECONDS)</span>
+<span class="nc" id="L285">        .observeOn(Schedulers.io())</span>
+    ),
+<span class="nc" id="L287">    fat32Checker.fileSystemStates,</span>
+<span class="nc" id="L288">    Function6(::combineLibrarySources)</span>
+  )
+<span class="nc" id="L290">    .doOnNext { libraryListIsRefreshing.postValue(false) }</span>
+<span class="nc" id="L291">    .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L292">    .subscribe(</span>
+<span class="nc" id="L293">      libraryItems::postValue,</span>
+      Throwable::printStackTrace
+<span class="nc" id="L295">    )</span>
+
+  private fun updateLanguagesInDao(
+    library: Flowable&lt;LibraryNetworkEntity&gt;,
+    languages: Flowable&lt;List&lt;Language&gt;&gt;
+<span class="nc" id="L300">  ) = library</span>
+<span class="nc" id="L301">    .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L302">    .map(LibraryNetworkEntity::book)</span>
+<span class="nc" id="L303">    .withLatestFrom(</span>
+<span class="nc" id="L304">      languages,</span>
+<span class="nc" id="L305">      BiFunction(::combineToLanguageList)</span>
+    )
+<span class="nc" id="L307">    .map { it.sortedBy(Language::language) }</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">    .filter(List&lt;Language&gt;::isNotEmpty)</span>
+<span class="nc" id="L309">    .subscribe(</span>
+<span class="nc" id="L310">      languageDao::insert,</span>
+      Throwable::printStackTrace
+<span class="nc" id="L312">    )</span>
+
+  private fun combineToLanguageList(
+    booksFromNetwork: List&lt;Book&gt;,
+    allLanguages: List&lt;Language&gt;
+<span class="nc" id="L317">  ) = when {</span>
+<span class="nc bnc" id="L318" title="All 4 branches missed.">    booksFromNetwork.isEmpty() &amp;&amp; allLanguages.isEmpty() -&gt; defaultLanguage()</span>
+<span class="nc bnc" id="L319" title="All 6 branches missed.">    booksFromNetwork.isEmpty() &amp;&amp; allLanguages.isNotEmpty() -&gt; emptyList()</span>
+<span class="nc bnc" id="L320" title="All 6 branches missed.">    booksFromNetwork.isNotEmpty() &amp;&amp; allLanguages.isEmpty() -&gt;</span>
+<span class="nc" id="L321">      fromLocalesWithNetworkMatchesSetActiveBy(</span>
+<span class="nc" id="L322">        networkLanguageCounts(booksFromNetwork), defaultLanguage()</span>
+      )
+<span class="nc bnc" id="L324" title="All 8 branches missed.">    booksFromNetwork.isNotEmpty() &amp;&amp; allLanguages.isNotEmpty() -&gt;</span>
+<span class="nc" id="L325">      fromLocalesWithNetworkMatchesSetActiveBy(</span>
+<span class="nc" id="L326">        networkLanguageCounts(booksFromNetwork), allLanguages</span>
+      )
+<span class="nc" id="L328">    else -&gt; throw RuntimeException(&quot;Impossible state&quot;)</span>
+<span class="nc" id="L329">  }</span>
+
+  private fun networkLanguageCounts(booksFromNetwork: List&lt;Book&gt;) =
+<span class="nc bnc" id="L332" title="All 2 branches missed.">    booksFromNetwork.mapNotNull(Book::language)</span>
+<span class="nc" id="L333">      .fold(</span>
+<span class="nc" id="L334">        mutableMapOf&lt;String, Int&gt;()</span>
+<span class="nc" id="L335">      ) { acc, language -&gt; acc.increment(language) }</span>
+
+  private fun &lt;K&gt; MutableMap&lt;K, Int&gt;.increment(key: K) =
+<span class="nc bnc" id="L338" title="All 2 branches missed.">    apply { set(key, getOrElse(key) { 0 } + 1) }</span>
+
+  private fun fromLocalesWithNetworkMatchesSetActiveBy(
+    networkLanguageCounts: MutableMap&lt;String, Int&gt;,
+    listToActivateBy: List&lt;Language&gt;
+<span class="nc" id="L343">  ) = Locale.getISOLanguages()</span>
+<span class="nc" id="L344">    .map(::Locale)</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">    .filter { networkLanguageCounts.containsKey(it.isO3Language) }</span>
+<span class="nc" id="L346">    .map { locale -&gt;</span>
+<span class="nc" id="L347">      Language(</span>
+<span class="nc" id="L348">        locale.isO3Language,</span>
+<span class="nc" id="L349">        languageIsActive(listToActivateBy, locale),</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        networkLanguageCounts.getOrElse(locale.isO3Language) { 0 }</span>
+      )
+<span class="nc" id="L352">    }</span>
+
+  private fun defaultLanguage() =
+<span class="nc" id="L355">    listOf(</span>
+<span class="nc" id="L356">      defaultLanguageProvider.provide()</span>
+<span class="nc" id="L357">    )</span>
+
+  private fun languageIsActive(
+    allLanguages: List&lt;Language&gt;,
+    locale: Locale
+<span class="nc bnc" id="L362" title="All 6 branches missed.">  ) = allLanguages.firstOrNull { it.languageCode == locale.isO3Language }?.active == true</span>
+
+  @Suppress(&quot;UnsafeCallOnNullableType&quot;)
+  private fun combineLibrarySources(
+    booksOnFileSystem: List&lt;BookOnDisk&gt;,
+    activeDownloads: List&lt;DownloadModel&gt;,
+    allLanguages: List&lt;Language&gt;,
+    libraryNetworkEntity: LibraryNetworkEntity,
+    filter: String,
+    fileSystemState: FileSystemState
+  ): List&lt;LibraryListItem&gt; {
+<span class="nc bnc" id="L373" title="All 2 branches missed.">    val activeLanguageCodes = allLanguages.filter(Language::active)</span>
+<span class="nc" id="L374">      .map(Language::languageCode)</span>
+<span class="nc" id="L375">    val booksUnfilteredByLanguage =</span>
+<span class="nc" id="L376">      applySearchFilter(</span>
+<span class="nc" id="L377">        libraryNetworkEntity.book!! - booksOnFileSystem.map(BookOnDisk::book),</span>
+<span class="nc" id="L378">        filter</span>
+      )
+
+<span class="nc" id="L381">    val booksWithActiveLanguages =</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">      booksUnfilteredByLanguage.filter { activeLanguageCodes.contains(it.language) }</span>
+<span class="nc" id="L383">    return createLibrarySection(</span>
+<span class="nc" id="L384">      booksWithActiveLanguages,</span>
+<span class="nc" id="L385">      activeDownloads,</span>
+<span class="nc" id="L386">      fileSystemState,</span>
+<span class="nc" id="L387">      R.string.your_languages,</span>
+<span class="nc" id="L388">      Long.MAX_VALUE</span>
+    ) +
+<span class="nc" id="L390">      createLibrarySection(</span>
+<span class="nc" id="L391">        booksUnfilteredByLanguage - booksWithActiveLanguages,</span>
+<span class="nc" id="L392">        activeDownloads,</span>
+<span class="nc" id="L393">        fileSystemState,</span>
+<span class="nc" id="L394">        R.string.other_languages,</span>
+<span class="nc" id="L395">        Long.MIN_VALUE</span>
+      )
+  }
+
+  private fun createLibrarySection(
+    books: List&lt;Book&gt;,
+    activeDownloads: List&lt;DownloadModel&gt;,
+    fileSystemState: FileSystemState,
+    sectionStringId: Int,
+    sectionId: Long
+  ) =
+<span class="nc bnc" id="L406" title="All 4 branches missed.">    if (books.isNotEmpty())</span>
+<span class="nc" id="L407">      listOf(DividerItem(sectionId, sectionStringId)) +</span>
+<span class="nc" id="L408">        books.asLibraryItems(activeDownloads, fileSystemState)</span>
+<span class="nc" id="L409">    else emptyList()</span>
+
+  private fun applySearchFilter(
+    unDownloadedBooks: List&lt;Book&gt;,
+    filter: String
+<span class="nc bnc" id="L414" title="All 4 branches missed.">  ) = if (filter.isEmpty()) {</span>
+<span class="nc" id="L415">    unDownloadedBooks</span>
+  } else {
+<span class="nc" id="L417">    unDownloadedBooks.iterator().forEach { it.calculateSearchMatches(filter, bookUtils) }</span>
+<span class="nc bnc" id="L418" title="All 4 branches missed.">    unDownloadedBooks.filter { it.searchMatches &gt; 0 }</span>
+<span class="nc" id="L419">  }</span>
+
+  private fun List&lt;Book&gt;.asLibraryItems(
+    activeDownloads: List&lt;DownloadModel&gt;,
+    fileSystemState: FileSystemState
+<span class="nc" id="L424">  ) = map { book -&gt;</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">    activeDownloads.firstOrNull { download -&gt; download.book == book }</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">      ?.let(::LibraryDownloadItem)</span>
+<span class="nc" id="L427">      ?: BookItem(book, fileSystemState)</span>
+<span class="nc" id="L428">  }</span>
+
+  private fun checkFileSystemForBooksOnRequest(booksFromDao: Flowable&lt;List&lt;BookOnDisk&gt;&gt;):
+    Disposable =
+<span class="nc" id="L432">    requestFileSystemCheck</span>
+<span class="nc" id="L433">      .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L434">      .observeOn(Schedulers.io())</span>
+<span class="nc" id="L435">      .onBackpressureDrop()</span>
+<span class="nc" id="L436">      .doOnNext { deviceListScanningProgress.postValue(DEFAULT_PROGRESS) }</span>
+<span class="nc" id="L437">      .switchMap(</span>
+        {
+<span class="nc" id="L439">          booksFromStorageNotIn(</span>
+<span class="nc" id="L440">            booksFromDao,</span>
+<span class="nc" id="L441">            object : ScanningProgressListener {</span>
+              override fun onProgressUpdate(scannedDirectory: Int, totalDirectory: Int) {
+                // Calculate the overall progress based on the number of processed directories
+<span class="nc" id="L444">                val overallProgress =</span>
+<span class="nc" id="L445">                  (scannedDirectory.toDouble() / totalDirectory.toDouble() * MAX_PROGRESS).toInt()</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                if (overallProgress != MAX_PROGRESS) {</span>
+                  // Send the progress if it is not 100% because after scanning the entire storage,
+                  // it takes a bit of time to organize the ZIM files, filter them,
+                  // and remove any duplicate ZIM files. We send the 100% progress
+                  // in the doOnNext method to hide the progressBar from the UI
+                  // and display all the filtered ZIM files.
+<span class="nc" id="L452">                  deviceListScanningProgress.postValue(overallProgress)</span>
+                }
+<span class="nc" id="L454">              }</span>
+            }
+          )
+        },
+<span class="nc" id="L458">        1</span>
+      )
+<span class="nc" id="L460">      .onBackpressureDrop()</span>
+<span class="nc" id="L461">      .doOnNext { deviceListScanningProgress.postValue(MAX_PROGRESS) }</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">      .filter(List&lt;BookOnDisk&gt;::isNotEmpty)</span>
+<span class="nc" id="L463">      .map { it.distinctBy { bookOnDisk -&gt; bookOnDisk.book.id } }</span>
+<span class="nc" id="L464">      .subscribe(</span>
+<span class="nc" id="L465">        bookDao::insert,</span>
+        Throwable::printStackTrace
+<span class="nc" id="L467">      )</span>
+
+<span class="nc" id="L469">  private fun books() = bookDao.books()</span>
+<span class="nc" id="L470">    .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L471">    .map { it.sortedBy { book -&gt; book.book.title } }</span>
+
+  private fun booksFromStorageNotIn(
+    booksFromDao: Flowable&lt;List&lt;BookOnDisk&gt;&gt;,
+    scanningProgressListener: ScanningProgressListener
+  ) =
+<span class="nc" id="L477">    storageObserver.getBooksOnFileSystem(scanningProgressListener)</span>
+<span class="nc" id="L478">      .withLatestFrom(</span>
+<span class="nc" id="L479">        booksFromDao.map { it.map { bookOnDisk -&gt; bookOnDisk.book.id } },</span>
+<span class="nc" id="L480">        BiFunction(::removeBooksAlreadyInDao)</span>
+<span class="nc" id="L481">      )</span>
+
+  private fun removeBooksAlreadyInDao(
+    booksFromFileSystem: Collection&lt;BookOnDisk&gt;,
+    idsInDao: List&lt;String&gt;
+<span class="nc bnc" id="L486" title="All 2 branches missed.">  ) = booksFromFileSystem.filterNot { idsInDao.contains(it.book.id) }</span>
+
+  private fun updateBookItems() =
+<span class="nc" id="L489">    dataSource.booksOnDiskAsListItems()</span>
+<span class="nc" id="L490">      .subscribe({ newList -&gt;</span>
+<span class="nc" id="L491">        fileSelectListStates.postValue(</span>
+<span class="nc bnc" id="L492" title="All 4 branches missed.">          fileSelectListStates.value?.let {</span>
+<span class="nc" id="L493">            inheritSelections(</span>
+<span class="nc" id="L494">              it,</span>
+<span class="nc" id="L495">              newList.toMutableList()</span>
+            )
+<span class="nc" id="L497">          } ?: FileSelectListState(newList)</span>
+        )
+<span class="nc" id="L499">      }, Throwable::printStackTrace)</span>
+
+  private fun inheritSelections(
+    oldState: FileSelectListState,
+    newList: MutableList&lt;BooksOnDiskListItem&gt;
+  ): FileSelectListState {
+<span class="nc" id="L505">    return oldState.copy(</span>
+<span class="nc" id="L506">      bookOnDiskListItems = newList.map { newBookOnDisk -&gt;</span>
+<span class="nc" id="L507">        val firstOrNull =</span>
+<span class="nc" id="L508">          oldState.bookOnDiskListItems.firstOrNull { oldBookOnDisk -&gt;</span>
+<span class="nc bnc" id="L509" title="All 4 branches missed.">            oldBookOnDisk.id == newBookOnDisk.id</span>
+          }
+<span class="nc bnc" id="L511" title="All 2 branches missed.">        newBookOnDisk.apply { isSelected = firstOrNull?.isSelected ?: false }</span>
+      }
+    )
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

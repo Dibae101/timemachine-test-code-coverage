@@ -57,10 +57,51 @@ def find_app_module(tree):
             if re.search(r"(com\.android\.application|plugins\.android\.application"
                          r"|androidApplication|android-application)", text):
                 depth = root[len(tree):].count(os.sep)
-                # prefer a module literally called app, then the shallowest
-                score = (0 if os.path.basename(root) == "app" else 1, depth)
+                rel = root[len(tree):].lower()
+                # Sample and demo modules also apply the application plugin.
+                # Muzei has example-unsplash, which was picked over the real app
+                # and produced an APK for the sample instead.
+                is_sample = any(w in rel for w in
+                                ("example", "sample", "demo", "playground",
+                                 "benchmark", "androidtest"))
+                has_launcher = False
+                manifest = os.path.join(root, "src", "main", "AndroidManifest.xml")
+                if os.path.isfile(manifest):
+                    try:
+                        has_launcher = "android.intent.category.LAUNCHER" in open(
+                            manifest, encoding="utf-8", errors="replace").read()
+                    except OSError:
+                        pass
+                score = (1 if is_sample else 0,
+                         0 if has_launcher else 1,
+                         0 if os.path.basename(root) == "app" else 1,
+                         depth)
                 candidates.append((score, root, path))
     if not candidates:
+        # Some projects never name the plugin in a way that can be grepped:
+        # Jellyfin applies alias(libs.plugins.android.app), and Kiwix uses a
+        # bare `android` accessor supplied by its own buildSrc convention
+        # plugin. Fall back to a module that looks like an application: it has a
+        # build file and a manifest declaring <application>.
+        for root, dirs, files in os.walk(tree):
+            dirs[:] = [d for d in dirs if d not in (".git", "build", ".gradle")]
+            build = next((f for f in ("build.gradle", "build.gradle.kts")
+                          if f in files), None)
+            if not build:
+                continue
+            manifest = os.path.join(root, "src", "main", "AndroidManifest.xml")
+            if not os.path.isfile(manifest):
+                continue
+            try:
+                text = open(manifest, encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            if "<application" not in text:
+                continue
+            # a launcher intent filter marks the application, not a library
+            if "android.intent.category.LAUNCHER" in text or \
+                    os.path.basename(root) == "app":
+                return root, os.path.join(root, build)
         raise InstrumentError("no module applies com.android.application")
     candidates.sort()
     return candidates[0][1], candidates[0][2]

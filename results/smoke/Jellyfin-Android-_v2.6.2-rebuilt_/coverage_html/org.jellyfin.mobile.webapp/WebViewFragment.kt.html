@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WebViewFragment.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Jellyfin-Android</a> &gt; <a href="index.source.html" class="el_package">org.jellyfin.mobile.webapp</a> &gt; <span class="el_source">WebViewFragment.kt</span></div><h1>WebViewFragment.kt</h1><pre class="source lang-java linenums">package org.jellyfin.mobile.webapp
+
+import android.content.Intent
+import android.graphics.Rect
+import android.net.Uri
+import android.os.Bundle
+import android.provider.Settings
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient.FileChooserParams
+import android.webkit.WebView
+import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.core.view.ViewCompat
+import androidx.core.view.doOnNextLayout
+import androidx.core.view.isVisible
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.webkit.WebViewAssetLoader.AssetsPathHandler
+import androidx.webkit.WebViewCompat
+import kotlinx.coroutines.launch
+import org.jellyfin.mobile.R
+import org.jellyfin.mobile.app.ApiClientController
+import org.jellyfin.mobile.app.AppPreferences
+import org.jellyfin.mobile.bridge.ExternalPlayer
+import org.jellyfin.mobile.bridge.NativeInterface
+import org.jellyfin.mobile.bridge.NativePlayer
+import org.jellyfin.mobile.data.entity.ServerEntity
+import org.jellyfin.mobile.databinding.FragmentWebviewBinding
+import org.jellyfin.mobile.setup.ConnectFragment
+import org.jellyfin.mobile.utils.AndroidVersion
+import org.jellyfin.mobile.utils.BackPressInterceptor
+import org.jellyfin.mobile.utils.Constants
+import org.jellyfin.mobile.utils.Constants.FRAGMENT_WEB_VIEW_EXTRA_SERVER
+import org.jellyfin.mobile.utils.applyDefault
+import org.jellyfin.mobile.utils.applyWindowInsetsAsMargins
+import org.jellyfin.mobile.utils.dip
+import org.jellyfin.mobile.utils.enableServiceWorkerWorkaround
+import org.jellyfin.mobile.utils.extensions.getParcelableCompat
+import org.jellyfin.mobile.utils.extensions.replaceFragment
+import org.jellyfin.mobile.utils.fadeIn
+import org.jellyfin.mobile.utils.isOutdated
+import org.jellyfin.mobile.utils.requestNoBatteryOptimizations
+import org.jellyfin.mobile.utils.runOnUiThread
+import org.koin.android.ext.android.inject
+
+<span class="nc" id="L52">class WebViewFragment : Fragment(), BackPressInterceptor, JellyfinWebChromeClient.FileChooserListener {</span>
+<span class="nc" id="L53">    val appPreferences: AppPreferences by inject()</span>
+<span class="nc" id="L54">    private val apiClientController: ApiClientController by inject()</span>
+<span class="nc" id="L55">    private val webappFunctionChannel: WebappFunctionChannel by inject()</span>
+    private lateinit var assetsPathHandler: AssetsPathHandler
+    private lateinit var jellyfinWebViewClient: JellyfinWebViewClient
+<span class="nc" id="L58">    private val nativePlayer: NativePlayer by inject()</span>
+    private lateinit var externalPlayer: ExternalPlayer
+
+<span class="nc" id="L61">    lateinit var server: ServerEntity</span>
+        private set
+    private var connected = false
+<span class="nc" id="L64">    private val timeoutRunnable = Runnable {</span>
+<span class="nc" id="L65">        handleError()</span>
+<span class="nc" id="L66">    }</span>
+<span class="nc" id="L67">    private val showLoadingContainerRunnable = Runnable {</span>
+<span class="nc bnc" id="L68" title="All 4 branches missed.">        webViewBinding?.loadingContainer?.isVisible = true</span>
+<span class="nc" id="L69">    }</span>
+
+    // UI
+    private var webViewBinding: FragmentWebviewBinding? = null
+
+    // External file access
+<span class="nc" id="L75">    private var fileChooserActivityLauncher: ActivityResultLauncher&lt;Intent&gt; = registerForActivityResult(</span>
+<span class="nc" id="L76">        ActivityResultContracts.StartActivityForResult(),</span>
+    ) { result -&gt;
+<span class="nc bnc" id="L78" title="All 2 branches missed.">        fileChooserCallback?.onReceiveValue(FileChooserParams.parseResult(result.resultCode, result.data))</span>
+<span class="nc" id="L79">    }</span>
+    private var fileChooserCallback: ValueCallback&lt;Array&lt;Uri&gt;&gt;? = null
+
+<span class="nc" id="L82">    init {</span>
+<span class="nc" id="L83">        enableServiceWorkerWorkaround()</span>
+<span class="nc" id="L84">    }</span>
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+<span class="nc" id="L87">        super.onCreate(savedInstanceState)</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        server = requireNotNull(requireArguments().getParcelableCompat(FRAGMENT_WEB_VIEW_EXTRA_SERVER)) {</span>
+<span class="nc" id="L89">            &quot;Server entity has not been supplied!&quot;</span>
+        }
+
+<span class="nc" id="L92">        assetsPathHandler = AssetsPathHandler(requireContext())</span>
+<span class="nc" id="L93">        jellyfinWebViewClient = object : JellyfinWebViewClient(</span>
+<span class="nc" id="L94">            lifecycleScope,</span>
+<span class="nc" id="L95">            server,</span>
+<span class="nc" id="L96">            assetsPathHandler,</span>
+<span class="nc" id="L97">            apiClientController,</span>
+        ) {
+            override fun onConnectedToWebapp() {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">                val webViewBinding = webViewBinding ?: return</span>
+<span class="nc" id="L101">                val webView = webViewBinding.webView</span>
+<span class="nc" id="L102">                webView.removeCallbacks(timeoutRunnable)</span>
+<span class="nc" id="L103">                webView.removeCallbacks(showLoadingContainerRunnable)</span>
+<span class="nc" id="L104">                connected = true</span>
+<span class="nc" id="L105">                runOnUiThread {</span>
+<span class="nc" id="L106">                    webViewBinding.loadingContainer.isVisible = false</span>
+<span class="nc" id="L107">                    webView.fadeIn()</span>
+<span class="nc" id="L108">                }</span>
+<span class="nc" id="L109">                requestNoBatteryOptimizations(webViewBinding.root)</span>
+<span class="nc" id="L110">            }</span>
+
+            override fun onErrorReceived() {
+<span class="nc" id="L113">                handleError()</span>
+<span class="nc" id="L114">            }</span>
+        }
+<span class="nc" id="L116">        externalPlayer = ExternalPlayer(requireContext(), this, requireActivity().activityResultRegistry)</span>
+<span class="nc" id="L117">    }</span>
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+<span class="nc" id="L120">        return FragmentWebviewBinding.inflate(inflater, container, false).also { binding -&gt;</span>
+<span class="nc" id="L121">            webViewBinding = binding</span>
+<span class="nc" id="L122">        }.root</span>
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+<span class="nc" id="L126">        super.onViewCreated(view, savedInstanceState)</span>
+<span class="nc" id="L127">        val webView = webViewBinding!!.webView</span>
+
+        // Apply window insets
+<span class="nc" id="L130">        webView.applyWindowInsetsAsMargins()</span>
+<span class="nc" id="L131">        ViewCompat.requestApplyInsets(webView)</span>
+
+        // Setup exclusion rects for gestures
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if (AndroidVersion.isAtLeastQ) {</span>
+            @Suppress(&quot;MagicNumber&quot;)
+<span class="nc" id="L136">            webView.doOnNextLayout {</span>
+                // Maximum allowed exclusion rect height is 200dp,
+                // offsetting 100dp from the center in both directions
+                // uses the maximum available space
+<span class="nc" id="L140">                val verticalCenter = webView.measuredHeight / 2</span>
+<span class="nc" id="L141">                val offset = webView.resources.dip(100)</span>
+
+                // Arbitrary, currently 2x minimum touch target size
+<span class="nc" id="L144">                val exclusionWidth = webView.resources.dip(96)</span>
+
+<span class="nc" id="L146">                webView.systemGestureExclusionRects = listOf(</span>
+<span class="nc" id="L147">                    Rect(</span>
+<span class="nc" id="L148">                        0,</span>
+<span class="nc" id="L149">                        verticalCenter - offset,</span>
+<span class="nc" id="L150">                        exclusionWidth,</span>
+<span class="nc" id="L151">                        verticalCenter + offset,</span>
+                    ),
+                )
+<span class="nc" id="L154">            }</span>
+        }
+
+        // Setup WebView
+<span class="nc" id="L158">        webView.initialize()</span>
+
+<span class="nc" id="L160">        webViewBinding!!.useDifferentServerButton.setOnClickListener {</span>
+<span class="nc" id="L161">            webView.removeCallbacks(timeoutRunnable)</span>
+<span class="nc" id="L162">            webView.stopLoading()</span>
+<span class="nc" id="L163">            webViewBinding!!.loadingContainer.isVisible = false</span>
+<span class="nc" id="L164">            onSelectServer(error = false)</span>
+<span class="nc" id="L165">        }</span>
+
+        // Process JS functions called from other components (e.g. the PlayerActivity)
+<span class="nc" id="L168">        lifecycleScope.launch {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            for (function in webappFunctionChannel) {</span>
+<span class="nc" id="L170">                webView.loadUrl(&quot;javascript:$function&quot;)</span>
+            }
+<span class="nc" id="L172">        }</span>
+<span class="nc" id="L173">    }</span>
+
+    override fun onInterceptBackPressed(): Boolean {
+<span class="nc bnc" id="L176" title="All 4 branches missed.">        return connected &amp;&amp; webappFunctionChannel.goBack()</span>
+    }
+
+    override fun onDestroyView() {
+<span class="nc" id="L180">        super.onDestroyView()</span>
+<span class="nc" id="L181">        webViewBinding = null</span>
+<span class="nc" id="L182">    }</span>
+
+    private fun WebView.initialize() {
+<span class="nc bnc" id="L185" title="All 4 branches missed.">        if (!appPreferences.ignoreWebViewChecks &amp;&amp; isOutdated()) { // Check WebView version</span>
+<span class="nc" id="L186">            showOutdatedWebViewDialog(this)</span>
+<span class="nc" id="L187">            return</span>
+        }
+<span class="nc" id="L189">        webViewClient = jellyfinWebViewClient</span>
+<span class="nc" id="L190">        webChromeClient = JellyfinWebChromeClient(this@WebViewFragment)</span>
+<span class="nc" id="L191">        settings.applyDefault()</span>
+<span class="nc" id="L192">        addJavascriptInterface(NativeInterface(requireContext()), &quot;NativeInterface&quot;)</span>
+<span class="nc" id="L193">        addJavascriptInterface(nativePlayer, &quot;NativePlayer&quot;)</span>
+<span class="nc" id="L194">        addJavascriptInterface(externalPlayer, &quot;ExternalPlayer&quot;)</span>
+
+<span class="nc" id="L196">        loadUrl(server.hostname)</span>
+<span class="nc" id="L197">        postDelayed(timeoutRunnable, Constants.INITIAL_CONNECTION_TIMEOUT)</span>
+<span class="nc" id="L198">        postDelayed(showLoadingContainerRunnable, Constants.SHOW_PROGRESS_BAR_DELAY)</span>
+<span class="nc" id="L199">    }</span>
+
+    private fun showOutdatedWebViewDialog(webView: WebView) {
+<span class="nc" id="L202">        AlertDialog.Builder(requireContext()).apply {</span>
+<span class="nc" id="L203">            setTitle(R.string.dialog_web_view_outdated)</span>
+<span class="nc" id="L204">            setMessage(R.string.dialog_web_view_outdated_message)</span>
+<span class="nc" id="L205">            setCancelable(false)</span>
+
+<span class="nc" id="L207">            val webViewPackage = WebViewCompat.getCurrentWebViewPackage(context)</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (webViewPackage != null) {</span>
+<span class="nc" id="L209">                val marketUri = Uri.Builder().apply {</span>
+<span class="nc" id="L210">                    scheme(&quot;market&quot;)</span>
+<span class="nc" id="L211">                    authority(&quot;details&quot;)</span>
+<span class="nc" id="L212">                    appendQueryParameter(&quot;id&quot;, webViewPackage.packageName)</span>
+<span class="nc" id="L213">                }.build()</span>
+<span class="nc" id="L214">                val referrerUri = Uri.Builder().apply {</span>
+<span class="nc" id="L215">                    scheme(&quot;android-app&quot;)</span>
+<span class="nc" id="L216">                    authority(context.packageName)</span>
+<span class="nc" id="L217">                }.build()</span>
+
+<span class="nc" id="L219">                val marketIntent = Intent(Intent.ACTION_VIEW).apply {</span>
+<span class="nc" id="L220">                    data = marketUri</span>
+<span class="nc" id="L221">                    putExtra(Intent.EXTRA_REFERRER, referrerUri)</span>
+<span class="nc" id="L222">                }</span>
+
+                // Only show button if the intent can be resolved
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                if (marketIntent.resolveActivity(context.packageManager) != null) {</span>
+<span class="nc" id="L226">                    setNegativeButton(R.string.dialog_button_check_for_updates) { _, _ -&gt;</span>
+<span class="nc" id="L227">                        startActivity(marketIntent)</span>
+<span class="nc" id="L228">                        requireActivity().finishAfterTransition()</span>
+<span class="nc" id="L229">                    }</span>
+                }
+            }
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (AndroidVersion.isAtLeastN) {</span>
+<span class="nc" id="L233">                setPositiveButton(R.string.dialog_button_open_settings) { _, _ -&gt;</span>
+<span class="nc" id="L234">                    startActivity(Intent(Settings.ACTION_WEBVIEW_SETTINGS))</span>
+<span class="nc" id="L235">                    Toast.makeText(context, R.string.toast_reopen_after_change, Toast.LENGTH_LONG).show()</span>
+<span class="nc" id="L236">                    requireActivity().finishAfterTransition()</span>
+<span class="nc" id="L237">                }</span>
+            }
+<span class="nc" id="L239">            setNeutralButton(R.string.dialog_button_ignore) { _, _ -&gt;</span>
+<span class="nc" id="L240">                appPreferences.ignoreWebViewChecks = true</span>
+                // Re-initialize
+<span class="nc" id="L242">                webView.initialize()</span>
+<span class="nc" id="L243">            }</span>
+<span class="nc" id="L244">        }.show()</span>
+<span class="nc" id="L245">    }</span>
+
+<span class="nc" id="L247">    private fun onSelectServer(error: Boolean = false) = runOnUiThread {</span>
+<span class="nc" id="L248">        val activity = activity</span>
+<span class="nc bnc" id="L249" title="All 4 branches missed.">        if (activity != null &amp;&amp; activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {</span>
+<span class="nc" id="L250">            val extras = when {</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                error -&gt; Bundle().apply {</span>
+<span class="nc" id="L252">                    putBoolean(Constants.FRAGMENT_CONNECT_EXTRA_ERROR, true)</span>
+<span class="nc" id="L253">                }</span>
+<span class="nc" id="L254">                else -&gt; null</span>
+            }
+<span class="nc" id="L256">            parentFragmentManager.replaceFragment&lt;ConnectFragment&gt;(extras)</span>
+        }
+<span class="nc" id="L258">    }</span>
+
+    private fun handleError() {
+<span class="nc" id="L261">        connected = false</span>
+<span class="nc" id="L262">        onSelectServer(error = true)</span>
+<span class="nc" id="L263">    }</span>
+
+    override fun onShowFileChooser(intent: Intent, filePathCallback: ValueCallback&lt;Array&lt;Uri&gt;&gt;) {
+<span class="nc" id="L266">        fileChooserCallback = filePathCallback</span>
+<span class="nc" id="L267">        fileChooserActivityLauncher.launch(intent)</span>
+<span class="nc" id="L268">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

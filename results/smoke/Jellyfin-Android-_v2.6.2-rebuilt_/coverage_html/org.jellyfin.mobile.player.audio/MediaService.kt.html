@@ -1,0 +1,437 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MediaService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Jellyfin-Android</a> &gt; <a href="index.source.html" class="el_package">org.jellyfin.mobile.player.audio</a> &gt; <span class="el_source">MediaService.kt</span></div><h1>MediaService.kt</h1><pre class="source lang-java linenums">// Contains code adapted from https://github.com/android/uamp/blob/main/common/src/main/java/com/example/android/uamp/media/MediaService.kt
+
+package org.jellyfin.mobile.player.audio
+
+import android.app.Notification
+import android.app.PendingIntent
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.os.ResultReceiver
+import android.support.v4.media.MediaBrowserCompat.MediaItem
+import android.support.v4.media.MediaDescriptionCompat
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaControllerCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
+import android.widget.Toast
+import androidx.core.content.ContextCompat
+import androidx.media.MediaBrowserServiceCompat
+import androidx.mediarouter.media.MediaControlIntent
+import androidx.mediarouter.media.MediaRouteSelector
+import androidx.mediarouter.media.MediaRouter
+import androidx.mediarouter.media.MediaRouterParams
+import com.google.android.exoplayer2.C
+import com.google.android.exoplayer2.ExoPlayer
+import com.google.android.exoplayer2.PlaybackException
+import com.google.android.exoplayer2.Player
+import com.google.android.exoplayer2.audio.AudioAttributes
+import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
+import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
+import com.google.android.exoplayer2.source.MediaSource
+import com.google.android.exoplayer2.ui.PlayerNotificationManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import org.jellyfin.mobile.R
+import org.jellyfin.mobile.app.ApiClientController
+import org.jellyfin.mobile.player.audio.car.LibraryBrowser
+import org.jellyfin.mobile.player.audio.car.LibraryPage
+import org.jellyfin.mobile.player.cast.CastPlayerProvider
+import org.jellyfin.mobile.player.cast.ICastPlayerProvider
+import org.jellyfin.mobile.utils.Constants
+import org.jellyfin.mobile.utils.extensions.mediaUri
+import org.jellyfin.mobile.utils.toast
+import org.jellyfin.sdk.api.client.ApiClient
+import org.jellyfin.sdk.api.client.exception.ApiClientException
+import org.koin.android.ext.android.get
+import org.koin.android.ext.android.inject
+import timber.log.Timber
+import com.google.android.exoplayer2.MediaItem as ExoPlayerMediaItem
+
+<span class="nc" id="L54">class MediaService : MediaBrowserServiceCompat() {</span>
+<span class="nc" id="L55">    private val apiClientController: ApiClientController by inject()</span>
+<span class="nc" id="L56">    private val apiClient: ApiClient by inject()</span>
+<span class="nc" id="L57">    private val libraryBrowser: LibraryBrowser by inject()</span>
+
+<span class="nc" id="L59">    private val serviceScope = MainScope()</span>
+    private var isForegroundService = false
+
+    private lateinit var loadingJob: Job
+
+    // The current player will either be an ExoPlayer (for local playback) or a CastPlayer (for
+    // remote playback through a Cast device).
+    private lateinit var currentPlayer: Player
+
+    private lateinit var notificationManager: AudioNotificationManager
+    private lateinit var mediaController: MediaControllerCompat
+    private lateinit var mediaSession: MediaSessionCompat
+    private lateinit var mediaSessionConnector: MediaSessionConnector
+    private lateinit var mediaRouteSelector: MediaRouteSelector
+    private lateinit var mediaRouter: MediaRouter
+<span class="nc" id="L74">    private val mediaRouterCallback = MediaRouterCallback()</span>
+
+<span class="nc" id="L76">    private var currentPlaylistItems: List&lt;MediaMetadataCompat&gt; = emptyList()</span>
+
+<span class="nc" id="L78">    private val playerAudioAttributes = AudioAttributes.Builder()</span>
+<span class="nc" id="L79">        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)</span>
+<span class="nc" id="L80">        .setUsage(C.USAGE_MEDIA)</span>
+<span class="nc" id="L81">        .build()</span>
+
+<span class="nc" id="L83">    @Suppress(&quot;MemberVisibilityCanBePrivate&quot;)</span>
+<span class="nc" id="L84">    val playerListener: Player.Listener = PlayerEventListener()</span>
+
+<span class="nc" id="L86">    private val exoPlayer: Player by lazy {</span>
+<span class="nc" id="L87">        ExoPlayer.Builder(this, get&lt;MediaSource.Factory&gt;()).apply {</span>
+<span class="nc" id="L88">            setUsePlatformDiagnostics(false)</span>
+<span class="nc" id="L89">        }.build().apply {</span>
+<span class="nc" id="L90">            setAudioAttributes(playerAudioAttributes, true)</span>
+<span class="nc" id="L91">            setHandleAudioBecomingNoisy(true)</span>
+<span class="nc" id="L92">            addListener(playerListener)</span>
+<span class="nc" id="L93">        }</span>
+    }
+
+<span class="nc" id="L96">    private val castPlayerProvider: ICastPlayerProvider by lazy {</span>
+<span class="nc" id="L97">        CastPlayerProvider(this)</span>
+    }
+
+    override fun onCreate() {
+<span class="nc" id="L101">        super.onCreate()</span>
+
+<span class="nc" id="L103">        loadingJob = serviceScope.launch {</span>
+<span class="nc" id="L104">            apiClientController.loadSavedServerUser()</span>
+<span class="nc" id="L105">        }</span>
+
+<span class="nc bnc" id="L107" title="All 4 branches missed.">        val sessionActivityPendingIntent = packageManager?.getLaunchIntentForPackage(packageName)?.let { sessionIntent -&gt;</span>
+<span class="nc" id="L108">            PendingIntent.getActivity(this, 0, sessionIntent, Constants.PENDING_INTENT_FLAGS)</span>
+        }
+
+<span class="nc" id="L111">        mediaSession = MediaSessionCompat(this, &quot;MediaService&quot;).apply {</span>
+<span class="nc" id="L112">            setSessionActivity(sessionActivityPendingIntent)</span>
+<span class="nc" id="L113">            isActive = true</span>
+<span class="nc" id="L114">        }</span>
+
+<span class="nc" id="L116">        sessionToken = mediaSession.sessionToken</span>
+
+<span class="nc" id="L118">        notificationManager = AudioNotificationManager(</span>
+<span class="nc" id="L119">            this,</span>
+<span class="nc" id="L120">            mediaSession.sessionToken,</span>
+<span class="nc" id="L121">            PlayerNotificationListener(),</span>
+        )
+
+<span class="nc" id="L124">        mediaController = MediaControllerCompat(this, mediaSession)</span>
+
+<span class="nc" id="L126">        mediaSessionConnector = MediaSessionConnector(mediaSession).apply {</span>
+<span class="nc" id="L127">            setPlayer(exoPlayer)</span>
+<span class="nc" id="L128">            setPlaybackPreparer(MediaPlaybackPreparer())</span>
+<span class="nc" id="L129">            setQueueNavigator(MediaQueueNavigator(mediaSession))</span>
+<span class="nc" id="L130">        }</span>
+
+<span class="nc" id="L132">        mediaRouter = MediaRouter.getInstance(this)</span>
+<span class="nc" id="L133">        mediaRouter.setMediaSessionCompat(mediaSession)</span>
+<span class="nc" id="L134">        mediaRouteSelector = MediaRouteSelector.Builder().apply {</span>
+<span class="nc" id="L135">            addControlCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK)</span>
+<span class="nc" id="L136">        }.build()</span>
+<span class="nc" id="L137">        mediaRouter.routerParams = MediaRouterParams.Builder().apply {</span>
+<span class="nc" id="L138">            setTransferToLocalEnabled(true)</span>
+<span class="nc" id="L139">        }.build()</span>
+<span class="nc" id="L140">        mediaRouter.addCallback(mediaRouteSelector, mediaRouterCallback, MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY)</span>
+
+<span class="nc" id="L142">        switchToPlayer(</span>
+<span class="nc" id="L143">            previousPlayer = null,</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            newPlayer = if (castPlayerProvider.isCastSessionAvailable) castPlayerProvider.get()!! else exoPlayer,</span>
+        )
+<span class="nc" id="L146">        notificationManager.showNotificationForPlayer(currentPlayer)</span>
+<span class="nc" id="L147">    }</span>
+
+    override fun onDestroy() {
+<span class="nc" id="L150">        mediaSession.run {</span>
+<span class="nc" id="L151">            isActive = false</span>
+<span class="nc" id="L152">            release()</span>
+<span class="nc" id="L153">        }</span>
+
+        // Cancel coroutines when the service is going away
+<span class="nc" id="L156">        serviceScope.cancel()</span>
+
+        // Free ExoPlayer resources
+<span class="nc" id="L159">        exoPlayer.removeListener(playerListener)</span>
+<span class="nc" id="L160">        exoPlayer.release()</span>
+
+        // Stop listening for route changes.
+<span class="nc" id="L163">        mediaRouter.removeCallback(mediaRouterCallback)</span>
+<span class="nc" id="L164">    }</span>
+
+    override fun onGetRoot(
+        clientPackageName: String,
+        clientUid: Int,
+        rootHints: Bundle?,
+<span class="nc" id="L170">    ): BrowserRoot = libraryBrowser.getRoot(rootHints)</span>
+
+    override fun onLoadChildren(parentId: String, result: Result&lt;List&lt;MediaItem&gt;&gt;) {
+<span class="nc" id="L173">        result.detach()</span>
+
+<span class="nc" id="L175">        serviceScope.launch(Dispatchers.IO) {</span>
+            // Ensure that server and credentials are available
+<span class="nc" id="L177">            loadingJob.join()</span>
+
+<span class="nc" id="L179">            val items = try {</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                if (apiClient.userId != null) {</span>
+<span class="nc" id="L181">                    libraryBrowser.loadLibrary(parentId)</span>
+                } else {
+<span class="nc" id="L183">                    Timber.e(&quot;Missing userId in ApiClient&quot;)</span>
+<span class="nc" id="L184">                    null</span>
+                }
+<span class="nc" id="L186">            } catch (e: ApiClientException) {</span>
+<span class="nc" id="L187">                Timber.e(e)</span>
+<span class="nc" id="L188">                null</span>
+            }
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            result.sendResult(items ?: emptyList())</span>
+<span class="nc" id="L191">        }</span>
+<span class="nc" id="L192">    }</span>
+
+    /**
+     * Load the supplied list of songs and the song to play into the current player.
+     */
+<span class="nc" id="L197">    private fun preparePlaylist(</span>
+        metadataList: List&lt;MediaMetadataCompat&gt;,
+<span class="nc" id="L199">        initialPlaybackIndex: Int = 0,</span>
+        playWhenReady: Boolean,
+<span class="nc" id="L201">        playbackStartPositionMs: Long = 0,</span>
+    ) {
+<span class="nc" id="L203">        currentPlaylistItems = metadataList</span>
+
+<span class="nc" id="L205">        val mediaItems = metadataList.map { metadata -&gt;</span>
+<span class="nc" id="L206">            ExoPlayerMediaItem.Builder().apply {</span>
+<span class="nc" id="L207">                setUri(metadata.mediaUri)</span>
+<span class="nc" id="L208">                setTag(metadata)</span>
+<span class="nc" id="L209">            }.build()</span>
+        }
+
+<span class="nc" id="L212">        currentPlayer.playWhenReady = playWhenReady</span>
+<span class="nc" id="L213">        with(currentPlayer) {</span>
+<span class="nc" id="L214">            stop()</span>
+<span class="nc" id="L215">            clearMediaItems()</span>
+<span class="nc" id="L216">        }</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if (currentPlayer == exoPlayer) {</span>
+<span class="nc" id="L218">            with(exoPlayer) {</span>
+<span class="nc" id="L219">                setMediaItems(mediaItems)</span>
+<span class="nc" id="L220">                prepare()</span>
+<span class="nc" id="L221">                seekTo(initialPlaybackIndex, playbackStartPositionMs)</span>
+<span class="nc" id="L222">            }</span>
+        } else {
+<span class="nc" id="L224">            val castPlayer = castPlayerProvider.get()</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">            if (currentPlayer == castPlayer) {</span>
+<span class="nc" id="L226">                castPlayer.setMediaItems(</span>
+<span class="nc" id="L227">                    mediaItems,</span>
+<span class="nc" id="L228">                    initialPlaybackIndex,</span>
+<span class="nc" id="L229">                    playbackStartPositionMs,</span>
+                )
+            }
+        }
+<span class="nc" id="L233">    }</span>
+
+    private fun switchToPlayer(previousPlayer: Player?, newPlayer: Player) {
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (previousPlayer == newPlayer) {</span>
+<span class="nc" id="L237">            return</span>
+        }
+<span class="nc" id="L239">        currentPlayer = newPlayer</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        if (previousPlayer != null) {</span>
+<span class="nc" id="L241">            val playbackState = previousPlayer.playbackState</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">            if (currentPlaylistItems.isEmpty()) {</span>
+                // We are joining a playback session.
+                // Loading the session from the new player is not supported, so we stop playback.
+<span class="nc" id="L245">                with(currentPlayer) {</span>
+<span class="nc" id="L246">                    stop()</span>
+<span class="nc" id="L247">                    clearMediaItems()</span>
+<span class="nc" id="L248">                }</span>
+<span class="nc bnc" id="L249" title="All 4 branches missed.">            } else if (playbackState != Player.STATE_IDLE &amp;&amp; playbackState != Player.STATE_ENDED) {</span>
+<span class="nc" id="L250">                preparePlaylist(</span>
+<span class="nc" id="L251">                    metadataList = currentPlaylistItems,</span>
+<span class="nc" id="L252">                    initialPlaybackIndex = previousPlayer.currentMediaItemIndex,</span>
+<span class="nc" id="L253">                    playWhenReady = previousPlayer.playWhenReady,</span>
+<span class="nc" id="L254">                    playbackStartPositionMs = previousPlayer.currentPosition,</span>
+                )
+            }
+        }
+<span class="nc" id="L258">        mediaSessionConnector.setPlayer(newPlayer)</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        previousPlayer?.run {</span>
+<span class="nc" id="L260">            stop()</span>
+<span class="nc" id="L261">            clearMediaItems()</span>
+<span class="nc" id="L262">        }</span>
+<span class="nc" id="L263">    }</span>
+
+    private fun setPlaybackError() {
+<span class="nc" id="L266">        val errorState = PlaybackStateCompat.Builder()</span>
+<span class="nc" id="L267">            .setState(PlaybackStateCompat.STATE_ERROR, 0, 1f)</span>
+<span class="nc" id="L268">            .setErrorMessage(</span>
+<span class="nc" id="L269">                PlaybackStateCompat.ERROR_CODE_NOT_SUPPORTED,</span>
+<span class="nc" id="L270">                getString(R.string.media_service_item_not_found),</span>
+            )
+<span class="nc" id="L272">            .build()</span>
+<span class="nc" id="L273">        mediaSession.setPlaybackState(errorState)</span>
+<span class="nc" id="L274">    }</span>
+
+    @Suppress(&quot;unused&quot;)
+    fun onCastSessionAvailable() {
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        val castPlayer = castPlayerProvider.get() ?: return</span>
+<span class="nc" id="L279">        switchToPlayer(currentPlayer, castPlayer)</span>
+<span class="nc" id="L280">    }</span>
+
+    @Suppress(&quot;unused&quot;)
+    fun onCastSessionUnavailable() {
+<span class="nc" id="L284">        switchToPlayer(currentPlayer, exoPlayer)</span>
+<span class="nc" id="L285">    }</span>
+
+<span class="nc" id="L287">    private inner class MediaQueueNavigator(mediaSession: MediaSessionCompat) : TimelineQueueNavigator(mediaSession) {</span>
+        override fun getMediaDescription(player: Player, windowIndex: Int): MediaDescriptionCompat =
+<span class="nc" id="L289">            currentPlaylistItems[windowIndex].description</span>
+    }
+
+<span class="nc" id="L292">    private inner class MediaPlaybackPreparer : MediaSessionConnector.PlaybackPreparer {</span>
+<span class="nc" id="L293">        override fun getSupportedPrepareActions(): Long = 0L or</span>
+            PlaybackStateCompat.ACTION_PREPARE or
+            PlaybackStateCompat.ACTION_PLAY or
+            PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or
+            PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or
+            PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH or
+<span class="nc" id="L299">            PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH</span>
+
+        override fun onPrepare(playWhenReady: Boolean) {
+<span class="nc" id="L302">            serviceScope.launch {</span>
+<span class="nc" id="L303">                val recents = try {</span>
+<span class="nc" id="L304">                    libraryBrowser.getDefaultRecents()</span>
+<span class="nc" id="L305">                } catch (e: ApiClientException) {</span>
+<span class="nc" id="L306">                    Timber.e(e)</span>
+<span class="nc" id="L307">                    null</span>
+                }
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                if (recents != null) {</span>
+<span class="nc" id="L310">                    preparePlaylist(recents, 0, playWhenReady)</span>
+                } else {
+<span class="nc" id="L312">                    setPlaybackError()</span>
+                }
+<span class="nc" id="L314">            }</span>
+<span class="nc" id="L315">        }</span>
+
+        override fun onPrepareFromMediaId(mediaId: String, playWhenReady: Boolean, extras: Bundle?) {
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (mediaId == LibraryPage.RESUME) {</span>
+                // Requested recents
+<span class="nc" id="L320">                onPrepare(playWhenReady)</span>
+            } else {
+<span class="nc" id="L322">                serviceScope.launch {</span>
+<span class="nc" id="L323">                    val result = libraryBrowser.buildPlayQueue(mediaId)</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                    if (result != null) {</span>
+<span class="nc" id="L325">                        val (playbackQueue, initialPlaybackIndex) = result</span>
+<span class="nc" id="L326">                        preparePlaylist(playbackQueue, initialPlaybackIndex, playWhenReady)</span>
+                    } else {
+<span class="nc" id="L328">                        setPlaybackError()</span>
+                    }
+<span class="nc" id="L330">                }</span>
+            }
+<span class="nc" id="L332">        }</span>
+
+        override fun onPrepareFromSearch(query: String, playWhenReady: Boolean, extras: Bundle?) {
+<span class="nc bnc" id="L335" title="All 4 branches missed.">            if (query.isEmpty()) {</span>
+                // No search provided, fallback to recents
+<span class="nc" id="L337">                onPrepare(playWhenReady)</span>
+            } else {
+<span class="nc" id="L339">                serviceScope.launch {</span>
+<span class="nc" id="L340">                    val results = try {</span>
+<span class="nc" id="L341">                        libraryBrowser.getSearchResults(query, extras)</span>
+<span class="nc" id="L342">                    } catch (e: ApiClientException) {</span>
+<span class="nc" id="L343">                        Timber.e(e)</span>
+<span class="nc" id="L344">                        null</span>
+                    }
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                    if (results != null) {</span>
+<span class="nc" id="L347">                        preparePlaylist(results, 0, playWhenReady)</span>
+                    } else {
+<span class="nc" id="L349">                        setPlaybackError()</span>
+                    }
+<span class="nc" id="L351">                }</span>
+            }
+<span class="nc" id="L353">        }</span>
+
+<span class="nc" id="L355">        override fun onPrepareFromUri(uri: Uri, playWhenReady: Boolean, extras: Bundle?) = Unit</span>
+
+        override fun onCommand(
+            player: Player,
+            command: String,
+            extras: Bundle?,
+            cb: ResultReceiver?,
+<span class="nc" id="L362">        ): Boolean = false</span>
+    }
+
+    /**
+     * Listen for notification events.
+     */
+<span class="nc" id="L368">    private inner class PlayerNotificationListener : PlayerNotificationManager.NotificationListener {</span>
+        override fun onNotificationPosted(notificationId: Int, notification: Notification, ongoing: Boolean) {
+<span class="nc bnc" id="L370" title="All 4 branches missed.">            if (ongoing &amp;&amp; !isForegroundService) {</span>
+<span class="nc" id="L371">                val serviceIntent = Intent(applicationContext, this@MediaService.javaClass)</span>
+<span class="nc" id="L372">                ContextCompat.startForegroundService(applicationContext, serviceIntent)</span>
+
+<span class="nc" id="L374">                startForeground(notificationId, notification)</span>
+<span class="nc" id="L375">                isForegroundService = true</span>
+            }
+<span class="nc" id="L377">        }</span>
+
+        override fun onNotificationCancelled(notificationId: Int, dismissedByUser: Boolean) {
+<span class="nc" id="L380">            stopForeground(true)</span>
+<span class="nc" id="L381">            isForegroundService = false</span>
+<span class="nc" id="L382">            stopSelf()</span>
+<span class="nc" id="L383">        }</span>
+    }
+
+    /**
+     * Listen for events from ExoPlayer.
+     */
+<span class="nc" id="L389">    private inner class PlayerEventListener : Player.Listener {</span>
+        override fun onPlayerStateChanged(playWhenReady: Boolean, playbackState: Int) {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">            when (playbackState) {</span>
+                Player.STATE_BUFFERING,
+                Player.STATE_READY,
+                -&gt; {
+<span class="nc" id="L395">                    notificationManager.showNotificationForPlayer(currentPlayer)</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                    if (playbackState == Player.STATE_READY) {</span>
+                        // TODO: When playing/paused save the current media item in persistent storage
+                        //  so that playback can be resumed between device reboots
+
+<span class="nc bnc" id="L400" title="All 2 branches missed.">                        if (!playWhenReady) {</span>
+                            // If playback is paused we remove the foreground state which allows the
+                            // notification to be dismissed. An alternative would be to provide a
+                            // &quot;close&quot; button in the notification which stops playback and clears
+                            // the notification.
+<span class="nc" id="L405">                            stopForeground(false)</span>
+                        }
+                    }
+                }
+<span class="nc" id="L409">                else -&gt; notificationManager.hideNotification()</span>
+            }
+<span class="nc" id="L411">        }</span>
+
+        override fun onPlayerError(error: PlaybackException) {
+<span class="nc" id="L414">            toast(&quot;${getString(R.string.media_service_generic_error)}: ${error.errorCodeName}&quot;, Toast.LENGTH_LONG)</span>
+<span class="nc" id="L415">        }</span>
+    }
+
+    /**
+     * Listen for MediaRoute changes
+     */
+<span class="nc" id="L421">    private inner class MediaRouterCallback : MediaRouter.Callback() {</span>
+        override fun onRouteSelected(router: MediaRouter, route: MediaRouter.RouteInfo, reason: Int) {
+<span class="nc bnc" id="L423" title="All 3 branches missed.">            if (reason == MediaRouter.UNSELECT_REASON_ROUTE_CHANGED) {</span>
+<span class="nc" id="L424">                Timber.d(&quot;Unselected because route changed, continue playback&quot;)</span>
+            } else if (reason == MediaRouter.UNSELECT_REASON_STOPPED) {
+<span class="nc" id="L426">                Timber.d(&quot;Unselected because route was stopped, stop playback&quot;)</span>
+<span class="nc" id="L427">                currentPlayer.stop()</span>
+            }
+<span class="nc" id="L429">        }</span>
+    }
+
+    companion object {
+        /** Declares that content style is supported */
+        const val CONTENT_STYLE_SUPPORTED = &quot;android.media.browse.CONTENT_STYLE_SUPPORTED&quot;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

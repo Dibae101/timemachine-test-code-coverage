@@ -1,0 +1,595 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ComposeWorker.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Fedilab</a> &gt; <a href="index.source.html" class="el_package">app.fedilab.android.mastodon.jobs</a> &gt; <span class="el_source">ComposeWorker.java</span></div><h1>ComposeWorker.java</h1><pre class="source lang-java linenums">package app.fedilab.android.mastodon.jobs;
+/* Copyright 2022 Thomas Schneider
+ *
+ * This file is a part of Fedilab
+ *
+ * This program is free software; you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation; either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * Fedilab is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with Fedilab; if not,
+ * see &lt;http://www.gnu.org/licenses&gt;. */
+
+import static android.content.Context.NOTIFICATION_SERVICE;
+
+import android.app.IntentService;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.ServiceInfo;
+import android.graphics.BitmapFactory;
+import android.os.Build;
+import android.os.Bundle;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
+import androidx.core.app.NotificationCompat;
+import androidx.preference.PreferenceManager;
+import androidx.work.Data;
+import androidx.work.ForegroundInfo;
+import androidx.work.WorkManager;
+import androidx.work.Worker;
+import androidx.work.WorkerParameters;
+
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.gson.Gson;
+
+import java.io.IOException;
+import java.net.IDN;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+
+import app.fedilab.android.BaseMainActivity;
+import app.fedilab.android.BuildConfig;
+import app.fedilab.android.R;
+import app.fedilab.android.mastodon.client.endpoints.MastodonStatusesService;
+import app.fedilab.android.mastodon.client.entities.api.Attachment;
+import app.fedilab.android.mastodon.client.entities.api.Poll;
+import app.fedilab.android.mastodon.client.entities.api.ScheduledStatus;
+import app.fedilab.android.mastodon.client.entities.api.Status;
+import app.fedilab.android.mastodon.client.entities.app.Account;
+import app.fedilab.android.mastodon.client.entities.app.BaseAccount;
+import app.fedilab.android.mastodon.client.entities.app.CachedBundle;
+import app.fedilab.android.mastodon.client.entities.app.CamelTag;
+import app.fedilab.android.mastodon.client.entities.app.PostState;
+import app.fedilab.android.mastodon.client.entities.app.StatusDraft;
+import app.fedilab.android.mastodon.exception.DBException;
+import app.fedilab.android.mastodon.helper.Helper;
+import app.fedilab.android.mastodon.ui.drawer.StatusAdapter;
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
+import okhttp3.OkHttpClient;
+import okhttp3.RequestBody;
+import retrofit2.Call;
+import retrofit2.Response;
+import retrofit2.Retrofit;
+import retrofit2.converter.gson.GsonConverterFactory;
+
+public class ComposeWorker extends Worker {
+
+    private static final int NOTIFICATION_INT_CHANNEL_ID = 1;
+<span class="nc" id="L82">    public static String CHANNEL_ID = &quot;post_messages&quot;;</span>
+    private final NotificationManager notificationManager;
+    private NotificationCompat.Builder notificationBuilder;
+
+    public ComposeWorker(
+            @NonNull Context context,
+            @NonNull WorkerParameters parameters) {
+<span class="nc" id="L89">        super(context, parameters);</span>
+<span class="nc" id="L90">        notificationManager = (NotificationManager)</span>
+<span class="nc" id="L91">                context.getSystemService(NOTIFICATION_SERVICE);</span>
+<span class="nc" id="L92">    }</span>
+
+    private static OkHttpClient getOkHttpClient(Context context) {
+<span class="nc" id="L95">        return new OkHttpClient.Builder()</span>
+<span class="nc" id="L96">                .readTimeout(120, TimeUnit.SECONDS)</span>
+<span class="nc" id="L97">                .connectTimeout(120, TimeUnit.SECONDS)</span>
+<span class="nc" id="L98">                .proxy(Helper.getProxy(context.getApplicationContext()))</span>
+<span class="nc" id="L99">                .build();</span>
+    }
+
+    private static MastodonStatusesService init(Context context, String instance) {
+<span class="nc" id="L103">        Retrofit retrofit = new Retrofit.Builder()</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                .baseUrl(&quot;https://&quot; + (instance != null ? IDN.toASCII(instance, IDN.ALLOW_UNASSIGNED) : null) + &quot;/api/v1/&quot;)</span>
+<span class="nc" id="L105">                .addConverterFactory(GsonConverterFactory.create(Helper.getDateBuilder()))</span>
+<span class="nc" id="L106">                .client(getOkHttpClient(context))</span>
+<span class="nc" id="L107">                .build();</span>
+<span class="nc" id="L108">        return retrofit.create(MastodonStatusesService.class);</span>
+    }
+
+    public static void publishMessage(Context context, DataPost dataPost) {
+        long totalMediaSize;
+        long totalBitRead;
+<span class="nc" id="L114">        MastodonStatusesService mastodonStatusesService = init(context, dataPost.instance);</span>
+<span class="nc" id="L115">        boolean error = false;</span>
+<span class="nc" id="L116">        Status firstSendMessage = null;</span>
+<span class="nc bnc" id="L117" title="All 6 branches missed.">        if (dataPost.statusDraft != null &amp;&amp; dataPost.statusDraft.statusDraftList != null &amp;&amp; dataPost.statusDraft.statusDraftList.size() &gt; 0) {</span>
+            //If state is null, it is created (typically when submitting the status the first time)
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if (dataPost.statusDraft.state == null) {</span>
+<span class="nc" id="L120">                dataPost.statusDraft.state = new PostState();</span>
+<span class="nc" id="L121">                dataPost.statusDraft.state.posts = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L122">                dataPost.statusDraft.state.number_of_posts = dataPost.statusDraft.statusDraftList.size();</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                for (Status status : dataPost.statusDraft.statusDraftList) {</span>
+<span class="nc" id="L124">                    PostState.Post post = new PostState.Post();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                    post.number_of_media = status.media_attachments != null ? status.media_attachments.size() : 0;</span>
+<span class="nc" id="L126">                    dataPost.statusDraft.state.posts.add(post);</span>
+<span class="nc" id="L127">                }</span>
+            }
+            //Check if previous messages in thread have already been published (ie: when resending after a fail)
+<span class="nc" id="L130">            int startingPosition = 0;</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            for (PostState.Post post : dataPost.statusDraft.state.posts) {</span>
+<span class="nc bnc" id="L132" title="All 4 branches missed.">                if (post.id == null || post.id.startsWith(&quot;@fedilab_compose_&quot;)) {</span>
+<span class="nc" id="L133">                    break;</span>
+                }
+<span class="nc" id="L135">                startingPosition++;</span>
+<span class="nc" id="L136">            }</span>
+
+<span class="nc" id="L138">            List&lt;Status&gt; statuses = dataPost.statusDraft.statusDraftList;</span>
+<span class="nc" id="L139">            String in_reply_to_status = null;</span>
+<span class="nc bnc" id="L140" title="All 4 branches missed.">            if (dataPost.statusDraft.statusReplyList != null &amp;&amp; dataPost.statusDraft.statusReplyList.size() &gt; 0) {</span>
+<span class="nc" id="L141">                in_reply_to_status = dataPost.statusDraft.statusReplyList.get(dataPost.statusDraft.statusReplyList.size() - 1).id;</span>
+            }
+<span class="nc" id="L143">            totalMediaSize = 0;</span>
+<span class="nc" id="L144">            totalBitRead = 0;</span>
+<span class="nc" id="L145">            SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context);</span>
+<span class="nc" id="L146">            boolean watermark = sharedPreferences.getBoolean(context.getString(R.string.SET_WATERMARK), false);</span>
+<span class="nc" id="L147">            String watermarkText = sharedPreferences.getString(context.getString(R.string.SET_WATERMARK_TEXT) + BaseMainActivity.currentUserID + BaseMainActivity.currentInstance, null);</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            for (int i = startingPosition; i &lt; statuses.size(); i++) {</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">                if (statuses.get(i).media_attachments != null &amp;&amp; statuses.get(i).media_attachments.size() &gt; 0) {</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                    for (Attachment attachment : statuses.get(i).media_attachments) {</span>
+<span class="nc" id="L151">                        totalMediaSize += attachment.size;</span>
+<span class="nc" id="L152">                    }</span>
+                }
+            }
+<span class="nc bnc" id="L155" title="All 4 branches missed.">            if (watermarkText == null || watermarkText.trim().length() == 0) {</span>
+                try {
+<span class="nc" id="L157">                    BaseAccount account = new Account(context).getAccountByToken(dataPost.token);</span>
+<span class="nc" id="L158">                    watermarkText = account.mastodon_account.username + &quot;@&quot; + account.instance;</span>
+<span class="nc" id="L159">                } catch (DBException e) {</span>
+<span class="nc" id="L160">                    e.printStackTrace();</span>
+<span class="nc" id="L161">                }</span>
+
+            }
+<span class="nc" id="L164">            dataPost.messageToSend = statuses.size() - startingPosition;</span>
+<span class="nc" id="L165">            dataPost.messageSent = 0;</span>
+<span class="nc" id="L166">            List&lt;String&gt; media_edit_id = null;</span>
+<span class="nc" id="L167">            List&lt;String&gt; media_edit_description = null;</span>
+<span class="nc" id="L168">            List&lt;String&gt; media_edit_focus = null;</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            for (int i = startingPosition; i &lt; statuses.size(); i++) {</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                if (dataPost.notificationBuilder != null) {</span>
+<span class="nc" id="L171">                    dataPost.notificationBuilder.setProgress(100, dataPost.messageSent * 100 / dataPost.messageToSend, true);</span>
+<span class="nc" id="L172">                    dataPost.notificationBuilder.setContentText(context.getString(R.string.post_message_text, dataPost.messageSent, dataPost.messageToSend));</span>
+<span class="nc" id="L173">                    dataPost.notificationManager.notify(NOTIFICATION_INT_CHANNEL_ID, dataPost.notificationBuilder.build());</span>
+                }
+                //post media first
+<span class="nc" id="L176">                List&lt;String&gt; attachmentIds = null;</span>
+<span class="nc bnc" id="L177" title="All 4 branches missed.">                if (statuses.get(i).media_attachments != null &amp;&amp; statuses.get(i).media_attachments.size() &gt; 0) {</span>
+<span class="nc" id="L178">                    attachmentIds = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                    for (Attachment attachment : statuses.get(i).media_attachments) {</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                        if (attachment.id != null) {</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                            if (media_edit_id == null) {</span>
+<span class="nc" id="L182">                                media_edit_id = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L183">                                media_edit_description = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L184">                                media_edit_focus = new ArrayList&lt;&gt;();</span>
+                            }
+<span class="nc" id="L186">                            attachmentIds.add(attachment.id);</span>
+<span class="nc" id="L187">                            media_edit_id.add(attachment.id);</span>
+<span class="nc" id="L188">                            media_edit_description.add(attachment.description);</span>
+<span class="nc" id="L189">                            media_edit_focus.add(attachment.focus);</span>
+                        } else {
+                            MultipartBody.Part fileMultipartBody;
+<span class="nc bnc" id="L192" title="All 6 branches missed.">                            if (watermark &amp;&amp; attachment.mimeType != null &amp;&amp; attachment.mimeType.contains(&quot;image&quot;)) {</span>
+<span class="nc" id="L193">                                fileMultipartBody = Helper.getMultipartBodyWithWM(context, watermarkText, &quot;file&quot;, attachment);</span>
+                            } else {
+<span class="nc" id="L195">                                fileMultipartBody = Helper.getMultipartBody(&quot;file&quot;, attachment);</span>
+                            }
+<span class="nc" id="L197">                            String replyId = null;</span>
+<span class="nc" id="L198">                            int retry = 0;</span>
+<span class="nc bnc" id="L199" title="All 4 branches missed.">                            while (replyId == null &amp;&amp; retry &lt; 3) {</span>
+<span class="nc" id="L200">                                replyId = postAttachment(mastodonStatusesService, dataPost, fileMultipartBody, attachment);</span>
+<span class="nc" id="L201">                                retry++;</span>
+                            }
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                            if (replyId == null) {</span>
+<span class="nc" id="L204">                                error = true;</span>
+                            } else {
+<span class="nc" id="L206">                                attachmentIds.add(replyId);</span>
+                            }
+                        }
+
+<span class="nc" id="L210">                    }</span>
+                }
+<span class="nc" id="L212">                List&lt;String&gt; poll_options = null;</span>
+<span class="nc" id="L213">                Integer poll_expire_in = null;</span>
+<span class="nc" id="L214">                Boolean poll_multiple = null;</span>
+<span class="nc" id="L215">                Boolean poll_hide_totals = null;</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                if (statuses.get(i).poll != null) {</span>
+<span class="nc" id="L217">                    poll_options = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                    for (Poll.PollItem pollItem : statuses.get(i).poll.options) {</span>
+<span class="nc" id="L219">                        poll_options.add(pollItem.title);</span>
+<span class="nc" id="L220">                    }</span>
+<span class="nc" id="L221">                    poll_expire_in = statuses.get(i).poll.expire_in;</span>
+<span class="nc" id="L222">                    poll_multiple = statuses.get(i).poll.multiple;</span>
+<span class="nc" id="L223">                    poll_hide_totals = false;</span>
+                }
+                Call&lt;Status&gt; statusCall;
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                if (error) {</span>
+<span class="nc" id="L227">                    Bundle args = new Bundle();</span>
+<span class="nc" id="L228">                    args.putBoolean(Helper.RECEIVE_COMPOSE_ERROR_MESSAGE, true);</span>
+<span class="nc" id="L229">                    Intent intentBD = new Intent(Helper.INTENT_COMPOSE_ERROR_MESSAGE);</span>
+<span class="nc" id="L230">                    args.putSerializable(Helper.RECEIVE_ERROR_MESSAGE, context.getString(R.string.media_cannot_be_uploaded));</span>
+<span class="nc" id="L231">                    args.putSerializable(Helper.ARG_STATUS_DRAFT, dataPost.statusDraft);</span>
+<span class="nc" id="L232">                    BaseAccount account = null;</span>
+                    try {
+<span class="nc" id="L234">                        account = new Account(context).getAccountByToken(dataPost.token);</span>
+<span class="nc" id="L235">                    } catch (DBException e) {</span>
+<span class="nc" id="L236">                        e.printStackTrace();</span>
+<span class="nc" id="L237">                    }</span>
+<span class="nc" id="L238">                    new CachedBundle(context).insertBundle(args, account, bundleId -&gt; {</span>
+<span class="nc" id="L239">                        Bundle bundle = new Bundle();</span>
+<span class="nc" id="L240">                        bundle.putLong(Helper.ARG_INTENT_ID, bundleId);</span>
+<span class="nc" id="L241">                        intentBD.putExtras(bundle);</span>
+<span class="nc" id="L242">                        intentBD.setPackage(BuildConfig.APPLICATION_ID);</span>
+<span class="nc" id="L243">                        context.sendBroadcast(intentBD);</span>
+<span class="nc" id="L244">                    });</span>
+<span class="nc" id="L245">                    return;</span>
+                }
+<span class="nc bnc" id="L247" title="All 2 branches missed.">                if (statuses.get(i).local_only) {</span>
+<span class="nc" id="L248">                    statuses.get(i).text += &quot; \uD83D\uDC41&quot;;</span>
+                }
+                //Record tags
+<span class="nc bnc" id="L251" title="All 4 branches missed.">                if (statuses.get(i).text != null &amp;&amp; statuses.get(i).text.length() &gt; 0) {</span>
+<span class="nc" id="L252">                    Matcher matcher = Helper.hashtagPattern.matcher(statuses.get(i).text);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                    while (matcher.find()) {</span>
+<span class="nc" id="L254">                        int matchStart = matcher.start(1);</span>
+<span class="nc" id="L255">                        int matchEnd = matcher.end();</span>
+                        //Get cached tags
+<span class="nc bnc" id="L257" title="All 4 branches missed.">                        if (matchStart &gt;= 0 &amp;&amp; matchEnd &lt; statuses.get(i).text.length()) {</span>
+<span class="nc" id="L258">                            String tag = statuses.get(i).text.substring(matchStart, matchEnd);</span>
+<span class="nc" id="L259">                            tag = tag.replace(&quot;#&quot;, &quot;&quot;);</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                            if (tag.length() &gt; 0) {</span>
+                                try {
+<span class="nc" id="L262">                                    new CamelTag(context).insert(tag);</span>
+<span class="nc" id="L263">                                } catch (DBException e) {</span>
+<span class="nc" id="L264">                                    throw new RuntimeException(e);</span>
+<span class="nc" id="L265">                                }</span>
+                            }
+                        }
+<span class="nc" id="L268">                    }</span>
+                }
+
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                if (dataPost.scheduledDate == null) {</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                    if (dataPost.statusEditId == null) {</span>
+<span class="nc" id="L273">                        statusCall = mastodonStatusesService.createStatus(null, dataPost.token, statuses.get(i).text, attachmentIds, poll_options, poll_expire_in,</span>
+<span class="nc bnc" id="L274" title="All 4 branches missed.">                                poll_multiple, poll_hide_totals, statuses.get(i).quote_id == null ? in_reply_to_status : null, statuses.get(i).sensitive, statuses.get(i).spoilerChecked ? statuses.get(i).spoiler_text : null, statuses.get(i).visibility.toLowerCase(), statuses.get(i).language, statuses.get(i).quote_id, statuses.get(i).content_type);</span>
+                    } else { //Status is edited
+<span class="nc" id="L276">                        statusCall = mastodonStatusesService.updateStatus(null, dataPost.token, dataPost.statusEditId, statuses.get(i).text, attachmentIds, poll_options, poll_expire_in,</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                                poll_multiple, poll_hide_totals, statuses.get(i).quote_id == null ? in_reply_to_status : null, statuses.get(i).sensitive,</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">                                statuses.get(i).spoilerChecked ? statuses.get(i).spoiler_text : null, statuses.get(i).visibility.toLowerCase(), statuses.get(i).language,</span>
+                                media_edit_id, media_edit_description, media_edit_focus);
+                    }
+                    try {
+<span class="nc" id="L282">                        Response&lt;Status&gt; statusResponse = statusCall.execute();</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">                        if (statusResponse.isSuccessful()) {</span>
+<span class="nc" id="L284">                            Status statusReply = statusResponse.body();</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                            if (statusReply != null) {</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                                if (dataPost.statusEditId == null) {</span>
+<span class="nc" id="L287">                                    StatusAdapter.sendAction(context, Helper.ARG_STATUS_POSTED, statusReply, null);</span>
+                                }
+                            }
+<span class="nc bnc" id="L290" title="All 4 branches missed.">                            if (firstSendMessage == null &amp;&amp; statusReply != null) {</span>
+<span class="nc" id="L291">                                firstSendMessage = statusReply;</span>
+                            }
+<span class="nc bnc" id="L293" title="All 2 branches missed.">                            if (statusReply != null) {</span>
+<span class="nc" id="L294">                                in_reply_to_status = statusReply.id;</span>
+<span class="nc" id="L295">                                dataPost.statusDraft.state.posts_successfully_sent = i;</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">                                if (dataPost.statusDraft.state.posts.size() &gt; i + 1) {</span>
+<span class="nc" id="L297">                                    dataPost.statusDraft.state.posts.get(i + 1).id = statusReply.id;</span>
+<span class="nc" id="L298">                                    dataPost.statusDraft.state.posts.get(i + 1).in_reply_to_id = statusReply.in_reply_to_id;</span>
+                                }
+
+                                try {
+<span class="nc" id="L302">                                    new StatusDraft(context.getApplicationContext()).updatePostState(dataPost.statusDraft);</span>
+<span class="nc" id="L303">                                } catch (DBException e) {</span>
+<span class="nc" id="L304">                                    e.printStackTrace();</span>
+<span class="nc" id="L305">                                }</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">                                if (i &gt;= dataPost.statusDraft.statusDraftList.size()) {</span>
+                                    try {
+<span class="nc" id="L308">                                        new StatusDraft(context).removeDraft(dataPost.statusDraft);</span>
+<span class="nc" id="L309">                                    } catch (DBException e) {</span>
+<span class="nc" id="L310">                                        e.printStackTrace();</span>
+<span class="nc" id="L311">                                    }</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                                    if (dataPost.service != null) {</span>
+<span class="nc" id="L313">                                        dataPost.service.stopSelf();</span>
+                                    }
+                                }
+                            }
+<span class="nc bnc" id="L317" title="All 2 branches missed.">                        } else if (statusResponse.errorBody() != null) {</span>
+<span class="nc" id="L318">                            Bundle args = new Bundle();</span>
+<span class="nc" id="L319">                            args.putBoolean(Helper.RECEIVE_COMPOSE_ERROR_MESSAGE, true);</span>
+<span class="nc" id="L320">                            Intent intentBD = new Intent(Helper.INTENT_COMPOSE_ERROR_MESSAGE);</span>
+<span class="nc" id="L321">                            args.putSerializable(Helper.ARG_STATUS_DRAFT, dataPost.statusDraft);</span>
+<span class="nc" id="L322">                            String err = statusResponse.errorBody().string();</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                            if (err.contains(&quot;{\&quot;error\&quot;:\&quot;&quot;)) {</span>
+<span class="nc" id="L324">                                err = err.replaceAll(&quot;\\{\&quot;error\&quot;:\&quot;(.*)\&quot;\\}&quot;, &quot;$1&quot;);</span>
+                            }
+<span class="nc" id="L326">                            args.putSerializable(Helper.RECEIVE_ERROR_MESSAGE, err);</span>
+
+<span class="nc" id="L328">                            BaseAccount account = null;</span>
+                            try {
+<span class="nc" id="L330">                                account = new Account(context).getAccountByToken(dataPost.token);</span>
+<span class="nc" id="L331">                            } catch (DBException e) {</span>
+<span class="nc" id="L332">                                e.printStackTrace();</span>
+<span class="nc" id="L333">                            }</span>
+<span class="nc" id="L334">                            new CachedBundle(context).insertBundle(args, account, bundleId -&gt; {</span>
+<span class="nc" id="L335">                                Bundle bundle = new Bundle();</span>
+<span class="nc" id="L336">                                bundle.putLong(Helper.ARG_INTENT_ID, bundleId);</span>
+<span class="nc" id="L337">                                intentBD.putExtras(bundle);</span>
+<span class="nc" id="L338">                                intentBD.setPackage(BuildConfig.APPLICATION_ID);</span>
+<span class="nc" id="L339">                                context.sendBroadcast(intentBD);</span>
+<span class="nc" id="L340">                            });</span>
+<span class="nc" id="L341">                            return;</span>
+                        }
+<span class="nc" id="L343">                    } catch (IOException e) {</span>
+<span class="nc" id="L344">                        e.printStackTrace();</span>
+<span class="nc" id="L345">                        Bundle args = new Bundle();</span>
+<span class="nc" id="L346">                        args.putBoolean(Helper.RECEIVE_COMPOSE_ERROR_MESSAGE, true);</span>
+<span class="nc" id="L347">                        args.putSerializable(Helper.ARG_STATUS_DRAFT, dataPost.statusDraft);</span>
+<span class="nc" id="L348">                        Intent intentBD = new Intent(Helper.INTENT_COMPOSE_ERROR_MESSAGE);</span>
+<span class="nc" id="L349">                        args.putSerializable(Helper.RECEIVE_ERROR_MESSAGE, e.getMessage());</span>
+<span class="nc" id="L350">                        BaseAccount account = null;</span>
+                        try {
+<span class="nc" id="L352">                            account = new Account(context).getAccountByToken(dataPost.token);</span>
+<span class="nc" id="L353">                        } catch (DBException e2) {</span>
+<span class="nc" id="L354">                            e2.printStackTrace();</span>
+<span class="nc" id="L355">                        }</span>
+<span class="nc" id="L356">                        new CachedBundle(context).insertBundle(args, account, bundleId -&gt; {</span>
+<span class="nc" id="L357">                            Bundle bundle = new Bundle();</span>
+<span class="nc" id="L358">                            bundle.putLong(Helper.ARG_INTENT_ID, bundleId);</span>
+<span class="nc" id="L359">                            intentBD.putExtras(bundle);</span>
+<span class="nc" id="L360">                            intentBD.setPackage(BuildConfig.APPLICATION_ID);</span>
+<span class="nc" id="L361">                            context.sendBroadcast(intentBD);</span>
+<span class="nc" id="L362">                        });</span>
+<span class="nc" id="L363">                        return;</span>
+<span class="nc" id="L364">                    }</span>
+                } else {
+<span class="nc" id="L366">                    Call&lt;ScheduledStatus&gt; scheduledStatusCall = mastodonStatusesService.createScheduledStatus(null, dataPost.token, statuses.get(i).text, attachmentIds, poll_options, poll_expire_in,</span>
+<span class="nc bnc" id="L367" title="All 4 branches missed.">                            poll_multiple, poll_hide_totals, statuses.get(i).quote_id == null ? in_reply_to_status : null, statuses.get(i).sensitive, statuses.get(i).spoilerChecked ? statuses.get(i).spoiler_text : null, statuses.get(i).visibility.toLowerCase(), dataPost.scheduledDate, statuses.get(i).language);</span>
+                    try {
+<span class="nc" id="L369">                        Response&lt;ScheduledStatus&gt; statusResponse = scheduledStatusCall.execute();</span>
+
+<span class="nc bnc" id="L371" title="All 2 branches missed.">                        if (statusResponse.isSuccessful()) {</span>
+<span class="nc" id="L372">                            ScheduledStatus statusReply = statusResponse.body();</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                            if (statusReply != null) {</span>
+<span class="nc" id="L374">                                in_reply_to_status = statusReply.id;</span>
+<span class="nc" id="L375">                                dataPost.statusDraft.state.posts_successfully_sent = i;</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                                if (dataPost.statusDraft.state.posts.size() &gt; i + 1) {</span>
+<span class="nc" id="L377">                                    dataPost.statusDraft.state.posts.get(i + 1).id = statusReply.id;</span>
+<span class="nc" id="L378">                                    dataPost.statusDraft.state.posts.get(i + 1).in_reply_to_id = statusReply.params.in_reply_to_id;</span>
+                                }
+                                try {
+<span class="nc" id="L381">                                    new StatusDraft(context.getApplicationContext()).updatePostState(dataPost.statusDraft);</span>
+<span class="nc" id="L382">                                } catch (DBException e) {</span>
+<span class="nc" id="L383">                                    e.printStackTrace();</span>
+<span class="nc" id="L384">                                }</span>
+                            }
+                        }
+<span class="nc" id="L387">                    } catch (IOException e) {</span>
+<span class="nc" id="L388">                        e.printStackTrace();</span>
+<span class="nc" id="L389">                        error = true;</span>
+<span class="nc" id="L390">                    }</span>
+                }
+<span class="nc" id="L392">                dataPost.messageSent++;</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                if (dataPost.messageSent &gt; dataPost.messageToSend) {</span>
+<span class="nc" id="L394">                    dataPost.messageSent = dataPost.messageToSend;</span>
+                }
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                if (i &gt;= (statuses.size() - 1)) {</span>
+                    try {
+<span class="nc" id="L398">                        new StatusDraft(context).removeDraft(dataPost.statusDraft);</span>
+<span class="nc" id="L399">                    } catch (DBException e) {</span>
+<span class="nc" id="L400">                        e.printStackTrace();</span>
+<span class="nc" id="L401">                    }</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">                    if (dataPost.service != null) {</span>
+<span class="nc" id="L403">                        dataPost.service.stopSelf();</span>
+                    }
+                }
+            }
+        }
+
+<span class="nc bnc" id="L409" title="All 6 branches missed.">        if (dataPost.scheduledDate == null &amp;&amp; dataPost.token != null &amp;&amp; firstSendMessage != null) {</span>
+<span class="nc" id="L410">            Bundle args = new Bundle();</span>
+<span class="nc" id="L411">            args.putBoolean(Helper.RECEIVE_NEW_MESSAGE, true);</span>
+<span class="nc" id="L412">            args.putString(Helper.ARG_EDIT_STATUS_ID, dataPost.statusEditId);</span>
+<span class="nc" id="L413">            Intent intentBD = new Intent(Helper.BROADCAST_DATA);</span>
+<span class="nc" id="L414">            args.putSerializable(Helper.RECEIVE_STATUS_ACTION, firstSendMessage);</span>
+<span class="nc" id="L415">            BaseAccount account = null;</span>
+            try {
+<span class="nc" id="L417">                account = new Account(context).getAccountByToken(dataPost.token);</span>
+<span class="nc" id="L418">            } catch (DBException e2) {</span>
+<span class="nc" id="L419">                e2.printStackTrace();</span>
+<span class="nc" id="L420">            }</span>
+<span class="nc" id="L421">            new CachedBundle(context).insertBundle(args, account, bundleId -&gt; {</span>
+<span class="nc" id="L422">                Bundle bundle = new Bundle();</span>
+<span class="nc" id="L423">                bundle.putLong(Helper.ARG_INTENT_ID, bundleId);</span>
+<span class="nc" id="L424">                intentBD.putExtras(bundle);</span>
+<span class="nc" id="L425">                intentBD.setPackage(BuildConfig.APPLICATION_ID);</span>
+<span class="nc" id="L426">                context.sendBroadcast(intentBD);</span>
+<span class="nc" id="L427">            });</span>
+        }
+<span class="nc" id="L429">    }</span>
+
+    private static String postAttachment(MastodonStatusesService mastodonStatusesService, DataPost dataPost, MultipartBody.Part fileMultipartBody, Attachment attachment) {
+
+<span class="nc" id="L433">        RequestBody descriptionBody = null;</span>
+<span class="nc" id="L434">        RequestBody focusBody = null;</span>
+<span class="nc bnc" id="L435" title="All 4 branches missed.">        if (attachment.description != null &amp;&amp; attachment.description.trim().length() &gt; 0) {</span>
+<span class="nc" id="L436">            descriptionBody = RequestBody.create(MediaType.parse(&quot;text/plain&quot;), attachment.description);</span>
+        }
+<span class="nc bnc" id="L438" title="All 4 branches missed.">        if (attachment.focus != null &amp;&amp; attachment.focus.trim().length() &gt; 0) {</span>
+<span class="nc" id="L439">            focusBody = RequestBody.create(MediaType.parse(&quot;text/plain&quot;), attachment.focus);</span>
+        }
+<span class="nc" id="L441">        Call&lt;Attachment&gt; attachmentCall = mastodonStatusesService.postMedia(dataPost.token, fileMultipartBody, null, descriptionBody, focusBody);</span>
+
+<span class="nc bnc" id="L443" title="All 2 branches missed.">        if (attachmentCall != null) {</span>
+            try {
+<span class="nc" id="L445">                Response&lt;Attachment&gt; attachmentResponse = attachmentCall.execute();</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                if (attachmentResponse.isSuccessful()) {</span>
+<span class="nc" id="L447">                    Attachment attachmentReply = attachmentResponse.body();</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                    if (attachmentReply != null) {</span>
+<span class="nc" id="L449">                        return attachmentReply.id;</span>
+                    }
+                }
+<span class="nc" id="L452">            } catch (IOException e) {</span>
+<span class="nc" id="L453">                e.printStackTrace();</span>
+<span class="nc" id="L454">            }</span>
+        }
+<span class="nc" id="L456">        return null;</span>
+    }
+
+    public static String serialize(StatusDraft statusDraft) {
+<span class="nc" id="L460">        Gson gson = new Gson();</span>
+        try {
+<span class="nc" id="L462">            return gson.toJson(statusDraft);</span>
+<span class="nc" id="L463">        } catch (Exception e) {</span>
+<span class="nc" id="L464">            return null;</span>
+        }
+    }
+
+    public static StatusDraft restore(String serialized) {
+<span class="nc" id="L469">        Gson gson = new Gson();</span>
+        try {
+<span class="nc" id="L471">            return gson.fromJson(serialized, StatusDraft.class);</span>
+<span class="nc" id="L472">        } catch (Exception e) {</span>
+<span class="nc" id="L473">            return null;</span>
+        }
+    }
+
+
+    @NonNull
+    @Override
+    public Result doWork() {
+<span class="nc" id="L481">        Data inputData = getInputData();</span>
+<span class="nc" id="L482">        String statusDraftId = inputData.getString(Helper.ARG_STATUS_DRAFT_ID);</span>
+<span class="nc" id="L483">        StatusDraft statusDraft = null;</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">        if (statusDraftId != null) {</span>
+            try {
+<span class="nc" id="L486">                statusDraft = new StatusDraft(getApplicationContext()).geStatusDraft(statusDraftId);</span>
+<span class="nc" id="L487">            } catch (DBException e) {</span>
+<span class="nc" id="L488">                e.printStackTrace();</span>
+<span class="nc" id="L489">            }</span>
+        }
+<span class="nc" id="L491">        String token = inputData.getString(Helper.ARG_TOKEN);</span>
+<span class="nc" id="L492">        String instance = inputData.getString(Helper.ARG_INSTANCE);</span>
+<span class="nc" id="L493">        String userId = inputData.getString(Helper.ARG_USER_ID);</span>
+<span class="nc" id="L494">        String scheduledDate = inputData.getString(Helper.ARG_SCHEDULED_DATE);</span>
+<span class="nc" id="L495">        String editMessageId = inputData.getString(Helper.ARG_EDIT_STATUS_ID);</span>
+        //Should not be null, but a simple security
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        if (token == null) {</span>
+<span class="nc" id="L498">            token = BaseMainActivity.currentToken;</span>
+        }
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        if (instance == null) {</span>
+<span class="nc" id="L501">            instance = BaseMainActivity.currentInstance;</span>
+        }
+<span class="nc" id="L503">        DataPost dataPost = new DataPost();</span>
+<span class="nc" id="L504">        dataPost.instance = instance;</span>
+<span class="nc" id="L505">        dataPost.token = token;</span>
+<span class="nc" id="L506">        dataPost.userId = userId;</span>
+<span class="nc" id="L507">        dataPost.statusDraft = statusDraft;</span>
+<span class="nc" id="L508">        dataPost.scheduledDate = scheduledDate;</span>
+<span class="nc" id="L509">        dataPost.notificationBuilder = notificationBuilder;</span>
+<span class="nc" id="L510">        dataPost.notificationManager = notificationManager;</span>
+<span class="nc" id="L511">        dataPost.statusEditId = editMessageId;</span>
+        // Mark the Worker as important
+<span class="nc" id="L513">        setForegroundAsync(createForegroundInfo());</span>
+<span class="nc" id="L514">        publishMessage(getApplicationContext(), dataPost);</span>
+<span class="nc" id="L515">        return Result.success();</span>
+    }
+
+
+    @NonNull
+    @Override
+    public ListenableFuture&lt;ForegroundInfo&gt; getForegroundInfoAsync() {
+        // Build a notification using bytesRead and contentLength
+<span class="nc" id="L523">        Context context = getApplicationContext();</span>
+        // This PendingIntent can be used to cancel the worker
+<span class="nc" id="L525">        PendingIntent intent = WorkManager.getInstance(context)</span>
+<span class="nc" id="L526">                .createCancelPendingIntent(getId());</span>
+
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L529">            createChannel();</span>
+        }
+<span class="nc" id="L531">        notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID);</span>
+<span class="nc" id="L532">        notificationBuilder.setSmallIcon(R.drawable.ic_notification)</span>
+<span class="nc" id="L533">                .setLargeIcon(BitmapFactory.decodeResource(context.getResources(), R.drawable.ic_launcher_foreground))</span>
+<span class="nc" id="L534">                .setContentTitle(context.getString(R.string.post_message))</span>
+<span class="nc" id="L535">                .setOngoing(true)</span>
+<span class="nc" id="L536">                .setDefaults(NotificationCompat.DEFAULT_ALL)</span>
+<span class="nc" id="L537">                .setPriority(Notification.PRIORITY_DEFAULT);</span>
+
+<span class="nc bnc" id="L539" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.Q) {</span>
+<span class="nc" id="L540">            return Futures.immediateFuture(new ForegroundInfo(NOTIFICATION_INT_CHANNEL_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC));</span>
+        } else {
+<span class="nc" id="L542">            return Futures.immediateFuture(new ForegroundInfo(NOTIFICATION_INT_CHANNEL_ID, notificationBuilder.build()));</span>
+        }
+    }
+
+    @NonNull
+    private ForegroundInfo createForegroundInfo() {
+        // Build a notification using bytesRead and contentLength
+<span class="nc" id="L549">        Context context = getApplicationContext();</span>
+        // This PendingIntent can be used to cancel the worker
+<span class="nc" id="L551">        PendingIntent intent = WorkManager.getInstance(context)</span>
+<span class="nc" id="L552">                .createCancelPendingIntent(getId());</span>
+
+<span class="nc bnc" id="L554" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L555">            createChannel();</span>
+        }
+<span class="nc" id="L557">        notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID);</span>
+<span class="nc" id="L558">        notificationBuilder.setSmallIcon(R.drawable.ic_notification)</span>
+<span class="nc" id="L559">                .setLargeIcon(BitmapFactory.decodeResource(context.getResources(), R.drawable.ic_launcher_foreground))</span>
+<span class="nc" id="L560">                .setContentTitle(context.getString(R.string.post_message))</span>
+<span class="nc" id="L561">                .setOngoing(true)</span>
+<span class="nc" id="L562">                .setSilent(true)</span>
+<span class="nc" id="L563">                .setDefaults(NotificationCompat.DEFAULT_ALL)</span>
+<span class="nc" id="L564">                .setPriority(Notification.PRIORITY_HIGH);</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.Q) {</span>
+<span class="nc" id="L566">            return new ForegroundInfo(NOTIFICATION_INT_CHANNEL_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);</span>
+        } else {
+<span class="nc" id="L568">            return new ForegroundInfo(NOTIFICATION_INT_CHANNEL_ID, notificationBuilder.build());</span>
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private void createChannel() {
+<span class="nc" id="L574">        String channelName = &quot;Post messages&quot;;</span>
+<span class="nc" id="L575">        String channelDescription = &quot;Post messages in background&quot;;</span>
+<span class="nc" id="L576">        NotificationChannel notifChannel = new NotificationChannel(CHANNEL_ID, channelName, NotificationManager.IMPORTANCE_HIGH);</span>
+<span class="nc" id="L577">        notifChannel.setDescription(channelDescription);</span>
+<span class="nc" id="L578">        notificationManager.createNotificationChannel(notifChannel);</span>
+<span class="nc" id="L579">    }</span>
+
+<span class="nc" id="L581">    public static class DataPost {</span>
+        public String instance;
+        public String token;
+        public String userId;
+        public String statusEditId;
+        public StatusDraft statusDraft;
+        public int messageToSend;
+        public int messageSent;
+        public NotificationCompat.Builder notificationBuilder;
+        public String scheduledDate;
+        public NotificationManager notificationManager;
+        public IntentService service;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

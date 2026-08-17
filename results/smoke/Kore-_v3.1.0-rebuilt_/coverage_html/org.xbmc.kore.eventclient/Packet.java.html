@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Packet.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Kore</a> &gt; <a href="index.source.html" class="el_package">org.xbmc.kore.eventclient</a> &gt; <span class="el_source">Packet.java</span></div><h1>Packet.java</h1><pre class="source lang-java linenums">/*
+ *  Copyright (C) 2008-2013 Team XBMC
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+package org.xbmc.kore.eventclient;
+
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+
+/**
+ * XBMC Event Client Class
+ * &lt;p&gt;
+ * Implementation of XBMC's UDP based input system.
+ * A set of classes that abstract the various packets that the event server
+ * currently supports. In addition, there's also a class, XBMCClient, that
+ * provides functions that sends the various packets. Use XBMCClient if you
+ * don't need complete control over packet structure.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * The basic workflow involves:
+ * &lt;ol&gt;
+ * &lt;li&gt;Send a HELO packet&lt;/li&gt;
+ * &lt;li&gt;Send x number of valid packets&lt;/li&gt;
+ * &lt;li&gt;Send a BYE packet&lt;/li&gt;
+ * &lt;/ol&gt;
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * IMPORTANT NOTE ABOUT TIMEOUTS:
+ * A client is considered to be timed out if XBMC doesn't received a packet
+ * at least once every 60 seconds. To &quot;ping&quot; XBMC with an empty packet use
+ * PacketPING or XBMCClient.ping(). See the documentation for details.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * Base class that implements a single event packet.
+ * - Generic packet structure (maximum 1024 bytes per packet)
+ * - Header is 32 bytes long, so 992 bytes available for payload
+ * - large payloads can be split into multiple packets using H4 and H5
+ *   H5 should contain total no. of packets in such a case
+ * - H6 contains length of P1, which is limited to 992 bytes
+ * - if H5 is 0 or 1, then H4 will be ignored (single packet msg)
+ * - H7 must be set to zeros for now
+ * &lt;/p&gt;
+ * &lt;pre&gt;
+ *   -----------------------------
+ *   | -H1 Signature (&quot;XBMC&quot;)    | - 4  x CHAR                4B
+ *   | -H2 Version (eg. 2.0)     | - 2  x UNSIGNED CHAR       2B
+ *   | -H3 PacketType            | - 1  x UNSIGNED SHORT      2B
+ *   | -H4 Sequence number       | - 1  x UNSIGNED LONG       4B
+ *   | -H5 No. of packets in msg | - 1  x UNSIGNED LONG       4B
+ *   | -H6 Payloadsize of packet | - 1  x UNSIGNED SHORT      2B
+ *   | -H7 Client's unique token | - 1  x UNSIGNED LONG       4B
+ *   | -H8 Reserved              | - 10 x UNSIGNED CHAR      10B
+ *   |---------------------------|
+ *   | -P1 payload               | -
+ *   -----------------------------
+ * &lt;/pre&gt;
+ * @author Stefan Agner
+ *
+ */
+public abstract class Packet {
+	
+	private final byte[] sig;
+<span class="nc" id="L79">	private byte[] payload = new byte[0];</span>
+	private final byte minver;
+	private final byte majver;
+	
+	private final short packettype;
+	
+	
+	private final static short MAX_PACKET_SIZE  = 1024;
+	private final static short HEADER_SIZE      = 32;
+	private final static short MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - HEADER_SIZE;
+
+	protected final static byte PT_HELO          = 0x01;
+	protected final static byte PT_BYE           = 0x02;
+	protected final static byte PT_BUTTON        = 0x03;
+	protected final static byte PT_MOUSE         = 0x04;
+	protected final static byte PT_PING          = 0x05;
+	protected final static byte PT_BROADCAST     = 0x06;
+	protected final static byte PT_NOTIFICATION  = 0x07;
+	protected final static byte PT_BLOB          = 0x08;
+	protected final static byte PT_LOG           = 0x09;
+	protected final static byte PT_ACTION        = 0x0A;
+	protected final static byte PT_DEBUG         = (byte)0xFF;
+
+	public final static byte ICON_NONE = 0x00;
+	public final static byte ICON_JPEG = 0x01;
+	public final static byte ICON_PNG  = 0x02;
+	public final static byte ICON_GIF  = 0x03;
+	
+<span class="nc" id="L107">	private static final int uid = (int)(Math.random() * Integer.MAX_VALUE);</span>
+	
+	/**
+	 * This is an Abstract class and cannot be instanced. Please use one of the Packet implementation Classes
+	 * (PacketXXX). 
+	 * 
+	 * Implements an XBMC Event Client Packet. Type is to be specified at creation time, Payload can be added
+	 * with the various appendPayload methods. Packet can be sent through UDP-Socket with method &quot;send&quot;.
+     * @param packettype Type of Packet (PT_XXX) 
+	 */
+	protected Packet(short packettype)
+<span class="nc" id="L118">	{</span>
+<span class="nc" id="L119">		sig = new byte[] {'X', 'B', 'M', 'C' };</span>
+<span class="nc" id="L120">        minver = 0;</span>
+<span class="nc" id="L121">        majver = 2;</span>
+<span class="nc" id="L122">        this.packettype = packettype;</span>
+<span class="nc" id="L123">	}</span>
+
+	/**
+	 * Appends a String to the payload (terminated with 0x00) 
+	 * @param payload Payload as String
+	 */
+	protected void appendPayload(String payload)
+	{
+<span class="nc" id="L131">		byte[] payloadarr = payload.getBytes();</span>
+<span class="nc" id="L132">		int oldpayloadsize = this.payload.length;</span>
+<span class="nc" id="L133">		byte[] oldpayload = this.payload;</span>
+<span class="nc" id="L134">		this.payload = new byte[oldpayloadsize+payloadarr.length+1]; // Create new Array with more place (+1 for string terminator)</span>
+<span class="nc" id="L135">		System.arraycopy(oldpayload, 0, this.payload, 0, oldpayloadsize);</span>
+<span class="nc" id="L136">		System.arraycopy(payloadarr, 0, this.payload, oldpayloadsize, payloadarr.length);</span>
+<span class="nc" id="L137">	}</span>
+
+	/**
+	 * Appends a single Byte to the payload
+	 * @param payload Payload
+	 */
+	protected void appendPayload(byte payload)
+	{
+<span class="nc" id="L145">		appendPayload(new byte[] { payload });</span>
+<span class="nc" id="L146">	}</span>
+
+	/**
+	 * Appends a Byte-Array to the payload
+	 * @param payloadarr Payload
+	 */
+	protected void appendPayload(byte[] payloadarr)
+	{
+<span class="nc" id="L154">		int oldpayloadsize = this.payload.length;</span>
+<span class="nc" id="L155">		byte[] oldpayload = this.payload;</span>
+<span class="nc" id="L156">		this.payload = new byte[oldpayloadsize+payloadarr.length];</span>
+<span class="nc" id="L157">		System.arraycopy(oldpayload, 0, this.payload, 0, oldpayloadsize);</span>
+<span class="nc" id="L158">		System.arraycopy(payloadarr, 0, this.payload, oldpayloadsize, payloadarr.length);</span>
+<span class="nc" id="L159">	}</span>
+
+	/**
+	 * Appends an integer to the payload
+	 * @param i Payload
+	 */
+	protected void appendPayload(int i) {
+<span class="nc" id="L166">		appendPayload(intToByteArray(i));</span>
+<span class="nc" id="L167">	}</span>
+
+	/**
+	 * Appends a short to the payload
+	 * @param s Payload
+	 */
+	protected void appendPayload(short s) {
+<span class="nc" id="L174">		appendPayload(shortToByteArray(s));</span>
+<span class="nc" id="L175">	}</span>
+	
+	/**
+	 * Get Number of Packets which will be sent with current Payload...
+	 * @return Number of Packets
+	 */
+	public int getNumPackets()
+	{
+//		return (payload.length + (MAX_PAYLOAD_SIZE - 1)) / MAX_PAYLOAD_SIZE;
+<span class="nc" id="L184">		return 1 + Math.max(payload.length - 1, 0) / MAX_PAYLOAD_SIZE;</span>
+	}
+	
+	/**
+	 * Get Header for a specific Packet in this sequence...
+	 * @param seq Current sequence number
+	 * @param maxseq Maximal sequence number
+	 * @param actpayloadsize Payloadsize of this packet
+	 * @return Byte-Array with Header information (currently 32-Byte long, see HEADER_SIZE)
+	 */
+	private byte[] getHeader(int seq, int maxseq, short actpayloadsize)
+	{
+<span class="nc" id="L196">		byte[] header = new byte[HEADER_SIZE];</span>
+<span class="nc" id="L197">		System.arraycopy(sig, 0, header, 0, 4);</span>
+<span class="nc" id="L198">		header[4] = majver;</span>
+<span class="nc" id="L199">		header[5] = minver;</span>
+<span class="nc" id="L200">		byte[] packettypearr = shortToByteArray(this.packettype);</span>
+<span class="nc" id="L201">		System.arraycopy(packettypearr, 0, header, 6, 2);</span>
+<span class="nc" id="L202">		byte[] seqarr = intToByteArray(seq);</span>
+<span class="nc" id="L203">		System.arraycopy(seqarr, 0, header, 8, 4);</span>
+<span class="nc" id="L204">		byte[] maxseqarr = intToByteArray(maxseq);</span>
+<span class="nc" id="L205">		System.arraycopy(maxseqarr, 0, header, 12, 4);</span>
+<span class="nc" id="L206">		byte[] payloadsize = shortToByteArray(actpayloadsize);</span>
+<span class="nc" id="L207">		System.arraycopy(payloadsize, 0, header, 16, 2);</span>
+<span class="nc" id="L208">		byte[] uid = intToByteArray(Packet.uid);</span>
+<span class="nc" id="L209">		System.arraycopy(uid, 0, header, 18, 4);</span>
+<span class="nc" id="L210">		byte[] reserved = new byte[10];</span>
+<span class="nc" id="L211">		System.arraycopy(reserved, 0, header, 22, 10);</span>
+		
+<span class="nc" id="L213">		return header;</span>
+	}
+	
+	/**
+	 * Generates the whole UDP-Message with Header and Payload of a specific Packet in sequence
+	 * @param seq Current sequence number
+	 * @return Byte-Array with UDP-Message
+	 */
+	private byte[] getUDPMessage(int seq)
+	{
+<span class="nc" id="L223">		int maxseq = getNumPackets();</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">		if(seq &gt; maxseq)</span>
+<span class="nc" id="L225">			return null;</span>
+		
+		short actpayloadsize;
+		
+<span class="nc bnc" id="L229" title="All 2 branches missed.">		if(seq == maxseq)</span>
+<span class="nc" id="L230">			actpayloadsize = (short)((payload.length - 1) % MAX_PAYLOAD_SIZE + 1);</span>
+		else
+<span class="nc" id="L232">			actpayloadsize = MAX_PAYLOAD_SIZE;</span>
+
+<span class="nc" id="L234">		byte[] pack = new byte[HEADER_SIZE+actpayloadsize];</span>
+		
+<span class="nc" id="L236">		System.arraycopy(getHeader(seq, maxseq, actpayloadsize), 0, pack, 0, HEADER_SIZE);</span>
+<span class="nc" id="L237">		System.arraycopy(payload, (seq-1)*MAX_PAYLOAD_SIZE, pack, HEADER_SIZE, actpayloadsize);</span>
+		
+<span class="nc" id="L239">		return pack;</span>
+	}
+	
+	/**
+	 * Sends this packet to the EventServer
+	 * @param adr Address of the EventServer
+	 * @param port Port of the EventServer
+	 */
+	public void send(InetAddress adr, int port) throws IOException
+	{
+<span class="nc" id="L249">		int maxseq = getNumPackets();</span>
+<span class="nc" id="L250">		DatagramSocket s = new DatagramSocket();</span>
+		// For each Packet in Sequence...
+<span class="nc bnc" id="L252" title="All 2 branches missed.">		for(int seq=1;seq&lt;=maxseq;seq++)</span>
+		{
+			// Get Message and send them...
+<span class="nc" id="L255">			byte[] pack = getUDPMessage(seq);</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">			if (pack == null) continue;</span>
+<span class="nc" id="L257">			DatagramPacket p = new DatagramPacket(pack, pack.length);</span>
+<span class="nc" id="L258">			p.setAddress(adr);</span>
+<span class="nc" id="L259">			p.setPort(port);</span>
+<span class="nc" id="L260">			s.send(p);</span>
+		}
+<span class="nc" id="L262">		s.close();</span>
+<span class="nc" id="L263">	}</span>
+	
+	/**
+	 * Helper Method to convert an integer to a Byte array
+	 * @param value Value
+	 * @return Byte-Array
+	 */
+	private static byte[] intToByteArray(int value) {
+<span class="nc" id="L271">	          return new byte[] {</span>
+	                  (byte)(value &gt;&gt;&gt; 24),
+	                  (byte)(value &gt;&gt;&gt; 16),
+	                  (byte)(value &gt;&gt;&gt; 8),
+	                  (byte)value};
+	}
+
+	/**
+	 * Helper Method to convert an short to a Byte array
+	 * @param value Value
+	 * @return Byte-Array
+	 */
+	private static byte[] shortToByteArray(short value) {
+<span class="nc" id="L284">        return new byte[] {</span>
+                (byte)(value &gt;&gt;&gt; 8),
+                (byte)value};
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>
