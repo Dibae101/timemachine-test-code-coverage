@@ -57,6 +57,27 @@ def strip_nested_git(path):
     return removed
 
 
+def strip_nested_gitignore(path):
+    """Remove .gitignore files that came with an upstream checkout.
+
+    Every Android project ignores `build/`, which is exactly where the compiled
+    classes live. Left in place, git silently excludes the entire point of the
+    dataset: Wikipedia published 11,279 class files as zero. These files have no
+    purpose inside a dataset directory.
+    """
+    removed = 0
+    for root, dirs, files in os.walk(path):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        if ".gitignore" in files:
+            try:
+                os.remove(os.path.join(root, ".gitignore"))
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def valid_apps():
     if not os.path.isfile(MANIFEST):
         raise SystemExit("no MANIFEST.tsv - run make_manifest.py first")
@@ -88,17 +109,20 @@ def main():
         git("rm", "--cached", "-q", "--", path, check=False)
         removed_links += 1
 
-    stripped = 0
+    stripped = ignores = 0
     paths = []
     for app in good:
         d = os.path.join(APPS, app)
         stripped += strip_nested_git(d)
+        ignores += strip_nested_gitignore(d)
         paths.append(os.path.join(APPS_REL, app))
 
     if os.path.isfile(MANIFEST):
         paths.append(os.path.join(APPS_REL, "MANIFEST.tsv"))
 
-    git("add", "--", *paths)
+    # -f because build output is ignored by convention everywhere; here it is
+    # the payload, not a build artefact to skip.
+    git("add", "-f", "--", *paths)
 
     print("staged %d complete datasets:" % len(good))
     for app in good:
@@ -113,6 +137,15 @@ def main():
     if stripped:
         print("stripped %d nested .git director%s"
               % (stripped, "y" if stripped == 1 else "ies"))
+    if ignores:
+        print("removed %d upstream .gitignore file(s) that excluded build output"
+              % ignores)
+
+    staged_classes = sum(
+        1 for ln in git("diff", "--cached", "--name-only").stdout.splitlines()
+        if ln.endswith(".class"))
+    print()
+    print("staged .class files: %d" % staged_classes)
     if incomplete:
         print()
         print("not staged - build not complete (%d):" % len(incomplete))
