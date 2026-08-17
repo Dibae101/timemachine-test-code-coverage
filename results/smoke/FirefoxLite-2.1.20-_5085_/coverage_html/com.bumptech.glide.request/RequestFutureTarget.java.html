@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestFutureTarget.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE FirefoxLite</a> &gt; <a href="index.source.html" class="el_package">com.bumptech.glide.request</a> &gt; <span class="el_source">RequestFutureTarget.java</span></div><h1>RequestFutureTarget.java</h1><pre class="source lang-java linenums">package com.bumptech.glide.request;
+
+import android.graphics.drawable.Drawable;
+import android.os.Handler;
+import androidx.annotation.Nullable;
+import com.bumptech.glide.request.target.SizeReadyCallback;
+import com.bumptech.glide.request.transition.Transition;
+import com.bumptech.glide.util.Util;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+/**
+ * A {@link java.util.concurrent.Future} implementation for Glide that can be used to load resources
+ * in a blocking manner on background threads.
+ *
+ * &lt;p&gt; Note - Unlike most targets, RequestFutureTargets can be used once and only once. Attempting
+ * to reuse a RequestFutureTarget will probably result in undesirable behavior or exceptions.
+ * Instead of reusing objects of this class, the pattern should be:
+ *
+ * &lt;pre&gt;
+ *     {@code
+ *      FutureTarget&lt;File&gt; target = null;
+ *      RequestManager requestManager = Glide.with(context);
+ *      try {
+ *        target = requestManager
+ *           .downloadOnly()
+ *           .load(model)
+ *           .submit();
+ *        File downloadedFile = target.get();
+ *        // ... do something with the file (usually throws IOException)
+ *      } catch (ExecutionException | InterruptedException | IOException e) {
+ *        // ... bug reporting or recovery
+ *      } finally {
+ *        // make sure to cancel pending operations and free resources
+ *        if (target != null) {
+ *          target.cancel(true); // mayInterruptIfRunning
+ *        }
+ *      }
+ *     }
+ *     &lt;/pre&gt;
+ * The {@link #cancel(boolean)} call will cancel pending operations and
+ * make sure that any resources used are recycled.
+ * &lt;/p&gt;
+ *
+ * @param &lt;R&gt; The type of the resource that will be loaded.
+ */
+public class RequestFutureTarget&lt;R&gt; implements FutureTarget&lt;R&gt;,
+    Runnable {
+<span class="nc" id="L51">  private static final Waiter DEFAULT_WAITER = new Waiter();</span>
+
+  private final Handler mainHandler;
+  private final int width;
+  private final int height;
+  // Exists for testing only.
+  private final boolean assertBackgroundThread;
+  private final Waiter waiter;
+
+  @Nullable private R resource;
+  @Nullable private Request request;
+  private boolean isCancelled;
+  private boolean resultReceived;
+  private boolean loadFailed;
+
+  /**
+   * Constructor for a RequestFutureTarget. Should not be used directly.
+   */
+  public RequestFutureTarget(Handler mainHandler, int width, int height) {
+<span class="nc" id="L70">    this(mainHandler, width, height, true, DEFAULT_WAITER);</span>
+<span class="nc" id="L71">  }</span>
+
+  RequestFutureTarget(Handler mainHandler, int width, int height, boolean assertBackgroundThread,
+<span class="nc" id="L74">      Waiter waiter) {</span>
+<span class="nc" id="L75">    this.mainHandler = mainHandler;</span>
+<span class="nc" id="L76">    this.width = width;</span>
+<span class="nc" id="L77">    this.height = height;</span>
+<span class="nc" id="L78">    this.assertBackgroundThread = assertBackgroundThread;</span>
+<span class="nc" id="L79">    this.waiter = waiter;</span>
+<span class="nc" id="L80">  }</span>
+
+  @Override
+  public synchronized boolean cancel(boolean mayInterruptIfRunning) {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">    if (isDone()) {</span>
+<span class="nc" id="L85">      return false;</span>
+    }
+<span class="nc" id="L87">    isCancelled = true;</span>
+<span class="nc" id="L88">    waiter.notifyAll(this);</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">    if (mayInterruptIfRunning) {</span>
+<span class="nc" id="L90">      clearOnMainThread();</span>
+    }
+<span class="nc" id="L92">    return true;</span>
+  }
+
+  @Override
+  public synchronized boolean isCancelled() {
+<span class="nc" id="L97">    return isCancelled;</span>
+  }
+
+  @Override
+  public synchronized boolean isDone() {
+<span class="nc bnc" id="L102" title="All 6 branches missed.">    return isCancelled || resultReceived || loadFailed;</span>
+  }
+
+  @Override
+  public R get() throws InterruptedException, ExecutionException {
+    try {
+<span class="nc" id="L108">      return doGet(null);</span>
+<span class="nc" id="L109">    } catch (TimeoutException e) {</span>
+<span class="nc" id="L110">      throw new AssertionError(e);</span>
+    }
+  }
+
+  @Override
+  public R get(long time, TimeUnit timeUnit)
+      throws InterruptedException, ExecutionException, TimeoutException {
+<span class="nc" id="L117">    return doGet(timeUnit.toMillis(time));</span>
+  }
+
+  /**
+   * A callback that should never be invoked directly.
+   */
+  @Override
+  public void getSize(SizeReadyCallback cb) {
+<span class="nc" id="L125">    cb.onSizeReady(width, height);</span>
+<span class="nc" id="L126">  }</span>
+
+  @Override
+  public void removeCallback(SizeReadyCallback cb) {
+    // Do nothing because we do not retain references to SizeReadyCallbacks.
+<span class="nc" id="L131">  }</span>
+
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public void setRequest(@Nullable Request request) {
+<span class="nc" id="L138">    this.request = request;</span>
+<span class="nc" id="L139">  }</span>
+
+  @Override
+  @Nullable
+  public Request getRequest() {
+<span class="nc" id="L144">    return request;</span>
+  }
+
+  /**
+   * A callback that should never be invoked directly.
+   */
+  @Override
+  public void onLoadCleared(Drawable placeholder) {
+    // Do nothing.
+<span class="nc" id="L153">  }</span>
+
+  /**
+   * A callback that should never be invoked directly.
+   */
+  @Override
+  public void onLoadStarted(Drawable placeholder) {
+    // Do nothing.
+<span class="nc" id="L161">  }</span>
+
+  /**
+   * A callback that should never be invoked directly.
+   */
+  @Override
+  public synchronized void onLoadFailed(Drawable errorDrawable) {
+<span class="nc" id="L168">    loadFailed = true;</span>
+<span class="nc" id="L169">    waiter.notifyAll(this);</span>
+<span class="nc" id="L170">  }</span>
+
+  /**
+   * A callback that should never be invoked directly.
+   */
+  @Override
+  public synchronized void onResourceReady(R resource, Transition&lt;? super R&gt; transition) {
+    // We might get a null result.
+<span class="nc" id="L178">    resultReceived = true;</span>
+<span class="nc" id="L179">    this.resource = resource;</span>
+<span class="nc" id="L180">    waiter.notifyAll(this);</span>
+<span class="nc" id="L181">  }</span>
+
+  private synchronized R doGet(Long timeoutMillis)
+      throws ExecutionException, InterruptedException, TimeoutException {
+<span class="nc bnc" id="L185" title="All 4 branches missed.">    if (assertBackgroundThread &amp;&amp; !isDone()) {</span>
+<span class="nc" id="L186">      Util.assertBackgroundThread();</span>
+    }
+
+<span class="nc bnc" id="L189" title="All 2 branches missed.">    if (isCancelled) {</span>
+<span class="nc" id="L190">      throw new CancellationException();</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">    } else if (loadFailed) {</span>
+<span class="nc" id="L192">      throw new ExecutionException(new IllegalStateException(&quot;Load failed&quot;));</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">    } else if (resultReceived) {</span>
+<span class="nc" id="L194">      return resource;</span>
+    }
+
+<span class="nc bnc" id="L197" title="All 2 branches missed.">    if (timeoutMillis == null) {</span>
+<span class="nc" id="L198">      waiter.waitForTimeout(this, 0);</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">    } else if (timeoutMillis &gt; 0) {</span>
+<span class="nc" id="L200">      waiter.waitForTimeout(this, timeoutMillis);</span>
+    }
+
+<span class="nc bnc" id="L203" title="All 2 branches missed.">    if (Thread.interrupted()) {</span>
+<span class="nc" id="L204">      throw new InterruptedException();</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">    } else if (loadFailed) {</span>
+<span class="nc" id="L206">      throw new ExecutionException(new IllegalStateException(&quot;Load failed&quot;));</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">    } else if (isCancelled) {</span>
+<span class="nc" id="L208">      throw new CancellationException();</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">    } else if (!resultReceived) {</span>
+<span class="nc" id="L210">      throw new TimeoutException();</span>
+    }
+
+<span class="nc" id="L213">    return resource;</span>
+  }
+
+  /**
+   * A callback that should never be invoked directly.
+   */
+  @Override
+  public void run() {
+<span class="nc bnc" id="L221" title="All 2 branches missed.">    if (request != null) {</span>
+<span class="nc" id="L222">      request.clear();</span>
+<span class="nc" id="L223">      request = null;</span>
+    }
+<span class="nc" id="L225">  }</span>
+
+  private void clearOnMainThread() {
+<span class="nc" id="L228">    mainHandler.post(this);</span>
+<span class="nc" id="L229">  }</span>
+
+  @Override
+  public void onStart() {
+    // Do nothing.
+<span class="nc" id="L234">  }</span>
+
+  @Override
+  public void onStop() {
+    // Do nothing.
+<span class="nc" id="L239">  }</span>
+
+  @Override
+  public void onDestroy() {
+    // Do nothing.
+<span class="nc" id="L244">  }</span>
+
+  // Visible for testing.
+<span class="nc" id="L247">  static class Waiter {</span>
+
+    public void waitForTimeout(Object toWaitOn, long timeoutMillis) throws InterruptedException {
+<span class="nc" id="L250">      toWaitOn.wait(timeoutMillis);</span>
+<span class="nc" id="L251">    }</span>
+
+    public void notifyAll(Object toNotify) {
+<span class="nc" id="L254">      toNotify.notifyAll();</span>
+<span class="nc" id="L255">    }</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>

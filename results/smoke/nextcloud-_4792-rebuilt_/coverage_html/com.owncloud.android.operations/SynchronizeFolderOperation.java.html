@@ -1,0 +1,508 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SynchronizeFolderOperation.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.operations</a> &gt; <span class="el_source">SynchronizeFolderOperation.java</span></div><h1>SynchronizeFolderOperation.java</h1><pre class="source lang-java linenums">/*
+ *   ownCloud Android client application
+ *
+ *   @author David A. Velasco
+ *   Copyright (C) 2016 ownCloud Inc.
+ *
+ *   This program is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License version 2,
+ *   as published by the Free Software Foundation.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ *
+ */
+
+package com.owncloud.android.operations;
+
+import android.accounts.Account;
+import android.content.Context;
+import android.content.Intent;
+import android.text.TextUtils;
+import android.util.Log;
+
+import com.owncloud.android.datamodel.FileDataStorageManager;
+import com.owncloud.android.datamodel.OCFile;
+import com.owncloud.android.files.services.FileDownloader;
+import com.owncloud.android.lib.common.OwnCloudClient;
+import com.owncloud.android.lib.common.operations.OperationCancelledException;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult.ResultCode;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.lib.resources.files.ReadFileRemoteOperation;
+import com.owncloud.android.lib.resources.files.ReadFolderRemoteOperation;
+import com.owncloud.android.lib.resources.files.model.RemoteFile;
+import com.owncloud.android.operations.common.SyncOperation;
+import com.owncloud.android.services.OperationsService;
+import com.owncloud.android.utils.FileStorageUtils;
+import com.owncloud.android.utils.MimeTypeUtil;
+
+import java.io.File;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Vector;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+
+/**
+ *  Remote operation performing the synchronization of the list of files contained
+ *  in a folder identified with its remote path.
+ *
+ *  Fetches the list and properties of the files contained in the given folder, including their
+ *  properties, and updates the local database with them.
+ *
+ *  Does NOT enter in the child folders to synchronize their contents also, BUT requests for a new operation instance
+ *  doing so.
+ */
+public class SynchronizeFolderOperation extends SyncOperation {
+
+<span class="nc" id="L65">    private static final String TAG = SynchronizeFolderOperation.class.getSimpleName();</span>
+
+    /** Time stamp for the synchronization process in progress */
+    private long mCurrentSyncTime;
+
+    /** Remote path of the folder to synchronize */
+    private String mRemotePath;
+
+    /** Account where the file to synchronize belongs */
+    private Account mAccount;
+
+    /** Android context; necessary to send requests to the download service */
+    private Context mContext;
+
+    /** Locally cached information about folder to synchronize */
+    private OCFile mLocalFolder;
+
+    /** Counter of conflicts found between local and remote files */
+    private int mConflictsFound;
+
+    /** Counter of failed operations in synchronization of kept-in-sync files */
+    private int mFailsInFileSyncsFound;
+
+    /** 'True' means that the remote folder changed and should be fetched */
+    private boolean mRemoteFolderChanged;
+
+    private List&lt;OCFile&gt; mFilesForDirectDownload;
+        // to avoid extra PROPFINDs when there was no change in the folder
+
+    private List&lt;SyncOperation&gt; mFilesToSyncContents;
+        // this will be used for every file when 'folder synchronization' replaces 'folder download'
+
+    private final AtomicBoolean mCancellationRequested;
+
+    /**
+     * Creates a new instance of {@link SynchronizeFolderOperation}.
+     *
+     * @param   context                 Application context.
+     * @param   remotePath              Path to synchronize.
+     * @param   account                 ownCloud account where the folder is located.
+     * @param   currentSyncTime         Time stamp for the synchronization process in progress.
+     */
+    public SynchronizeFolderOperation(Context context, String remotePath, Account account,
+<span class="nc" id="L108">                                      long currentSyncTime){</span>
+<span class="nc" id="L109">        mRemotePath = remotePath;</span>
+<span class="nc" id="L110">        mCurrentSyncTime = currentSyncTime;</span>
+<span class="nc" id="L111">        mAccount = account;</span>
+<span class="nc" id="L112">        mContext = context;</span>
+<span class="nc" id="L113">        mRemoteFolderChanged = false;</span>
+<span class="nc" id="L114">        mFilesForDirectDownload = new Vector&lt;&gt;();</span>
+<span class="nc" id="L115">        mFilesToSyncContents = new Vector&lt;&gt;();</span>
+<span class="nc" id="L116">        mCancellationRequested = new AtomicBoolean(false);</span>
+<span class="nc" id="L117">    }</span>
+
+
+    /**
+     * Performs the synchronization.
+     *
+     * {@inheritDoc}
+     */
+    @Override
+    protected RemoteOperationResult run(OwnCloudClient client) {
+        RemoteOperationResult result;
+<span class="nc" id="L128">        mFailsInFileSyncsFound = 0;</span>
+<span class="nc" id="L129">        mConflictsFound = 0;</span>
+
+        try {
+            // get locally cached information about folder
+<span class="nc" id="L133">            mLocalFolder = getStorageManager().getFileByPath(mRemotePath);</span>
+
+<span class="nc" id="L135">            result = checkForChanges(client);</span>
+
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            if (result.isSuccess()) {</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                if (mRemoteFolderChanged) {</span>
+<span class="nc" id="L139">                    result = fetchAndSyncRemoteFolder(client);</span>
+
+                } else {
+<span class="nc" id="L142">                    prepareOpsFromLocalKnowledge();</span>
+                }
+
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                if (result.isSuccess()) {</span>
+<span class="nc" id="L146">                    syncContents();</span>
+                }
+            }
+
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L151">                throw new OperationCancelledException();</span>
+            }
+
+<span class="nc" id="L154">        } catch (OperationCancelledException e) {</span>
+<span class="nc" id="L155">            result = new RemoteOperationResult(e);</span>
+<span class="nc" id="L156">        }</span>
+
+<span class="nc" id="L158">        return result;</span>
+    }
+
+    private RemoteOperationResult checkForChanges(OwnCloudClient client) throws OperationCancelledException {
+<span class="nc" id="L162">        Log_OC.d(TAG, &quot;Checking changes in &quot; + mAccount.name + mRemotePath);</span>
+
+<span class="nc" id="L164">        mRemoteFolderChanged = true;</span>
+
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L167">            throw new OperationCancelledException();</span>
+        }
+
+        // remote request
+<span class="nc" id="L171">        ReadFileRemoteOperation operation = new ReadFileRemoteOperation(mRemotePath);</span>
+<span class="nc" id="L172">        RemoteOperationResult result = operation.execute(client);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L174">            OCFile remoteFolder = FileStorageUtils.fillOCFile((RemoteFile) result.getData().get(0));</span>
+
+            // check if remote and local folder are different
+<span class="nc bnc" id="L177" title="All 2 branches missed.">            mRemoteFolderChanged = !(remoteFolder.getEtag().equalsIgnoreCase(mLocalFolder.getEtag()));</span>
+
+<span class="nc" id="L179">            result = new RemoteOperationResult(ResultCode.OK);</span>
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            Log_OC.i(TAG, &quot;Checked &quot; + mAccount.name + mRemotePath + &quot; : &quot; +</span>
+                    (mRemoteFolderChanged ? &quot;changed&quot; : &quot;not changed&quot;));
+
+<span class="nc" id="L184">        } else {</span>
+            // check failed
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            if (result.getCode() == ResultCode.FILE_NOT_FOUND) {</span>
+<span class="nc" id="L187">                removeLocalFolder();</span>
+            }
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (result.isException()) {</span>
+<span class="nc" id="L190">                Log_OC.e(TAG, &quot;Checked &quot; + mAccount.name + mRemotePath  + &quot; : &quot; +</span>
+<span class="nc" id="L191">                        result.getLogMessage(), result.getException());</span>
+            } else {
+<span class="nc" id="L193">                Log_OC.e(TAG, &quot;Checked &quot; + mAccount.name + mRemotePath + &quot; : &quot; +</span>
+<span class="nc" id="L194">                        result.getLogMessage());</span>
+            }
+
+        }
+
+<span class="nc" id="L199">        return result;</span>
+    }
+
+
+    private RemoteOperationResult fetchAndSyncRemoteFolder(OwnCloudClient client) throws OperationCancelledException {
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L205">            throw new OperationCancelledException();</span>
+        }
+
+<span class="nc" id="L208">        ReadFolderRemoteOperation operation = new ReadFolderRemoteOperation(mRemotePath);</span>
+<span class="nc" id="L209">        RemoteOperationResult result = operation.execute(client);</span>
+<span class="nc" id="L210">        Log_OC.d(TAG, &quot;Synchronizing &quot; + mAccount.name + mRemotePath);</span>
+
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L213">            synchronizeData(result.getData());</span>
+<span class="nc bnc" id="L214" title="All 4 branches missed.">            if (mConflictsFound &gt; 0  || mFailsInFileSyncsFound &gt; 0) {</span>
+<span class="nc" id="L215">                result = new RemoteOperationResult(ResultCode.SYNC_CONFLICT);</span>
+                    // should be a different result code, but will do the job
+            }
+        } else {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (result.getCode() == ResultCode.FILE_NOT_FOUND) {</span>
+<span class="nc" id="L220">                removeLocalFolder();</span>
+            }
+        }
+
+<span class="nc" id="L224">        return result;</span>
+    }
+
+
+    private void removeLocalFolder() {
+<span class="nc" id="L229">        FileDataStorageManager storageManager = getStorageManager();</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (storageManager.fileExists(mLocalFolder.getFileId())) {</span>
+<span class="nc" id="L231">            String currentSavePath = FileStorageUtils.getSavePath(mAccount.name);</span>
+<span class="nc" id="L232">            storageManager.removeFolder(</span>
+                    mLocalFolder,
+                    true,
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                    mLocalFolder.isDown() // TODO: debug, I think this is always false for folders</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                            &amp;&amp; mLocalFolder.getStoragePath().startsWith(currentSavePath)</span>
+            );
+        }
+<span class="nc" id="L239">    }</span>
+
+
+    /**
+     * Synchronizes the data retrieved from the server about the contents of the target folder
+     * with the current data in the local database.
+     *
+     * @param folderAndFiles Remote folder and children files in Folder
+     */
+    private void synchronizeData(List&lt;Object&gt; folderAndFiles) throws OperationCancelledException {
+        // parse data from remote folder
+<span class="nc" id="L250">        OCFile remoteFolder = FileStorageUtils.fillOCFile((RemoteFile) folderAndFiles.get(0));</span>
+<span class="nc" id="L251">        remoteFolder.setParentId(mLocalFolder.getParentId());</span>
+<span class="nc" id="L252">        remoteFolder.setFileId(mLocalFolder.getFileId());</span>
+
+<span class="nc" id="L254">        Log_OC.d(TAG, &quot;Remote folder &quot; + mLocalFolder.getRemotePath()</span>
+                + &quot; changed - starting update of local data &quot;);
+
+<span class="nc" id="L257">        mFilesForDirectDownload.clear();</span>
+<span class="nc" id="L258">        mFilesToSyncContents.clear();</span>
+
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L261">            throw new OperationCancelledException();</span>
+        }
+
+<span class="nc" id="L264">        FileDataStorageManager storageManager = getStorageManager();</span>
+<span class="nc" id="L265">        List&lt;OCFile&gt; updatedFiles = new Vector&lt;&gt;(folderAndFiles.size() - 1);</span>
+
+        // get current data about local contents of the folder to synchronize
+<span class="nc" id="L268">        List&lt;OCFile&gt; localFiles = storageManager.getFolderContent(mLocalFolder, false);</span>
+<span class="nc" id="L269">        Map&lt;String, OCFile&gt; localFilesMap = new HashMap&lt;&gt;(localFiles.size());</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        for (OCFile file : localFiles) {</span>
+<span class="nc" id="L271">            localFilesMap.put(file.getRemotePath(), file);</span>
+<span class="nc" id="L272">        }</span>
+
+        // loop to synchronize every child
+        OCFile remoteFile;
+        OCFile localFile;
+        OCFile updatedFile;
+        RemoteFile r;
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        for (int i=1; i&lt;folderAndFiles.size(); i++) {</span>
+            /// new OCFile instance with the data from the server
+<span class="nc" id="L281">            r = (RemoteFile) folderAndFiles.get(i);</span>
+<span class="nc" id="L282">            remoteFile = FileStorageUtils.fillOCFile(r);</span>
+
+            /// retrieve local data for the read file
+            //  localFile = mStorageManager.getFileByPath(remoteFile.getRemotePath());
+<span class="nc" id="L286">            localFile = localFilesMap.remove(remoteFile.getRemotePath());</span>
+
+            /// new OCFile instance to merge fresh data from server with local state
+<span class="nc" id="L289">            updatedFile = FileStorageUtils.fillOCFile(r);</span>
+<span class="nc" id="L290">            updatedFile.setParentId(mLocalFolder.getFileId());</span>
+
+            /// add to updatedFile data about LOCAL STATE (not existing in server)
+<span class="nc" id="L293">            updateLocalStateData(remoteFile, localFile, updatedFile);</span>
+
+            /// check and fix, if needed, local storage path
+<span class="nc" id="L296">            searchForLocalFileInDefaultPath(updatedFile);</span>
+
+            /// classify file to sync/download contents later
+<span class="nc" id="L299">            classifyFileForLaterSyncOrDownload(remoteFile, localFile);</span>
+
+<span class="nc" id="L301">            updatedFiles.add(updatedFile);</span>
+        }
+
+        // save updated contents in local database
+<span class="nc" id="L305">        storageManager.saveFolder(remoteFolder, updatedFiles, localFilesMap.values());</span>
+<span class="nc" id="L306">    }</span>
+
+    private void updateLocalStateData(OCFile remoteFile, OCFile localFile, OCFile updatedFile) {
+<span class="nc" id="L309">        updatedFile.setLastSyncDateForProperties(mCurrentSyncTime);</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        if (localFile != null) {</span>
+<span class="nc" id="L311">            updatedFile.setFileId(localFile.getFileId());</span>
+<span class="nc" id="L312">            updatedFile.setLastSyncDateForData(localFile.getLastSyncDateForData());</span>
+<span class="nc" id="L313">            updatedFile.setModificationTimestampAtLastSyncForData(</span>
+<span class="nc" id="L314">                    localFile.getModificationTimestampAtLastSyncForData()</span>
+            );
+<span class="nc" id="L316">            updatedFile.setStoragePath(localFile.getStoragePath());</span>
+            // eTag will not be updated unless file CONTENTS are synchronized
+<span class="nc" id="L318">            updatedFile.setEtag(localFile.getEtag());</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">            if (updatedFile.isFolder()) {</span>
+<span class="nc" id="L320">                updatedFile.setFileLength(localFile.getFileLength());</span>
+                    // TODO move operations about size of folders to FileContentProvider
+<span class="nc bnc" id="L322" title="All 4 branches missed.">            } else if (mRemoteFolderChanged &amp;&amp; MimeTypeUtil.isImage(remoteFile) &amp;&amp;</span>
+<span class="nc" id="L323">                    remoteFile.getModificationTimestamp() !=</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                            localFile.getModificationTimestamp()) {</span>
+<span class="nc" id="L325">                updatedFile.setUpdateThumbnailNeeded(true);</span>
+<span class="nc" id="L326">                Log.d(TAG, &quot;Image &quot; + remoteFile.getFileName() + &quot; updated on the server&quot;);</span>
+            }
+<span class="nc" id="L328">            updatedFile.setPublicLink(localFile.getPublicLink());</span>
+<span class="nc" id="L329">            updatedFile.setSharedViaLink(localFile.isSharedViaLink());</span>
+<span class="nc" id="L330">            updatedFile.setSharedWithSharee(localFile.isSharedWithSharee());</span>
+<span class="nc" id="L331">            updatedFile.setEtagInConflict(localFile.getEtagInConflict());</span>
+        } else {
+            // remote eTag will not be updated unless file CONTENTS are synchronized
+<span class="nc" id="L334">            updatedFile.setEtag(&quot;&quot;);</span>
+        }
+<span class="nc" id="L336">    }</span>
+
+    private void classifyFileForLaterSyncOrDownload(OCFile remoteFile, OCFile localFile)
+            throws OperationCancelledException {
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        if (remoteFile.isFolder()) {</span>
+            /// to download children files recursively
+<span class="nc" id="L342">            synchronized (mCancellationRequested) {</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L344">                    throw new OperationCancelledException();</span>
+                }
+<span class="nc" id="L346">                startSyncFolderOperation(remoteFile.getRemotePath());</span>
+<span class="nc" id="L347">            }</span>
+
+        } else {
+            /// prepare content synchronization for files (any file, not just favorites)
+<span class="nc" id="L351">            SynchronizeFileOperation operation = new SynchronizeFileOperation(</span>
+                    localFile,
+                    remoteFile,
+                    mAccount,
+                    true,
+                    mContext
+                );
+<span class="nc" id="L358">            mFilesToSyncContents.add(operation);</span>
+        }
+<span class="nc" id="L360">    }</span>
+
+
+    private void prepareOpsFromLocalKnowledge() throws OperationCancelledException {
+<span class="nc" id="L364">        List&lt;OCFile&gt; children = getStorageManager().getFolderContent(mLocalFolder, false);</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">        for (OCFile child : children) {</span>
+            /// classify file to sync/download contents later
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (child.isFolder()) {</span>
+                /// to download children files recursively
+<span class="nc" id="L369">                synchronized(mCancellationRequested) {</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                    if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L371">                        throw new OperationCancelledException();</span>
+                    }
+<span class="nc" id="L373">                    startSyncFolderOperation(child.getRemotePath());</span>
+<span class="nc" id="L374">                }</span>
+
+            } else {
+                /// synchronization for regular files
+<span class="nc bnc" id="L378" title="All 2 branches missed.">                if (!child.isDown()) {</span>
+<span class="nc" id="L379">                    mFilesForDirectDownload.add(child);</span>
+
+                } else {
+                    /// this should result in direct upload of files that were locally modified
+<span class="nc" id="L383">                    SynchronizeFileOperation operation = new SynchronizeFileOperation(</span>
+                            child,
+<span class="nc bnc" id="L385" title="All 2 branches missed.">                            child.getEtagInConflict() != null ? child : null,</span>
+                            mAccount,
+                            true,
+                            mContext
+                    );
+<span class="nc" id="L390">                    mFilesToSyncContents.add(operation);</span>
+
+                }
+
+            }
+<span class="nc" id="L395">        }</span>
+<span class="nc" id="L396">    }</span>
+
+
+    private void syncContents() throws OperationCancelledException {
+<span class="nc" id="L400">        startDirectDownloads();</span>
+<span class="nc" id="L401">        startContentSynchronizations(mFilesToSyncContents);</span>
+<span class="nc" id="L402">    }</span>
+
+
+    private void startDirectDownloads() throws OperationCancelledException {
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        for (OCFile file : mFilesForDirectDownload) {</span>
+<span class="nc" id="L407">            synchronized(mCancellationRequested) {</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L409">                    throw new OperationCancelledException();</span>
+                }
+<span class="nc" id="L411">                Intent i = new Intent(mContext, FileDownloader.class);</span>
+<span class="nc" id="L412">                i.putExtra(FileDownloader.EXTRA_ACCOUNT, mAccount);</span>
+<span class="nc" id="L413">                i.putExtra(FileDownloader.EXTRA_FILE, file);</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">                if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L415">                    mContext.startForegroundService(i);</span>
+                } else {
+<span class="nc" id="L417">                    mContext.startService(i);</span>
+                }
+<span class="nc" id="L419">            }</span>
+<span class="nc" id="L420">        }</span>
+<span class="nc" id="L421">    }</span>
+
+    /**
+     * Performs a list of synchronization operations, determining if a download or upload is needed
+     * or if exists conflict due to changes both in local and remote contents of the each file.
+     *
+     * If download or upload is needed, request the operation to the corresponding service and goes on.
+     *
+     * @param filesToSyncContents       Synchronization operations to execute.
+     */
+    private void startContentSynchronizations(List&lt;SyncOperation&gt; filesToSyncContents)
+            throws OperationCancelledException {
+
+<span class="nc" id="L434">        Log_OC.v(TAG, &quot;Starting content synchronization... &quot;);</span>
+        RemoteOperationResult contentsResult;
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        for (SyncOperation op: filesToSyncContents) {</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L438">                throw new OperationCancelledException();</span>
+            }
+<span class="nc" id="L440">            contentsResult = op.execute(getStorageManager(), mContext);</span>
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            if (!contentsResult.isSuccess()) {</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">                if (contentsResult.getCode() == ResultCode.SYNC_CONFLICT) {</span>
+<span class="nc" id="L443">                    mConflictsFound++;</span>
+                } else {
+<span class="nc" id="L445">                    mFailsInFileSyncsFound++;</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                    if (contentsResult.getException() != null) {</span>
+<span class="nc" id="L447">                        Log_OC.e(TAG, &quot;Error while synchronizing file : &quot;</span>
+<span class="nc" id="L448">                                +  contentsResult.getLogMessage(), contentsResult.getException());</span>
+                    } else {
+<span class="nc" id="L450">                        Log_OC.e(TAG, &quot;Error while synchronizing file : &quot;</span>
+<span class="nc" id="L451">                                + contentsResult.getLogMessage());</span>
+                    }
+                }
+                // TODO - use the errors count in notifications
+            }   // won't let these fails break the synchronization process
+<span class="nc" id="L456">        }</span>
+<span class="nc" id="L457">    }</span>
+
+    /**
+     * Scans the default location for saving local copies of files searching for
+     * a 'lost' file with the same full name as the {@link com.owncloud.android.datamodel.OCFile}
+     * received as parameter.
+     *
+     * @param file      File to associate a possible 'lost' local file.
+     */
+    private void searchForLocalFileInDefaultPath(OCFile file) {
+<span class="nc bnc" id="L467" title="All 4 branches missed.">        if (file.getStoragePath() == null &amp;&amp; !file.isFolder()) {</span>
+<span class="nc" id="L468">            File f = new File(FileStorageUtils.getDefaultSavePathFor(mAccount.name, file));</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">            if (f.exists()) {</span>
+<span class="nc" id="L470">                file.setStoragePath(f.getAbsolutePath());</span>
+<span class="nc" id="L471">                file.setLastSyncDateForData(f.lastModified());</span>
+            }
+        }
+<span class="nc" id="L474">    }</span>
+
+
+    /**
+     * Cancel operation
+     */
+    public void cancel() {
+<span class="nc" id="L481">        mCancellationRequested.set(true);</span>
+<span class="nc" id="L482">    }</span>
+
+    public String getFolderPath() {
+<span class="nc" id="L485">        String path = mLocalFolder.getStoragePath();</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        if (!TextUtils.isEmpty(path)) {</span>
+<span class="nc" id="L487">            return path;</span>
+        }
+<span class="nc" id="L489">        return FileStorageUtils.getDefaultSavePathFor(mAccount.name, mLocalFolder);</span>
+    }
+
+    private void startSyncFolderOperation(String path){
+<span class="nc" id="L493">        Intent intent = new Intent(mContext, OperationsService.class);</span>
+<span class="nc" id="L494">        intent.setAction(OperationsService.ACTION_SYNC_FOLDER);</span>
+<span class="nc" id="L495">        intent.putExtra(OperationsService.EXTRA_ACCOUNT, mAccount);</span>
+<span class="nc" id="L496">        intent.putExtra(OperationsService.EXTRA_REMOTE_PATH, path);</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L498">            mContext.startForegroundService(intent);</span>
+        } else {
+<span class="nc" id="L500">            mContext.startService(intent);</span>
+        }
+<span class="nc" id="L502">    }</span>
+
+    public String getRemotePath() {
+<span class="nc" id="L505">        return mRemotePath;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>

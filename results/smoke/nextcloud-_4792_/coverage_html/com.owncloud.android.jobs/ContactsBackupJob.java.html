@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContactsBackupJob.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.jobs</a> &gt; <span class="el_source">ContactsBackupJob.java</span></div><h1>ContactsBackupJob.java</h1><pre class="source lang-java linenums">/*
+ * Nextcloud Android client application
+ *
+ * @author Tobias Kaminsky
+ * Copyright (C) 2017 Tobias Kaminsky
+ * Copyright (C) 2017 Nextcloud GmbH.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.jobs;
+
+import android.accounts.Account;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.IBinder;
+import android.provider.ContactsContract;
+import android.text.format.DateFormat;
+
+import com.evernote.android.job.Job;
+import com.evernote.android.job.util.support.PersistableBundleCompat;
+import com.nextcloud.client.account.UserAccountManager;
+import com.owncloud.android.R;
+import com.owncloud.android.datamodel.ArbitraryDataProvider;
+import com.owncloud.android.datamodel.FileDataStorageManager;
+import com.owncloud.android.datamodel.OCFile;
+import com.owncloud.android.files.services.FileUploader;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.operations.UploadFileOperation;
+import com.owncloud.android.services.OperationsService;
+
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
+
+import androidx.annotation.NonNull;
+
+import static com.owncloud.android.ui.activity.ContactsPreferenceActivity.PREFERENCE_CONTACTS_LAST_BACKUP;
+
+/**
+ * Job that backup contacts to /Contacts-Backup and deletes files older than x days
+ */
+
+public class ContactsBackupJob extends Job {
+    public static final String TAG = &quot;ContactsBackupJob&quot;;
+    public static final String ACCOUNT = &quot;account&quot;;
+    public static final String FORCE = &quot;force&quot;;
+
+    private OperationsServiceConnection operationsServiceConnection;
+    private OperationsService.OperationsServiceBinder operationsServiceBinder;
+    private UserAccountManager accountManager;
+
+<span class="nc" id="L72">    public ContactsBackupJob(UserAccountManager accountManager) {</span>
+<span class="nc" id="L73">        this.accountManager = accountManager;</span>
+<span class="nc" id="L74">    }</span>
+
+    @NonNull
+    @Override
+    protected Result onRunJob(@NonNull Params params) {
+<span class="nc" id="L79">        PersistableBundleCompat bundle = params.getExtras();</span>
+
+<span class="nc" id="L81">        final Account account = accountManager.getAccountByName(bundle.getString(ACCOUNT, &quot;&quot;));</span>
+
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (account == null) {</span>
+<span class="nc" id="L84">            return Result.FAILURE;</span>
+        }
+
+<span class="nc" id="L87">        ArbitraryDataProvider arbitraryDataProvider = new ArbitraryDataProvider(getContext().getContentResolver());</span>
+<span class="nc" id="L88">        Long lastExecution = arbitraryDataProvider.getLongValue(account, PREFERENCE_CONTACTS_LAST_BACKUP);</span>
+
+<span class="nc" id="L90">        boolean force = bundle.getBoolean(FORCE, false);</span>
+<span class="nc bnc" id="L91" title="All 4 branches missed.">        if (force || (lastExecution + 24 * 60 * 60 * 1000) &lt; Calendar.getInstance().getTimeInMillis()) {</span>
+<span class="nc" id="L92">            Log_OC.d(TAG, &quot;start contacts backup job&quot;);</span>
+
+<span class="nc" id="L94">            String backupFolder = getContext().getResources().getString(R.string.contacts_backup_folder) +</span>
+                    OCFile.PATH_SEPARATOR;
+<span class="nc" id="L96">            Integer daysToExpire = getContext().getResources().getInteger(R.integer.contacts_backup_expire);</span>
+
+<span class="nc" id="L98">            backupContact(account, backupFolder);</span>
+
+            // bind to Operations Service
+<span class="nc" id="L101">            operationsServiceConnection = new OperationsServiceConnection(daysToExpire, backupFolder, account);</span>
+
+<span class="nc" id="L103">            getContext().bindService(new Intent(getContext(), OperationsService.class), operationsServiceConnection,</span>
+                    OperationsService.BIND_AUTO_CREATE);
+
+            // store execution date
+<span class="nc" id="L107">            arbitraryDataProvider.storeOrUpdateKeyValue(account.name,</span>
+                                                        PREFERENCE_CONTACTS_LAST_BACKUP,
+<span class="nc" id="L109">                                                        Calendar.getInstance().getTimeInMillis());</span>
+<span class="nc" id="L110">        } else {</span>
+<span class="nc" id="L111">            Log_OC.d(TAG, &quot;last execution less than 24h ago&quot;);</span>
+        }
+
+<span class="nc" id="L114">        return Result.SUCCESS;</span>
+    }
+
+    private void backupContact(Account account, String backupFolder) {
+<span class="nc" id="L118">        ArrayList&lt;String&gt; vCard = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L120">        Cursor cursor = getContext().getContentResolver().query(ContactsContract.Contacts.CONTENT_URI, null,</span>
+                null, null, null);
+
+<span class="nc bnc" id="L123" title="All 4 branches missed.">        if (cursor != null &amp;&amp; cursor.getCount() &gt; 0) {</span>
+<span class="nc" id="L124">            cursor.moveToFirst();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            for (int i = 0; i &lt; cursor.getCount(); i++) {</span>
+
+<span class="nc" id="L127">                vCard.add(getContactFromCursor(cursor));</span>
+<span class="nc" id="L128">                cursor.moveToNext();</span>
+            }
+        }
+
+<span class="nc" id="L132">        String filename = DateFormat.format(&quot;yyyy-MM-dd_HH-mm-ss&quot;, Calendar.getInstance()).toString() + &quot;.vcf&quot;;</span>
+<span class="nc" id="L133">        Log_OC.d(TAG, &quot;Storing: &quot; + filename);</span>
+<span class="nc" id="L134">        File file = new File(getContext().getCacheDir(), filename);</span>
+
+<span class="nc" id="L136">        FileWriter fw = null;</span>
+        try {
+<span class="nc" id="L138">            fw = new FileWriter(file);</span>
+
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            for (String card : vCard) {</span>
+<span class="nc" id="L141">                fw.write(card);</span>
+<span class="nc" id="L142">            }</span>
+
+<span class="nc" id="L144">        } catch (IOException e) {</span>
+<span class="nc" id="L145">            Log_OC.d(TAG, &quot;Error &quot;, e);</span>
+        } finally {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            if (cursor != null) {</span>
+<span class="nc" id="L148">                cursor.close();</span>
+            }
+
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (fw != null) {</span>
+                try {
+<span class="nc" id="L153">                    fw.close();</span>
+<span class="nc" id="L154">                } catch (IOException e) {</span>
+<span class="nc" id="L155">                    Log_OC.d(TAG, &quot;Error closing file writer &quot;, e);</span>
+<span class="nc" id="L156">                }</span>
+            }
+        }
+
+<span class="nc" id="L160">        FileUploader.UploadRequester requester = new FileUploader.UploadRequester();</span>
+<span class="nc" id="L161">        requester.uploadNewFile(</span>
+<span class="nc" id="L162">                getContext(),</span>
+                account,
+<span class="nc" id="L164">                file.getAbsolutePath(),</span>
+                backupFolder + filename,
+                FileUploader.LOCAL_BEHAVIOUR_MOVE,
+                null,
+                true,
+                UploadFileOperation.CREATED_BY_USER,
+                false,
+                false
+        );
+<span class="nc" id="L173">    }</span>
+
+    private void expireFiles(Integer daysToExpire, String backupFolderString, Account account) {
+        // -1 disables expiration
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (daysToExpire &gt; -1) {</span>
+<span class="nc" id="L178">            FileDataStorageManager storageManager = new FileDataStorageManager(account, getContext().getContentResolver());</span>
+<span class="nc" id="L179">            OCFile backupFolder = storageManager.getFileByPath(backupFolderString);</span>
+<span class="nc" id="L180">            Calendar cal = Calendar.getInstance();</span>
+<span class="nc" id="L181">            cal.add(Calendar.DAY_OF_YEAR, -daysToExpire);</span>
+<span class="nc" id="L182">            Long timestampToExpire = cal.getTimeInMillis();</span>
+
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            if (backupFolder != null) {</span>
+<span class="nc" id="L185">                Log_OC.d(TAG, &quot;expire: &quot; + daysToExpire + &quot; &quot; + backupFolder.getFileName());</span>
+            }
+
+<span class="nc" id="L188">            List&lt;OCFile&gt; backups = storageManager.getFolderContent(backupFolder, false);</span>
+
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            for (OCFile backup : backups) {</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                if (timestampToExpire &gt; backup.getModificationTimestamp()) {</span>
+<span class="nc" id="L192">                    Log_OC.d(TAG, &quot;delete &quot; + backup.getRemotePath());</span>
+
+                    // delete backups
+<span class="nc" id="L195">                    Intent service = new Intent(getContext(), OperationsService.class);</span>
+<span class="nc" id="L196">                    service.setAction(OperationsService.ACTION_REMOVE);</span>
+<span class="nc" id="L197">                    service.putExtra(OperationsService.EXTRA_ACCOUNT, account);</span>
+<span class="nc" id="L198">                    service.putExtra(OperationsService.EXTRA_REMOTE_PATH, backup.getRemotePath());</span>
+<span class="nc" id="L199">                    service.putExtra(OperationsService.EXTRA_REMOVE_ONLY_LOCAL, false);</span>
+<span class="nc" id="L200">                    operationsServiceBinder.queueNewOperation(service);</span>
+                }
+<span class="nc" id="L202">            }</span>
+        }
+
+<span class="nc" id="L205">        getContext().unbindService(operationsServiceConnection);</span>
+<span class="nc" id="L206">    }</span>
+
+    private String getContactFromCursor(Cursor cursor) {
+<span class="nc" id="L209">        String lookupKey = cursor.getString(cursor.getColumnIndex(ContactsContract.Contacts.LOOKUP_KEY));</span>
+<span class="nc" id="L210">        Uri uri = Uri.withAppendedPath(ContactsContract.Contacts.CONTENT_VCARD_URI, lookupKey);</span>
+
+<span class="nc" id="L212">        String vCard = &quot;&quot;;</span>
+<span class="nc" id="L213">        InputStream inputStream = null;</span>
+<span class="nc" id="L214">        InputStreamReader inputStreamReader = null;</span>
+        try {
+<span class="nc" id="L216">            inputStream = getContext().getContentResolver().openInputStream(uri);</span>
+<span class="nc" id="L217">            char[] buffer = new char[1024];</span>
+<span class="nc" id="L218">            StringBuilder stringBuilder = new StringBuilder();</span>
+
+<span class="nc bnc" id="L220" title="All 2 branches missed.">            if (inputStream != null) {</span>
+<span class="nc" id="L221">                inputStreamReader = new InputStreamReader(inputStream);</span>
+
+                while (true) {
+<span class="nc" id="L224">                    int byteCount = inputStreamReader.read(buffer, 0, buffer.length);</span>
+
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (byteCount &gt; 0) {</span>
+<span class="nc" id="L227">                        stringBuilder.append(buffer, 0, byteCount);</span>
+                    } else {
+                        break;
+                    }
+<span class="nc" id="L231">                }</span>
+            }
+
+<span class="nc" id="L234">            vCard = stringBuilder.toString();</span>
+
+<span class="nc" id="L236">            return vCard;</span>
+
+<span class="nc" id="L238">        } catch (IOException e) {</span>
+<span class="nc" id="L239">            Log_OC.d(TAG, e.getMessage());</span>
+        } finally {
+            try {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                if (inputStream != null) {</span>
+<span class="nc" id="L243">                    inputStream.close();</span>
+                }
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                if (inputStreamReader != null) {</span>
+<span class="nc" id="L246">                    inputStreamReader.close();</span>
+                }
+<span class="nc" id="L248">            } catch (IOException e) {</span>
+<span class="nc" id="L249">                Log_OC.e(TAG, &quot;failed to close stream&quot;);</span>
+<span class="nc" id="L250">            }</span>
+        }
+<span class="nc" id="L252">        return vCard;</span>
+    }
+
+    /**
+     * Implements callback methods for service binding.
+     */
+    private class OperationsServiceConnection implements ServiceConnection {
+        private Integer daysToExpire;
+        private String backupFolder;
+        private Account account;
+
+<span class="nc" id="L263">        OperationsServiceConnection(Integer daysToExpire, String backupFolder, Account account) {</span>
+<span class="nc" id="L264">            this.daysToExpire = daysToExpire;</span>
+<span class="nc" id="L265">            this.backupFolder = backupFolder;</span>
+<span class="nc" id="L266">            this.account = account;</span>
+<span class="nc" id="L267">        }</span>
+
+        @Override
+        public void onServiceConnected(ComponentName component, IBinder service) {
+<span class="nc" id="L271">            Log_OC.d(TAG, &quot;service connected&quot;);</span>
+
+
+<span class="nc bnc" id="L274" title="All 2 branches missed.">            if (component.equals(new ComponentName(getContext(), OperationsService.class))) {</span>
+<span class="nc" id="L275">                operationsServiceBinder = (OperationsService.OperationsServiceBinder) service;</span>
+<span class="nc" id="L276">                expireFiles(daysToExpire, backupFolder, account);</span>
+            }
+<span class="nc" id="L278">        }</span>
+
+        @Override
+        public void onServiceDisconnected(ComponentName component) {
+<span class="nc" id="L282">            Log_OC.d(TAG, &quot;service disconnected&quot;);</span>
+
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            if (component.equals(new ComponentName(getContext(), OperationsService.class))) {</span>
+<span class="nc" id="L285">             operationsServiceBinder = null;</span>
+            }
+<span class="nc" id="L287">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>

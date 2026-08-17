@@ -1,0 +1,1351 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UploadFileOperation.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.operations</a> &gt; <span class="el_source">UploadFileOperation.java</span></div><h1>UploadFileOperation.java</h1><pre class="source lang-java linenums">/*
+ * ownCloud Android client application
+ *
+ * @author David A. Velasco
+ * @author Chris Narkiewicz
+ * Copyright (C) 2016 ownCloud GmbH.
+ * Copyright (C) 2019 Chris Narkiewicz &lt;hello@ezaquarii.com&gt;
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2,
+ * as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.operations;
+
+import android.accounts.Account;
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.net.Uri;
+import android.os.Build;
+import android.text.TextUtils;
+import android.util.Log;
+
+import com.evernote.android.job.JobRequest;
+import com.evernote.android.job.util.Device;
+import com.google.gson.reflect.TypeToken;
+import com.nextcloud.client.device.PowerManagementService;
+import com.nextcloud.client.network.ConnectivityService;
+import com.owncloud.android.datamodel.ArbitraryDataProvider;
+import com.owncloud.android.datamodel.DecryptedFolderMetadata;
+import com.owncloud.android.datamodel.EncryptedFolderMetadata;
+import com.owncloud.android.datamodel.FileDataStorageManager;
+import com.owncloud.android.datamodel.OCFile;
+import com.owncloud.android.datamodel.ThumbnailsCacheManager;
+import com.owncloud.android.datamodel.UploadsStorageManager;
+import com.owncloud.android.db.OCUpload;
+import com.owncloud.android.files.services.FileUploader;
+import com.owncloud.android.lib.common.OwnCloudClient;
+import com.owncloud.android.lib.common.network.OnDatatransferProgressListener;
+import com.owncloud.android.lib.common.network.ProgressiveDataTransfer;
+import com.owncloud.android.lib.common.operations.OperationCancelledException;
+import com.owncloud.android.lib.common.operations.RemoteOperation;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult.ResultCode;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.lib.resources.e2ee.GetMetadataRemoteOperation;
+import com.owncloud.android.lib.resources.e2ee.LockFileRemoteOperation;
+import com.owncloud.android.lib.resources.e2ee.StoreMetadataRemoteOperation;
+import com.owncloud.android.lib.resources.e2ee.UnlockFileRemoteOperation;
+import com.owncloud.android.lib.resources.e2ee.UpdateMetadataRemoteOperation;
+import com.owncloud.android.lib.resources.files.ChunkedFileUploadRemoteOperation;
+import com.owncloud.android.lib.resources.files.ExistenceCheckRemoteOperation;
+import com.owncloud.android.lib.resources.files.ReadFileRemoteOperation;
+import com.owncloud.android.lib.resources.files.UploadFileRemoteOperation;
+import com.owncloud.android.lib.resources.files.model.RemoteFile;
+import com.owncloud.android.operations.common.SyncOperation;
+import com.owncloud.android.utils.EncryptionUtils;
+import com.owncloud.android.utils.FileStorageUtils;
+import com.owncloud.android.utils.MimeType;
+import com.owncloud.android.utils.MimeTypeUtil;
+import com.owncloud.android.utils.UriUtils;
+
+import org.apache.commons.httpclient.HttpStatus;
+import org.apache.commons.httpclient.methods.RequestEntity;
+import org.lukhnos.nnio.file.Files;
+import org.lukhnos.nnio.file.Paths;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import androidx.annotation.RequiresApi;
+
+
+/**
+ * Operation performing the update in the ownCloud server
+ * of a file that was modified locally.
+ */
+public class UploadFileOperation extends SyncOperation {
+
+<span class="nc" id="L102">    private static final String TAG = UploadFileOperation.class.getSimpleName();</span>
+
+    public static final int CREATED_BY_USER = 0;
+    public static final int CREATED_AS_INSTANT_PICTURE = 1;
+    public static final int CREATED_AS_INSTANT_VIDEO = 2;
+
+    /**
+     * OCFile which is to be uploaded.
+     */
+    private OCFile mFile;
+
+    /**
+     * Original OCFile which is to be uploaded in case file had to be renamed
+     * (if forceOverwrite==false and remote file already exists).
+     */
+    private OCFile mOldFile;
+    private String mRemotePath;
+    private String mFolderUnlockToken;
+    private boolean mRemoteFolderToBeCreated;
+    private boolean mForceOverwrite;
+    private int mLocalBehaviour;
+    private int mCreatedBy;
+    private boolean mOnWifiOnly;
+    private boolean mWhileChargingOnly;
+    private boolean mIgnoringPowerSaveMode;
+
+    private boolean mWasRenamed;
+    private long mOCUploadId;
+    /**
+     * Local path to file which is to be uploaded (before any possible renaming or moving).
+     */
+    private String mOriginalStoragePath;
+<span class="nc" id="L134">    private final Set&lt;OnDatatransferProgressListener&gt; mDataTransferListeners = new HashSet&lt;&gt;();</span>
+    private OnRenameListener mRenameUploadListener;
+
+<span class="nc" id="L137">    private final AtomicBoolean mCancellationRequested = new AtomicBoolean(false);</span>
+<span class="nc" id="L138">    private final AtomicBoolean mUploadStarted = new AtomicBoolean(false);</span>
+
+    private Context mContext;
+
+    private UploadFileRemoteOperation mUploadOperation;
+
+    private RequestEntity mEntity;
+
+    final private Account mAccount;
+    final private OCUpload mUpload;
+    final private UploadsStorageManager uploadsStorageManager;
+    final private ConnectivityService connectivityService;
+    final private PowerManagementService powerManagementService;
+
+    private boolean encryptedAncestor;
+
+    public static OCFile obtainNewOCFileToUpload(String remotePath, String localPath, String mimeType) {
+
+        // MIME type
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (TextUtils.isEmpty(mimeType)) {</span>
+<span class="nc" id="L158">            mimeType = MimeTypeUtil.getBestMimeTypeByFilename(localPath);</span>
+        }
+
+<span class="nc" id="L161">        OCFile newFile = new OCFile(remotePath);</span>
+<span class="nc" id="L162">        newFile.setStoragePath(localPath);</span>
+<span class="nc" id="L163">        newFile.setLastSyncDateForProperties(0);</span>
+<span class="nc" id="L164">        newFile.setLastSyncDateForData(0);</span>
+
+        // size
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (!TextUtils.isEmpty(localPath)) {</span>
+<span class="nc" id="L168">            File localFile = new File(localPath);</span>
+<span class="nc" id="L169">            newFile.setFileLength(localFile.length());</span>
+<span class="nc" id="L170">            newFile.setLastSyncDateForData(localFile.lastModified());</span>
+        } // don't worry about not assigning size, the problems with localPath
+        // are checked when the UploadFileOperation instance is created
+
+
+<span class="nc" id="L175">        newFile.setMimeType(mimeType);</span>
+
+<span class="nc" id="L177">        return newFile;</span>
+    }
+
+    public UploadFileOperation(UploadsStorageManager uploadsStorageManager,
+                               ConnectivityService connectivityService,
+                               PowerManagementService powerManagementService,
+                               Account account,
+                               OCFile file,
+                               OCUpload upload,
+                               boolean forceOverwrite,
+                               int localBehaviour,
+                               Context context,
+                               boolean onWifiOnly,
+                               boolean whileChargingOnly
+<span class="nc" id="L191">    ) {</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (account == null) {</span>
+<span class="nc" id="L193">            throw new IllegalArgumentException(&quot;Illegal NULL account in UploadFileOperation &quot; + &quot;creation&quot;);</span>
+        }
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (upload == null) {</span>
+<span class="nc" id="L196">            throw new IllegalArgumentException(&quot;Illegal NULL file in UploadFileOperation creation&quot;);</span>
+        }
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (TextUtils.isEmpty(upload.getLocalPath())) {</span>
+<span class="nc" id="L199">            throw new IllegalArgumentException(</span>
+                    &quot;Illegal file in UploadFileOperation; storage path invalid: &quot;
+<span class="nc" id="L201">                            + upload.getLocalPath());</span>
+        }
+
+<span class="nc" id="L204">        this.uploadsStorageManager = uploadsStorageManager;</span>
+<span class="nc" id="L205">        this.connectivityService = connectivityService;</span>
+<span class="nc" id="L206">        this.powerManagementService = powerManagementService;</span>
+<span class="nc" id="L207">        mAccount = account;</span>
+<span class="nc" id="L208">        mUpload = upload;</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        if (file == null) {</span>
+<span class="nc" id="L210">            mFile = obtainNewOCFileToUpload(</span>
+<span class="nc" id="L211">                    upload.getRemotePath(),</span>
+<span class="nc" id="L212">                    upload.getLocalPath(),</span>
+<span class="nc" id="L213">                    upload.getMimeType()</span>
+            );
+        } else {
+<span class="nc" id="L216">            mFile = file;</span>
+        }
+<span class="nc" id="L218">        mOnWifiOnly = onWifiOnly;</span>
+<span class="nc" id="L219">        mWhileChargingOnly = whileChargingOnly;</span>
+<span class="nc" id="L220">        mRemotePath = upload.getRemotePath();</span>
+<span class="nc" id="L221">        mForceOverwrite = forceOverwrite;</span>
+<span class="nc" id="L222">        mLocalBehaviour = localBehaviour;</span>
+<span class="nc" id="L223">        mOriginalStoragePath = mFile.getStoragePath();</span>
+<span class="nc" id="L224">        mContext = context;</span>
+<span class="nc" id="L225">        mOCUploadId = upload.getUploadId();</span>
+<span class="nc" id="L226">        mCreatedBy = upload.getCreatedBy();</span>
+<span class="nc" id="L227">        mRemoteFolderToBeCreated = upload.isCreateRemoteFolder();</span>
+        // Ignore power save mode only if user explicitly created this upload
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        mIgnoringPowerSaveMode = mCreatedBy == CREATED_BY_USER;</span>
+<span class="nc" id="L230">        mFolderUnlockToken = upload.getFolderUnlockToken();</span>
+<span class="nc" id="L231">    }</span>
+
+    public boolean isWifiRequired() {
+<span class="nc" id="L234">        return mOnWifiOnly;</span>
+    }
+
+    public boolean isChargingRequired() {
+<span class="nc" id="L238">        return mWhileChargingOnly;</span>
+    }
+
+<span class="nc" id="L241">    public boolean isIgnoringPowerSaveMode() { return mIgnoringPowerSaveMode; }</span>
+
+    public Account getAccount() {
+<span class="nc" id="L244">        return mAccount;</span>
+    }
+
+    public String getFileName() {
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        return (mFile != null) ? mFile.getFileName() : null;</span>
+    }
+
+    public OCFile getFile() {
+<span class="nc" id="L252">        return mFile;</span>
+    }
+
+    /**
+     * If remote file was renamed, return original OCFile which was uploaded. Is
+     * null is file was not renamed.
+     */
+    public OCFile getOldFile() {
+<span class="nc" id="L260">        return mOldFile;</span>
+    }
+
+    public String getOriginalStoragePath() {
+<span class="nc" id="L264">        return mOriginalStoragePath;</span>
+    }
+
+    public String getStoragePath() {
+<span class="nc" id="L268">        return mFile.getStoragePath();</span>
+    }
+
+    public String getRemotePath() {
+<span class="nc" id="L272">        return mFile.getRemotePath();</span>
+    }
+
+    public String getDecryptedRemotePath() {
+<span class="nc" id="L276">        return mFile.getDecryptedRemotePath();</span>
+    }
+
+    public String getMimeType() {
+<span class="nc" id="L280">        return mFile.getMimeType();</span>
+    }
+
+    public int getLocalBehaviour() {
+<span class="nc" id="L284">        return mLocalBehaviour;</span>
+    }
+
+    public void setRemoteFolderToBeCreated() {
+<span class="nc" id="L288">        mRemoteFolderToBeCreated = true;</span>
+<span class="nc" id="L289">    }</span>
+
+    public boolean wasRenamed() {
+<span class="nc" id="L292">        return mWasRenamed;</span>
+    }
+
+    public void setCreatedBy(int createdBy) {
+<span class="nc" id="L296">        mCreatedBy = createdBy;</span>
+<span class="nc bnc" id="L297" title="All 4 branches missed.">        if (createdBy &lt; CREATED_BY_USER || CREATED_AS_INSTANT_VIDEO &lt; createdBy) {</span>
+<span class="nc" id="L298">            mCreatedBy = CREATED_BY_USER;</span>
+        }
+<span class="nc" id="L300">    }</span>
+
+    public int getCreatedBy() {
+<span class="nc" id="L303">        return mCreatedBy;</span>
+    }
+
+    public boolean isInstantPicture() {
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        return mCreatedBy == CREATED_AS_INSTANT_PICTURE;</span>
+    }
+
+    public boolean isInstantVideo() {
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        return mCreatedBy == CREATED_AS_INSTANT_VIDEO;</span>
+    }
+
+    public void setOCUploadId(long id) {
+<span class="nc" id="L315">        mOCUploadId = id;</span>
+<span class="nc" id="L316">    }</span>
+
+    public long getOCUploadId() {
+<span class="nc" id="L319">        return mOCUploadId;</span>
+    }
+
+    public Set&lt;OnDatatransferProgressListener&gt; getDataTransferListeners() {
+<span class="nc" id="L323">        return mDataTransferListeners;</span>
+    }
+
+    public void addDataTransferProgressListener(OnDatatransferProgressListener listener) {
+<span class="nc" id="L327">        synchronized (mDataTransferListeners) {</span>
+<span class="nc" id="L328">            mDataTransferListeners.add(listener);</span>
+<span class="nc" id="L329">        }</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (mEntity != null) {</span>
+<span class="nc" id="L331">            ((ProgressiveDataTransfer) mEntity).addDataTransferProgressListener(listener);</span>
+        }
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if (mUploadOperation != null) {</span>
+<span class="nc" id="L334">            mUploadOperation.addDataTransferProgressListener(listener);</span>
+        }
+<span class="nc" id="L336">    }</span>
+
+    public void removeDataTransferProgressListener(OnDatatransferProgressListener listener) {
+<span class="nc" id="L339">        synchronized (mDataTransferListeners) {</span>
+<span class="nc" id="L340">            mDataTransferListeners.remove(listener);</span>
+<span class="nc" id="L341">        }</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (mEntity != null) {</span>
+<span class="nc" id="L343">            ((ProgressiveDataTransfer) mEntity).removeDataTransferProgressListener(listener);</span>
+        }
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        if (mUploadOperation != null) {</span>
+<span class="nc" id="L346">            mUploadOperation.removeDataTransferProgressListener(listener);</span>
+        }
+<span class="nc" id="L348">    }</span>
+
+    public void addRenameUploadListener(OnRenameListener listener) {
+<span class="nc" id="L351">        mRenameUploadListener = listener;</span>
+<span class="nc" id="L352">    }</span>
+
+    public Context getContext() {
+<span class="nc" id="L355">        return mContext;</span>
+    }
+
+    @Override
+    @SuppressWarnings(&quot;PMD.AvoidDuplicateLiterals&quot;)
+    protected RemoteOperationResult run(OwnCloudClient client) {
+<span class="nc" id="L361">        mCancellationRequested.set(false);</span>
+<span class="nc" id="L362">        mUploadStarted.set(true);</span>
+
+<span class="nc bnc" id="L364" title="All 2 branches missed.">        for (OCUpload ocUpload : uploadsStorageManager.getAllStoredUploads()) {</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if (ocUpload.getUploadId() == getOCUploadId()) {</span>
+<span class="nc" id="L366">                ocUpload.setFileSize(0);</span>
+<span class="nc" id="L367">                uploadsStorageManager.updateUpload(ocUpload);</span>
+<span class="nc" id="L368">                break;</span>
+            }
+        }
+
+<span class="nc" id="L372">        String remoteParentPath = new File(getRemotePath()).getParent();</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        remoteParentPath = remoteParentPath.endsWith(OCFile.PATH_SEPARATOR) ?</span>
+                remoteParentPath : remoteParentPath + OCFile.PATH_SEPARATOR;
+
+<span class="nc" id="L376">        OCFile parent = getStorageManager().getFileByPath(remoteParentPath);</span>
+
+        // in case of a fresh upload with subfolder, where parent does not exist yet
+<span class="nc bnc" id="L379" title="All 6 branches missed.">        if (parent == null &amp;&amp; (mFolderUnlockToken == null || mFolderUnlockToken.isEmpty())) {</span>
+            // try to create folder
+<span class="nc" id="L381">            RemoteOperationResult result = grantFolderExistence(remoteParentPath, client);</span>
+
+<span class="nc bnc" id="L383" title="All 2 branches missed.">            if (!result.isSuccess()) {</span>
+<span class="nc" id="L384">                return result;</span>
+            }
+
+<span class="nc" id="L387">            parent = getStorageManager().getFileByPath(remoteParentPath);</span>
+
+<span class="nc bnc" id="L389" title="All 2 branches missed.">            if (parent == null) {</span>
+<span class="nc" id="L390">                return new RemoteOperationResult(false, &quot;Parent folder not found&quot;, HttpStatus.SC_NOT_FOUND);</span>
+            }
+        }
+
+        // parent file is not null anymore:
+        // - it was created on fresh upload or
+        // - resume of encrypted upload, then parent file exists already as unlock is only for direct parent
+
+<span class="nc" id="L398">        mFile.setParentId(parent.getFileId());</span>
+
+        // try to unlock folder with stored token, e.g. when upload needs to be resumed or app crashed
+        // the parent folder should exist as it is a resume of a broken upload
+<span class="nc bnc" id="L402" title="All 4 branches missed.">        if (mFolderUnlockToken != null &amp;&amp; !mFolderUnlockToken.isEmpty()) {</span>
+<span class="nc" id="L403">            UnlockFileRemoteOperation unlockFileOperation = new UnlockFileRemoteOperation(parent.getLocalId(),</span>
+                mFolderUnlockToken);
+<span class="nc" id="L405">            RemoteOperationResult unlockFileOperationResult = unlockFileOperation.execute(client);</span>
+
+<span class="nc bnc" id="L407" title="All 2 branches missed.">            if (!unlockFileOperationResult.isSuccess()) {</span>
+<span class="nc" id="L408">                return unlockFileOperationResult;</span>
+            }
+        }
+
+        // check if any parent is encrypted
+<span class="nc" id="L413">        encryptedAncestor = FileStorageUtils.checkEncryptionStatus(parent, getStorageManager());</span>
+<span class="nc" id="L414">        mFile.setEncrypted(encryptedAncestor);</span>
+
+<span class="nc bnc" id="L416" title="All 2 branches missed.">        if (encryptedAncestor) {</span>
+<span class="nc" id="L417">            Log_OC.d(TAG, &quot;encrypted upload&quot;);</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.KITKAT) {</span>
+<span class="nc" id="L419">                return encryptedUpload(client, parent);</span>
+            } else {
+<span class="nc" id="L421">                Log_OC.e(TAG, &quot;Encrypted upload on old Android API&quot;);</span>
+<span class="nc" id="L422">                return new RemoteOperationResult(ResultCode.OLD_ANDROID_API);</span>
+            }
+        } else {
+<span class="nc" id="L425">            Log_OC.d(TAG, &quot;normal upload&quot;);</span>
+<span class="nc" id="L426">            return normalUpload(client);</span>
+        }
+    }
+
+    @SuppressLint(&quot;AndroidLintUseSparseArrays&quot;) // gson cannot handle sparse arrays easily, therefore use hashmap
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    private RemoteOperationResult encryptedUpload(OwnCloudClient client, OCFile parentFile) {
+<span class="nc" id="L433">        RemoteOperationResult result = null;</span>
+<span class="nc" id="L434">        File temporalFile = null;</span>
+<span class="nc" id="L435">        File originalFile = new File(mOriginalStoragePath);</span>
+<span class="nc" id="L436">        File expectedFile = null;</span>
+<span class="nc" id="L437">        FileLock fileLock = null;</span>
+        long size;
+
+<span class="nc" id="L440">        boolean metadataExists = false;</span>
+<span class="nc" id="L441">        String token = null;</span>
+
+<span class="nc" id="L443">        ArbitraryDataProvider arbitraryDataProvider = new ArbitraryDataProvider(getContext().getContentResolver());</span>
+
+<span class="nc" id="L445">        String privateKey = arbitraryDataProvider.getValue(getAccount().name, EncryptionUtils.PRIVATE_KEY);</span>
+<span class="nc" id="L446">        String publicKey = arbitraryDataProvider.getValue(getAccount().name, EncryptionUtils.PUBLIC_KEY);</span>
+
+        try {
+            // check conditions
+<span class="nc" id="L450">            result = checkConditions(originalFile);</span>
+
+<span class="nc bnc" id="L452" title="All 2 branches missed.">            if (result != null) {</span>
+<span class="nc" id="L453">                return result;</span>
+            }
+            /***** E2E *****/
+
+            // Lock folder
+<span class="nc" id="L458">            LockFileRemoteOperation lockFileOperation = new LockFileRemoteOperation(parentFile.getLocalId());</span>
+<span class="nc" id="L459">            RemoteOperationResult lockFileOperationResult = lockFileOperation.execute(client);</span>
+
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            if (lockFileOperationResult.isSuccess()) {</span>
+<span class="nc" id="L462">                token = (String) lockFileOperationResult.getData().get(0);</span>
+                // immediately store it
+<span class="nc" id="L464">                mUpload.setFolderUnlockToken(token);</span>
+<span class="nc" id="L465">                uploadsStorageManager.updateUpload(mUpload);</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">            } else if (lockFileOperationResult.getHttpCode() == HttpStatus.SC_FORBIDDEN) {</span>
+<span class="nc" id="L467">                throw new UploadException(&quot;Forbidden! Please try again later.)&quot;);</span>
+            } else {
+<span class="nc" id="L469">                throw new UploadException(&quot;Unknown error!&quot;);</span>
+            }
+
+            // Update metadata
+<span class="nc" id="L473">            GetMetadataRemoteOperation getMetadataOperation = new GetMetadataRemoteOperation(parentFile.getLocalId());</span>
+<span class="nc" id="L474">            RemoteOperationResult getMetadataOperationResult = getMetadataOperation.execute(client);</span>
+
+            DecryptedFolderMetadata metadata;
+
+<span class="nc bnc" id="L478" title="All 2 branches missed.">            if (getMetadataOperationResult.isSuccess()) {</span>
+<span class="nc" id="L479">                metadataExists = true;</span>
+
+                // decrypt metadata
+<span class="nc" id="L482">                String serializedEncryptedMetadata = (String) getMetadataOperationResult.getData().get(0);</span>
+
+
+<span class="nc" id="L485">                EncryptedFolderMetadata encryptedFolderMetadata = EncryptionUtils.deserializeJSON(</span>
+<span class="nc" id="L486">                        serializedEncryptedMetadata, new TypeToken&lt;EncryptedFolderMetadata&gt;() {</span>
+                        });
+
+<span class="nc" id="L489">                metadata = EncryptionUtils.decryptFolderMetaData(encryptedFolderMetadata, privateKey);</span>
+
+<span class="nc bnc" id="L491" title="All 2 branches missed.">            } else if (getMetadataOperationResult.getHttpCode() == HttpStatus.SC_NOT_FOUND) {</span>
+                // new metadata
+<span class="nc" id="L493">                metadata = new DecryptedFolderMetadata();</span>
+<span class="nc" id="L494">                metadata.setMetadata(new DecryptedFolderMetadata.Metadata());</span>
+<span class="nc" id="L495">                metadata.getMetadata().setMetadataKeys(new HashMap&lt;&gt;());</span>
+<span class="nc" id="L496">                String metadataKey = EncryptionUtils.encodeBytesToBase64String(EncryptionUtils.generateKey());</span>
+<span class="nc" id="L497">                String encryptedMetadataKey = EncryptionUtils.encryptStringAsymmetric(metadataKey, publicKey);</span>
+<span class="nc" id="L498">                metadata.getMetadata().getMetadataKeys().put(0, encryptedMetadataKey);</span>
+<span class="nc" id="L499">            } else {</span>
+                // TODO error
+<span class="nc" id="L501">                throw new UploadException(&quot;something wrong&quot;);</span>
+            }
+
+            /**** E2E *****/
+
+            // check name collision
+<span class="nc" id="L507">            checkNameCollision(client, metadata, parentFile.isEncrypted());</span>
+
+<span class="nc" id="L509">            String expectedPath = FileStorageUtils.getDefaultSavePathFor(mAccount.name, mFile);</span>
+<span class="nc" id="L510">            expectedFile = new File(expectedPath);</span>
+
+<span class="nc" id="L512">            result = copyFile(originalFile, expectedPath);</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">            if (!result.isSuccess()) {</span>
+<span class="nc" id="L514">                return result;</span>
+            }
+
+            // Get the last modification date of the file from the file system
+<span class="nc" id="L518">            Long timeStampLong = originalFile.lastModified() / 1000;</span>
+<span class="nc" id="L519">            String timeStamp = timeStampLong.toString();</span>
+
+            /***** E2E *****/
+
+            // Key, always generate new one
+<span class="nc" id="L524">            byte[] key = EncryptionUtils.generateKey();</span>
+
+            // IV, always generate new one
+<span class="nc" id="L527">            byte[] iv = EncryptionUtils.randomBytes(EncryptionUtils.ivLength);</span>
+
+<span class="nc" id="L529">            EncryptionUtils.EncryptedFile encryptedFile = EncryptionUtils.encryptFile(mFile, key, iv);</span>
+
+            // new random file name, check if it exists in metadata
+<span class="nc" id="L532">            String encryptedFileName = UUID.randomUUID().toString().replaceAll(&quot;-&quot;, &quot;&quot;);</span>
+
+<span class="nc bnc" id="L534" title="All 2 branches missed.">            while (metadata.getFiles().get(encryptedFileName) != null) {</span>
+<span class="nc" id="L535">                encryptedFileName = UUID.randomUUID().toString().replaceAll(&quot;-&quot;, &quot;&quot;);</span>
+            }
+
+<span class="nc" id="L538">            mFile.setEncryptedFileName(encryptedFileName);</span>
+
+<span class="nc" id="L540">            File encryptedTempFile = File.createTempFile(&quot;encFile&quot;, encryptedFileName);</span>
+<span class="nc" id="L541">            FileOutputStream fileOutputStream = new FileOutputStream(encryptedTempFile);</span>
+<span class="nc" id="L542">            fileOutputStream.write(encryptedFile.encryptedBytes);</span>
+<span class="nc" id="L543">            fileOutputStream.close();</span>
+
+            /***** E2E *****/
+
+<span class="nc" id="L547">            FileChannel channel = null;</span>
+            try {
+<span class="nc" id="L549">                channel = new RandomAccessFile(mFile.getStoragePath(), &quot;rw&quot;).getChannel();</span>
+<span class="nc" id="L550">                fileLock = channel.tryLock();</span>
+<span class="nc" id="L551">            } catch (FileNotFoundException e) {</span>
+                // this basically means that the file is on SD card
+                // try to copy file to temporary dir if it doesn't exist
+<span class="nc" id="L554">                String temporalPath = FileStorageUtils.getInternalTemporalPath(mAccount.name, mContext) +</span>
+<span class="nc" id="L555">                        mFile.getRemotePath();</span>
+<span class="nc" id="L556">                mFile.setStoragePath(temporalPath);</span>
+<span class="nc" id="L557">                temporalFile = new File(temporalPath);</span>
+
+<span class="nc" id="L559">                Files.deleteIfExists(Paths.get(temporalPath));</span>
+<span class="nc" id="L560">                result = copy(originalFile, temporalFile);</span>
+
+<span class="nc bnc" id="L562" title="All 2 branches missed.">                if (result.isSuccess()) {</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">                    if (temporalFile.length() == originalFile.length()) {</span>
+<span class="nc" id="L564">                        channel = new RandomAccessFile(temporalFile.getAbsolutePath(), &quot;rw&quot;).getChannel();</span>
+<span class="nc" id="L565">                        fileLock = channel.tryLock();</span>
+                    } else {
+<span class="nc" id="L567">                        result = new RemoteOperationResult(ResultCode.LOCK_FAILED);</span>
+                    }
+                }
+<span class="nc" id="L570">            }</span>
+
+            try {
+<span class="nc" id="L573">                size = channel.size();</span>
+<span class="nc" id="L574">            } catch (IOException e1) {</span>
+<span class="nc" id="L575">                size = new File(mFile.getStoragePath()).length();</span>
+<span class="nc" id="L576">            }</span>
+
+<span class="nc bnc" id="L578" title="All 2 branches missed.">            for (OCUpload ocUpload : uploadsStorageManager.getAllStoredUploads()) {</span>
+<span class="nc bnc" id="L579" title="All 2 branches missed.">                if (ocUpload.getUploadId() == getOCUploadId()) {</span>
+<span class="nc" id="L580">                    ocUpload.setFileSize(size);</span>
+<span class="nc" id="L581">                    uploadsStorageManager.updateUpload(ocUpload);</span>
+<span class="nc" id="L582">                    break;</span>
+                }
+            }
+
+            /// perform the upload
+<span class="nc bnc" id="L587" title="All 2 branches missed.">            if (size &gt; ChunkedFileUploadRemoteOperation.CHUNK_SIZE_MOBILE) {</span>
+<span class="nc" id="L588">                boolean onWifiConnection = connectivityService.isOnlineWithWifi();</span>
+
+<span class="nc" id="L590">                mUploadOperation = new ChunkedFileUploadRemoteOperation(encryptedTempFile.getAbsolutePath(),</span>
+<span class="nc" id="L591">                                                                        mFile.getParentRemotePath() + encryptedFileName,</span>
+<span class="nc" id="L592">                                                                        mFile.getMimeType(), mFile.getEtagInConflict(),</span>
+                                                                        timeStamp, onWifiConnection);
+<span class="nc" id="L594">            } else {</span>
+<span class="nc" id="L595">                mUploadOperation = new UploadFileRemoteOperation(encryptedTempFile.getAbsolutePath(),</span>
+<span class="nc" id="L596">                        mFile.getParentRemotePath() + encryptedFileName, mFile.getMimeType(),</span>
+<span class="nc" id="L597">                        mFile.getEtagInConflict(), timeStamp);</span>
+            }
+
+<span class="nc bnc" id="L600" title="All 2 branches missed.">            for (OnDatatransferProgressListener mDataTransferListener : mDataTransferListeners) {</span>
+<span class="nc" id="L601">                mUploadOperation.addDataTransferProgressListener(mDataTransferListener);</span>
+<span class="nc" id="L602">            }</span>
+
+<span class="nc bnc" id="L604" title="All 2 branches missed.">            if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L605">                throw new OperationCancelledException();</span>
+            }
+
+<span class="nc" id="L608">            result = mUploadOperation.execute(client);</span>
+
+            /// move local temporal file or original file to its corresponding
+            // location in the Nextcloud local folder
+<span class="nc bnc" id="L612" title="All 4 branches missed.">            if (!result.isSuccess() &amp;&amp; result.getHttpCode() == HttpStatus.SC_PRECONDITION_FAILED) {</span>
+<span class="nc" id="L613">                result = new RemoteOperationResult(ResultCode.SYNC_CONFLICT);</span>
+            }
+
+<span class="nc bnc" id="L616" title="All 2 branches missed.">            if (result.isSuccess()) {</span>
+                // upload metadata
+<span class="nc" id="L618">                DecryptedFolderMetadata.DecryptedFile decryptedFile = new DecryptedFolderMetadata.DecryptedFile();</span>
+<span class="nc" id="L619">                DecryptedFolderMetadata.Data data = new DecryptedFolderMetadata.Data();</span>
+<span class="nc" id="L620">                data.setFilename(mFile.getFileName());</span>
+<span class="nc" id="L621">                data.setMimetype(mFile.getMimeType());</span>
+<span class="nc" id="L622">                data.setKey(EncryptionUtils.encodeBytesToBase64String(key));</span>
+
+<span class="nc" id="L624">                decryptedFile.setEncrypted(data);</span>
+<span class="nc" id="L625">                decryptedFile.setInitializationVector(EncryptionUtils.encodeBytesToBase64String(iv));</span>
+<span class="nc" id="L626">                decryptedFile.setAuthenticationTag(encryptedFile.authenticationTag);</span>
+
+<span class="nc" id="L628">                metadata.getFiles().put(encryptedFileName, decryptedFile);</span>
+
+<span class="nc" id="L630">                EncryptedFolderMetadata encryptedFolderMetadata = EncryptionUtils.encryptFolderMetadata(metadata,</span>
+                        privateKey);
+<span class="nc" id="L632">                String serializedFolderMetadata = EncryptionUtils.serializeJSON(encryptedFolderMetadata);</span>
+
+                // upload metadata
+                RemoteOperationResult uploadMetadataOperationResult;
+<span class="nc bnc" id="L636" title="All 2 branches missed.">                if (metadataExists) {</span>
+                    // update metadata
+<span class="nc" id="L638">                    UpdateMetadataRemoteOperation storeMetadataOperation = new UpdateMetadataRemoteOperation(</span>
+<span class="nc" id="L639">                        parentFile.getLocalId(), serializedFolderMetadata, token);</span>
+<span class="nc" id="L640">                    uploadMetadataOperationResult = storeMetadataOperation.execute(client);</span>
+<span class="nc" id="L641">                } else {</span>
+                    // store metadata
+<span class="nc" id="L643">                    StoreMetadataRemoteOperation storeMetadataOperation = new StoreMetadataRemoteOperation(</span>
+<span class="nc" id="L644">                        parentFile.getLocalId(), serializedFolderMetadata);</span>
+<span class="nc" id="L645">                    uploadMetadataOperationResult = storeMetadataOperation.execute(client);</span>
+                }
+
+<span class="nc bnc" id="L648" title="All 2 branches missed.">                if (!uploadMetadataOperationResult.isSuccess()) {</span>
+<span class="nc" id="L649">                    throw new UploadException();</span>
+                }
+            }
+<span class="nc" id="L652">        } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L653">            Log_OC.d(TAG, mFile.getStoragePath() + &quot; not exists anymore&quot;);</span>
+<span class="nc" id="L654">            result = new RemoteOperationResult(ResultCode.LOCAL_FILE_NOT_FOUND);</span>
+<span class="nc" id="L655">        } catch (OverlappingFileLockException e) {</span>
+<span class="nc" id="L656">            Log_OC.d(TAG, &quot;Overlapping file lock exception&quot;);</span>
+<span class="nc" id="L657">            result = new RemoteOperationResult(ResultCode.LOCK_FAILED);</span>
+<span class="nc" id="L658">        } catch (Exception e) {</span>
+<span class="nc" id="L659">            result = new RemoteOperationResult(e);</span>
+        } finally {
+<span class="nc" id="L661">            mUploadStarted.set(false);</span>
+
+<span class="nc bnc" id="L663" title="All 2 branches missed.">            if (fileLock != null) {</span>
+                try {
+<span class="nc" id="L665">                    fileLock.release();</span>
+<span class="nc" id="L666">                } catch (IOException e) {</span>
+<span class="nc" id="L667">                    Log_OC.e(TAG, &quot;Failed to unlock file with path &quot; + mFile.getStoragePath());</span>
+<span class="nc" id="L668">                }</span>
+            }
+
+<span class="nc bnc" id="L671" title="All 4 branches missed.">            if (temporalFile != null &amp;&amp; !originalFile.equals(temporalFile)) {</span>
+<span class="nc" id="L672">                temporalFile.delete();</span>
+            }
+<span class="nc bnc" id="L674" title="All 2 branches missed.">            if (result == null) {</span>
+<span class="nc" id="L675">                result = new RemoteOperationResult(ResultCode.UNKNOWN_ERROR);</span>
+            }
+
+<span class="nc" id="L678">            logResult(result, mFile.getStoragePath(), mFile.getRemotePath());</span>
+        }
+
+<span class="nc bnc" id="L681" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L682">            handleSuccessfulUpload(temporalFile, expectedFile, originalFile, client);</span>
+<span class="nc" id="L683">            RemoteOperationResult unlockFolderResult = unlockFolder(parentFile, client, token);</span>
+
+<span class="nc bnc" id="L685" title="All 2 branches missed.">            if (!unlockFolderResult.isSuccess()) {</span>
+<span class="nc" id="L686">                return unlockFolderResult;</span>
+            }
+<span class="nc bnc" id="L688" title="All 2 branches missed.">        } else if (result.getCode() == ResultCode.SYNC_CONFLICT) {</span>
+<span class="nc" id="L689">            getStorageManager().saveConflict(mFile, mFile.getEtagInConflict());</span>
+        }
+
+        // delete temporal file
+<span class="nc bnc" id="L693" title="All 6 branches missed.">        if (temporalFile != null &amp;&amp; temporalFile.exists() &amp;&amp; !temporalFile.delete()) {</span>
+<span class="nc" id="L694">            Log_OC.e(TAG, &quot;Could not delete temporal file &quot; + temporalFile.getAbsolutePath());</span>
+        }
+
+<span class="nc" id="L697">        return result;</span>
+    }
+
+    private RemoteOperationResult unlockFolder(OCFile parentFolder, OwnCloudClient client, String token) {
+<span class="nc bnc" id="L701" title="All 2 branches missed.">        if (token != null) {</span>
+<span class="nc" id="L702">            return new UnlockFileRemoteOperation(parentFolder.getLocalId(), token).execute(client);</span>
+        } else {
+<span class="nc" id="L704">            return new RemoteOperationResult(new Exception(&quot;No token available&quot;));</span>
+        }
+    }
+
+    private RemoteOperationResult checkConditions(File originalFile) {
+<span class="nc" id="L709">        RemoteOperationResult remoteOperationResult = null;</span>
+
+        // check that internet is not behind walled garden
+<span class="nc bnc" id="L712" title="All 2 branches missed.">        if (Device.getNetworkType(mContext).equals(JobRequest.NetworkType.ANY) ||</span>
+<span class="nc bnc" id="L713" title="All 2 branches missed.">                connectivityService.isInternetWalled()) {</span>
+<span class="nc" id="L714">            remoteOperationResult =  new RemoteOperationResult(ResultCode.NO_NETWORK_CONNECTION);</span>
+        }
+
+        // check that connectivity conditions are met and delays the upload otherwise
+<span class="nc bnc" id="L718" title="All 4 branches missed.">        if (mOnWifiOnly &amp;&amp; !Device.getNetworkType(mContext).equals(JobRequest.NetworkType.UNMETERED)) {</span>
+<span class="nc" id="L719">            Log_OC.d(TAG, &quot;Upload delayed until WiFi is available: &quot; + getRemotePath());</span>
+<span class="nc" id="L720">            remoteOperationResult = new RemoteOperationResult(ResultCode.DELAYED_FOR_WIFI);</span>
+        }
+
+        // check if charging conditions are met and delays the upload otherwise
+<span class="nc bnc" id="L724" title="All 4 branches missed.">        if (mWhileChargingOnly &amp;&amp; !Device.getBatteryStatus(mContext).isCharging()</span>
+<span class="nc bnc" id="L725" title="All 2 branches missed.">                &amp;&amp; Device.getBatteryStatus(mContext).getBatteryPercent() &lt; 1) {</span>
+<span class="nc" id="L726">            Log_OC.d(TAG, &quot;Upload delayed until the device is charging: &quot; + getRemotePath());</span>
+<span class="nc" id="L727">            remoteOperationResult =  new RemoteOperationResult(ResultCode.DELAYED_FOR_CHARGING);</span>
+        }
+
+        // check that device is not in power save mode
+<span class="nc bnc" id="L731" title="All 4 branches missed.">        if (!mIgnoringPowerSaveMode &amp;&amp; powerManagementService.isPowerSavingEnabled()) {</span>
+<span class="nc" id="L732">            Log_OC.d(TAG, &quot;Upload delayed because device is in power save mode: &quot; + getRemotePath());</span>
+<span class="nc" id="L733">            remoteOperationResult =  new RemoteOperationResult(ResultCode.DELAYED_IN_POWER_SAVE_MODE);</span>
+        }
+
+        // check if the file continues existing before schedule the operation
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        if (!originalFile.exists()) {</span>
+<span class="nc" id="L738">            Log_OC.d(TAG, mOriginalStoragePath + &quot; not exists anymore&quot;);</span>
+<span class="nc" id="L739">            remoteOperationResult =  new RemoteOperationResult(ResultCode.LOCAL_FILE_NOT_FOUND);</span>
+        }
+
+<span class="nc" id="L742">        return remoteOperationResult;</span>
+    }
+
+    private RemoteOperationResult normalUpload(OwnCloudClient client) {
+<span class="nc" id="L746">        RemoteOperationResult result = null;</span>
+<span class="nc" id="L747">        File temporalFile = null;</span>
+<span class="nc" id="L748">        File originalFile = new File(mOriginalStoragePath);</span>
+<span class="nc" id="L749">        File expectedFile = null;</span>
+<span class="nc" id="L750">        FileLock fileLock = null;</span>
+        long size;
+
+        try {
+            // check conditions
+<span class="nc" id="L755">            result = checkConditions(originalFile);</span>
+
+<span class="nc bnc" id="L757" title="All 2 branches missed.">            if (result != null) {</span>
+<span class="nc" id="L758">                return result;</span>
+            }
+
+            // check name collision
+<span class="nc" id="L762">            checkNameCollision(client, null, false);</span>
+
+<span class="nc" id="L764">            String expectedPath = FileStorageUtils.getDefaultSavePathFor(mAccount.name, mFile);</span>
+<span class="nc" id="L765">            expectedFile = new File(expectedPath);</span>
+
+<span class="nc" id="L767">            result = copyFile(originalFile, expectedPath);</span>
+<span class="nc bnc" id="L768" title="All 2 branches missed.">            if (!result.isSuccess()) {</span>
+<span class="nc" id="L769">                return result;</span>
+            }
+
+            // Get the last modification date of the file from the file system
+<span class="nc" id="L773">            Long timeStampLong = originalFile.lastModified() / 1000;</span>
+<span class="nc" id="L774">            String timeStamp = timeStampLong.toString();</span>
+
+<span class="nc" id="L776">            FileChannel channel = null;</span>
+            try {
+<span class="nc" id="L778">                channel = new RandomAccessFile(mFile.getStoragePath(), &quot;rw&quot;).getChannel();</span>
+<span class="nc" id="L779">                fileLock = channel.tryLock();</span>
+<span class="nc" id="L780">            } catch (FileNotFoundException e) {</span>
+                // this basically means that the file is on SD card
+                // try to copy file to temporary dir if it doesn't exist
+<span class="nc" id="L783">                String temporalPath = FileStorageUtils.getInternalTemporalPath(mAccount.name, mContext) +</span>
+<span class="nc" id="L784">                        mFile.getRemotePath();</span>
+<span class="nc" id="L785">                mFile.setStoragePath(temporalPath);</span>
+<span class="nc" id="L786">                temporalFile = new File(temporalPath);</span>
+
+<span class="nc" id="L788">                Files.deleteIfExists(Paths.get(temporalPath));</span>
+<span class="nc" id="L789">                result = copy(originalFile, temporalFile);</span>
+
+<span class="nc bnc" id="L791" title="All 2 branches missed.">                if (result.isSuccess()) {</span>
+<span class="nc bnc" id="L792" title="All 2 branches missed.">                    if (temporalFile.length() == originalFile.length()) {</span>
+<span class="nc" id="L793">                        channel = new RandomAccessFile(temporalFile.getAbsolutePath(), &quot;rw&quot;).getChannel();</span>
+<span class="nc" id="L794">                        fileLock = channel.tryLock();</span>
+                    } else {
+<span class="nc" id="L796">                        result = new RemoteOperationResult(ResultCode.LOCK_FAILED);</span>
+                    }
+                }
+<span class="nc" id="L799">            }</span>
+
+            try {
+<span class="nc" id="L802">                size = channel.size();</span>
+<span class="nc" id="L803">            } catch (Exception e1) {</span>
+<span class="nc" id="L804">                size = new File(mFile.getStoragePath()).length();</span>
+<span class="nc" id="L805">            }</span>
+
+<span class="nc bnc" id="L807" title="All 2 branches missed.">            for (OCUpload ocUpload : uploadsStorageManager.getAllStoredUploads()) {</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">                if (ocUpload.getUploadId() == getOCUploadId()) {</span>
+<span class="nc" id="L809">                    ocUpload.setFileSize(size);</span>
+<span class="nc" id="L810">                    uploadsStorageManager.updateUpload(ocUpload);</span>
+<span class="nc" id="L811">                    break;</span>
+                }
+            }
+
+            // perform the upload
+<span class="nc bnc" id="L816" title="All 2 branches missed.">            if (size &gt; ChunkedFileUploadRemoteOperation.CHUNK_SIZE_MOBILE) {</span>
+<span class="nc" id="L817">                boolean onWifiConnection = connectivityService.isOnlineWithWifi();</span>
+
+<span class="nc" id="L819">                mUploadOperation = new ChunkedFileUploadRemoteOperation(mFile.getStoragePath(),</span>
+<span class="nc" id="L820">                                                                        mFile.getRemotePath(), mFile.getMimeType(),</span>
+<span class="nc" id="L821">                                                                        mFile.getEtagInConflict(),</span>
+                                                                        timeStamp, onWifiConnection);
+<span class="nc" id="L823">            } else {</span>
+<span class="nc" id="L824">                mUploadOperation = new UploadFileRemoteOperation(mFile.getStoragePath(),</span>
+<span class="nc" id="L825">                        mFile.getRemotePath(), mFile.getMimeType(), mFile.getEtagInConflict(), timeStamp);</span>
+            }
+
+<span class="nc bnc" id="L828" title="All 2 branches missed.">            for (OnDatatransferProgressListener mDataTransferListener : mDataTransferListeners) {</span>
+<span class="nc" id="L829">                mUploadOperation.addDataTransferProgressListener(mDataTransferListener);</span>
+<span class="nc" id="L830">            }</span>
+
+<span class="nc bnc" id="L832" title="All 2 branches missed.">            if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L833">                throw new OperationCancelledException();</span>
+            }
+
+<span class="nc bnc" id="L836" title="All 4 branches missed.">            if (result.isSuccess() &amp;&amp; mUploadOperation != null) {</span>
+<span class="nc" id="L837">                result = mUploadOperation.execute(client);</span>
+
+                /// move local temporal file or original file to its corresponding
+                // location in the Nextcloud local folder
+<span class="nc bnc" id="L841" title="All 4 branches missed.">                if (!result.isSuccess() &amp;&amp; result.getHttpCode() == HttpStatus.SC_PRECONDITION_FAILED) {</span>
+<span class="nc" id="L842">                    result = new RemoteOperationResult(ResultCode.SYNC_CONFLICT);</span>
+                }
+            }
+<span class="nc" id="L845">        } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L846">            Log_OC.d(TAG, mOriginalStoragePath + &quot; not exists anymore&quot;);</span>
+<span class="nc" id="L847">            result = new RemoteOperationResult(ResultCode.LOCAL_FILE_NOT_FOUND);</span>
+<span class="nc" id="L848">        } catch (OverlappingFileLockException e) {</span>
+<span class="nc" id="L849">            Log_OC.d(TAG, &quot;Overlapping file lock exception&quot;);</span>
+<span class="nc" id="L850">            result = new RemoteOperationResult(ResultCode.LOCK_FAILED);</span>
+<span class="nc" id="L851">        } catch (Exception e) {</span>
+<span class="nc" id="L852">            result = new RemoteOperationResult(e);</span>
+        } finally {
+<span class="nc" id="L854">            mUploadStarted.set(false);</span>
+
+<span class="nc bnc" id="L856" title="All 2 branches missed.">            if (fileLock != null) {</span>
+                try {
+<span class="nc" id="L858">                    fileLock.release();</span>
+<span class="nc" id="L859">                } catch (IOException e) {</span>
+<span class="nc" id="L860">                    Log_OC.e(TAG, &quot;Failed to unlock file with path &quot; + mOriginalStoragePath);</span>
+<span class="nc" id="L861">                }</span>
+            }
+
+<span class="nc bnc" id="L864" title="All 4 branches missed.">            if (temporalFile != null &amp;&amp; !originalFile.equals(temporalFile)) {</span>
+<span class="nc" id="L865">                temporalFile.delete();</span>
+            }
+
+<span class="nc bnc" id="L868" title="All 2 branches missed.">            if (result == null) {</span>
+<span class="nc" id="L869">                result = new RemoteOperationResult(ResultCode.UNKNOWN_ERROR);</span>
+            }
+
+<span class="nc" id="L872">            logResult(result, mOriginalStoragePath, mRemotePath);</span>
+        }
+
+<span class="nc bnc" id="L875" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L876">            handleSuccessfulUpload(temporalFile, expectedFile, originalFile, client);</span>
+<span class="nc bnc" id="L877" title="All 2 branches missed.">        } else if (result.getCode() == ResultCode.SYNC_CONFLICT) {</span>
+<span class="nc" id="L878">            getStorageManager().saveConflict(mFile, mFile.getEtagInConflict());</span>
+        }
+
+        // delete temporal file
+<span class="nc bnc" id="L882" title="All 6 branches missed.">        if (temporalFile != null &amp;&amp; temporalFile.exists() &amp;&amp; !temporalFile.delete()) {</span>
+<span class="nc" id="L883">            Log_OC.e(TAG, &quot;Could not delete temporal file &quot; + temporalFile.getAbsolutePath());</span>
+        }
+
+<span class="nc" id="L886">        return result;</span>
+    }
+
+    private void logResult(RemoteOperationResult result, String sourcePath, String targetPath) {
+<span class="nc bnc" id="L890" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L891">            Log_OC.i(TAG, &quot;Upload of &quot; + sourcePath + &quot; to &quot; + targetPath + &quot;: &quot; + result.getLogMessage());</span>
+        } else {
+<span class="nc bnc" id="L893" title="All 2 branches missed.">            if (result.getException() != null) {</span>
+<span class="nc bnc" id="L894" title="All 2 branches missed.">                if (result.isCancelled()) {</span>
+<span class="nc" id="L895">                    Log_OC.w(TAG, &quot;Upload of &quot; + sourcePath + &quot; to &quot; + targetPath + &quot;: &quot;</span>
+<span class="nc" id="L896">                        + result.getLogMessage());</span>
+                } else {
+<span class="nc" id="L898">                    Log_OC.e(TAG, &quot;Upload of &quot; + sourcePath + &quot; to &quot; + targetPath + &quot;: &quot;</span>
+<span class="nc" id="L899">                        + result.getLogMessage(), result.getException());</span>
+                }
+            } else {
+<span class="nc" id="L902">                Log_OC.e(TAG, &quot;Upload of &quot; + sourcePath + &quot; to &quot; + targetPath + &quot;: &quot; + result.getLogMessage());</span>
+            }
+        }
+<span class="nc" id="L905">    }</span>
+
+    private RemoteOperationResult copyFile(File originalFile, String expectedPath) throws OperationCancelledException,
+            IOException {
+<span class="nc bnc" id="L909" title="All 4 branches missed.">        if (mLocalBehaviour == FileUploader.LOCAL_BEHAVIOUR_COPY &amp;&amp; !mOriginalStoragePath.equals(expectedPath)) {</span>
+<span class="nc" id="L910">            String temporalPath = FileStorageUtils.getInternalTemporalPath(mAccount.name, mContext) +</span>
+<span class="nc" id="L911">                mFile.getRemotePath();</span>
+<span class="nc" id="L912">            mFile.setStoragePath(temporalPath);</span>
+<span class="nc" id="L913">            File temporalFile = new File(temporalPath);</span>
+
+<span class="nc" id="L915">            return copy(originalFile, temporalFile);</span>
+        }
+
+<span class="nc bnc" id="L918" title="All 2 branches missed.">        if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L919">            throw new OperationCancelledException();</span>
+        }
+
+<span class="nc" id="L922">        return new RemoteOperationResult(ResultCode.OK);</span>
+    }
+
+    private void checkNameCollision(OwnCloudClient client, DecryptedFolderMetadata metadata, boolean encrypted)
+            throws OperationCancelledException {
+        /// automatic rename of file to upload in case of name collision in server
+<span class="nc" id="L928">        Log_OC.d(TAG, &quot;Checking name collision in server&quot;);</span>
+<span class="nc bnc" id="L929" title="All 2 branches missed.">        if (!mForceOverwrite) {</span>
+<span class="nc" id="L930">            String remotePath = getAvailableRemotePath(client, mRemotePath, metadata, encrypted);</span>
+<span class="nc bnc" id="L931" title="All 2 branches missed.">            mWasRenamed = !remotePath.equals(mRemotePath);</span>
+<span class="nc bnc" id="L932" title="All 2 branches missed.">            if (mWasRenamed) {</span>
+<span class="nc" id="L933">                createNewOCFile(remotePath);</span>
+<span class="nc" id="L934">                Log_OC.d(TAG, &quot;File renamed as &quot; + remotePath);</span>
+            }
+<span class="nc" id="L936">            mRemotePath = remotePath;</span>
+<span class="nc" id="L937">            mRenameUploadListener.onRenameUpload();</span>
+        }
+
+<span class="nc bnc" id="L940" title="All 2 branches missed.">        if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L941">            throw new OperationCancelledException();</span>
+        }
+<span class="nc" id="L943">    }</span>
+
+    private void handleSuccessfulUpload(File temporalFile, File expectedFile, File originalFile,
+                                        OwnCloudClient client) {
+<span class="nc bnc" id="L947" title="All 4 branches missed.">        switch (mLocalBehaviour) {</span>
+            case FileUploader.LOCAL_BEHAVIOUR_FORGET:
+            default:
+<span class="nc" id="L950">                mFile.setStoragePath(&quot;&quot;);</span>
+<span class="nc" id="L951">                saveUploadedFile(client);</span>
+<span class="nc" id="L952">                break;</span>
+
+            case FileUploader.LOCAL_BEHAVIOUR_DELETE:
+<span class="nc" id="L955">                originalFile.delete();</span>
+<span class="nc" id="L956">                getStorageManager().deleteFileInMediaScan(originalFile.getAbsolutePath());</span>
+<span class="nc" id="L957">                saveUploadedFile(client);</span>
+<span class="nc" id="L958">                break;</span>
+
+            case FileUploader.LOCAL_BEHAVIOUR_COPY:
+<span class="nc bnc" id="L961" title="All 2 branches missed.">                if (temporalFile != null) {</span>
+                    try {
+<span class="nc" id="L963">                        move(temporalFile, expectedFile);</span>
+<span class="nc" id="L964">                    } catch (IOException e) {</span>
+<span class="nc" id="L965">                        Log_OC.e(TAG, e.getMessage());</span>
+<span class="nc" id="L966">                    }</span>
+                }
+<span class="nc" id="L968">                mFile.setStoragePath(expectedFile.getAbsolutePath());</span>
+<span class="nc" id="L969">                saveUploadedFile(client);</span>
+<span class="nc" id="L970">                FileDataStorageManager.triggerMediaScan(expectedFile.getAbsolutePath());</span>
+<span class="nc" id="L971">                break;</span>
+
+            case FileUploader.LOCAL_BEHAVIOUR_MOVE:
+<span class="nc" id="L974">                String expectedPath = FileStorageUtils.getDefaultSavePathFor(mAccount.name, mFile);</span>
+<span class="nc" id="L975">                File newFile = new File(expectedPath);</span>
+
+                try {
+<span class="nc" id="L978">                    move(originalFile, newFile);</span>
+<span class="nc" id="L979">                } catch (IOException e) {</span>
+<span class="nc" id="L980">                    Log.e(TAG, &quot;Error moving file&quot;, e);</span>
+<span class="nc" id="L981">                }</span>
+<span class="nc" id="L982">                getStorageManager().deleteFileInMediaScan(originalFile.getAbsolutePath());</span>
+<span class="nc" id="L983">                mFile.setStoragePath(newFile.getAbsolutePath());</span>
+<span class="nc" id="L984">                saveUploadedFile(client);</span>
+<span class="nc" id="L985">                FileDataStorageManager.triggerMediaScan(newFile.getAbsolutePath());</span>
+                break;
+        }
+<span class="nc" id="L988">    }</span>
+
+    /**
+     * Checks the existence of the folder where the current file will be uploaded both
+     * in the remote server and in the local database.
+     * &lt;p/&gt;
+     * If the upload is set to enforce the creation of the folder, the method tries to
+     * create it both remote and locally.
+     *
+     * @param pathToGrant Full remote path whose existence will be granted.
+     * @return An {@link OCFile} instance corresponding to the folder where the file
+     * will be uploaded.
+     */
+    private RemoteOperationResult grantFolderExistence(String pathToGrant, OwnCloudClient client) {
+<span class="nc" id="L1002">        RemoteOperation operation = new ExistenceCheckRemoteOperation(pathToGrant, false);</span>
+<span class="nc" id="L1003">        RemoteOperationResult result = operation.execute(client);</span>
+<span class="nc bnc" id="L1004" title="All 6 branches missed.">        if (!result.isSuccess() &amp;&amp; result.getCode() == ResultCode.FILE_NOT_FOUND &amp;&amp; mRemoteFolderToBeCreated) {</span>
+<span class="nc" id="L1005">            SyncOperation syncOp = new CreateFolderOperation(pathToGrant, true);</span>
+<span class="nc" id="L1006">            result = syncOp.execute(client, getStorageManager());</span>
+        }
+<span class="nc bnc" id="L1008" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L1009">            OCFile parentDir = getStorageManager().getFileByPath(pathToGrant);</span>
+<span class="nc bnc" id="L1010" title="All 2 branches missed.">            if (parentDir == null) {</span>
+<span class="nc" id="L1011">                parentDir = createLocalFolder(pathToGrant);</span>
+            }
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">            if (parentDir != null) {</span>
+<span class="nc" id="L1014">                result = new RemoteOperationResult(ResultCode.OK);</span>
+            } else {
+<span class="nc" id="L1016">                result = new RemoteOperationResult(ResultCode.CANNOT_CREATE_FILE);</span>
+            }
+        }
+<span class="nc" id="L1019">        return result;</span>
+    }
+
+    private OCFile createLocalFolder(String remotePath) {
+<span class="nc" id="L1023">        String parentPath = new File(remotePath).getParent();</span>
+<span class="nc bnc" id="L1024" title="All 2 branches missed.">        parentPath = parentPath.endsWith(OCFile.PATH_SEPARATOR) ?</span>
+                parentPath : parentPath + OCFile.PATH_SEPARATOR;
+<span class="nc" id="L1026">        OCFile parent = getStorageManager().getFileByPath(parentPath);</span>
+<span class="nc bnc" id="L1027" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L1028">            parent = createLocalFolder(parentPath);</span>
+        }
+<span class="nc bnc" id="L1030" title="All 2 branches missed.">        if (parent != null) {</span>
+<span class="nc" id="L1031">            OCFile createdFolder = new OCFile(remotePath);</span>
+<span class="nc" id="L1032">            createdFolder.setMimeType(MimeType.DIRECTORY);</span>
+<span class="nc" id="L1033">            createdFolder.setParentId(parent.getFileId());</span>
+<span class="nc" id="L1034">            getStorageManager().saveFile(createdFolder);</span>
+<span class="nc" id="L1035">            return createdFolder;</span>
+        }
+<span class="nc" id="L1037">        return null;</span>
+    }
+
+
+    /**
+     * Create a new OCFile mFile with new remote path. This is required if forceOverwrite==false.
+     * New file is stored as mFile, original as mOldFile.
+     *
+     * @param newRemotePath new remote path
+     */
+    private void createNewOCFile(String newRemotePath) {
+        // a new OCFile instance must be created for a new remote path
+<span class="nc" id="L1049">        OCFile newFile = new OCFile(newRemotePath);</span>
+<span class="nc" id="L1050">        newFile.setCreationTimestamp(mFile.getCreationTimestamp());</span>
+<span class="nc" id="L1051">        newFile.setFileLength(mFile.getFileLength());</span>
+<span class="nc" id="L1052">        newFile.setMimeType(mFile.getMimeType());</span>
+<span class="nc" id="L1053">        newFile.setModificationTimestamp(mFile.getModificationTimestamp());</span>
+<span class="nc" id="L1054">        newFile.setModificationTimestampAtLastSyncForData(</span>
+<span class="nc" id="L1055">                mFile.getModificationTimestampAtLastSyncForData()</span>
+        );
+<span class="nc" id="L1057">        newFile.setEtag(mFile.getEtag());</span>
+<span class="nc" id="L1058">        newFile.setLastSyncDateForProperties(mFile.getLastSyncDateForProperties());</span>
+<span class="nc" id="L1059">        newFile.setLastSyncDateForData(mFile.getLastSyncDateForData());</span>
+<span class="nc" id="L1060">        newFile.setStoragePath(mFile.getStoragePath());</span>
+<span class="nc" id="L1061">        newFile.setParentId(mFile.getParentId());</span>
+<span class="nc" id="L1062">        mOldFile = mFile;</span>
+<span class="nc" id="L1063">        mFile = newFile;</span>
+<span class="nc" id="L1064">    }</span>
+
+    /**
+     * Checks if remotePath does not exist in the server and returns it, or adds
+     * a suffix to it in order to avoid the server file is overwritten.
+     *
+     * @param client     OwnCloud client
+     * @param remotePath remote path of the file
+     * @param metadata   metadata of encrypted folder
+     * @return new remote path
+     */
+    private String getAvailableRemotePath(OwnCloudClient client, String remotePath, DecryptedFolderMetadata metadata,
+                                          boolean encrypted) {
+<span class="nc" id="L1077">        boolean check = existsFile(client, remotePath, metadata, encrypted);</span>
+<span class="nc bnc" id="L1078" title="All 2 branches missed.">        if (!check) {</span>
+<span class="nc" id="L1079">            return remotePath;</span>
+        }
+
+<span class="nc" id="L1082">        int pos = remotePath.lastIndexOf('.');</span>
+        String suffix;
+<span class="nc" id="L1084">        String extension = &quot;&quot;;</span>
+<span class="nc" id="L1085">        String remotePathWithoutExtension = &quot;&quot;;</span>
+<span class="nc bnc" id="L1086" title="All 2 branches missed.">        if (pos &gt;= 0) {</span>
+<span class="nc" id="L1087">            extension = remotePath.substring(pos + 1);</span>
+<span class="nc" id="L1088">            remotePathWithoutExtension = remotePath.substring(0, pos);</span>
+        }
+<span class="nc" id="L1090">        int count = 2;</span>
+        do {
+<span class="nc" id="L1092">            suffix = &quot; (&quot; + count + &quot;)&quot;;</span>
+<span class="nc bnc" id="L1093" title="All 2 branches missed.">            if (pos &gt;= 0) {</span>
+<span class="nc" id="L1094">                check = existsFile(client, remotePathWithoutExtension + suffix + &quot;.&quot; + extension, metadata, encrypted);</span>
+            } else {
+<span class="nc" id="L1096">                check = existsFile(client, remotePath + suffix, metadata, encrypted);</span>
+            }
+<span class="nc" id="L1098">            count++;</span>
+<span class="nc bnc" id="L1099" title="All 2 branches missed.">        } while (check);</span>
+
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">        if (pos &gt;= 0) {</span>
+<span class="nc" id="L1102">            return remotePathWithoutExtension + suffix + &quot;.&quot; + extension;</span>
+        } else {
+<span class="nc" id="L1104">            return remotePath + suffix;</span>
+        }
+    }
+
+    private boolean existsFile(OwnCloudClient client, String remotePath, DecryptedFolderMetadata metadata,
+                               boolean encrypted) {
+<span class="nc bnc" id="L1110" title="All 2 branches missed.">        if (encrypted) {</span>
+<span class="nc" id="L1111">            String fileName = new File(remotePath).getName();</span>
+
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">            for (DecryptedFolderMetadata.DecryptedFile file : metadata.getFiles().values()) {</span>
+<span class="nc bnc" id="L1114" title="All 2 branches missed.">                if (file.getEncrypted().getFilename().equalsIgnoreCase(fileName)) {</span>
+<span class="nc" id="L1115">                    return true;</span>
+                }
+<span class="nc" id="L1117">            }</span>
+
+<span class="nc" id="L1119">            return false;</span>
+        } else {
+<span class="nc" id="L1121">            ExistenceCheckRemoteOperation existsOperation = new ExistenceCheckRemoteOperation(remotePath, false);</span>
+<span class="nc" id="L1122">            RemoteOperationResult result = existsOperation.execute(client);</span>
+<span class="nc" id="L1123">            return result.isSuccess();</span>
+        }
+    }
+
+    /**
+     * Allows to cancel the actual upload operation. If actual upload operating
+     * is in progress it is cancelled, if upload preparation is being performed
+     * upload will not take place.
+     */
+    public void cancel() {
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">        if (mUploadOperation == null) {</span>
+<span class="nc bnc" id="L1134" title="All 2 branches missed.">            if (mUploadStarted.get()) {</span>
+<span class="nc" id="L1135">                Log_OC.d(TAG, &quot;Cancelling upload during upload preparations.&quot;);</span>
+<span class="nc" id="L1136">                mCancellationRequested.set(true);</span>
+            } else {
+<span class="nc" id="L1138">                Log_OC.e(TAG, &quot;No upload in progress. This should not happen.&quot;);</span>
+            }
+        } else {
+<span class="nc" id="L1141">            Log_OC.d(TAG, &quot;Cancelling upload during actual upload operation.&quot;);</span>
+<span class="nc" id="L1142">            mUploadOperation.cancel();</span>
+        }
+<span class="nc" id="L1144">    }</span>
+
+    /**
+     * As soon as this method return true, upload can be cancel via cancel().
+     */
+    public boolean isUploadInProgress() {
+<span class="nc" id="L1150">        return mUploadStarted.get();</span>
+
+    }
+
+    /**
+     * TODO rewrite with homogeneous fail handling, remove dependency on {@link RemoteOperationResult},
+     * TODO     use Exceptions instead
+     *
+     * @param sourceFile Source file to copy.
+     * @param targetFile Target location to copy the file.
+     * @return {@link RemoteOperationResult}
+     * @throws IOException exception if file cannot be accessed
+     */
+    private RemoteOperationResult copy(File sourceFile, File targetFile) throws IOException {
+<span class="nc" id="L1164">        Log_OC.d(TAG, &quot;Copying local file&quot;);</span>
+
+<span class="nc bnc" id="L1166" title="All 2 branches missed.">        if (FileStorageUtils.getUsableSpace() &lt; sourceFile.length()) {</span>
+<span class="nc" id="L1167">            return new RemoteOperationResult(ResultCode.LOCAL_STORAGE_FULL); // error when the file should be copied</span>
+        } else {
+<span class="nc" id="L1169">            Log_OC.d(TAG, &quot;Creating temporal folder&quot;);</span>
+<span class="nc" id="L1170">            File temporalParent = targetFile.getParentFile();</span>
+
+<span class="nc bnc" id="L1172" title="All 4 branches missed.">            if (!temporalParent.mkdirs() &amp;&amp; !temporalParent.isDirectory()) {</span>
+<span class="nc" id="L1173">                return new RemoteOperationResult(ResultCode.CANNOT_CREATE_FILE);</span>
+            }
+
+<span class="nc" id="L1176">            Log_OC.d(TAG, &quot;Creating temporal file&quot;);</span>
+<span class="nc bnc" id="L1177" title="All 4 branches missed.">            if (!targetFile.createNewFile() &amp;&amp; !targetFile.isFile()) {</span>
+<span class="nc" id="L1178">                return new RemoteOperationResult(ResultCode.CANNOT_CREATE_FILE);</span>
+            }
+
+<span class="nc" id="L1181">            Log_OC.d(TAG, &quot;Copying file contents&quot;);</span>
+<span class="nc" id="L1182">            InputStream in = null;</span>
+<span class="nc" id="L1183">            OutputStream out = null;</span>
+
+            try {
+<span class="nc bnc" id="L1186" title="All 2 branches missed.">                if (!mOriginalStoragePath.equals(targetFile.getAbsolutePath())) {</span>
+                    // In case document provider schema as 'content://'
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">                    if (mOriginalStoragePath.startsWith(UriUtils.URI_CONTENT_SCHEME)) {</span>
+<span class="nc" id="L1189">                        Uri uri = Uri.parse(mOriginalStoragePath);</span>
+<span class="nc" id="L1190">                        in = mContext.getContentResolver().openInputStream(uri);</span>
+<span class="nc" id="L1191">                    } else {</span>
+<span class="nc" id="L1192">                        in = new FileInputStream(sourceFile);</span>
+                    }
+<span class="nc" id="L1194">                    out = new FileOutputStream(targetFile);</span>
+                    int nRead;
+<span class="nc" id="L1196">                    byte[] buf = new byte[4096];</span>
+<span class="nc bnc" id="L1197" title="All 2 branches missed.">                    while (!mCancellationRequested.get() &amp;&amp;</span>
+<span class="nc bnc" id="L1198" title="All 2 branches missed.">                            (nRead = in.read(buf)) &gt; -1) {</span>
+<span class="nc" id="L1199">                        out.write(buf, 0, nRead);</span>
+                    }
+<span class="nc" id="L1201">                    out.flush();</span>
+
+                } // else: weird but possible situation, nothing to copy
+
+<span class="nc bnc" id="L1205" title="All 2 branches missed.">                if (mCancellationRequested.get()) {</span>
+<span class="nc" id="L1206">                    return new RemoteOperationResult(new OperationCancelledException());</span>
+                }
+<span class="nc" id="L1208">            } catch (Exception e) {</span>
+<span class="nc" id="L1209">                return new RemoteOperationResult(ResultCode.LOCAL_STORAGE_NOT_COPIED);</span>
+            } finally {
+                try {
+<span class="nc bnc" id="L1212" title="All 2 branches missed.">                    if (in != null) {</span>
+<span class="nc" id="L1213">                        in.close();</span>
+                    }
+<span class="nc" id="L1215">                } catch (Exception e) {</span>
+<span class="nc" id="L1216">                    Log_OC.d(TAG, &quot;Weird exception while closing input stream for &quot; +</span>
+                            mOriginalStoragePath + &quot; (ignoring)&quot;, e);
+<span class="nc" id="L1218">                }</span>
+                try {
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">                    if (out != null) {</span>
+<span class="nc" id="L1221">                        out.close();</span>
+                    }
+<span class="nc" id="L1223">                } catch (Exception e) {</span>
+<span class="nc" id="L1224">                    Log_OC.d(TAG, &quot;Weird exception while closing output stream for &quot; +</span>
+<span class="nc" id="L1225">                            targetFile.getAbsolutePath() + &quot; (ignoring)&quot;, e);</span>
+<span class="nc" id="L1226">                }</span>
+            }
+        }
+<span class="nc" id="L1229">        return new RemoteOperationResult(ResultCode.OK);</span>
+    }
+
+
+    /**
+     * TODO rewrite with homogeneous fail handling, remove dependency on {@link RemoteOperationResult},
+     * TODO     use Exceptions instead
+     * TODO refactor both this and 'copy' in a single method
+     *
+     * @param sourceFile Source file to move.
+     * @param targetFile Target location to move the file.
+     * @throws IOException exception if file cannot be read/wrote
+     */
+    private void move(File sourceFile, File targetFile) throws IOException {
+
+<span class="nc bnc" id="L1244" title="All 2 branches missed.">        if (!targetFile.equals(sourceFile)) {</span>
+<span class="nc" id="L1245">            File expectedFolder = targetFile.getParentFile();</span>
+<span class="nc" id="L1246">            expectedFolder.mkdirs();</span>
+
+<span class="nc bnc" id="L1248" title="All 2 branches missed.">            if (expectedFolder.isDirectory()) {</span>
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">                if (!sourceFile.renameTo(targetFile)) {</span>
+                    // try to copy and then delete
+<span class="nc" id="L1251">                    targetFile.createNewFile();</span>
+<span class="nc" id="L1252">                    FileChannel inChannel = new FileInputStream(sourceFile).getChannel();</span>
+<span class="nc" id="L1253">                    FileChannel outChannel = new FileOutputStream(targetFile).getChannel();</span>
+                    try {
+<span class="nc" id="L1255">                        inChannel.transferTo(0, inChannel.size(), outChannel);</span>
+<span class="nc" id="L1256">                        sourceFile.delete();</span>
+<span class="nc" id="L1257">                    } catch (Exception e) {</span>
+<span class="nc" id="L1258">                        mFile.setStoragePath(&quot;&quot;); // forget the local file</span>
+                        // by now, treat this as a success; the file was uploaded
+                        // the best option could be show a warning message
+                    } finally {
+<span class="nc bnc" id="L1262" title="All 2 branches missed.">                        if (inChannel != null) {</span>
+<span class="nc" id="L1263">                            inChannel.close();</span>
+                        }
+<span class="nc bnc" id="L1265" title="All 2 branches missed.">                        if (outChannel != null) {</span>
+<span class="nc" id="L1266">                            outChannel.close();</span>
+                        }
+                    }
+<span class="nc" id="L1269">                }</span>
+
+            } else {
+<span class="nc" id="L1272">                mFile.setStoragePath(&quot;&quot;);</span>
+            }
+        }
+<span class="nc" id="L1275">    }</span>
+
+    /**
+     * Saves a OC File after a successful upload.
+     * &lt;p&gt;
+     * A PROPFIND is necessary to keep the props in the local database
+     * synchronized with the server, specially the modification time and Etag
+     * (where available)
+     */
+    private void saveUploadedFile(OwnCloudClient client) {
+<span class="nc" id="L1285">        OCFile file = mFile;</span>
+<span class="nc bnc" id="L1286" title="All 2 branches missed.">        if (file.fileExists()) {</span>
+<span class="nc" id="L1287">            file = getStorageManager().getFileById(file.getFileId());</span>
+        }
+<span class="nc" id="L1289">        long syncDate = System.currentTimeMillis();</span>
+<span class="nc" id="L1290">        file.setLastSyncDateForData(syncDate);</span>
+
+        // new PROPFIND to keep data consistent with server
+        // in theory, should return the same we already have
+        // TODO from the appropriate OC server version, get data from last PUT response headers, instead
+        // TODO     of a new PROPFIND; the latter may fail, specially for chunked uploads
+        String path;
+<span class="nc bnc" id="L1297" title="All 2 branches missed.">        if (encryptedAncestor) {</span>
+<span class="nc" id="L1298">            path = file.getParentRemotePath() + mFile.getEncryptedFileName();</span>
+        } else {
+<span class="nc" id="L1300">            path = getRemotePath();</span>
+        }
+
+<span class="nc" id="L1303">        ReadFileRemoteOperation operation = new ReadFileRemoteOperation(path);</span>
+<span class="nc" id="L1304">        RemoteOperationResult result = operation.execute(client);</span>
+<span class="nc bnc" id="L1305" title="All 2 branches missed.">        if (result.isSuccess()) {</span>
+<span class="nc" id="L1306">            updateOCFile(file, (RemoteFile) result.getData().get(0));</span>
+<span class="nc" id="L1307">            file.setLastSyncDateForProperties(syncDate);</span>
+        } else {
+<span class="nc" id="L1309">            Log_OC.e(TAG, &quot;Error reading properties of file after successful upload; this is gonna hurt...&quot;);</span>
+        }
+
+<span class="nc bnc" id="L1312" title="All 2 branches missed.">        if (mWasRenamed) {</span>
+<span class="nc" id="L1313">            OCFile oldFile = getStorageManager().getFileByPath(mOldFile.getRemotePath());</span>
+<span class="nc bnc" id="L1314" title="All 2 branches missed.">            if (oldFile != null) {</span>
+<span class="nc" id="L1315">                oldFile.setStoragePath(null);</span>
+<span class="nc" id="L1316">                getStorageManager().saveFile(oldFile);</span>
+<span class="nc" id="L1317">                getStorageManager().saveConflict(oldFile, null);</span>
+            }
+            // else: it was just an automatic renaming due to a name
+            // coincidence; nothing else is needed, the storagePath is right
+            // in the instance returned by mCurrentUpload.getFile()
+        }
+<span class="nc" id="L1323">        file.setUpdateThumbnailNeeded(true);</span>
+<span class="nc" id="L1324">        getStorageManager().saveFile(file);</span>
+<span class="nc" id="L1325">        getStorageManager().saveConflict(file, null);</span>
+
+<span class="nc" id="L1327">        FileDataStorageManager.triggerMediaScan(file.getStoragePath());</span>
+
+        // generate new Thumbnail
+<span class="nc" id="L1330">        final ThumbnailsCacheManager.ThumbnailGenerationTask task =</span>
+<span class="nc" id="L1331">                new ThumbnailsCacheManager.ThumbnailGenerationTask(getStorageManager(), mAccount);</span>
+<span class="nc" id="L1332">        task.execute(new ThumbnailsCacheManager.ThumbnailGenerationTaskObject(file, file.getRemoteId()));</span>
+<span class="nc" id="L1333">    }</span>
+
+    private void updateOCFile(OCFile file, RemoteFile remoteFile) {
+<span class="nc" id="L1336">        file.setCreationTimestamp(remoteFile.getCreationTimestamp());</span>
+<span class="nc" id="L1337">        file.setFileLength(remoteFile.getLength());</span>
+<span class="nc" id="L1338">        file.setMimeType(remoteFile.getMimeType());</span>
+<span class="nc" id="L1339">        file.setModificationTimestamp(remoteFile.getModifiedTimestamp());</span>
+<span class="nc" id="L1340">        file.setModificationTimestampAtLastSyncForData(remoteFile.getModifiedTimestamp());</span>
+<span class="nc" id="L1341">        file.setEtag(remoteFile.getEtag());</span>
+<span class="nc" id="L1342">        file.setRemoteId(remoteFile.getRemoteId());</span>
+<span class="nc" id="L1343">    }</span>
+
+    public interface OnRenameListener {
+
+        void onRenameUpload();
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>
