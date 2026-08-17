@@ -1,0 +1,1210 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SevenZFile.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AmazeFileManager</a> &gt; <a href="index.source.html" class="el_package">com.amaze.filemanager.filesystem.compressed.sevenz</a> &gt; <span class="el_source">SevenZFile.java</span></div><h1>SevenZFile.java</h1><pre class="source lang-java linenums">/*
+ *  Licensed to the Apache Software Foundation (ASF) under one or more
+ *  contributor license agreements.  See the NOTICE file distributed with
+ *  this work for additional information regarding copyright ownership.
+ *  The ASF licenses this file to You under the Apache License, Version 2.0
+ *  (the &quot;License&quot;); you may not use this file except in compliance with
+ *  the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ */
+package com.amaze.filemanager.filesystem.compressed.sevenz;
+
+import org.apache.commons.compress.utils.BoundedInputStream;
+import org.apache.commons.compress.utils.CRC32VerifyingInputStream;
+import org.apache.commons.compress.utils.CharsetNames;
+import org.apache.commons.compress.utils.IOUtils;
+import org.apache.commons.compress.utils.InputStreamStatistics;
+
+import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
+import java.io.Closeable;
+import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.CharBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetEncoder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.LinkedList;
+import java.util.zip.CRC32;
+
+/**
+ * Reads a 7z file, using FileChannel under
+ * the covers.
+ * &lt;p&gt;
+ * The 7z file format is a flexible container
+ * that can contain many compression and
+ * encryption types, but at the moment only
+ * only Copy, LZMA, LZMA2, BZIP2, Deflate and AES-256 + SHA-256
+ * are supported.
+ * &lt;p&gt;
+ * The format is very Windows/Intel specific,
+ * so it uses little-endian byte order,
+ * doesn't store user/group or permission bits,
+ * and represents times using NTFS timestamps
+ * (100 nanosecond units since 1 January 1601).
+ * Hence the official tools recommend against
+ * using it for backup purposes on *nix, and
+ * recommend .tar.7z or .tar.lzma or .tar.xz
+ * instead.
+ * &lt;p&gt;
+ * Both the header and file contents may be
+ * compressed and/or encrypted. With both
+ * encrypted, neither file names nor file
+ * contents can be read, but the use of
+ * encryption isn't plausibly deniable.
+ *
+ * @NotThreadSafe
+ * @since 1.6
+ */
+public class SevenZFile implements Closeable {
+    static final int SIGNATURE_HEADER_SIZE = 32;
+
+    private final String fileName;
+    private FileChannel channel;
+    private final Archive archive;
+<span class="nc" id="L82">    private int currentEntryIndex = -1;</span>
+<span class="nc" id="L83">    private int currentFolderIndex = -1;</span>
+<span class="nc" id="L84">    private InputStream currentFolderInputStream = null;</span>
+    private byte[] password;
+
+    private long compressedBytesReadFromCurrentEntry;
+    private long uncompressedBytesReadFromCurrentEntry;
+
+<span class="nc" id="L90">    private final ArrayList&lt;InputStream&gt; deferredBlockStreams = new ArrayList&lt;&gt;();</span>
+
+    // shared with SevenZOutputFile and tests, neither mutates it
+<span class="nc" id="L93">    static final byte[] sevenZSignature = { //NOSONAR</span>
+        (byte)'7', (byte)'z', (byte)0xBC, (byte)0xAF, (byte)0x27, (byte)0x1C
+    };
+
+    /**
+     * Reads a file as 7z archive
+     *
+     * @param filename the file to read
+     * @param password optional password if the archive is encrypted
+     * @throws IOException if reading the archive fails
+     * @since 1.17
+     */
+    public SevenZFile(final File filename, final char[] password) throws IOException {
+<span class="nc" id="L106">        this(new FileInputStream(filename).getChannel(),</span>
+<span class="nc" id="L107">             filename.getAbsolutePath(), utf16Decode(password), true);</span>
+<span class="nc" id="L108">    }</span>
+
+    /**
+     * Reads a file as 7z archive
+     *
+     * @param filename the file to read
+     * @param password optional password if the archive is encrypted -
+     * the byte array is supposed to be the UTF16-LE encoded
+     * representation of the password.
+     * @throws IOException if reading the archive fails
+     * @deprecated use the char[]-arg version for the password instead
+     */
+    public SevenZFile(final File filename, final byte[] password) throws IOException {
+<span class="nc" id="L121">        this(new FileInputStream(filename).getChannel(),</span>
+<span class="nc" id="L122">             filename.getAbsolutePath(), password, true);</span>
+<span class="nc" id="L123">    }</span>
+
+    /**
+     * Reads a FileChannel as 7z archive
+     *
+     * &lt;p&gt;{@link
+     * org.apache.commons.compress.utils.SeekableInMemoryByteChannel}
+     * allows you to read from an in-memory archive.&lt;/p&gt;
+     *
+     * @param channel the channel to read
+     * @throws IOException if reading the archive fails
+     * @since 1.13
+     */
+    public SevenZFile(final FileChannel channel) throws IOException {
+<span class="nc" id="L137">        this(channel, &quot;unknown archive&quot;, (char[]) null);</span>
+<span class="nc" id="L138">    }</span>
+
+    /**
+     * Reads a FileChannel as 7z archive
+     *
+     * &lt;p&gt;{@link
+     * org.apache.commons.compress.utils.SeekableInMemoryByteChannel}
+     * allows you to read from an in-memory archive.&lt;/p&gt;
+     *
+     * @param channel the channel to read
+     * @param password optional password if the archive is encrypted
+     * @throws IOException if reading the archive fails
+     * @since 1.17
+     */
+    public SevenZFile(final FileChannel channel,
+                      final char[] password) throws IOException {
+<span class="nc" id="L154">        this(channel, &quot;unknown archive&quot;, utf16Decode(password));</span>
+<span class="nc" id="L155">    }</span>
+
+    /**
+     * Reads a FileChannel as 7z archive
+     *
+     * &lt;p&gt;{@link
+     * org.apache.commons.compress.utils.SeekableInMemoryByteChannel}
+     * allows you to read from an in-memory archive.&lt;/p&gt;
+     *
+     * @param channel the channel to read
+     * @param filename name of the archive - only used for error reporting
+     * @param password optional password if the archive is encrypted
+     * @throws IOException if reading the archive fails
+     * @since 1.17
+     */
+    public SevenZFile(final FileChannel channel, String filename,
+                      final char[] password) throws IOException {
+<span class="nc" id="L172">        this(channel, filename, utf16Decode(password), false);</span>
+<span class="nc" id="L173">    }</span>
+
+    /**
+     * Reads a FileChannel as 7z archive
+     *
+     * &lt;p&gt;{@link
+     * org.apache.commons.compress.utils.SeekableInMemoryByteChannel}
+     * allows you to read from an in-memory archive.&lt;/p&gt;
+     *
+     * @param channel the channel to read
+     * @param filename name of the archive - only used for error reporting
+     * @throws IOException if reading the archive fails
+     * @since 1.17
+     */
+    public SevenZFile(final FileChannel channel, String filename)
+        throws IOException {
+<span class="nc" id="L189">        this(channel, filename, null, false);</span>
+<span class="nc" id="L190">    }</span>
+
+    /**
+     * Reads a FileChannel as 7z archive
+     *
+     * &lt;p&gt;{@link
+     * org.apache.commons.compress.utils.SeekableInMemoryByteChannel}
+     * allows you to read from an in-memory archive.&lt;/p&gt;
+     *
+     * @param channel the channel to read
+     * @param password optional password if the archive is encrypted -
+     * the byte array is supposed to be the UTF16-LE encoded
+     * representation of the password.
+     * @throws IOException if reading the archive fails
+     * @since 1.13
+     * @deprecated use the char[]-arg version for the password instead
+     */
+    public SevenZFile(final FileChannel channel,
+                      final byte[] password) throws IOException {
+<span class="nc" id="L209">        this(channel, &quot;unknown archive&quot;, password);</span>
+<span class="nc" id="L210">    }</span>
+
+    /**
+     * Reads a FileChannel as 7z archive
+     *
+     * &lt;p&gt;{@link
+     * org.apache.commons.compress.utils.SeekableInMemoryByteChannel}
+     * allows you to read from an in-memory archive.&lt;/p&gt;
+     *
+     * @param channel the channel to read
+     * @param filename name of the archive - only used for error reporting
+     * @param password optional password if the archive is encrypted -
+     * the byte array is supposed to be the UTF16-LE encoded
+     * representation of the password.
+     * @throws IOException if reading the archive fails
+     * @since 1.13
+     * @deprecated use the char[]-arg version for the password instead
+     */
+    public SevenZFile(final FileChannel channel, String filename,
+                      final byte[] password) throws IOException {
+<span class="nc" id="L230">        this(channel, filename, password, false);</span>
+<span class="nc" id="L231">    }</span>
+
+    private SevenZFile(final FileChannel channel, String filename,
+<span class="nc" id="L234">                       final byte[] password, boolean closeOnError) throws IOException {</span>
+<span class="nc" id="L235">        boolean succeeded = false;</span>
+<span class="nc" id="L236">        this.channel = channel;</span>
+<span class="nc" id="L237">        this.fileName = filename;</span>
+        try {
+<span class="nc" id="L239">            archive = readHeaders(password);</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">            if (password != null) {</span>
+<span class="nc" id="L241">                this.password = Arrays.copyOf(password, password.length);</span>
+            } else {
+<span class="nc" id="L243">                this.password = null;</span>
+            }
+<span class="nc" id="L245">            succeeded = true;</span>
+        } finally {
+<span class="nc bnc" id="L247" title="All 4 branches missed.">            if (!succeeded &amp;&amp; closeOnError) {</span>
+<span class="nc" id="L248">                this.channel.close();</span>
+            }
+        }
+<span class="nc" id="L251">    }</span>
+
+    /**
+     * Reads a file as unencrypted 7z archive
+     *
+     * @param filename the file to read
+     * @throws IOException if reading the archive fails
+     */
+    public SevenZFile(final File filename) throws IOException {
+<span class="nc" id="L260">        this(filename, (char[]) null);</span>
+<span class="nc" id="L261">    }</span>
+
+    /**
+     * Closes the archive.
+     * @throws IOException if closing the file fails
+     */
+    @Override
+    public void close() throws IOException {
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (channel != null) {</span>
+            try {
+<span class="nc" id="L271">                channel.close();</span>
+            } finally {
+<span class="nc" id="L273">                channel = null;</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                if (password != null) {</span>
+<span class="nc" id="L275">                    Arrays.fill(password, (byte) 0);</span>
+                }
+<span class="nc" id="L277">                password = null;</span>
+            }
+        }
+<span class="nc" id="L280">    }</span>
+
+    /**
+     * Returns the next Archive Entry in this archive.
+     *
+     * @return the next entry,
+     *         or {@code null} if there are no more entries
+     * @throws IOException if the next entry could not be read
+     */
+    public SevenZArchiveEntry getNextEntry() throws IOException {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (currentEntryIndex &gt;= archive.files.length - 1) {</span>
+<span class="nc" id="L291">            return null;</span>
+        }
+<span class="nc" id="L293">        ++currentEntryIndex;</span>
+<span class="nc" id="L294">        final SevenZArchiveEntry entry = archive.files[currentEntryIndex];</span>
+<span class="nc" id="L295">        buildDecodingStream();</span>
+<span class="nc" id="L296">        uncompressedBytesReadFromCurrentEntry = compressedBytesReadFromCurrentEntry = 0;</span>
+<span class="nc" id="L297">        return entry;</span>
+    }
+
+    /**
+     * Returns meta-data of all archive entries.
+     *
+     * &lt;p&gt;This method only provides meta-data, the entries can not be
+     * used to read the contents, you still need to process all
+     * entries in order using {@link #getNextEntry} for that.&lt;/p&gt;
+     *
+     * &lt;p&gt;The content methods are only available for entries that have
+     * already been reached via {@link #getNextEntry}.&lt;/p&gt;
+     *
+     * @return meta-data of all archive entries.
+     * @since 1.11
+     */
+    public Iterable&lt;SevenZArchiveEntry&gt; getEntries() {
+<span class="nc" id="L314">        return Arrays.asList(archive.files);</span>
+    }
+
+    private Archive readHeaders(final byte[] password) throws IOException {
+<span class="nc" id="L318">        ByteBuffer buf = ByteBuffer.allocate(12 /* signature + 2 bytes version + 4 bytes CRC */)</span>
+<span class="nc" id="L319">            .order(ByteOrder.LITTLE_ENDIAN);</span>
+<span class="nc" id="L320">        readFully(buf);</span>
+<span class="nc" id="L321">        final byte[] signature = new byte[6];</span>
+<span class="nc" id="L322">        buf.get(signature);</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (!Arrays.equals(signature, sevenZSignature)) {</span>
+<span class="nc" id="L324">            throw new IOException(&quot;Bad 7z signature&quot;);</span>
+        }
+        // 7zFormat.txt has it wrong - it's first major then minor
+<span class="nc" id="L327">        final byte archiveVersionMajor = buf.get();</span>
+<span class="nc" id="L328">        final byte archiveVersionMinor = buf.get();</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        if (archiveVersionMajor != 0) {</span>
+<span class="nc" id="L330">            throw new IOException(String.format(&quot;Unsupported 7z version (%d,%d)&quot;,</span>
+<span class="nc" id="L331">                    archiveVersionMajor, archiveVersionMinor));</span>
+        }
+
+<span class="nc" id="L334">        final long startHeaderCrc = 0xffffFFFFL &amp; buf.getInt();</span>
+<span class="nc" id="L335">        final StartHeader startHeader = readStartHeader(startHeaderCrc);</span>
+
+<span class="nc" id="L337">        final int nextHeaderSizeInt = (int) startHeader.nextHeaderSize;</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (nextHeaderSizeInt != startHeader.nextHeaderSize) {</span>
+<span class="nc" id="L339">            throw new IOException(&quot;cannot handle nextHeaderSize &quot; + startHeader.nextHeaderSize);</span>
+        }
+<span class="nc" id="L341">        channel.position(SIGNATURE_HEADER_SIZE + startHeader.nextHeaderOffset);</span>
+<span class="nc" id="L342">        buf = ByteBuffer.allocate(nextHeaderSizeInt).order(ByteOrder.LITTLE_ENDIAN);</span>
+<span class="nc" id="L343">        readFully(buf);</span>
+<span class="nc" id="L344">        final CRC32 crc = new CRC32();</span>
+<span class="nc" id="L345">        crc.update(buf.array());</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        if (startHeader.nextHeaderCrc != crc.getValue()) {</span>
+<span class="nc" id="L347">            throw new IOException(&quot;NextHeader CRC mismatch&quot;);</span>
+        }
+
+<span class="nc" id="L350">        Archive archive = new Archive();</span>
+<span class="nc" id="L351">        int nid = getUnsignedByte(buf);</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (nid == NID.kEncodedHeader) {</span>
+<span class="nc" id="L353">            buf = readEncodedHeader(buf, archive, password);</span>
+            // Archive gets rebuilt with the new header
+<span class="nc" id="L355">            archive = new Archive();</span>
+<span class="nc" id="L356">            nid = getUnsignedByte(buf);</span>
+        }
+<span class="nc bnc" id="L358" title="All 2 branches missed.">        if (nid == NID.kHeader) {</span>
+<span class="nc" id="L359">            readHeader(buf, archive);</span>
+        } else {
+<span class="nc" id="L361">            throw new IOException(&quot;Broken or unsupported archive: no Header&quot;);</span>
+        }
+<span class="nc" id="L363">        return archive;</span>
+    }
+
+    private StartHeader readStartHeader(final long startHeaderCrc) throws IOException {
+<span class="nc" id="L367">        final StartHeader startHeader = new StartHeader();</span>
+        // using Stream rather than ByteBuffer for the benefit of the
+        // built-in CRC check
+<span class="nc" id="L370">        try (DataInputStream dataInputStream = new DataInputStream(new CRC32VerifyingInputStream(</span>
+                new BoundedFileChannelInputStream(channel, 20), 20, startHeaderCrc))) {
+<span class="nc" id="L372">             startHeader.nextHeaderOffset = Long.reverseBytes(dataInputStream.readLong());</span>
+<span class="nc" id="L373">             startHeader.nextHeaderSize = Long.reverseBytes(dataInputStream.readLong());</span>
+<span class="nc" id="L374">             startHeader.nextHeaderCrc = 0xffffFFFFL &amp; Integer.reverseBytes(dataInputStream.readInt());</span>
+<span class="nc" id="L375">             return startHeader;</span>
+        }
+    }
+
+    private void readHeader(final ByteBuffer header, final Archive archive) throws IOException {
+<span class="nc" id="L380">        int nid = getUnsignedByte(header);</span>
+
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if (nid == NID.kArchiveProperties) {</span>
+<span class="nc" id="L383">            readArchiveProperties(header);</span>
+<span class="nc" id="L384">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        if (nid == NID.kAdditionalStreamsInfo) {</span>
+<span class="nc" id="L388">            throw new IOException(&quot;Additional streams unsupported&quot;);</span>
+            //nid = header.readUnsignedByte();
+        }
+
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        if (nid == NID.kMainStreamsInfo) {</span>
+<span class="nc" id="L393">            readStreamsInfo(header, archive);</span>
+<span class="nc" id="L394">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L397" title="All 2 branches missed.">        if (nid == NID.kFilesInfo) {</span>
+<span class="nc" id="L398">            readFilesInfo(header, archive);</span>
+<span class="nc" id="L399">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        if (nid != NID.kEnd) {</span>
+<span class="nc" id="L403">            throw new IOException(&quot;Badly terminated header, found &quot; + nid);</span>
+        }
+<span class="nc" id="L405">    }</span>
+
+    private void readArchiveProperties(final ByteBuffer input) throws IOException {
+        // FIXME: the reference implementation just throws them away?
+<span class="nc" id="L409">        int nid =  getUnsignedByte(input);</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        while (nid != NID.kEnd) {</span>
+<span class="nc" id="L411">            final long propertySize = readUint64(input);</span>
+<span class="nc" id="L412">            final byte[] property = new byte[(int)propertySize];</span>
+<span class="nc" id="L413">            input.get(property);</span>
+<span class="nc" id="L414">            nid = getUnsignedByte(input);</span>
+<span class="nc" id="L415">        }</span>
+<span class="nc" id="L416">    }</span>
+
+    private ByteBuffer readEncodedHeader(final ByteBuffer header, final Archive archive,
+                                         final byte[] password) throws IOException {
+<span class="nc" id="L420">        readStreamsInfo(header, archive);</span>
+
+        // FIXME: merge with buildDecodingStream()/buildDecoderStack() at some stage?
+<span class="nc" id="L423">        final Folder folder = archive.folders[0];</span>
+<span class="nc" id="L424">        final int firstPackStreamIndex = 0;</span>
+<span class="nc" id="L425">        final long folderOffset = SIGNATURE_HEADER_SIZE + archive.packPos +</span>
+                0;
+
+<span class="nc" id="L428">        channel.position(folderOffset);</span>
+<span class="nc" id="L429">        InputStream inputStreamStack = new BoundedFileChannelInputStream(channel,</span>
+                archive.packSizes[firstPackStreamIndex]);
+<span class="nc bnc" id="L431" title="All 2 branches missed.">        for (final Coder coder : folder.getOrderedCoders()) {</span>
+<span class="nc bnc" id="L432" title="All 4 branches missed.">            if (coder.numInStreams != 1 || coder.numOutStreams != 1) {</span>
+<span class="nc" id="L433">                throw new IOException(&quot;Multi input/output stream coders are not yet supported&quot;);</span>
+            }
+<span class="nc" id="L435">            inputStreamStack = Coders.addDecoder(fileName, inputStreamStack, //NOSONAR</span>
+<span class="nc" id="L436">                    folder.getUnpackSizeForCoder(coder), coder, password);</span>
+<span class="nc" id="L437">        }</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (folder.hasCrc) {</span>
+<span class="nc" id="L439">            inputStreamStack = new CRC32VerifyingInputStream(inputStreamStack,</span>
+<span class="nc" id="L440">                    folder.getUnpackSize(), folder.crc);</span>
+        }
+<span class="nc" id="L442">        final byte[] nextHeader = new byte[(int)folder.getUnpackSize()];</span>
+<span class="nc" id="L443">        try (DataInputStream nextHeaderInputStream = new DataInputStream(inputStreamStack)) {</span>
+<span class="nc" id="L444">            nextHeaderInputStream.readFully(nextHeader);</span>
+        }
+<span class="nc" id="L446">        return ByteBuffer.wrap(nextHeader).order(ByteOrder.LITTLE_ENDIAN);</span>
+    }
+
+    private void readStreamsInfo(final ByteBuffer header, final Archive archive) throws IOException {
+<span class="nc" id="L450">        int nid = getUnsignedByte(header);</span>
+
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if (nid == NID.kPackInfo) {</span>
+<span class="nc" id="L453">            readPackInfo(header, archive);</span>
+<span class="nc" id="L454">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (nid == NID.kUnpackInfo) {</span>
+<span class="nc" id="L458">            readUnpackInfo(header, archive);</span>
+<span class="nc" id="L459">            nid = getUnsignedByte(header);</span>
+        } else {
+            // archive without unpack/coders info
+<span class="nc" id="L462">            archive.folders = new Folder[0];</span>
+        }
+
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        if (nid == NID.kSubStreamsInfo) {</span>
+<span class="nc" id="L466">            readSubStreamsInfo(header, archive);</span>
+<span class="nc" id="L467">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (nid != NID.kEnd) {</span>
+<span class="nc" id="L471">            throw new IOException(&quot;Badly terminated StreamsInfo&quot;);</span>
+        }
+<span class="nc" id="L473">    }</span>
+
+    private void readPackInfo(final ByteBuffer header, final Archive archive) throws IOException {
+<span class="nc" id="L476">        archive.packPos = readUint64(header);</span>
+<span class="nc" id="L477">        final long numPackStreams = readUint64(header);</span>
+<span class="nc" id="L478">        int nid = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">        if (nid == NID.kSize) {</span>
+<span class="nc" id="L480">            archive.packSizes = new long[(int)numPackStreams];</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">            for (int i = 0; i &lt; archive.packSizes.length; i++) {</span>
+<span class="nc" id="L482">                archive.packSizes[i] = readUint64(header);</span>
+            }
+<span class="nc" id="L484">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        if (nid == NID.kCRC) {</span>
+<span class="nc" id="L488">            archive.packCrcsDefined = readAllOrBits(header, (int)numPackStreams);</span>
+<span class="nc" id="L489">            archive.packCrcs = new long[(int)numPackStreams];</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">            for (int i = 0; i &lt; (int)numPackStreams; i++) {</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">                if (archive.packCrcsDefined.get(i)) {</span>
+<span class="nc" id="L492">                    archive.packCrcs[i] = 0xffffFFFFL &amp; header.getInt();</span>
+                }
+            }
+
+<span class="nc" id="L496">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L499" title="All 2 branches missed.">        if (nid != NID.kEnd) {</span>
+<span class="nc" id="L500">            throw new IOException(&quot;Badly terminated PackInfo (&quot; + nid + &quot;)&quot;);</span>
+        }
+<span class="nc" id="L502">    }</span>
+
+    private void readUnpackInfo(final ByteBuffer header, final Archive archive) throws IOException {
+<span class="nc" id="L505">        int nid = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L506" title="All 2 branches missed.">        if (nid != NID.kFolder) {</span>
+<span class="nc" id="L507">            throw new IOException(&quot;Expected kFolder, got &quot; + nid);</span>
+        }
+<span class="nc" id="L509">        final long numFolders = readUint64(header);</span>
+<span class="nc" id="L510">        final Folder[] folders = new Folder[(int)numFolders];</span>
+<span class="nc" id="L511">        archive.folders = folders;</span>
+<span class="nc" id="L512">        final int external = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">        if (external != 0) {</span>
+<span class="nc" id="L514">            throw new IOException(&quot;External unsupported&quot;);</span>
+        }
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        for (int i = 0; i &lt; (int)numFolders; i++) {</span>
+<span class="nc" id="L517">            folders[i] = readFolder(header);</span>
+        }
+
+<span class="nc" id="L520">        nid = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">        if (nid != NID.kCodersUnpackSize) {</span>
+<span class="nc" id="L522">            throw new IOException(&quot;Expected kCodersUnpackSize, got &quot; + nid);</span>
+        }
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        for (final Folder folder : folders) {</span>
+<span class="nc" id="L525">            folder.unpackSizes = new long[(int)folder.totalOutputStreams];</span>
+<span class="nc bnc" id="L526" title="All 2 branches missed.">            for (int i = 0; i &lt; folder.totalOutputStreams; i++) {</span>
+<span class="nc" id="L527">                folder.unpackSizes[i] = readUint64(header);</span>
+            }
+        }
+
+<span class="nc" id="L531">        nid = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">        if (nid == NID.kCRC) {</span>
+<span class="nc" id="L533">            final BitSet crcsDefined = readAllOrBits(header, (int)numFolders);</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">            for (int i = 0; i &lt; (int)numFolders; i++) {</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">                if (crcsDefined.get(i)) {</span>
+<span class="nc" id="L536">                    folders[i].hasCrc = true;</span>
+<span class="nc" id="L537">                    folders[i].crc = 0xffffFFFFL &amp; header.getInt();</span>
+                } else {
+<span class="nc" id="L539">                    folders[i].hasCrc = false;</span>
+                }
+            }
+
+<span class="nc" id="L543">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L546" title="All 2 branches missed.">        if (nid != NID.kEnd) {</span>
+<span class="nc" id="L547">            throw new IOException(&quot;Badly terminated UnpackInfo&quot;);</span>
+        }
+<span class="nc" id="L549">    }</span>
+
+    private void readSubStreamsInfo(final ByteBuffer header, final Archive archive) throws IOException {
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        for (final Folder folder : archive.folders) {</span>
+<span class="nc" id="L553">            folder.numUnpackSubStreams = 1;</span>
+        }
+<span class="nc" id="L555">        int totalUnpackStreams = archive.folders.length;</span>
+
+<span class="nc" id="L557">        int nid = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">        if (nid == NID.kNumUnpackStream) {</span>
+<span class="nc" id="L559">            totalUnpackStreams = 0;</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            for (final Folder folder : archive.folders) {</span>
+<span class="nc" id="L561">                final long numStreams = readUint64(header);</span>
+<span class="nc" id="L562">                folder.numUnpackSubStreams = (int)numStreams;</span>
+<span class="nc" id="L563">                totalUnpackStreams += numStreams;</span>
+            }
+<span class="nc" id="L565">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc" id="L568">        final SubStreamsInfo subStreamsInfo = new SubStreamsInfo();</span>
+<span class="nc" id="L569">        subStreamsInfo.unpackSizes = new long[totalUnpackStreams];</span>
+<span class="nc" id="L570">        subStreamsInfo.hasCrc = new BitSet(totalUnpackStreams);</span>
+<span class="nc" id="L571">        subStreamsInfo.crcs = new long[totalUnpackStreams];</span>
+
+<span class="nc" id="L573">        int nextUnpackStream = 0;</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">        for (final Folder folder : archive.folders) {</span>
+<span class="nc bnc" id="L575" title="All 2 branches missed.">            if (folder.numUnpackSubStreams == 0) {</span>
+<span class="nc" id="L576">                continue;</span>
+            }
+<span class="nc" id="L578">            long sum = 0;</span>
+<span class="nc bnc" id="L579" title="All 2 branches missed.">            if (nid == NID.kSize) {</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">                for (int i = 0; i &lt; folder.numUnpackSubStreams - 1; i++) {</span>
+<span class="nc" id="L581">                    final long size = readUint64(header);</span>
+<span class="nc" id="L582">                    subStreamsInfo.unpackSizes[nextUnpackStream++] = size;</span>
+<span class="nc" id="L583">                    sum += size;</span>
+                }
+            }
+<span class="nc" id="L586">            subStreamsInfo.unpackSizes[nextUnpackStream++] = folder.getUnpackSize() - sum;</span>
+        }
+<span class="nc bnc" id="L588" title="All 2 branches missed.">        if (nid == NID.kSize) {</span>
+<span class="nc" id="L589">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc" id="L592">        int numDigests = 0;</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">        for (final Folder folder : archive.folders) {</span>
+<span class="nc bnc" id="L594" title="All 4 branches missed.">            if (folder.numUnpackSubStreams != 1 || !folder.hasCrc) {</span>
+<span class="nc" id="L595">                numDigests += folder.numUnpackSubStreams;</span>
+            }
+        }
+
+<span class="nc bnc" id="L599" title="All 2 branches missed.">        if (nid == NID.kCRC) {</span>
+<span class="nc" id="L600">            final BitSet hasMissingCrc = readAllOrBits(header, numDigests);</span>
+<span class="nc" id="L601">            final long[] missingCrcs = new long[numDigests];</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">            for (int i = 0; i &lt; numDigests; i++) {</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">                if (hasMissingCrc.get(i)) {</span>
+<span class="nc" id="L604">                    missingCrcs[i] = 0xffffFFFFL &amp; header.getInt();</span>
+                }
+            }
+<span class="nc" id="L607">            int nextCrc = 0;</span>
+<span class="nc" id="L608">            int nextMissingCrc = 0;</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">            for (final Folder folder: archive.folders) {</span>
+<span class="nc bnc" id="L610" title="All 4 branches missed.">                if (folder.numUnpackSubStreams == 1 &amp;&amp; folder.hasCrc) {</span>
+<span class="nc" id="L611">                    subStreamsInfo.hasCrc.set(nextCrc, true);</span>
+<span class="nc" id="L612">                    subStreamsInfo.crcs[nextCrc] = folder.crc;</span>
+<span class="nc" id="L613">                    ++nextCrc;</span>
+                } else {
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                    for (int i = 0; i &lt; folder.numUnpackSubStreams; i++) {</span>
+<span class="nc" id="L616">                        subStreamsInfo.hasCrc.set(nextCrc, hasMissingCrc.get(nextMissingCrc));</span>
+<span class="nc" id="L617">                        subStreamsInfo.crcs[nextCrc] = missingCrcs[nextMissingCrc];</span>
+<span class="nc" id="L618">                        ++nextCrc;</span>
+<span class="nc" id="L619">                        ++nextMissingCrc;</span>
+                    }
+                }
+            }
+
+<span class="nc" id="L624">            nid = getUnsignedByte(header);</span>
+        }
+
+<span class="nc bnc" id="L627" title="All 2 branches missed.">        if (nid != NID.kEnd) {</span>
+<span class="nc" id="L628">            throw new IOException(&quot;Badly terminated SubStreamsInfo&quot;);</span>
+        }
+
+<span class="nc" id="L631">        archive.subStreamsInfo = subStreamsInfo;</span>
+<span class="nc" id="L632">    }</span>
+
+    private Folder readFolder(final ByteBuffer header) throws IOException {
+<span class="nc" id="L635">        final Folder folder = new Folder();</span>
+
+<span class="nc" id="L637">        final long numCoders = readUint64(header);</span>
+<span class="nc" id="L638">        final Coder[] coders = new Coder[(int)numCoders];</span>
+<span class="nc" id="L639">        long totalInStreams = 0;</span>
+<span class="nc" id="L640">        long totalOutStreams = 0;</span>
+<span class="nc bnc" id="L641" title="All 2 branches missed.">        for (int i = 0; i &lt; coders.length; i++) {</span>
+<span class="nc" id="L642">            coders[i] = new Coder();</span>
+<span class="nc" id="L643">            final int bits = getUnsignedByte(header);</span>
+<span class="nc" id="L644">            final int idSize = bits &amp; 0xf;</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">            final boolean isSimple = (bits &amp; 0x10) == 0;</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">            final boolean hasAttributes = (bits &amp; 0x20) != 0;</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">            final boolean moreAlternativeMethods = (bits &amp; 0x80) != 0;</span>
+
+<span class="nc" id="L649">            coders[i].decompressionMethodId = new byte[idSize];</span>
+<span class="nc" id="L650">            header.get(coders[i].decompressionMethodId);</span>
+<span class="nc bnc" id="L651" title="All 2 branches missed.">            if (isSimple) {</span>
+<span class="nc" id="L652">                coders[i].numInStreams = 1;</span>
+<span class="nc" id="L653">                coders[i].numOutStreams = 1;</span>
+            } else {
+<span class="nc" id="L655">                coders[i].numInStreams = readUint64(header);</span>
+<span class="nc" id="L656">                coders[i].numOutStreams = readUint64(header);</span>
+            }
+<span class="nc" id="L658">            totalInStreams += coders[i].numInStreams;</span>
+<span class="nc" id="L659">            totalOutStreams += coders[i].numOutStreams;</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">            if (hasAttributes) {</span>
+<span class="nc" id="L661">                final long propertiesSize = readUint64(header);</span>
+<span class="nc" id="L662">                coders[i].properties = new byte[(int)propertiesSize];</span>
+<span class="nc" id="L663">                header.get(coders[i].properties);</span>
+            }
+            // would need to keep looping as above:
+<span class="nc bnc" id="L666" title="All 2 branches missed.">            while (moreAlternativeMethods) {</span>
+<span class="nc" id="L667">                throw new IOException(&quot;Alternative methods are unsupported, please report. &quot; +</span>
+                        &quot;The reference implementation doesn't support them either.&quot;);
+            }
+        }
+<span class="nc" id="L671">        folder.coders = coders;</span>
+<span class="nc" id="L672">        folder.totalInputStreams = totalInStreams;</span>
+<span class="nc" id="L673">        folder.totalOutputStreams = totalOutStreams;</span>
+
+<span class="nc bnc" id="L675" title="All 2 branches missed.">        if (totalOutStreams == 0) {</span>
+<span class="nc" id="L676">            throw new IOException(&quot;Total output streams can't be 0&quot;);</span>
+        }
+<span class="nc" id="L678">        final long numBindPairs = totalOutStreams - 1;</span>
+<span class="nc" id="L679">        final BindPair[] bindPairs = new BindPair[(int)numBindPairs];</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">        for (int i = 0; i &lt; bindPairs.length; i++) {</span>
+<span class="nc" id="L681">            bindPairs[i] = new BindPair();</span>
+<span class="nc" id="L682">            bindPairs[i].inIndex = readUint64(header);</span>
+<span class="nc" id="L683">            bindPairs[i].outIndex = readUint64(header);</span>
+        }
+<span class="nc" id="L685">        folder.bindPairs = bindPairs;</span>
+
+<span class="nc bnc" id="L687" title="All 2 branches missed.">        if (totalInStreams &lt; numBindPairs) {</span>
+<span class="nc" id="L688">            throw new IOException(&quot;Total input streams can't be less than the number of bind pairs&quot;);</span>
+        }
+<span class="nc" id="L690">        final long numPackedStreams = totalInStreams - numBindPairs;</span>
+<span class="nc" id="L691">        final long packedStreams[] = new long[(int)numPackedStreams];</span>
+<span class="nc bnc" id="L692" title="All 2 branches missed.">        if (numPackedStreams == 1) {</span>
+            int i;
+<span class="nc bnc" id="L694" title="All 2 branches missed.">            for (i = 0; i &lt; (int)totalInStreams; i++) {</span>
+<span class="nc bnc" id="L695" title="All 2 branches missed.">                if (folder.findBindPairForInStream(i) &lt; 0) {</span>
+<span class="nc" id="L696">                    break;</span>
+                }
+            }
+<span class="nc bnc" id="L699" title="All 2 branches missed.">            if (i == (int)totalInStreams) {</span>
+<span class="nc" id="L700">                throw new IOException(&quot;Couldn't find stream's bind pair index&quot;);</span>
+            }
+<span class="nc" id="L702">            packedStreams[0] = i;</span>
+<span class="nc" id="L703">        } else {</span>
+<span class="nc bnc" id="L704" title="All 2 branches missed.">            for (int i = 0; i &lt; (int)numPackedStreams; i++) {</span>
+<span class="nc" id="L705">                packedStreams[i] = readUint64(header);</span>
+            }
+        }
+<span class="nc" id="L708">        folder.packedStreams = packedStreams;</span>
+
+<span class="nc" id="L710">        return folder;</span>
+    }
+
+    private BitSet readAllOrBits(final ByteBuffer header, final int size) throws IOException {
+<span class="nc" id="L714">        final int areAllDefined = getUnsignedByte(header);</span>
+        final BitSet bits;
+<span class="nc bnc" id="L716" title="All 2 branches missed.">        if (areAllDefined != 0) {</span>
+<span class="nc" id="L717">            bits = new BitSet(size);</span>
+<span class="nc bnc" id="L718" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L719">                bits.set(i, true);</span>
+            }
+        } else {
+<span class="nc" id="L722">            bits = readBits(header, size);</span>
+        }
+<span class="nc" id="L724">        return bits;</span>
+    }
+
+    private BitSet readBits(final ByteBuffer header, final int size) throws IOException {
+<span class="nc" id="L728">        final BitSet bits = new BitSet(size);</span>
+<span class="nc" id="L729">        int mask = 0;</span>
+<span class="nc" id="L730">        int cache = 0;</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">        for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">            if (mask == 0) {</span>
+<span class="nc" id="L733">                mask = 0x80;</span>
+<span class="nc" id="L734">                cache = getUnsignedByte(header);</span>
+            }
+<span class="nc bnc" id="L736" title="All 2 branches missed.">            bits.set(i, (cache &amp; mask) != 0);</span>
+<span class="nc" id="L737">            mask &gt;&gt;&gt;= 1;</span>
+        }
+<span class="nc" id="L739">        return bits;</span>
+    }
+
+    private void readFilesInfo(final ByteBuffer header, final Archive archive) throws IOException {
+<span class="nc" id="L743">        final long numFiles = readUint64(header);</span>
+<span class="nc" id="L744">        final SevenZArchiveEntry[] files = new SevenZArchiveEntry[(int)numFiles];</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        for (int i = 0; i &lt; files.length; i++) {</span>
+<span class="nc" id="L746">            files[i] = new SevenZArchiveEntry();</span>
+        }
+<span class="nc" id="L748">        BitSet isEmptyStream = null;</span>
+<span class="nc" id="L749">        BitSet isEmptyFile = null;</span>
+<span class="nc" id="L750">        BitSet isAnti = null;</span>
+        while (true) {
+<span class="nc" id="L752">            final int propertyType = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L753" title="All 2 branches missed.">            if (propertyType == 0) {</span>
+<span class="nc" id="L754">                break;</span>
+            }
+<span class="nc" id="L756">            final long size = readUint64(header);</span>
+<span class="nc bnc" id="L757" title="All 11 branches missed.">            switch (propertyType) {</span>
+                case NID.kEmptyStream: {
+<span class="nc" id="L759">                    isEmptyStream = readBits(header, files.length);</span>
+<span class="nc" id="L760">                    break;</span>
+                }
+                case NID.kEmptyFile: {
+<span class="nc bnc" id="L763" title="All 2 branches missed.">                    if (isEmptyStream == null) { // protect against NPE</span>
+<span class="nc" id="L764">                        throw new IOException(&quot;Header format error: kEmptyStream must appear before kEmptyFile&quot;);</span>
+                    }
+<span class="nc" id="L766">                    isEmptyFile = readBits(header, isEmptyStream.cardinality());</span>
+<span class="nc" id="L767">                    break;</span>
+                }
+                case NID.kAnti: {
+<span class="nc bnc" id="L770" title="All 2 branches missed.">                    if (isEmptyStream == null) { // protect against NPE</span>
+<span class="nc" id="L771">                        throw new IOException(&quot;Header format error: kEmptyStream must appear before kAnti&quot;);</span>
+                    }
+<span class="nc" id="L773">                    isAnti = readBits(header, isEmptyStream.cardinality());</span>
+<span class="nc" id="L774">                    break;</span>
+                }
+                case NID.kName: {
+<span class="nc" id="L777">                    final int external = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">                    if (external != 0) {</span>
+<span class="nc" id="L779">                        throw new IOException(&quot;Not implemented&quot;);</span>
+                    }
+<span class="nc bnc" id="L781" title="All 2 branches missed.">                    if (((size - 1) &amp; 1) != 0) {</span>
+<span class="nc" id="L782">                        throw new IOException(&quot;File names length invalid&quot;);</span>
+                    }
+<span class="nc" id="L784">                    final byte[] names = new byte[(int)(size - 1)];</span>
+<span class="nc" id="L785">                    header.get(names);</span>
+<span class="nc" id="L786">                    int nextFile = 0;</span>
+<span class="nc" id="L787">                    int nextName = 0;</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">                    for (int i = 0; i &lt; names.length; i += 2) {</span>
+<span class="nc bnc" id="L789" title="All 4 branches missed.">                        if (names[i] == 0 &amp;&amp; names[i+1] == 0) {</span>
+<span class="nc" id="L790">                            files[nextFile++].setName(new String(names, nextName, i-nextName, CharsetNames.UTF_16LE));</span>
+<span class="nc" id="L791">                            nextName = i + 2;</span>
+                        }
+                    }
+<span class="nc bnc" id="L794" title="All 4 branches missed.">                    if (nextName != names.length || nextFile != files.length) {</span>
+<span class="nc" id="L795">                        throw new IOException(&quot;Error parsing file names&quot;);</span>
+                    }
+                    break;
+                }
+                case NID.kCTime: {
+<span class="nc" id="L800">                    final BitSet timesDefined = readAllOrBits(header, files.length);</span>
+<span class="nc" id="L801">                    final int external = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">                    if (external != 0) {</span>
+<span class="nc" id="L803">                        throw new IOException(&quot;Unimplemented&quot;);</span>
+                    }
+<span class="nc bnc" id="L805" title="All 2 branches missed.">                    for (int i = 0; i &lt; files.length; i++) {</span>
+<span class="nc" id="L806">                        files[i].setHasCreationDate(timesDefined.get(i));</span>
+<span class="nc bnc" id="L807" title="All 2 branches missed.">                        if (files[i].getHasCreationDate()) {</span>
+<span class="nc" id="L808">                            files[i].setCreationDate(header.getLong());</span>
+                        }
+                    }
+<span class="nc" id="L811">                    break;</span>
+                }
+                case NID.kATime: {
+<span class="nc" id="L814">                    final BitSet timesDefined = readAllOrBits(header, files.length);</span>
+<span class="nc" id="L815">                    final int external = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L816" title="All 2 branches missed.">                    if (external != 0) {</span>
+<span class="nc" id="L817">                        throw new IOException(&quot;Unimplemented&quot;);</span>
+                    }
+<span class="nc bnc" id="L819" title="All 2 branches missed.">                    for (int i = 0; i &lt; files.length; i++) {</span>
+<span class="nc" id="L820">                        files[i].setHasAccessDate(timesDefined.get(i));</span>
+<span class="nc bnc" id="L821" title="All 2 branches missed.">                        if (files[i].getHasAccessDate()) {</span>
+<span class="nc" id="L822">                            files[i].setAccessDate(header.getLong());</span>
+                        }
+                    }
+<span class="nc" id="L825">                    break;</span>
+                }
+                case NID.kMTime: {
+<span class="nc" id="L828">                    final BitSet timesDefined = readAllOrBits(header, files.length);</span>
+<span class="nc" id="L829">                    final int external = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L830" title="All 2 branches missed.">                    if (external != 0) {</span>
+<span class="nc" id="L831">                        throw new IOException(&quot;Unimplemented&quot;);</span>
+                    }
+<span class="nc bnc" id="L833" title="All 2 branches missed.">                    for (int i = 0; i &lt; files.length; i++) {</span>
+<span class="nc" id="L834">                        files[i].setHasLastModifiedDate(timesDefined.get(i));</span>
+<span class="nc bnc" id="L835" title="All 2 branches missed.">                        if (files[i].getHasLastModifiedDate()) {</span>
+<span class="nc" id="L836">                            files[i].setLastModifiedDate(header.getLong());</span>
+                        }
+                    }
+<span class="nc" id="L839">                    break;</span>
+                }
+                case NID.kWinAttributes: {
+<span class="nc" id="L842">                    final BitSet attributesDefined = readAllOrBits(header, files.length);</span>
+<span class="nc" id="L843">                    final int external = getUnsignedByte(header);</span>
+<span class="nc bnc" id="L844" title="All 2 branches missed.">                    if (external != 0) {</span>
+<span class="nc" id="L845">                        throw new IOException(&quot;Unimplemented&quot;);</span>
+                    }
+<span class="nc bnc" id="L847" title="All 2 branches missed.">                    for (int i = 0; i &lt; files.length; i++) {</span>
+<span class="nc" id="L848">                        files[i].setHasWindowsAttributes(attributesDefined.get(i));</span>
+<span class="nc bnc" id="L849" title="All 2 branches missed.">                        if (files[i].getHasWindowsAttributes()) {</span>
+<span class="nc" id="L850">                            files[i].setWindowsAttributes(header.getInt());</span>
+                        }
+                    }
+<span class="nc" id="L853">                    break;</span>
+                }
+                case NID.kStartPos: {
+<span class="nc" id="L856">                    throw new IOException(&quot;kStartPos is unsupported, please report&quot;);</span>
+                }
+                case NID.kDummy: {
+                    // 7z 9.20 asserts the content is all zeros and ignores the property
+                    // Compress up to 1.8.1 would throw an exception, now we ignore it (see COMPRESS-287
+
+<span class="nc bnc" id="L862" title="All 2 branches missed.">                    if (skipBytesFully(header, size) &lt; size) {</span>
+<span class="nc" id="L863">                        throw new IOException(&quot;Incomplete kDummy property&quot;);</span>
+                    }
+                    break;
+                }
+
+                default: {
+                    // Compress up to 1.8.1 would throw an exception, now we ignore it (see COMPRESS-287
+<span class="nc bnc" id="L870" title="All 2 branches missed.">                    if (skipBytesFully(header, size) &lt; size) {</span>
+<span class="nc" id="L871">                        throw new IOException(&quot;Incomplete property of type &quot; + propertyType);</span>
+                    }
+                    break;
+                }
+            }
+<span class="nc" id="L876">        }</span>
+<span class="nc" id="L877">        int nonEmptyFileCounter = 0;</span>
+<span class="nc" id="L878">        int emptyFileCounter = 0;</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">        for (int i = 0; i &lt; files.length; i++) {</span>
+<span class="nc bnc" id="L880" title="All 4 branches missed.">            files[i].setHasStream(isEmptyStream == null || !isEmptyStream.get(i));</span>
+<span class="nc bnc" id="L881" title="All 2 branches missed.">            if (files[i].hasStream()) {</span>
+<span class="nc" id="L882">                files[i].setDirectory(false);</span>
+<span class="nc" id="L883">                files[i].setAntiItem(false);</span>
+<span class="nc" id="L884">                files[i].setHasCrc(archive.subStreamsInfo.hasCrc.get(nonEmptyFileCounter));</span>
+<span class="nc" id="L885">                files[i].setCrcValue(archive.subStreamsInfo.crcs[nonEmptyFileCounter]);</span>
+<span class="nc" id="L886">                files[i].setSize(archive.subStreamsInfo.unpackSizes[nonEmptyFileCounter]);</span>
+<span class="nc" id="L887">                ++nonEmptyFileCounter;</span>
+            } else {
+<span class="nc bnc" id="L889" title="All 4 branches missed.">                files[i].setDirectory(isEmptyFile == null || !isEmptyFile.get(emptyFileCounter));</span>
+<span class="nc bnc" id="L890" title="All 4 branches missed.">                files[i].setAntiItem(isAnti != null &amp;&amp; isAnti.get(emptyFileCounter));</span>
+<span class="nc" id="L891">                files[i].setHasCrc(false);</span>
+<span class="nc" id="L892">                files[i].setSize(0);</span>
+<span class="nc" id="L893">                ++emptyFileCounter;</span>
+            }
+        }
+<span class="nc" id="L896">        archive.files = files;</span>
+<span class="nc" id="L897">        calculateStreamMap(archive);</span>
+<span class="nc" id="L898">    }</span>
+
+    private void calculateStreamMap(final Archive archive) throws IOException {
+<span class="nc" id="L901">        final StreamMap streamMap = new StreamMap();</span>
+
+<span class="nc" id="L903">        int nextFolderPackStreamIndex = 0;</span>
+<span class="nc bnc" id="L904" title="All 2 branches missed.">        final int numFolders = archive.folders != null ? archive.folders.length : 0;</span>
+<span class="nc" id="L905">        streamMap.folderFirstPackStreamIndex = new int[numFolders];</span>
+<span class="nc bnc" id="L906" title="All 2 branches missed.">        for (int i = 0; i &lt; numFolders; i++) {</span>
+<span class="nc" id="L907">            streamMap.folderFirstPackStreamIndex[i] = nextFolderPackStreamIndex;</span>
+<span class="nc" id="L908">            nextFolderPackStreamIndex += archive.folders[i].packedStreams.length;</span>
+        }
+
+<span class="nc" id="L911">        long nextPackStreamOffset = 0;</span>
+<span class="nc bnc" id="L912" title="All 2 branches missed.">        final int numPackSizes = archive.packSizes != null ? archive.packSizes.length : 0;</span>
+<span class="nc" id="L913">        streamMap.packStreamOffsets = new long[numPackSizes];</span>
+<span class="nc bnc" id="L914" title="All 2 branches missed.">        for (int i = 0; i &lt; numPackSizes; i++) {</span>
+<span class="nc" id="L915">            streamMap.packStreamOffsets[i] = nextPackStreamOffset;</span>
+<span class="nc" id="L916">            nextPackStreamOffset += archive.packSizes[i];</span>
+        }
+
+<span class="nc" id="L919">        streamMap.folderFirstFileIndex = new int[numFolders];</span>
+<span class="nc" id="L920">        streamMap.fileFolderIndex = new int[archive.files.length];</span>
+<span class="nc" id="L921">        int nextFolderIndex = 0;</span>
+<span class="nc" id="L922">        int nextFolderUnpackStreamIndex = 0;</span>
+<span class="nc bnc" id="L923" title="All 2 branches missed.">        for (int i = 0; i &lt; archive.files.length; i++) {</span>
+<span class="nc bnc" id="L924" title="All 4 branches missed.">            if (!archive.files[i].hasStream() &amp;&amp; nextFolderUnpackStreamIndex == 0) {</span>
+<span class="nc" id="L925">                streamMap.fileFolderIndex[i] = -1;</span>
+<span class="nc" id="L926">                continue;</span>
+            }
+<span class="nc bnc" id="L928" title="All 2 branches missed.">            if (nextFolderUnpackStreamIndex == 0) {</span>
+<span class="nc bnc" id="L929" title="All 2 branches missed.">                for (; nextFolderIndex &lt; archive.folders.length; ++nextFolderIndex) {</span>
+<span class="nc" id="L930">                    streamMap.folderFirstFileIndex[nextFolderIndex] = i;</span>
+<span class="nc bnc" id="L931" title="All 2 branches missed.">                    if (archive.folders[nextFolderIndex].numUnpackSubStreams &gt; 0) {</span>
+<span class="nc" id="L932">                        break;</span>
+                    }
+                }
+<span class="nc bnc" id="L935" title="All 2 branches missed.">                if (nextFolderIndex &gt;= archive.folders.length) {</span>
+<span class="nc" id="L936">                    throw new IOException(&quot;Too few folders in archive&quot;);</span>
+                }
+            }
+<span class="nc" id="L939">            streamMap.fileFolderIndex[i] = nextFolderIndex;</span>
+<span class="nc bnc" id="L940" title="All 2 branches missed.">            if (!archive.files[i].hasStream()) {</span>
+<span class="nc" id="L941">                continue;</span>
+            }
+<span class="nc" id="L943">            ++nextFolderUnpackStreamIndex;</span>
+<span class="nc bnc" id="L944" title="All 2 branches missed.">            if (nextFolderUnpackStreamIndex &gt;= archive.folders[nextFolderIndex].numUnpackSubStreams) {</span>
+<span class="nc" id="L945">                ++nextFolderIndex;</span>
+<span class="nc" id="L946">                nextFolderUnpackStreamIndex = 0;</span>
+            }
+        }
+
+<span class="nc" id="L950">        archive.streamMap = streamMap;</span>
+<span class="nc" id="L951">    }</span>
+
+    private void buildDecodingStream() throws IOException {
+<span class="nc" id="L954">        final int folderIndex = archive.streamMap.fileFolderIndex[currentEntryIndex];</span>
+<span class="nc bnc" id="L955" title="All 2 branches missed.">        if (folderIndex &lt; 0) {</span>
+<span class="nc" id="L956">            deferredBlockStreams.clear();</span>
+            // TODO: previously it'd return an empty stream?
+            // new BoundedInputStream(new ByteArrayInputStream(new byte[0]), 0);
+<span class="nc" id="L959">            return;</span>
+        }
+<span class="nc" id="L961">        final SevenZArchiveEntry file = archive.files[currentEntryIndex];</span>
+<span class="nc bnc" id="L962" title="All 2 branches missed.">        if (currentFolderIndex == folderIndex) {</span>
+            // (COMPRESS-320).
+            // The current entry is within the same (potentially opened) folder. The
+            // previous stream has to be fully decoded before we can start reading
+            // but don't do it eagerly -- if the user skips over the entire folder nothing
+            // is effectively decompressed.
+
+<span class="nc" id="L969">            file.setContentMethods(archive.files[currentEntryIndex - 1].getContentMethods());</span>
+        } else {
+            // We're opening a new folder. Discard any queued streams/ folder stream.
+<span class="nc" id="L972">            currentFolderIndex = folderIndex;</span>
+<span class="nc" id="L973">            deferredBlockStreams.clear();</span>
+<span class="nc bnc" id="L974" title="All 2 branches missed.">            if (currentFolderInputStream != null) {</span>
+<span class="nc" id="L975">                currentFolderInputStream.close();</span>
+<span class="nc" id="L976">                currentFolderInputStream = null;</span>
+            }
+
+<span class="nc" id="L979">            final Folder folder = archive.folders[folderIndex];</span>
+<span class="nc" id="L980">            final int firstPackStreamIndex = archive.streamMap.folderFirstPackStreamIndex[folderIndex];</span>
+<span class="nc" id="L981">            final long folderOffset = SIGNATURE_HEADER_SIZE + archive.packPos +</span>
+                    archive.streamMap.packStreamOffsets[firstPackStreamIndex];
+<span class="nc" id="L983">            currentFolderInputStream = buildDecoderStack(folder, folderOffset, firstPackStreamIndex, file);</span>
+        }
+
+<span class="nc" id="L986">        InputStream fileStream = new BoundedInputStream(currentFolderInputStream, file.getSize());</span>
+<span class="nc bnc" id="L987" title="All 2 branches missed.">        if (file.getHasCrc()) {</span>
+<span class="nc" id="L988">            fileStream = new CRC32VerifyingInputStream(fileStream, file.getSize(), file.getCrcValue());</span>
+        }
+
+<span class="nc" id="L991">        deferredBlockStreams.add(fileStream);</span>
+<span class="nc" id="L992">    }</span>
+
+    private InputStream buildDecoderStack(final Folder folder, final long folderOffset,
+                final int firstPackStreamIndex, final SevenZArchiveEntry entry) throws IOException {
+<span class="nc" id="L996">        channel.position(folderOffset);</span>
+<span class="nc" id="L997">        InputStream inputStreamStack = new FilterInputStream(new BufferedInputStream(</span>
+              new BoundedFileChannelInputStream(channel,
+<span class="nc" id="L999">                  archive.packSizes[firstPackStreamIndex]))) {</span>
+            @Override
+            public int read() throws IOException {
+<span class="nc" id="L1002">                final int r = in.read();</span>
+<span class="nc bnc" id="L1003" title="All 2 branches missed.">                if (r &gt;= 0) {</span>
+<span class="nc" id="L1004">                    count(1);</span>
+                }
+<span class="nc" id="L1006">                return r;</span>
+            }
+            @Override
+            public int read(final byte[] b) throws IOException {
+<span class="nc" id="L1010">                return read(b, 0, b.length);</span>
+            }
+            @Override
+            public int read(final byte[] b, final int off, final int len) throws IOException {
+<span class="nc" id="L1014">                final int r = in.read(b, off, len);</span>
+<span class="nc bnc" id="L1015" title="All 2 branches missed.">                if (r &gt;= 0) {</span>
+<span class="nc" id="L1016">                    count(r);</span>
+                }
+<span class="nc" id="L1018">                return r;</span>
+            }
+            private void count(int c) {
+<span class="nc" id="L1021">                compressedBytesReadFromCurrentEntry += c;</span>
+<span class="nc" id="L1022">            }</span>
+        };
+<span class="nc" id="L1024">        final LinkedList&lt;SevenZMethodConfiguration&gt; methods = new LinkedList&lt;&gt;();</span>
+<span class="nc bnc" id="L1025" title="All 2 branches missed.">        for (final Coder coder : folder.getOrderedCoders()) {</span>
+<span class="nc bnc" id="L1026" title="All 4 branches missed.">            if (coder.numInStreams != 1 || coder.numOutStreams != 1) {</span>
+<span class="nc" id="L1027">                throw new IOException(&quot;Multi input/output stream coders are not yet supported&quot;);</span>
+            }
+<span class="nc" id="L1029">            final SevenZMethod method = SevenZMethod.byId(coder.decompressionMethodId);</span>
+<span class="nc" id="L1030">            inputStreamStack = Coders.addDecoder(fileName, inputStreamStack,</span>
+<span class="nc" id="L1031">                    folder.getUnpackSizeForCoder(coder), coder, password);</span>
+<span class="nc" id="L1032">            methods.addFirst(new SevenZMethodConfiguration(method,</span>
+<span class="nc" id="L1033">                     Coders.findByMethod(method).getOptionsFromCoder(coder, inputStreamStack)));</span>
+<span class="nc" id="L1034">        }</span>
+<span class="nc" id="L1035">        entry.setContentMethods(methods);</span>
+<span class="nc bnc" id="L1036" title="All 2 branches missed.">        if (folder.hasCrc) {</span>
+<span class="nc" id="L1037">            return new CRC32VerifyingInputStream(inputStreamStack,</span>
+<span class="nc" id="L1038">                    folder.getUnpackSize(), folder.crc);</span>
+        }
+<span class="nc" id="L1040">        return inputStreamStack;</span>
+    }
+
+    /**
+     * Reads a byte of data.
+     *
+     * @return the byte read, or -1 if end of input is reached
+     * @throws IOException
+     *             if an I/O error has occurred
+     */
+    public int read() throws IOException {
+<span class="nc" id="L1051">        int b = getCurrentStream().read();</span>
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">        if (b &gt;= 0) {</span>
+<span class="nc" id="L1053">            uncompressedBytesReadFromCurrentEntry++;</span>
+        }
+<span class="nc" id="L1055">        return b;</span>
+    }
+
+    private InputStream getCurrentStream() throws IOException {
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">        if (archive.files[currentEntryIndex].getSize() == 0) {</span>
+<span class="nc" id="L1060">            return new ByteArrayInputStream(new byte[0]);</span>
+        }
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">        if (deferredBlockStreams.isEmpty()) {</span>
+<span class="nc" id="L1063">            throw new IllegalStateException(&quot;No current 7z entry (call getNextEntry() first).&quot;);</span>
+        }
+
+<span class="nc bnc" id="L1066" title="All 2 branches missed.">        while (deferredBlockStreams.size() &gt; 1) {</span>
+            // In solid compression mode we need to decompress all leading folder'
+            // streams to get access to an entry. We defer this until really needed
+            // so that entire blocks can be skipped without wasting time for decompression.
+<span class="nc" id="L1070">            try (final InputStream stream = deferredBlockStreams.remove(0)) {</span>
+<span class="nc" id="L1071">                IOUtils.skip(stream, Long.MAX_VALUE);</span>
+            }
+<span class="nc" id="L1073">            compressedBytesReadFromCurrentEntry = 0;</span>
+        }
+
+<span class="nc" id="L1076">        return deferredBlockStreams.get(0);</span>
+    }
+
+    /**
+     * Reads data into an array of bytes.
+     *
+     * @param b the array to write data to
+     * @return the number of bytes read, or -1 if end of input is reached
+     * @throws IOException
+     *             if an I/O error has occurred
+     */
+    public int read(final byte[] b) throws IOException {
+<span class="nc" id="L1088">        return read(b, 0, b.length);</span>
+    }
+
+    /**
+     * Reads data into an array of bytes.
+     *
+     * @param b the array to write data to
+     * @param off offset into the buffer to start filling at
+     * @param len of bytes to read
+     * @return the number of bytes read, or -1 if end of input is reached
+     * @throws IOException
+     *             if an I/O error has occurred
+     */
+    public int read(final byte[] b, final int off, final int len) throws IOException {
+<span class="nc" id="L1102">        int cnt = getCurrentStream().read(b, off, len);</span>
+<span class="nc bnc" id="L1103" title="All 2 branches missed.">        if (cnt &gt; 0) {</span>
+<span class="nc" id="L1104">            uncompressedBytesReadFromCurrentEntry += cnt;</span>
+        }
+<span class="nc" id="L1106">        return cnt;</span>
+    }
+
+    /**
+     * Provides statistics for bytes read from the current entry.
+     *
+     * @return statistics for bytes read from the current entry
+     * @since 1.17
+     */
+    public InputStreamStatistics getStatisticsForCurrentEntry() {
+<span class="nc" id="L1116">        return new InputStreamStatistics() {</span>
+            @Override
+            public long getCompressedCount() {
+<span class="nc" id="L1119">                return compressedBytesReadFromCurrentEntry;</span>
+            }
+            @Override
+            public long getUncompressedCount() {
+<span class="nc" id="L1123">                return uncompressedBytesReadFromCurrentEntry;</span>
+            }
+        };
+    }
+
+    private static long readUint64(final ByteBuffer in) throws IOException {
+        // long rather than int as it might get shifted beyond the range of an int
+<span class="nc" id="L1130">        final long firstByte = getUnsignedByte(in);</span>
+<span class="nc" id="L1131">        int mask = 0x80;</span>
+<span class="nc" id="L1132">        long value = 0;</span>
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">        for (int i = 0; i &lt; 8; i++) {</span>
+<span class="nc bnc" id="L1134" title="All 2 branches missed.">            if ((firstByte &amp; mask) == 0) {</span>
+<span class="nc" id="L1135">                return value | ((firstByte &amp; (mask - 1)) &lt;&lt; (8 * i));</span>
+            }
+<span class="nc" id="L1137">            final long nextByte = getUnsignedByte(in);</span>
+<span class="nc" id="L1138">            value |= nextByte &lt;&lt; (8 * i);</span>
+<span class="nc" id="L1139">            mask &gt;&gt;&gt;= 1;</span>
+        }
+<span class="nc" id="L1141">        return value;</span>
+    }
+
+    private static int getUnsignedByte(ByteBuffer buf) {
+<span class="nc" id="L1145">        return buf.get() &amp; 0xff;</span>
+    }
+
+    /**
+     * Checks if the signature matches what is expected for a 7z file.
+     *
+     * @param signature
+     *            the bytes to check
+     * @param length
+     *            the number of bytes to check
+     * @return true, if this is the signature of a 7z archive.
+     * @since 1.8
+     */
+    public static boolean matches(final byte[] signature, final int length) {
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">        if (length &lt; sevenZSignature.length) {</span>
+<span class="nc" id="L1160">            return false;</span>
+        }
+
+<span class="nc bnc" id="L1163" title="All 2 branches missed.">        for (int i = 0; i &lt; sevenZSignature.length; i++) {</span>
+<span class="nc bnc" id="L1164" title="All 2 branches missed.">            if (signature[i] != sevenZSignature[i]) {</span>
+<span class="nc" id="L1165">                return false;</span>
+            }
+        }
+<span class="nc" id="L1168">        return true;</span>
+    }
+
+    private static long skipBytesFully(final ByteBuffer input, long bytesToSkip) throws IOException {
+<span class="nc bnc" id="L1172" title="All 2 branches missed.">        if (bytesToSkip &lt; 1) {</span>
+<span class="nc" id="L1173">            return 0;</span>
+        }
+<span class="nc" id="L1175">        int current = input.position();</span>
+<span class="nc" id="L1176">        int maxSkip = input.remaining();</span>
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">        if (maxSkip &lt; bytesToSkip) {</span>
+<span class="nc" id="L1178">            bytesToSkip = maxSkip;</span>
+        }
+<span class="nc" id="L1180">        input.position(current + (int) bytesToSkip);</span>
+<span class="nc" id="L1181">        return bytesToSkip;</span>
+    }
+
+    private void readFully(ByteBuffer buf) throws IOException {
+<span class="nc" id="L1185">        buf.rewind();</span>
+<span class="nc" id="L1186">        IOUtils.readFully(channel, buf);</span>
+<span class="nc" id="L1187">        buf.flip();</span>
+<span class="nc" id="L1188">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L1192">      return archive.toString();</span>
+    }
+
+<span class="nc" id="L1195">    private static final CharsetEncoder PASSWORD_ENCODER = Charset.forName(&quot;UTF-16LE&quot;).newEncoder();</span>
+
+    private static byte[] utf16Decode(char[] chars) throws IOException {
+<span class="nc bnc" id="L1198" title="All 2 branches missed.">        if (chars == null) {</span>
+<span class="nc" id="L1199">            return null;</span>
+        }
+<span class="nc" id="L1201">        ByteBuffer encoded = PASSWORD_ENCODER.encode(CharBuffer.wrap(chars));</span>
+<span class="nc bnc" id="L1202" title="All 2 branches missed.">        if (encoded.hasArray()) {</span>
+<span class="nc" id="L1203">            return encoded.array();</span>
+        }
+<span class="nc" id="L1205">        byte[] e = new byte[encoded.remaining()];</span>
+<span class="nc" id="L1206">        encoded.get(e);</span>
+<span class="nc" id="L1207">        return e;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>

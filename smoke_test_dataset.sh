@@ -34,6 +34,7 @@ SERIAL="${SERIAL:-emulator-5554}"
 EVENTS="${EVENTS:-40}"            # monkey events to exercise the app
 SETTLE="${SETTLE:-8}"             # seconds to let the app initialise
 INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-600}"   # per install attempt, seconds
+BROADCAST_TIMEOUT="${BROADCAST_TIMEOUT:-900}" # COLLECT_COVERAGE dump, seconds
 EMU_ARGS="${EMU_ARGS:--accel off -gpu guest}"
 AAPT="$SDK/build-tools/28.0.3/aapt"
 ADB="$SDK/platform-tools/adb"
@@ -45,12 +46,43 @@ alog() { echo "[$(date +%H:%M:%S)] $*" >> "$APP_LOG"; }
 
 mkdir -p "$OUT"
 SUMMARY="$OUT/smoke_summary.csv"
-echo "app,apk,package,installed,launched,ec_bytes,classes_found,line_coverage_pct,mismatched_classes,html_pages,verdict,seconds" > "$SUMMARY"
+HEADER="app,apk,package,installed,launched,ec_bytes,classes_found,line_coverage_pct,mismatched_classes,html_pages,verdict,seconds"
+
+# RESUME (default on): never delete previous results, and skip apks that already
+# have a completed verdict. Failures are retried, since they are usually caused
+# by a busy host rather than the app. Set RESUME=0 to re-test everything.
+RESUME="${RESUME:-1}"
+[ -f "$SUMMARY" ] || echo "$HEADER" > "$SUMMARY"
+
+already_done() {
+  local apk="$1"
+  [ "$RESUME" = "1" ] || return 1
+  [ -f "$SUMMARY" ] || return 1
+  # completed = has a verdict that is not a retryable failure
+  awk -F, -v want="$apk" '
+    $2==want && $11!="" && $11!="INSTALL FAILED" && $11!="NO EC FILE" && $11!="BAD APK" { found=1 }
+    END { exit(found?0:1) }
+  ' "$SUMMARY"
+}
 
 # ------------------------------------------------------------------ emulator
+# `pm install` runs dex2oat, which dominates install time under software
+# emulation (8m38s measured while the host was busy). For a smoke test we only
+# need the app to run and report coverage, not to run fast, so skip AOT
+# compilation: installs drop to ~2min. The app runs interpreted; jacoco probes
+# are unaffected.
+tune_for_speed() {
+  timeout 30 $ADB -s "$SERIAL" root >/dev/null 2>&1
+  sleep 3
+  timeout 30 $ADB -s "$SERIAL" wait-for-device >/dev/null 2>&1
+  timeout 30 $ADB -s "$SERIAL" shell setprop pm.dexopt.install verify-none >/dev/null 2>&1
+  log "dexopt filter: $(timeout 30 $ADB -s "$SERIAL" shell getprop pm.dexopt.install 2>/dev/null | tr -d '\r')"
+}
+
 boot_emulator() {
   if $ADB devices | grep -q "$SERIAL"; then
     log "emulator already running, reusing it"
+    tune_for_speed
     return 0
   fi
   log "booting emulator $AVD (software emulation, expect ~5 min) ..."
@@ -62,9 +94,7 @@ boot_emulator() {
     bc=$(timeout 25 $ADB -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
     if [ "$bc" = "1" ]; then
       log "emulator booted after $((i*10))s"
-      timeout 30 $ADB -s "$SERIAL" root >/dev/null 2>&1
-      sleep 5
-      timeout 30 $ADB -s "$SERIAL" wait-for-device
+      tune_for_speed
       return 0
     fi
   done
@@ -133,7 +163,9 @@ rows=0
 # `adb shell` reads stdin and would swallow the remaining entries, so the loop
 # would silently process only the first app.
 mapfile -t ENTRIES < <(discover)
-log "discovered ${#ENTRIES[@]} apks in the dataset"
+skipped=0
+done_count=$(( $(wc -l < "$SUMMARY") - 1 ))
+log "discovered ${#ENTRIES[@]} apks in the dataset; $done_count already recorded (RESUME=$RESUME)"
 
 for entry in "${ENTRIES[@]}"; do
   app="${entry%%|*}"
@@ -146,6 +178,13 @@ for entry in "${ENTRIES[@]}"; do
       shopt -s nocasematch; [[ "$app" == *"$want"* ]] && keep=1; shopt -u nocasematch
     done
     [ $keep -eq 1 ] || continue
+  fi
+
+  if already_done "$apk"; then
+    prev=$(awk -F, -v want="$apk" '$2==want {v=$11; p=$8} END {print v" "p}' "$SUMMARY")
+    log "SKIP (already validated): $apk  [$prev]"
+    skipped=$((skipped+1))
+    continue
   fi
 
   app_dir="$APPS_DIR/$app"
@@ -214,15 +253,43 @@ for entry in "${ENTRIES[@]}"; do
   log "  exercised with $EVENTS events"
 
   # ---- collect coverage ----------------------------------------------------
-  timeout 240 $ADB -s "$SERIAL" shell am broadcast \
-      -a edu.gatech.m3.emma.COLLECT_COVERAGE >>"$APP_LOG" 2>&1
-  timeout 60 $ADB -s "$SERIAL" shell "mv /data/data/$pkg/files/coverage.ec /sdcard/smoke.ec" >>"$APP_LOG" 2>&1
+  # `am broadcast` blocks until the receiver finishes writing coverage.ec. On a
+  # loaded host that can take many minutes; if the timeout fires first the
+  # receiver is killed mid-dump and no .ec is ever produced. Two attempts, and
+  # we confirm "Broadcast completed" rather than assuming success.
   rm -f "$dest/coverage.ec"
-  timeout 120 $ADB -s "$SERIAL" pull /sdcard/smoke.ec "$dest/coverage.ec" >>"$APP_LOG" 2>&1
-  timeout 30 $ADB -s "$SERIAL" shell rm -f /sdcard/smoke.ec >>"$APP_LOG" 2>&1
-
   ec_bytes=0
-  [ -f "$dest/coverage.ec" ] && ec_bytes=$(stat -c%s "$dest/coverage.ec")
+  for battempt in 1 2; do
+    # The Jacoco receiver can only dump from a LIVE process: once monkey exits
+    # the app is often gone, the broadcast then returns "completed" without any
+    # receiver running, and no .ec is written. Relaunch and confirm the process
+    # exists before each broadcast.
+    timeout 180 $ADB -s "$SERIAL" shell monkey -p "$pkg" 1 >>"$APP_LOG" 2>&1
+    sleep 12
+    alive=$(timeout 60 $ADB -s "$SERIAL" shell ps 2>/dev/null | grep -c "$pkg")
+    alog "process alive before broadcast: $alive"
+    if [ "${alive:-0}" -eq 0 ]; then
+      log "  app not running, relaunching once more"
+      timeout 180 $ADB -s "$SERIAL" shell monkey -p "$pkg" 1 >>"$APP_LOG" 2>&1
+      sleep 15
+    fi
+    alog "broadcast attempt $battempt (timeout ${BROADCAST_TIMEOUT}s)"
+    bout=$(timeout "$BROADCAST_TIMEOUT" $ADB -s "$SERIAL" shell am broadcast \
+             -a edu.gatech.m3.emma.COLLECT_COVERAGE 2>&1 | tr -d '\r')
+    alog "broadcast said: $bout"
+    if ! echo "$bout" | grep -q 'Broadcast completed'; then
+      log "  broadcast attempt $battempt did not complete (receiver killed by timeout?)"
+      sleep 15
+      continue
+    fi
+    timeout 90 $ADB -s "$SERIAL" shell "mv /data/data/$pkg/files/coverage.ec /sdcard/smoke.ec" >>"$APP_LOG" 2>&1
+    timeout 180 $ADB -s "$SERIAL" pull /sdcard/smoke.ec "$dest/coverage.ec" >>"$APP_LOG" 2>&1
+    timeout 30 $ADB -s "$SERIAL" shell rm -f /sdcard/smoke.ec >>"$APP_LOG" 2>&1
+    [ -f "$dest/coverage.ec" ] && ec_bytes=$(stat -c%s "$dest/coverage.ec")
+    [ "$ec_bytes" -gt 0 ] && break
+    log "  no .ec yet after attempt $battempt, retrying broadcast"
+    sleep 15
+  done
   log "  coverage.ec: $ec_bytes bytes"
 
   # ---- report -------------------------------------------------------------
@@ -281,11 +348,15 @@ python3 "$PROJECT/probe_report.py" "$OUT" 2>&1 | sed 's/^/  /'
 
 echo
 echo "================================================================"
-echo " SMOKE TEST SUMMARY   ($rows apps)"
+echo " SMOKE TEST SUMMARY   ($rows tested this pass, $skipped skipped as already done)"
 echo "================================================================"
 python3 - "$SUMMARY" <<'PY'
-import csv, sys
-rows = list(csv.DictReader(open(sys.argv[1])))
+import collections, csv, sys
+# Retried apks append a second row; keep only the most recent per apk.
+uniq = collections.OrderedDict()
+for r in csv.DictReader(open(sys.argv[1])):
+    uniq[r['apk']] = r
+rows = list(uniq.values())
 w = '%-26s %-34s %-9s %-8s %-6s %s'
 print(w % ('APP', 'APK', 'EC BYTES', 'COVER%', 'MISM', 'VERDICT'))
 print('-'*112)

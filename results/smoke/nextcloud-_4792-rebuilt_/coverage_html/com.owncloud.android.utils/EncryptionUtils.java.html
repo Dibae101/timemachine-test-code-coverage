@@ -1,0 +1,708 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EncryptionUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.utils</a> &gt; <span class="el_source">EncryptionUtils.java</span></div><h1>EncryptionUtils.java</h1><pre class="source lang-java linenums">/*
+ * Nextcloud Android client application
+ *
+ * @author Tobias Kaminsky
+ * Copyright (C) 2017 Tobias Kaminsky
+ * Copyright (C) 2017 Nextcloud GmbH.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.utils;
+
+import android.accounts.Account;
+import android.content.Context;
+import android.os.Build;
+import android.util.Base64;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import com.owncloud.android.datamodel.ArbitraryDataProvider;
+import com.owncloud.android.datamodel.DecryptedFolderMetadata;
+import com.owncloud.android.datamodel.EncryptedFolderMetadata;
+import com.owncloud.android.datamodel.OCFile;
+import com.owncloud.android.lib.common.OwnCloudClient;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.lib.resources.e2ee.GetMetadataRemoteOperation;
+
+import org.apache.commons.codec.binary.Hex;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.Key;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.KeySpec;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.KeyGenerator;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
+
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+
+/**
+ * Utils for encryption
+ */
+public final class EncryptionUtils {
+<span class="nc" id="L93">    private static String TAG = EncryptionUtils.class.getSimpleName();</span>
+
+    public static final String PUBLIC_KEY = &quot;PUBLIC_KEY&quot;;
+    public static final String PRIVATE_KEY = &quot;PRIVATE_KEY&quot;;
+    public static final String MNEMONIC = &quot;MNEMONIC&quot;;
+    public static final int ivLength = 16;
+    public static final int saltLength = 40;
+
+    private static final String HASH_DELIMITER = &quot;$&quot;;
+    private static final String ivDelimiter = &quot;fA==&quot;; // &quot;|&quot; base64 encoded
+    private static final int iterationCount = 1024;
+    private static final int keyStrength = 256;
+    private static final String AES_CIPHER = &quot;AES/GCM/NoPadding&quot;;
+    private static final String AES = &quot;AES&quot;;
+    private static final String RSA_CIPHER = &quot;RSA/ECB/OAEPWithSHA-256AndMGF1Padding&quot;;
+    private static final String RSA = &quot;RSA&quot;;
+
+    private EncryptionUtils() {
+        // utility class -&gt; private constructor
+    }
+
+    /*
+    JSON
+     */
+
+    public static &lt;T&gt; T deserializeJSON(String json, TypeToken&lt;T&gt; type) {
+<span class="nc" id="L119">        return new Gson().fromJson(json, type.getType());</span>
+    }
+
+    public static String serializeJSON(Object data) {
+<span class="nc" id="L123">        return new Gson().toJson(data);</span>
+    }
+
+    /*
+    METADATA
+     */
+
+    /**
+     * Encrypt folder metaData
+     *
+     * @param decryptedFolderMetadata folder metaData to encrypt
+     * @return EncryptedFolderMetadata encrypted folder metadata
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static EncryptedFolderMetadata encryptFolderMetadata(DecryptedFolderMetadata decryptedFolderMetadata,
+                                                                String privateKey)
+            throws NoSuchAlgorithmException, InvalidKeyException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, BadPaddingException,
+            IllegalBlockSizeException, InvalidKeySpecException {
+
+<span class="nc" id="L143">        HashMap&lt;String, EncryptedFolderMetadata.EncryptedFile&gt; files = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L144">        EncryptedFolderMetadata encryptedFolderMetadata = new EncryptedFolderMetadata(decryptedFolderMetadata</span>
+<span class="nc" id="L145">                .getMetadata(), files);</span>
+
+        // Encrypt each file in &quot;files&quot;
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        for (Map.Entry&lt;String, DecryptedFolderMetadata.DecryptedFile&gt; entry : decryptedFolderMetadata</span>
+<span class="nc" id="L149">                .getFiles().entrySet()) {</span>
+<span class="nc" id="L150">            String key = entry.getKey();</span>
+<span class="nc" id="L151">            DecryptedFolderMetadata.DecryptedFile decryptedFile = entry.getValue();</span>
+
+<span class="nc" id="L153">            EncryptedFolderMetadata.EncryptedFile encryptedFile = new EncryptedFolderMetadata.EncryptedFile();</span>
+<span class="nc" id="L154">            encryptedFile.setInitializationVector(decryptedFile.getInitializationVector());</span>
+<span class="nc" id="L155">            encryptedFile.setMetadataKey(decryptedFile.getMetadataKey());</span>
+<span class="nc" id="L156">            encryptedFile.setAuthenticationTag(decryptedFile.getAuthenticationTag());</span>
+
+<span class="nc" id="L158">            byte[] decryptedMetadataKey = EncryptionUtils.decodeStringToBase64Bytes(EncryptionUtils.decryptStringAsymmetric(</span>
+<span class="nc" id="L159">                    decryptedFolderMetadata.getMetadata().getMetadataKeys().get(encryptedFile.getMetadataKey()),</span>
+                    privateKey));
+
+            // encrypt
+<span class="nc" id="L163">            String dataJson = EncryptionUtils.serializeJSON(decryptedFile.getEncrypted());</span>
+<span class="nc" id="L164">            encryptedFile.setEncrypted(EncryptionUtils.encryptStringSymmetric(dataJson, decryptedMetadataKey));</span>
+
+<span class="nc" id="L166">            files.put(key, encryptedFile);</span>
+<span class="nc" id="L167">        }</span>
+
+<span class="nc" id="L169">        return encryptedFolderMetadata;</span>
+    }
+
+    /*
+     * decrypt folder metaData with private key
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static DecryptedFolderMetadata decryptFolderMetaData(EncryptedFolderMetadata encryptedFolderMetadata,
+                                                                String privateKey)
+            throws NoSuchAlgorithmException, InvalidKeyException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, BadPaddingException,
+            IllegalBlockSizeException, InvalidKeySpecException {
+
+<span class="nc" id="L182">        HashMap&lt;String, DecryptedFolderMetadata.DecryptedFile&gt; files = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L183">        DecryptedFolderMetadata decryptedFolderMetadata = new DecryptedFolderMetadata(</span>
+<span class="nc" id="L184">                encryptedFolderMetadata.getMetadata(), files);</span>
+
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        for (Map.Entry&lt;String, EncryptedFolderMetadata.EncryptedFile&gt; entry : encryptedFolderMetadata</span>
+<span class="nc" id="L187">                .getFiles().entrySet()) {</span>
+<span class="nc" id="L188">            String key = entry.getKey();</span>
+<span class="nc" id="L189">            EncryptedFolderMetadata.EncryptedFile encryptedFile = entry.getValue();</span>
+
+<span class="nc" id="L191">            DecryptedFolderMetadata.DecryptedFile decryptedFile = new DecryptedFolderMetadata.DecryptedFile();</span>
+<span class="nc" id="L192">            decryptedFile.setInitializationVector(encryptedFile.getInitializationVector());</span>
+<span class="nc" id="L193">            decryptedFile.setMetadataKey(encryptedFile.getMetadataKey());</span>
+<span class="nc" id="L194">            decryptedFile.setAuthenticationTag(encryptedFile.getAuthenticationTag());</span>
+
+<span class="nc" id="L196">            byte[] decryptedMetadataKey = EncryptionUtils.decodeStringToBase64Bytes(</span>
+<span class="nc" id="L197">                    EncryptionUtils.decryptStringAsymmetric(decryptedFolderMetadata.getMetadata()</span>
+<span class="nc" id="L198">                            .getMetadataKeys().get(encryptedFile.getMetadataKey()), privateKey));</span>
+
+            // decrypt
+<span class="nc" id="L201">            String dataJson = EncryptionUtils.decryptStringSymmetric(encryptedFile.getEncrypted(), decryptedMetadataKey);</span>
+<span class="nc" id="L202">            decryptedFile.setEncrypted(EncryptionUtils.deserializeJSON(dataJson,</span>
+<span class="nc" id="L203">                    new TypeToken&lt;DecryptedFolderMetadata.Data&gt;() {</span>
+                    }));
+
+<span class="nc" id="L206">            files.put(key, decryptedFile);</span>
+<span class="nc" id="L207">        }</span>
+
+<span class="nc" id="L209">        return decryptedFolderMetadata;</span>
+    }
+
+    /**
+     * Download metadata for folder and decrypt it
+     *
+     * @return decrypted metadata or null
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static @Nullable
+    DecryptedFolderMetadata downloadFolderMetadata(OCFile folder, OwnCloudClient client,
+                                                   Context context, Account account) {
+<span class="nc" id="L221">        RemoteOperationResult getMetadataOperationResult = new GetMetadataRemoteOperation(folder.getLocalId())</span>
+<span class="nc" id="L222">            .execute(client);</span>
+
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (!getMetadataOperationResult.isSuccess()) {</span>
+<span class="nc" id="L225">            return null;</span>
+        }
+
+        // decrypt metadata
+<span class="nc" id="L229">        ArbitraryDataProvider arbitraryDataProvider = new ArbitraryDataProvider(context.getContentResolver());</span>
+<span class="nc" id="L230">        String serializedEncryptedMetadata = (String) getMetadataOperationResult.getData().get(0);</span>
+<span class="nc" id="L231">        String privateKey = arbitraryDataProvider.getValue(account.name, EncryptionUtils.PRIVATE_KEY);</span>
+
+<span class="nc" id="L233">        EncryptedFolderMetadata encryptedFolderMetadata = EncryptionUtils.deserializeJSON(</span>
+<span class="nc" id="L234">                serializedEncryptedMetadata, new TypeToken&lt;EncryptedFolderMetadata&gt;() {</span>
+                });
+
+        try {
+<span class="nc" id="L238">            return EncryptionUtils.decryptFolderMetaData(encryptedFolderMetadata, privateKey);</span>
+<span class="nc" id="L239">        } catch (Exception e) {</span>
+<span class="nc" id="L240">            Log_OC.e(TAG, e.getMessage());</span>
+<span class="nc" id="L241">            return null;</span>
+        }
+    }
+
+    /*
+    BASE 64
+     */
+
+    public static byte[] encodeStringToBase64Bytes(String string) {
+        try {
+<span class="nc" id="L251">            return Base64.encode(string.getBytes(), Base64.NO_WRAP);</span>
+<span class="nc" id="L252">        } catch (Exception e) {</span>
+<span class="nc" id="L253">            return new byte[0];</span>
+        }
+    }
+
+    public static String decodeBase64BytesToString(byte[] bytes) {
+        try {
+<span class="nc" id="L259">            return new String(Base64.decode(bytes, Base64.NO_WRAP));</span>
+<span class="nc" id="L260">        } catch (Exception e) {</span>
+<span class="nc" id="L261">            return &quot;&quot;;</span>
+        }
+    }
+
+    public static String encodeBytesToBase64String(byte[] bytes) {
+<span class="nc" id="L266">        return Base64.encodeToString(bytes, Base64.NO_WRAP);</span>
+    }
+
+    public static byte[] decodeStringToBase64Bytes(String string) {
+<span class="nc" id="L270">        return Base64.decode(string, Base64.NO_WRAP);</span>
+    }
+
+    /*
+    ENCRYPTION
+     */
+
+    /**
+     * @param ocFile             file do crypt
+     * @param encryptionKeyBytes key, either from metadata or {@link EncryptionUtils#generateKey()}
+     * @param iv                 initialization vector, either from metadata or {@link EncryptionUtils#randomBytes(int)}
+     * @return encryptedFile with encryptedBytes and authenticationTag
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static EncryptedFile encryptFile(OCFile ocFile, byte[] encryptionKeyBytes, byte[] iv)
+            throws NoSuchAlgorithmException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, InvalidKeyException,
+            BadPaddingException, IllegalBlockSizeException, IOException {
+<span class="nc" id="L288">        File file = new File(ocFile.getStoragePath());</span>
+
+<span class="nc" id="L290">        return encryptFile(file, encryptionKeyBytes, iv);</span>
+    }
+
+    /**
+     * @param file               file do crypt
+     * @param encryptionKeyBytes key, either from metadata or {@link EncryptionUtils#generateKey()}
+     * @param iv                 initialization vector, either from metadata or {@link EncryptionUtils#randomBytes(int)}
+     * @return encryptedFile with encryptedBytes and authenticationTag
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static EncryptedFile encryptFile(File file, byte[] encryptionKeyBytes, byte[] iv)
+            throws NoSuchAlgorithmException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, InvalidKeyException,
+            BadPaddingException, IllegalBlockSizeException, IOException {
+
+<span class="nc" id="L305">        Cipher cipher = Cipher.getInstance(AES_CIPHER);</span>
+
+<span class="nc" id="L307">        Key key = new SecretKeySpec(encryptionKeyBytes, AES);</span>
+
+<span class="nc" id="L309">        GCMParameterSpec spec = new GCMParameterSpec(128, iv);</span>
+<span class="nc" id="L310">        cipher.init(Cipher.ENCRYPT_MODE, key, spec);</span>
+
+<span class="nc" id="L312">        RandomAccessFile randomAccessFile = new RandomAccessFile(file, &quot;r&quot;);</span>
+<span class="nc" id="L313">        byte[] fileBytes = new byte[(int) randomAccessFile.length()];</span>
+<span class="nc" id="L314">        randomAccessFile.readFully(fileBytes);</span>
+
+<span class="nc" id="L316">        byte[] cryptedBytes = cipher.doFinal(fileBytes);</span>
+<span class="nc" id="L317">        String authenticationTag = encodeBytesToBase64String(Arrays.copyOfRange(cryptedBytes,</span>
+                cryptedBytes.length - (128 / 8), cryptedBytes.length));
+
+<span class="nc" id="L320">        return new EncryptedFile(cryptedBytes, authenticationTag);</span>
+    }
+
+    /**
+     * @param file               encrypted file
+     * @param encryptionKeyBytes key from metadata
+     * @param iv                 initialization vector from metadata
+     * @param authenticationTag  authenticationTag from metadata
+     * @return decrypted byte[]
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static byte[] decryptFile(File file, byte[] encryptionKeyBytes, byte[] iv, byte[] authenticationTag)
+            throws NoSuchAlgorithmException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, InvalidKeyException,
+            BadPaddingException, IllegalBlockSizeException, IOException {
+
+
+<span class="nc" id="L337">        Cipher cipher = Cipher.getInstance(AES_CIPHER);</span>
+<span class="nc" id="L338">        Key key = new SecretKeySpec(encryptionKeyBytes, AES);</span>
+<span class="nc" id="L339">        GCMParameterSpec spec = new GCMParameterSpec(128, iv);</span>
+<span class="nc" id="L340">        cipher.init(Cipher.DECRYPT_MODE, key, spec);</span>
+
+<span class="nc" id="L342">        RandomAccessFile randomAccessFile = new RandomAccessFile(file, &quot;r&quot;);</span>
+<span class="nc" id="L343">        byte[] fileBytes = new byte[(int) randomAccessFile.length()];</span>
+<span class="nc" id="L344">        randomAccessFile.readFully(fileBytes);</span>
+
+        // check authentication tag
+<span class="nc" id="L347">        byte[] extractedAuthenticationTag = Arrays.copyOfRange(fileBytes,</span>
+                fileBytes.length - (128 / 8), fileBytes.length);
+
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        if (!Arrays.equals(extractedAuthenticationTag, authenticationTag)) {</span>
+<span class="nc" id="L351">            throw new SecurityException(&quot;Tag not correct&quot;);</span>
+        }
+
+<span class="nc" id="L354">        return cipher.doFinal(fileBytes);</span>
+    }
+
+    public static class EncryptedFile {
+        public byte[] encryptedBytes;
+        public String authenticationTag;
+
+<span class="nc" id="L361">        public EncryptedFile(byte[] encryptedBytes, String authenticationTag) {</span>
+<span class="nc" id="L362">            this.encryptedBytes = encryptedBytes;</span>
+<span class="nc" id="L363">            this.authenticationTag = authenticationTag;</span>
+<span class="nc" id="L364">        }</span>
+    }
+
+    /**
+     * Encrypt string with RSA algorithm, ECB mode, OAEPWithSHA-256AndMGF1 padding
+     * Asymmetric encryption, with private and public key
+     *
+     * @param string String to encrypt
+     * @param cert   contains public key in it
+     * @return encrypted string
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static String encryptStringAsymmetric(String string, String cert)
+            throws NoSuchAlgorithmException,
+            NoSuchPaddingException, InvalidKeyException,
+        BadPaddingException, IllegalBlockSizeException,
+        CertificateException {
+
+<span class="nc" id="L382">        Cipher cipher = Cipher.getInstance(RSA_CIPHER);</span>
+
+<span class="nc" id="L384">        String trimmedCert = cert.replace(&quot;-----BEGIN CERTIFICATE-----\n&quot;, &quot;&quot;)</span>
+<span class="nc" id="L385">                .replace(&quot;-----END CERTIFICATE-----\n&quot;, &quot;&quot;);</span>
+<span class="nc" id="L386">        byte[] encodedCert = trimmedCert.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L387">        byte[] decodedCert = org.apache.commons.codec.binary.Base64.decodeBase64(encodedCert);</span>
+
+<span class="nc" id="L389">        CertificateFactory certFactory = CertificateFactory.getInstance(&quot;X.509&quot;);</span>
+<span class="nc" id="L390">        InputStream in = new ByteArrayInputStream(decodedCert);</span>
+<span class="nc" id="L391">        X509Certificate certificate = (X509Certificate) certFactory.generateCertificate(in);</span>
+<span class="nc" id="L392">        PublicKey realPublicKey = certificate.getPublicKey();</span>
+
+<span class="nc" id="L394">        cipher.init(Cipher.ENCRYPT_MODE, realPublicKey);</span>
+
+<span class="nc" id="L396">        byte[] bytes = encodeStringToBase64Bytes(string);</span>
+<span class="nc" id="L397">        byte[] cryptedBytes = cipher.doFinal(bytes);</span>
+
+<span class="nc" id="L399">        return encodeBytesToBase64String(cryptedBytes);</span>
+    }
+
+
+    /**
+     * Decrypt string with RSA algorithm, ECB mode, OAEPWithSHA-256AndMGF1 padding
+     * Asymmetric encryption, with private and public key
+     *
+     * @param string           string to decrypt
+     * @param privateKeyString private key
+     * @return decrypted string
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static String decryptStringAsymmetric(String string, String privateKeyString)
+            throws NoSuchAlgorithmException,
+            NoSuchPaddingException, InvalidKeyException,
+            BadPaddingException, IllegalBlockSizeException,
+            InvalidKeySpecException {
+
+<span class="nc" id="L418">        Cipher cipher = Cipher.getInstance(RSA_CIPHER);</span>
+
+<span class="nc" id="L420">        byte[] privateKeyBytes = decodeStringToBase64Bytes(privateKeyString);</span>
+<span class="nc" id="L421">        PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(privateKeyBytes);</span>
+<span class="nc" id="L422">        KeyFactory kf = KeyFactory.getInstance(RSA);</span>
+<span class="nc" id="L423">        PrivateKey privateKey = kf.generatePrivate(keySpec);</span>
+
+<span class="nc" id="L425">        cipher.init(Cipher.DECRYPT_MODE, privateKey);</span>
+
+<span class="nc" id="L427">        byte[] bytes = decodeStringToBase64Bytes(string);</span>
+<span class="nc" id="L428">        byte[] encodedBytes = cipher.doFinal(bytes);</span>
+
+<span class="nc" id="L430">        return decodeBase64BytesToString(encodedBytes);</span>
+    }
+
+
+    /**
+     * Encrypt string with RSA algorithm, ECB mode, OAEPWithSHA-256AndMGF1 padding
+     * Asymmetric encryption, with private and public key
+     *
+     * @param string             String to encrypt
+     * @param encryptionKeyBytes key, either from metadata or {@link EncryptionUtils#generateKey()}
+     * @return encrypted string
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static String encryptStringSymmetric(String string, byte[] encryptionKeyBytes)
+            throws NoSuchAlgorithmException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, InvalidKeyException,
+            BadPaddingException, IllegalBlockSizeException {
+
+<span class="nc" id="L448">        Cipher cipher = Cipher.getInstance(AES_CIPHER);</span>
+<span class="nc" id="L449">        byte[] iv = randomBytes(ivLength);</span>
+
+<span class="nc" id="L451">        Key key = new SecretKeySpec(encryptionKeyBytes, AES);</span>
+<span class="nc" id="L452">        GCMParameterSpec spec = new GCMParameterSpec(128, iv);</span>
+<span class="nc" id="L453">        cipher.init(Cipher.ENCRYPT_MODE, key, spec);</span>
+
+<span class="nc" id="L455">        byte[] bytes = encodeStringToBase64Bytes(string);</span>
+<span class="nc" id="L456">        byte[] cryptedBytes = cipher.doFinal(bytes);</span>
+
+<span class="nc" id="L458">        String encodedCryptedBytes = encodeBytesToBase64String(cryptedBytes);</span>
+<span class="nc" id="L459">        String encodedIV = encodeBytesToBase64String(iv);</span>
+
+<span class="nc" id="L461">        return encodedCryptedBytes + ivDelimiter + encodedIV;</span>
+    }
+
+
+    /**
+     * Decrypt string with RSA algorithm, ECB mode, OAEPWithSHA-256AndMGF1 padding
+     * Asymmetric encryption, with private and public key
+     *
+     * @param string             string to decrypt
+     * @param encryptionKeyBytes key from metadata
+     * @return decrypted string
+     */
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    public static String decryptStringSymmetric(String string, byte[] encryptionKeyBytes)
+            throws NoSuchAlgorithmException,
+            InvalidAlgorithmParameterException, NoSuchPaddingException, InvalidKeyException,
+            BadPaddingException, IllegalBlockSizeException {
+
+<span class="nc" id="L479">        Cipher cipher = Cipher.getInstance(AES_CIPHER);</span>
+
+<span class="nc" id="L481">        int delimiterPosition = string.lastIndexOf(ivDelimiter);</span>
+<span class="nc" id="L482">        String cipherString = string.substring(0, delimiterPosition);</span>
+<span class="nc" id="L483">        String ivString = string.substring(delimiterPosition + ivDelimiter.length());</span>
+
+<span class="nc" id="L485">        byte[] iv = new IvParameterSpec(decodeStringToBase64Bytes(ivString)).getIV();</span>
+
+<span class="nc" id="L487">        Key key = new SecretKeySpec(encryptionKeyBytes, AES);</span>
+
+<span class="nc" id="L489">        GCMParameterSpec spec = new GCMParameterSpec(128, iv);</span>
+<span class="nc" id="L490">        cipher.init(Cipher.DECRYPT_MODE, key, spec);</span>
+
+<span class="nc" id="L492">        byte[] bytes = decodeStringToBase64Bytes(cipherString);</span>
+<span class="nc" id="L493">        byte[] encodedBytes = cipher.doFinal(bytes);</span>
+
+<span class="nc" id="L495">        return decodeBase64BytesToString(encodedBytes);</span>
+    }
+
+    /**
+     * Encrypt private key with symmetric AES encryption, GCM mode mode and no padding
+     *
+     * @param privateKey byte64 encoded string representation of private key
+     * @param keyPhrase  key used for encryption, e.g. 12 random words
+     *                   {@link EncryptionUtils#getRandomWords(int, Context)}
+     * @return encrypted string, bytes first encoded base64, IV separated with &quot;|&quot;, then to string
+     */
+    public static String encryptPrivateKey(String privateKey, String keyPhrase) throws NoSuchPaddingException,
+            NoSuchAlgorithmException, InvalidKeyException, BadPaddingException,
+            IllegalBlockSizeException, InvalidKeySpecException {
+<span class="nc" id="L509">        Cipher cipher = Cipher.getInstance(AES_CIPHER);</span>
+
+<span class="nc" id="L511">        SecretKeyFactory factory = SecretKeyFactory.getInstance(&quot;PBKDF2WithHmacSHA1&quot;);</span>
+<span class="nc" id="L512">        byte[] salt = randomBytes(saltLength);</span>
+<span class="nc" id="L513">        KeySpec spec = new PBEKeySpec(keyPhrase.toCharArray(), salt, iterationCount, keyStrength);</span>
+<span class="nc" id="L514">        SecretKey tmp = factory.generateSecret(spec);</span>
+<span class="nc" id="L515">        SecretKeySpec key = new SecretKeySpec(tmp.getEncoded(), AES);</span>
+
+<span class="nc" id="L517">        cipher.init(Cipher.ENCRYPT_MODE, key);</span>
+<span class="nc" id="L518">        byte[] bytes = encodeStringToBase64Bytes(privateKey);</span>
+<span class="nc" id="L519">        byte[] encrypted = cipher.doFinal(bytes);</span>
+
+<span class="nc" id="L521">        byte[] iv = cipher.getIV();</span>
+<span class="nc" id="L522">        String encodedIV = encodeBytesToBase64String(iv);</span>
+<span class="nc" id="L523">        String encodedSalt = encodeBytesToBase64String(salt);</span>
+<span class="nc" id="L524">        String encodedEncryptedBytes = encodeBytesToBase64String(encrypted);</span>
+
+<span class="nc" id="L526">        return encodedEncryptedBytes + ivDelimiter + encodedIV + ivDelimiter + encodedSalt;</span>
+    }
+
+    /**
+     * Decrypt private key with symmetric AES encryption, GCM mode mode and no padding
+     *
+     * @param privateKey byte64 encoded string representation of private key, IV separated with &quot;|&quot;
+     * @param keyPhrase  key used for encryption, e.g. 12 random words
+     *                   {@link EncryptionUtils#getRandomWords(int, Context)}
+     * @return decrypted string
+     */
+    public static String decryptPrivateKey(String privateKey, String keyPhrase) throws NoSuchPaddingException,
+            NoSuchAlgorithmException, InvalidKeyException, BadPaddingException,
+            IllegalBlockSizeException, InvalidKeySpecException, InvalidAlgorithmParameterException {
+
+        // split up iv, salt
+<span class="nc" id="L542">        String[] strings = privateKey.split(ivDelimiter);</span>
+<span class="nc" id="L543">        String realPrivateKey = strings[0];</span>
+<span class="nc" id="L544">        byte[] iv = decodeStringToBase64Bytes(strings[1]);</span>
+<span class="nc" id="L545">        byte[] salt = decodeStringToBase64Bytes(strings[2]);</span>
+
+<span class="nc" id="L547">        Cipher cipher = Cipher.getInstance(AES_CIPHER);</span>
+<span class="nc" id="L548">        SecretKeyFactory factory = SecretKeyFactory.getInstance(&quot;PBKDF2WithHmacSHA1&quot;);</span>
+<span class="nc" id="L549">        KeySpec spec = new PBEKeySpec(keyPhrase.toCharArray(), salt, iterationCount, keyStrength);</span>
+<span class="nc" id="L550">        SecretKey tmp = factory.generateSecret(spec);</span>
+<span class="nc" id="L551">        SecretKeySpec key = new SecretKeySpec(tmp.getEncoded(), AES);</span>
+
+<span class="nc" id="L553">        cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(iv));</span>
+
+<span class="nc" id="L555">        byte[] bytes = decodeStringToBase64Bytes(realPrivateKey);</span>
+<span class="nc" id="L556">        byte[] decrypted = cipher.doFinal(bytes);</span>
+
+<span class="nc" id="L558">        String pemKey = decodeBase64BytesToString(decrypted);</span>
+
+<span class="nc" id="L560">        return pemKey.replaceAll(&quot;\n&quot;, &quot;&quot;).replace(&quot;-----BEGIN PRIVATE KEY-----&quot;, &quot;&quot;)</span>
+<span class="nc" id="L561">                .replace(&quot;-----END PRIVATE KEY-----&quot;, &quot;&quot;);</span>
+    }
+
+    public static String privateKeyToPEM(PrivateKey privateKey) {
+<span class="nc" id="L565">        String privateKeyString = encodeBytesToBase64String(privateKey.getEncoded());</span>
+
+<span class="nc" id="L567">        return &quot;-----BEGIN PRIVATE KEY-----\n&quot; + privateKeyString.replaceAll(&quot;(.{65})&quot;, &quot;$1\n&quot;)</span>
+                + &quot;\n-----END PRIVATE KEY-----&quot;;
+    }
+
+    /*
+    Helper
+     */
+
+    public static String getMD5Sum(File file) {
+<span class="nc" id="L576">        FileInputStream fileInputStream = null;</span>
+        try {
+<span class="nc" id="L578">            fileInputStream = new FileInputStream(file);</span>
+<span class="nc" id="L579">            MessageDigest md5 = MessageDigest.getInstance(&quot;MD5&quot;);</span>
+<span class="nc" id="L580">            byte[] bytes = new byte[2048];</span>
+            int readBytes;
+
+<span class="nc bnc" id="L583" title="All 2 branches missed.">            while ((readBytes = fileInputStream.read(bytes)) != -1) {</span>
+<span class="nc" id="L584">                md5.update(bytes, 0, readBytes);</span>
+            }
+
+<span class="nc" id="L587">            return new String(Hex.encodeHex(md5.digest()));</span>
+
+<span class="nc" id="L589">        } catch (Exception e) {</span>
+<span class="nc" id="L590">            Log_OC.e(TAG, e.getMessage());</span>
+        } finally {
+<span class="nc bnc" id="L592" title="All 2 branches missed.">            if (fileInputStream != null) {</span>
+                try {
+<span class="nc" id="L594">                    fileInputStream.close();</span>
+<span class="nc" id="L595">                } catch (IOException e) {</span>
+<span class="nc" id="L596">                    Log_OC.e(TAG, &quot;Error getting MD5 checksum for file&quot;, e);</span>
+<span class="nc" id="L597">                }</span>
+            }
+        }
+
+<span class="nc" id="L601">        return &quot;&quot;;</span>
+    }
+
+    public static List&lt;String&gt; getRandomWords(int count, Context context) throws IOException {
+<span class="nc" id="L605">        InputStream ins = context.getResources().openRawResource(context.getResources()</span>
+<span class="nc" id="L606">                .getIdentifier(&quot;encryption_key_words&quot;, &quot;raw&quot;, context.getPackageName()));</span>
+
+<span class="nc" id="L608">        InputStreamReader inputStreamReader = new InputStreamReader(ins);</span>
+
+<span class="nc" id="L610">        BufferedReader bufferedReader = new BufferedReader(inputStreamReader);</span>
+
+<span class="nc" id="L612">        List&lt;String&gt; lines = new ArrayList&lt;&gt;();</span>
+        String line;
+<span class="nc bnc" id="L614" title="All 2 branches missed.">        while ((line = bufferedReader.readLine()) != null) {</span>
+<span class="nc" id="L615">            lines.add(line);</span>
+        }
+
+<span class="nc" id="L618">        SecureRandom random = new SecureRandom();</span>
+
+<span class="nc" id="L620">        List&lt;String&gt; outputLines = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">        for (int i = 0; i &lt; count; i++) {</span>
+<span class="nc" id="L622">            int randomLine = random.nextInt(lines.size());</span>
+<span class="nc" id="L623">            outputLines.add(lines.get(randomLine));</span>
+        }
+
+<span class="nc" id="L626">        return outputLines;</span>
+    }
+
+    public static KeyPair generateKeyPair() throws NoSuchAlgorithmException {
+<span class="nc" id="L630">        KeyPairGenerator keyGen = KeyPairGenerator.getInstance(RSA);</span>
+<span class="nc" id="L631">        keyGen.initialize(2048, new SecureRandom());</span>
+<span class="nc" id="L632">        return keyGen.generateKeyPair();</span>
+    }
+
+    public static byte[] generateKey() {
+        KeyGenerator keyGenerator;
+        try {
+<span class="nc" id="L638">            keyGenerator = KeyGenerator.getInstance(AES);</span>
+<span class="nc" id="L639">            keyGenerator.init(128);</span>
+
+<span class="nc" id="L641">            return keyGenerator.generateKey().getEncoded();</span>
+<span class="nc" id="L642">        } catch (NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L643">            Log_OC.e(TAG, e.getMessage());</span>
+        }
+
+<span class="nc" id="L646">        return null;</span>
+    }
+
+    public static byte[] randomBytes(int size) {
+<span class="nc" id="L650">        SecureRandom random = new SecureRandom();</span>
+<span class="nc" id="L651">        final byte[] iv = new byte[size];</span>
+<span class="nc" id="L652">        random.nextBytes(iv);</span>
+
+<span class="nc" id="L654">        return iv;</span>
+    }
+
+    /**
+     * Generate a SHA512 with appended salt
+     *
+     * @param token token to be hashed
+     * @return SHA512 with appended salt, delimiter HASH_DELIMITER
+     */
+    public static String generateSHA512(String token) {
+<span class="nc" id="L664">        String salt = EncryptionUtils.encodeBytesToBase64String(EncryptionUtils.randomBytes(EncryptionUtils.saltLength));</span>
+
+<span class="nc" id="L666">        return generateSHA512(token, salt);</span>
+    }
+
+    /**
+     * Generate a SHA512 with appended salt
+     *
+     * @param token token to be hashed
+     * @return SHA512 with appended salt, delimiter HASH_DELIMITER
+     */
+    public static String generateSHA512(String token, String salt) {
+        MessageDigest digest;
+<span class="nc" id="L677">        String hashedToken = &quot;&quot;;</span>
+        byte[] hash;
+        try {
+<span class="nc" id="L680">            digest = MessageDigest.getInstance(&quot;SHA-512&quot;);</span>
+<span class="nc" id="L681">            digest.update(salt.getBytes());</span>
+<span class="nc" id="L682">            hash = digest.digest(token.getBytes());</span>
+
+<span class="nc" id="L684">            StringBuilder stringBuilder = new StringBuilder();</span>
+<span class="nc bnc" id="L685" title="All 2 branches missed.">            for (byte hashByte : hash) {</span>
+<span class="nc" id="L686">                stringBuilder.append(Integer.toString((hashByte &amp; 0xff) + 0x100, 16).substring(1));</span>
+            }
+
+<span class="nc" id="L689">            stringBuilder.append(HASH_DELIMITER).append(salt);</span>
+
+<span class="nc" id="L691">            hashedToken = stringBuilder.toString();</span>
+
+<span class="nc" id="L693">        } catch (NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L694">            Log_OC.e(TAG, &quot;Generating SHA512 failed&quot;, e);</span>
+<span class="nc" id="L695">        }</span>
+
+<span class="nc" id="L697">        return hashedToken;</span>
+    }
+
+    public static boolean verifySHA512(String hashWithSalt, String compareToken) {
+<span class="nc" id="L701">        String salt = hashWithSalt.split(&quot;\\&quot; + HASH_DELIMITER)[1];</span>
+
+<span class="nc" id="L703">        String newHash = generateSHA512(compareToken, salt);</span>
+
+<span class="nc" id="L705">        return hashWithSalt.equals(newHash);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.201911080117</span></div></body></html>
