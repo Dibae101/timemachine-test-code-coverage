@@ -109,6 +109,45 @@ These are the reasons a 2017-2023 Android project does not build unmodified in
   snapshot and rewrites the file per subject, so the second silently reverts the
   first. State is per subject set, and `reconcile.py` can rebuild it from disk.
 
+## Expanding the set from llm-gui-testing-research
+
+`dataset/apps.tsv` in the private `Dibae101/llm-gui-testing-research` repo lists
+50 Jacoco-friendly apps with package, min_sdk, target_sdk and, for 22 of them, the
+exact `source_repo`, `source_ref` and `source_commit` the tested APK was built
+from. Exact refs matter: guessing tags caused most of the earlier build failures.
+
+`research_subjects.json` is generated from it. Money Manager Ex is excluded
+because min_sdk 26 cannot install on the API 25 emulator this dataset targets.
+
+Faults fixed while building that set, all in the tooling rather than the apps:
+
+* **Settings-level repository locking.** Modern projects declare
+  `repositoriesMode = FAIL_ON_PROJECT_REPOS` in settings.gradle, which turns a
+  repository added by an init script into a build error. The init script now adds
+  repositories through `beforeSettings` and relaxes the mode to `PREFER_PROJECT`.
+* **Pointless JDK retries.** The fallback ladder retried Gradle 8 builds on JDK 8
+  and 11, which cannot work, wasted a build each, and pushed the real error off
+  the end of the log - GPSLogger's actual failure was masked that way. Retries are
+  gated by Gradle version now.
+* **Module detection.** Jellyfin applies `alias(libs.plugins.android.app)` and
+  Kiwix uses a bare `android` accessor from its own buildSrc convention plugin,
+  neither of which contains a greppable plugin id. There is a fallback that looks
+  for a module whose manifest declares an application with a launcher intent
+  filter. Muzei exposed a ranking bug as well: its `example-unsplash` sample
+  module was chosen over the real app, so sample and demo modules rank last.
+* **A build wrote into this repository's git hooks.** Kiwix installs a pre-commit
+  hook as part of its build. Cloned trees have their `.git` removed so they are
+  stored as files rather than gitlinks, which means such a task resolves to the
+  parent repository: the hook landed in `.git/hooks/pre-commit` and failed every
+  subsequent commit with `./gradlew: not found`. Worth knowing if commits suddenly
+  start failing after a build.
+
+Commit 197dca625 carries six of these datasets under the message "Remove temporary
+commit message file". The message is wrong, not the contents: `git commit -F` read
+an empty file and the real message was lost. The history was already published, so
+it is documented here rather than rewritten. That commit adds SkyTube,
+Orgzly-Revived, LibreTorrent, ownCloud, Infinity-For-Reddit and Kore.
+
 ## Storage
 
 Each finished subject is pruned to compiled classes, sources, and the APKs -
