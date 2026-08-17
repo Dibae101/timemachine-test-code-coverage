@@ -24,11 +24,10 @@ MIN_FREE_GB="${MIN_FREE_GB:-6}"
 
 usable() {
   python3 - <<'PY'
-import csv, os
-p = 'status.csv'
-if not os.path.isfile(p):
-    print(0); raise SystemExit
-rows = list(csv.DictReader(open(p)))
+import csv, glob
+rows = []
+for p in sorted(glob.glob('status-*.csv')):
+    rows.extend(csv.DictReader(open(p)))
 print(sum(1 for r in rows if r['state'] in ('ok', 'apk_only')))
 PY
 }
@@ -46,6 +45,7 @@ for pass in $(seq 1 "$PASSES"); do
     break
   fi
 
+  python3 reconcile.py 2>&1 | tail -5
   python3 -u build_dataset.py                                  2>&1 | tail -60
   python3 -u build_dataset.py --subjects modern_subjects.json   2>&1 | tail -80
 

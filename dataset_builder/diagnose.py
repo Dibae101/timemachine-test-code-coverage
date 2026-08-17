@@ -14,12 +14,13 @@ SDK platform), so grouping is far more useful than reading logs one by one.
 import argparse
 import collections
 import csv
+import glob
 import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOGS = os.path.join(HERE, "logs")
-STATUS = os.path.join(HERE, "status.csv")
+STATUS_GLOB = os.path.join(HERE, "status-*.csv")
 
 # ordered: first match wins, so specific patterns go above generic ones
 PATTERNS = [
@@ -61,10 +62,13 @@ def main():
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    if not os.path.isfile(STATUS):
-        print("no status.csv yet")
+    files = sorted(glob.glob(STATUS_GLOB))
+    if not files:
+        print("no status-*.csv yet")
         return
-    rows = list(csv.DictReader(open(STATUS)))
+    rows = []
+    for f in files:
+        rows.extend(csv.DictReader(open(f)))
     ok = [r for r in rows if r["state"] in ("ok", "apk_only")]
     bad = [r for r in rows if r["state"] not in ("ok", "apk_only")]
 

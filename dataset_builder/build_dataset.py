@@ -48,7 +48,17 @@ APPS_DIR = os.path.join(PROJECT, "instrumented_apps")
 INIT_SCRIPT = os.path.join(HERE, "repair-repos.init.gradle")
 WORK = os.path.join(HERE, "work")
 LOGS = os.path.join(HERE, "logs")
+# One status file per subject set. A single shared status.csv is unsafe: two
+# builders running concurrently each hold their own snapshot and rewrite the
+# whole file on every subject, so the second one silently reverts the first
+# one's results. The datasets on disk were unaffected, the bookkeeping was not.
 STATUS = os.path.join(HERE, "status.csv")
+
+
+def set_status_path(subjects_file):
+    global STATUS
+    stem = os.path.splitext(os.path.basename(subjects_file))[0]
+    STATUS = os.path.join(HERE, "status-%s.csv" % stem)
 
 SDK = os.environ.get("SDK", "/home/ubuntu/android-sdk")
 JDK8 = "/usr/lib/jvm/java-8-openjdk-amd64"
@@ -488,6 +498,15 @@ def build_subject(subject, status_rows):
         if flavours:
             rc, detail = gradle_build(tree, jdk, logfile, [[t] for t in flavours])
     if rc != 0:
+        # The era guess for the JDK is sometimes wrong in both directions: a
+        # 2023 tag can still need JDK 8 toolchains, and an older project can
+        # refuse JDK 8. Retry once with the other JDK before giving up.
+        other = "17" if str(jdk) == "8" else "8"
+        log("  %s: retrying with JDK %s" % (name, other))
+        rc, detail = gradle_build(tree, other, logfile, tasks)
+        if rc == 0:
+            detail += " (jdk%s)" % other
+    if rc != 0:
         row.update(state="build_failed", detail=detail,
                    seconds=str(int(time.time() - t0)))
         status_rows[key] = row
@@ -541,7 +560,19 @@ def build_subject(subject, status_rows):
         write_class_files_json(app_dir, os.path.basename(themis_apk),
                                class_dirs, source_dirs)
 
-    prune_tree(tree, class_dirs + source_dirs)
+    # Protect the whole class-output container, not just the leaves that were
+    # selected. commons showed why: an early pass selected only its Kotlin
+    # output, pruning deleted the javac output, and the entry could not be
+    # repaired without a full rebuild. Keeping the containers costs a little
+    # disk and makes re-deriving class_files.json possible at any time.
+    containers = []
+    for d in class_dirs:
+        for marker in ("intermediates/javac", "intermediates/classes",
+                       "tmp/kotlin-classes"):
+            idx = d.replace(os.sep, "/").find(marker)
+            if idx >= 0:
+                containers.append(d[:idx + len(marker)])
+    prune_tree(tree, class_dirs + source_dirs + containers)
     size = dir_size_mb(app_dir)
 
     row.update(state="ok", apk=built_name, class_dirs=str(len(class_dirs)),
@@ -563,6 +594,7 @@ def main():
     ap.add_argument("--force", action="store_true", help="rebuild subjects marked ok")
     args = ap.parse_args()
 
+    set_status_path(args.subjects)
     with open(args.subjects) as fh:
         subjects = json.load(fh)
     if args.only:
