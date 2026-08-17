@@ -1,1 +1,0 @@
-Corrección de errores

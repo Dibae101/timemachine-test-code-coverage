@@ -1,2 +1,0 @@
--keep class org.totschnig.myexpenses.test.** { *; }
--keep class org.totschnig.myexpenses.testutils.** { *; }
