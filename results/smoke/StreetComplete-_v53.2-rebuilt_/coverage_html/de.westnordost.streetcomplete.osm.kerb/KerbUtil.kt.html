@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>KerbUtil.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.osm.kerb</a> &gt; <span class="el_source">KerbUtil.kt</span></div><h1>KerbUtil.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.osm.kerb
+
+import de.westnordost.streetcomplete.data.elementfilter.toElementFilterExpression
+import de.westnordost.streetcomplete.data.osm.mapdata.MapData
+import de.westnordost.streetcomplete.data.osm.mapdata.Node
+import de.westnordost.streetcomplete.data.osm.mapdata.Way
+import de.westnordost.streetcomplete.osm.ALL_PATHS
+import de.westnordost.streetcomplete.osm.ALL_ROADS
+import de.westnordost.streetcomplete.osm.LAST_CHECK_DATE_KEYS
+import de.westnordost.streetcomplete.osm.getLastCheckDateKeys
+import de.westnordost.streetcomplete.util.ktx.allExceptFirstAndLast
+import de.westnordost.streetcomplete.util.ktx.firstAndLast
+
+<span class="nc" id="L14">private val footwaysFilter by lazy { &quot;&quot;&quot;</span>
+    ways with (
+        highway ~ footway|path
+        or highway = cycleway and foot ~ yes|designated
+      )
+      and area != yes
+      and access !~ private|no and foot !~ no
+<span class="nc" id="L21">&quot;&quot;&quot;.toElementFilterExpression() }</span>
+
+<span class="nc" id="L23">private val waysFilter by lazy { &quot;&quot;&quot;</span>
+    ways with
+<span class="nc" id="L25">      highway ~ ${(ALL_ROADS + ALL_PATHS).joinToString(&quot;|&quot;)}</span>
+<span class="nc" id="L26">      or construction ~ ${(ALL_ROADS + ALL_PATHS).joinToString(&quot;|&quot;)}</span>
+<span class="nc" id="L27">&quot;&quot;&quot;.toElementFilterExpression() }</span>
+
+/* It is documented to be legal for a barrier=kerb to be mapped on the highway=crossing. See also
+ * https://taginfo.openstreetmap.org/keys/kerb#combinations . At the time of writing, 40% of
+ * all kerbs are mapped this way.
+ *
+ * This app should however not ask for details on these because the question is then confusing: It
+ * asks for &quot;this kerb&quot; but points to the crossing, i.e. the middle of the street.
+ *
+ * So, if the candidate has any tags that are NOT one of these, the app does not recognize this
+ * node as a kerb, even if barrier=kerb is set */
+<span class="nc" id="L38">private val allowedKeysOnKerbNode = setOf(</span>
+<span class="nc" id="L39">    &quot;barrier&quot;, // = kerb</span>
+    // details on kerbs
+<span class="nc" id="L41">    &quot;sloped_curb&quot;,</span>
+<span class="nc" id="L42">    &quot;tactile_paving&quot;,</span>
+<span class="nc" id="L43">    &quot;surface&quot;, &quot;smoothness&quot;, &quot;material&quot;,</span>
+<span class="nc" id="L44">    &quot;kerb&quot;, &quot;kerb:height&quot;, &quot;height&quot;, &quot;width&quot;,</span>
+    // access/eligibility-related
+<span class="nc" id="L46">    &quot;wheelchair&quot;, &quot;bicycle&quot;, &quot;foot&quot;, &quot;stroller&quot;,</span>
+    // misc / meta info
+<span class="nc" id="L48">    &quot;source&quot;, &quot;project&quot;, &quot;note&quot;, &quot;mapillary&quot;</span>
+    // check date
+<span class="nc" id="L50">) + LAST_CHECK_DATE_KEYS</span>
+
+/* separating regex-enabled keys and normal keys for performance reasons. No need to regex on
+   strings that are not regexes ... */
+<span class="nc" id="L54">private val allowedKeysOnKerbNodeRegexes = getLastCheckDateKeys(&quot;.*&quot;).map { it.toRegex() }</span>
+
+/** Most nodes **could** be a kerb, depending on their location within a way. However, nodes that
+ *  are already something else, e.g. shop=hairdresser are definitely NOT a kerb.
+ *
+ *  If any node **could** be a kerb, this would lead to an unacceptable performance hit when any
+ *  node is updated due to an answered quest. See
+ *  https://github.com/streetcomplete/StreetComplete/pull/3104#issuecomment-889833381 for more
+ *  details on why this function exists */
+<span class="nc" id="L63">fun Node.couldBeAKerb(): Boolean = tags.keys.all { key -&gt;</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">    key in allowedKeysOnKerbNode || allowedKeysOnKerbNodeRegexes.any { regex -&gt; regex.matches(key) }</span>
+<span class="nc" id="L65">}</span>
+
+/** Find all nodes that are (very likely) kerbs in this map data:
+ *  1. nodes tagged with barrier=kerb
+ *  2. the shared nodes at intersections of barrier=kerb ways with footways
+ *  3. certain shared nodes between a footway=sidewalk and a footway=crossing */
+fun MapData.findAllKerbNodes(): Iterable&lt;Node&gt; {
+<span class="nc" id="L72">    val footwayNodes = mutableSetOf&lt;Node&gt;()</span>
+<span class="nc" id="L73">    ways.asSequence()</span>
+<span class="nc" id="L74">        .filter { footwaysFilter.matches(it) }</span>
+<span class="nc" id="L75">        .flatMap { it.nodeIds }</span>
+<span class="nc" id="L76">        .mapNotNullTo(footwayNodes) { nodeId -&gt;</span>
+<span class="nc bnc" id="L77" title="All 4 branches missed.">            getNode(nodeId)?.takeIf { it.couldBeAKerb() }</span>
+        }
+
+<span class="nc" id="L80">    val kerbBarrierNodeIds = mutableSetOf&lt;Long&gt;()</span>
+<span class="nc" id="L81">    ways.asSequence()</span>
+<span class="nc" id="L82">        .filter { it.tags[&quot;barrier&quot;] == &quot;kerb&quot; }</span>
+<span class="nc" id="L83">        .flatMapTo(kerbBarrierNodeIds) { it.nodeIds }</span>
+
+<span class="nc" id="L85">    val anyWays = ways.filter { waysFilter.matches(it) }</span>
+<span class="nc" id="L86">    val crossingEndNodeIds = findCrossingKerbEndNodeIds(anyWays)</span>
+
+    // Kerbs can be defined in three ways (see https://github.com/streetcomplete/StreetComplete/issues/1305#issuecomment-688333976):
+<span class="nc" id="L89">    return footwayNodes.filter {</span>
+        // 1. either as a node tagged with barrier = kerb on a footway
+        // see https://github.com/streetcomplete/StreetComplete/blob/master/res/documentation/kerbs/kerb-node.svg
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        it.tags[&quot;barrier&quot;] == &quot;kerb&quot;</span>
+        // 2. or as the shared node at which a way tagged with barrier = kerb crosses a footway
+        // see https://github.com/streetcomplete/StreetComplete/blob/master/res/documentation/kerbs/kerb-way.svg
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        || it.id in kerbBarrierNodeIds</span>
+        // 3. or implicitly as the shared node between a footway tagged with footway = crossing and
+        //    another tagged with footway = sidewalk that is the continuation of the way and is not
+        //    and intersection (thus, has exactly two connections: to the sidewalk and to the crossing)
+        // see https://github.com/streetcomplete/StreetComplete/blob/master/res/documentation/kerbs/crossing-style1.svg
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        || it.id in crossingEndNodeIds</span>
+    }
+}
+
+/** Find all node ids of end nodes of crossings that are (very probably) kerbs within the given
+ *  collection of [ways] */
+private fun MapData.findCrossingKerbEndNodeIds(ways: Collection&lt;Way&gt;): Set&lt;Long&gt; {
+    /* using asSequence in this function so to not copy potentially huge amounts (e.g. almost all
+       nodes of all ways in the data set) of data into temporary lists */
+
+<span class="nc" id="L110">    val footways = ways.filter { footwaysFilter.matches(it) }</span>
+
+<span class="nc" id="L112">    val crossingEndNodeIds = footways.asSequence()</span>
+<span class="nc bnc" id="L113" title="All 4 branches missed.">        .filter { it.tags[&quot;footway&quot;] == &quot;crossing&quot; || it.tags[&quot;footway&quot;] == &quot;access_aisle&quot; }</span>
+<span class="nc" id="L114">        .flatMap { it.nodeIds.firstAndLast() }</span>
+
+<span class="nc" id="L116">    val connectionsById = mutableMapOf&lt;Long, Int&gt;()</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">    for (id in crossingEndNodeIds) {</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        val count = connectionsById[id] ?: 0</span>
+<span class="nc" id="L119">        connectionsById[id] = count + 1</span>
+    }
+    // skip nodes that have not exactly ONE connection to a crossing
+<span class="nc bnc" id="L122" title="All 2 branches missed.">    connectionsById.entries.removeAll { it.value != 1 }</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">    if (connectionsById.isEmpty()) return emptySet()</span>
+
+<span class="nc" id="L125">    val sidewalkEndNodeIds = footways.asSequence()</span>
+<span class="nc bnc" id="L126" title="All 4 branches missed.">        .filter { it.tags[&quot;footway&quot;] == &quot;sidewalk&quot; || it.tags[&quot;footway&quot;] == &quot;traffic_island&quot; }</span>
+<span class="nc" id="L127">        .flatMap { it.nodeIds.firstAndLast() }</span>
+
+<span class="nc bnc" id="L129" title="All 2 branches missed.">    for (id in sidewalkEndNodeIds) {</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        val count = connectionsById[id] ?: continue</span>
+<span class="nc" id="L131">        connectionsById[id] = count + 1</span>
+    }
+    // skip nodes that have not exactly ONE connection to a sidewalk (1 to crossing + 1 to sidewalk = 2)
+<span class="nc bnc" id="L134" title="All 2 branches missed.">    connectionsById.entries.removeAll { it.value != 2 }</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">    if (connectionsById.isEmpty()) return emptySet()</span>
+
+    // skip nodes that share an end node with a way where it is not clear if it is a sidewalk, crossing or something else
+<span class="nc" id="L138">    ways.asSequence()</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        .filter { it.tags[&quot;footway&quot;] !in handledFootwayValues }</span>
+<span class="nc" id="L140">        .flatMap { it.nodeIds.firstAndLast() }</span>
+<span class="nc" id="L141">        .forEach { connectionsById.remove(it) }</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">    if (connectionsById.isEmpty()) return emptySet()</span>
+
+    // skip nodes that share an end node with any node of a way that is not an end node
+<span class="nc" id="L145">    ways.asSequence()</span>
+<span class="nc" id="L146">        .flatMap { it.nodeIds.allExceptFirstAndLast() }</span>
+<span class="nc" id="L147">        .forEach { connectionsById.remove(it) }</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">    if (connectionsById.isEmpty()) return emptySet()</span>
+
+    // skip nodes of ways that already have barrier=kerb node as not one of their endnodes
+<span class="nc" id="L151">    ways.asSequence()</span>
+<span class="nc" id="L152">        .forEach { way -&gt;</span>
+<span class="nc" id="L153">            val hasKerbAsNonEndNode = way.nodeIds.allExceptFirstAndLast().any {</span>
+<span class="nc bnc" id="L154" title="All 4 branches missed.">                getNode(it)?.tags?.get(&quot;barrier&quot;) == &quot;kerb&quot;</span>
+            }
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (hasKerbAsNonEndNode) {</span>
+<span class="nc" id="L157">                connectionsById.remove(way.nodeIds.first())</span>
+<span class="nc" id="L158">                connectionsById.remove(way.nodeIds.last())</span>
+            }
+<span class="nc" id="L160">        }</span>
+
+<span class="nc" id="L162">    return connectionsById.keys</span>
+}
+
+<span class="nc" id="L165">private val handledFootwayValues = setOf(&quot;sidewalk&quot;, &quot;traffic_island&quot;, &quot;crossing&quot;, &quot;access_aisle&quot;)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

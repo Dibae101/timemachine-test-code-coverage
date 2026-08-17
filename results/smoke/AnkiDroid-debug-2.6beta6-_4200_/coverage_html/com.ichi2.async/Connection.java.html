@@ -1,0 +1,569 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Connection.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.async</a> &gt; <span class="el_source">Connection.java</span></div><h1>Connection.java</h1><pre class="source lang-java linenums">/****************************************************************************************
+ * Copyright (c) 2009 Edu Zamora &lt;edu.zasu@gmail.com&gt;                                   *
+ * Copyright (c) 2011 Kostas Spyropoulos &lt;inigo.aldana@gmail.com&gt;                       *
+ * Copyright (c) 2012 Norbert Nagold &lt;norbert.nagold@gmail.com&gt;                         *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General Public License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General Public License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.async;
+
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
+import android.os.AsyncTask;
+import android.os.PowerManager;
+
+import com.ichi2.anki.AnkiDroidApp;
+import com.ichi2.anki.CollectionHelper;
+import com.ichi2.anki.R;
+import com.ichi2.anki.exception.MediaSyncException;
+import com.ichi2.anki.exception.UnknownHttpResponseException;
+import com.ichi2.libanki.Collection;
+import com.ichi2.libanki.sync.FullSyncer;
+import com.ichi2.libanki.sync.HttpSyncer;
+import com.ichi2.libanki.sync.MediaSyncer;
+import com.ichi2.libanki.sync.RemoteMediaServer;
+import com.ichi2.libanki.sync.RemoteServer;
+import com.ichi2.libanki.sync.Syncer;
+
+import org.apache.http.HttpResponse;
+import org.apache.http.impl.conn.tsccm.ThreadSafeClientConnManager;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.lang.ref.WeakReference;
+
+import timber.log.Timber;
+
+public class Connection extends BaseAsyncTask&lt;Connection.Payload, Object, Connection.Payload&gt; {
+
+    public static final int TASK_TYPE_LOGIN = 0;
+    public static final int TASK_TYPE_SYNC = 1;
+    public static final int CONN_TIMEOUT = 30000;
+
+
+    private static Connection sInstance;
+    private TaskListener mListener;
+    private static boolean sIsCancelled;
+    private static boolean sIsCancellable;
+
+    /**
+     * Before syncing, we acquire a wake lock and then release it once the sync is complete.
+     * This ensures that the device remains awake until the sync is complete. Without it,
+     * the process will be paused and the sync can fail due to timing conflicts with AnkiWeb.
+     */
+    private final PowerManager.WakeLock mWakeLock;
+
+    public static synchronized boolean getIsCancelled() {
+<span class="nc" id="L70">        return sIsCancelled;</span>
+    }
+
+<span class="nc" id="L73">    public Connection() {</span>
+<span class="nc" id="L74">        sIsCancelled = false;</span>
+<span class="nc" id="L75">        sIsCancellable = false;</span>
+<span class="nc" id="L76">        Context context = AnkiDroidApp.getInstance().getApplicationContext();</span>
+<span class="nc" id="L77">        PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);</span>
+<span class="nc" id="L78">        mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, &quot;Connection&quot;);</span>
+<span class="nc" id="L79">    }</span>
+
+    private static Connection launchConnectionTask(TaskListener listener, Payload data) {
+
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (!isOnline()) {</span>
+<span class="nc" id="L84">            data.success = false;</span>
+<span class="nc" id="L85">            listener.onDisconnected();</span>
+<span class="nc" id="L86">            return null;</span>
+        }
+
+        try {
+<span class="nc bnc" id="L90" title="All 4 branches missed.">            if ((sInstance != null) &amp;&amp; (sInstance.getStatus() != AsyncTask.Status.FINISHED)) {</span>
+<span class="nc" id="L91">                sInstance.get();</span>
+            }
+<span class="nc" id="L93">        } catch (Exception e) {</span>
+<span class="nc" id="L94">            e.printStackTrace();</span>
+<span class="nc" id="L95">        }</span>
+
+<span class="nc" id="L97">        sInstance = new Connection();</span>
+<span class="nc" id="L98">        sInstance.mListener = listener;</span>
+
+<span class="nc" id="L100">        sInstance.execute(data);</span>
+<span class="nc" id="L101">        return sInstance;</span>
+    }
+
+
+    /*
+     * Runs on GUI thread
+     */
+    @Override
+    protected void onCancelled() {
+<span class="nc" id="L110">        super.onCancelled();</span>
+<span class="nc" id="L111">        Timber.i(&quot;Connection onCancelled() method called&quot;);</span>
+        // Sync has ended so release the wake lock
+<span class="nc" id="L113">        mWakeLock.release();</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (mListener instanceof CancellableTaskListener) {</span>
+<span class="nc" id="L115">            ((CancellableTaskListener) mListener).onCancelled();</span>
+        }
+<span class="nc" id="L117">    }</span>
+
+
+    /*
+     * Runs on GUI thread
+     */
+    @Override
+    protected void onPreExecute() {
+<span class="nc" id="L125">        super.onPreExecute();</span>
+        // Acquire the wake lock before syncing to ensure CPU remains on until the sync completes.
+<span class="nc" id="L127">        mWakeLock.acquire();</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (mListener != null) {</span>
+<span class="nc" id="L129">            mListener.onPreExecute();</span>
+        }
+<span class="nc" id="L131">    }</span>
+
+
+    /*
+     * Runs on GUI thread
+     */
+    @Override
+    protected void onPostExecute(Payload data) {
+<span class="nc" id="L139">        super.onPostExecute(data);</span>
+        // Sync has ended so release the wake lock
+<span class="nc" id="L141">        mWakeLock.release();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (mListener != null) {</span>
+<span class="nc" id="L143">            mListener.onPostExecute(data);</span>
+        }
+<span class="nc" id="L145">    }</span>
+
+
+    /*
+     * Runs on GUI thread
+     */
+    @Override
+    protected void onProgressUpdate(Object... values) {
+<span class="nc" id="L153">        super.onProgressUpdate(values);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (mListener != null) {</span>
+<span class="nc" id="L155">            mListener.onProgressUpdate(values);</span>
+        }
+<span class="nc" id="L157">    }</span>
+
+
+    public static Connection login(TaskListener listener, Payload data) {
+<span class="nc" id="L161">        data.taskType = TASK_TYPE_LOGIN;</span>
+<span class="nc" id="L162">        return launchConnectionTask(listener, data);</span>
+    }
+
+
+    public static Connection sync(TaskListener listener, Payload data) {
+<span class="nc" id="L167">        data.taskType = TASK_TYPE_SYNC;</span>
+<span class="nc" id="L168">        return launchConnectionTask(listener, data);</span>
+    }
+
+
+    @Override
+    protected Payload doInBackground(Payload... params) {
+<span class="nc" id="L174">        super.doInBackground(params);</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (params.length != 1) {</span>
+<span class="nc" id="L176">            throw new IllegalArgumentException();</span>
+        }
+<span class="nc" id="L178">        return doOneInBackground(params[0]);</span>
+    }
+
+
+    private Payload doOneInBackground(Payload data) {
+<span class="nc bnc" id="L183" title="All 3 branches missed.">        switch (data.taskType) {</span>
+            case TASK_TYPE_LOGIN:
+<span class="nc" id="L185">                return doInBackgroundLogin(data);</span>
+
+            case TASK_TYPE_SYNC:
+<span class="nc" id="L188">                return doInBackgroundSync(data);</span>
+
+            default:
+<span class="nc" id="L191">                return null;</span>
+        }
+    }
+
+
+    private Payload doInBackgroundLogin(Payload data) {
+<span class="nc" id="L197">        String username = (String) data.data[0];</span>
+<span class="nc" id="L198">        String password = (String) data.data[1];</span>
+<span class="nc" id="L199">        HttpSyncer server = new RemoteServer(this, null);</span>
+        HttpResponse ret;
+        try {
+<span class="nc" id="L202">            ret = server.hostKey(username, password);</span>
+<span class="nc" id="L203">        } catch (UnknownHttpResponseException e) {</span>
+<span class="nc" id="L204">            data.success = false;</span>
+<span class="nc" id="L205">            data.result = new Object[] { &quot;error&quot;, e.getResponseCode(), e.getMessage() };</span>
+<span class="nc" id="L206">            return data;</span>
+<span class="nc" id="L207">        } catch (Exception e2) {</span>
+            // Ask user to report all bugs which aren't timeout errors
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (!timeoutOccured(e2)) {</span>
+<span class="nc" id="L210">                AnkiDroidApp.sendExceptionReport(e2, &quot;doInBackgroundLogin&quot;);</span>
+            }
+<span class="nc" id="L212">            data.success = false;</span>
+<span class="nc" id="L213">            data.result = new Object[] {&quot;connectionError&quot; };</span>
+<span class="nc" id="L214">            return data;</span>
+<span class="nc" id="L215">        }</span>
+<span class="nc" id="L216">        String hostkey = null;</span>
+<span class="nc" id="L217">        boolean valid = false;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (ret != null) {</span>
+<span class="nc" id="L219">            data.returnType = ret.getStatusLine().getStatusCode();</span>
+<span class="nc" id="L220">            Timber.d(&quot;doInBackgroundLogin - response from server: %d, (%s)&quot;, data.returnType, ret.getStatusLine().getReasonPhrase());</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (data.returnType == 200) {</span>
+                try {
+<span class="nc" id="L223">                    JSONObject jo = (new JSONObject(server.stream2String(ret.getEntity().getContent())));</span>
+<span class="nc" id="L224">                    hostkey = jo.getString(&quot;key&quot;);</span>
+<span class="nc bnc" id="L225" title="All 4 branches missed.">                    valid = (hostkey != null) &amp;&amp; (hostkey.length() &gt; 0);</span>
+<span class="nc" id="L226">                } catch (JSONException e) {</span>
+<span class="nc" id="L227">                    valid = false;</span>
+<span class="nc" id="L228">                } catch (IllegalStateException | IOException e) {</span>
+<span class="nc" id="L229">                    throw new RuntimeException(e);</span>
+<span class="nc" id="L230">                }</span>
+            }
+        } else {
+<span class="nc" id="L233">            Timber.e(&quot;doInBackgroundLogin - empty response from server&quot;);</span>
+        }
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        if (valid) {</span>
+<span class="nc" id="L236">            data.success = true;</span>
+<span class="nc" id="L237">            data.data = new String[] { username, hostkey };</span>
+        } else {
+<span class="nc" id="L239">            data.success = false;</span>
+        }
+<span class="nc" id="L241">        return data;</span>
+    }
+
+
+    private boolean timeoutOccured(Exception e) {
+<span class="nc" id="L246">        String msg = e.getMessage();</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        return msg.contains(&quot;UnknownHostException&quot;) ||</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                msg.contains(&quot;HttpHostConnectException&quot;) ||</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">                msg.contains(&quot;SSLException while building HttpClient&quot;) ||</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">                msg.contains(&quot;SocketTimeoutException&quot;) ||</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                msg.contains(&quot;ClientProtocolException&quot;) ||</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                msg.contains(&quot;TimeoutException&quot;);</span>
+    }
+
+
+    private Payload doInBackgroundSync(Payload data) {
+<span class="nc" id="L257">        sIsCancellable = true;</span>
+<span class="nc" id="L258">        Timber.d(&quot;doInBackgroundSync()&quot;);</span>
+        // Block execution until any previous background task finishes, or timeout after 5s
+<span class="nc" id="L260">        boolean ok = DeckTask.waitToFinish(5);</span>
+
+<span class="nc" id="L262">        String hkey = (String) data.data[0];</span>
+<span class="nc" id="L263">        boolean media = (Boolean) data.data[1];</span>
+<span class="nc" id="L264">        String conflictResolution = (String) data.data[2];</span>
+        // Use safe version that catches exceptions so that full sync is still possible
+<span class="nc" id="L266">        Collection col = CollectionHelper.getInstance().getColSafe(AnkiDroidApp.getInstance());</span>
+
+<span class="nc" id="L268">        boolean colCorruptFullSync = false;</span>
+<span class="nc bnc" id="L269" title="All 4 branches missed.">        if (!CollectionHelper.getInstance().colIsOpen() || !ok) {</span>
+<span class="nc bnc" id="L270" title="All 4 branches missed.">            if (conflictResolution != null &amp;&amp; conflictResolution.equals(&quot;download&quot;)) {</span>
+<span class="nc" id="L271">                colCorruptFullSync = true;</span>
+            } else {
+<span class="nc" id="L273">                data.success = false;</span>
+<span class="nc" id="L274">                data.result = new Object[] { &quot;genericError&quot; };</span>
+<span class="nc" id="L275">                return data;</span>
+            }
+        }
+        try {
+<span class="nc" id="L279">            CollectionHelper.getInstance().lockCollection();</span>
+<span class="nc" id="L280">            HttpSyncer server = new RemoteServer(this, hkey);</span>
+<span class="nc" id="L281">            Syncer client = new Syncer(col, server);</span>
+
+            // run sync and check state
+<span class="nc" id="L284">            boolean noChanges = false;</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            if (conflictResolution == null) {</span>
+<span class="nc" id="L286">                Timber.i(&quot;Sync - starting sync&quot;);</span>
+<span class="nc" id="L287">                publishProgress(R.string.sync_prepare_syncing);</span>
+<span class="nc" id="L288">                Object[] ret = client.sync(this);</span>
+<span class="nc" id="L289">                data.message = client.getSyncMsg();</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">                if (ret == null) {</span>
+<span class="nc" id="L291">                    data.success = false;</span>
+<span class="nc" id="L292">                    data.result = new Object[] { &quot;genericError&quot; };</span>
+<span class="nc" id="L293">                    return data;</span>
+                }
+<span class="nc" id="L295">                String retCode = (String) ret[0];</span>
+<span class="nc bnc" id="L296" title="All 4 branches missed.">                if (!retCode.equals(&quot;noChanges&quot;) &amp;&amp; !retCode.equals(&quot;success&quot;)) {</span>
+<span class="nc" id="L297">                    data.success = false;</span>
+<span class="nc" id="L298">                    data.result = ret;</span>
+                    // Check if there was a sanity check error
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                    if (retCode.equals(&quot;sanityCheckError&quot;)) {</span>
+                        // Force full sync next time
+<span class="nc" id="L302">                        col.modSchemaNoCheck();</span>
+<span class="nc" id="L303">                        col.save();</span>
+                    }
+<span class="nc" id="L305">                    return data;</span>
+                }
+                // save and note success state
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                if (retCode.equals(&quot;noChanges&quot;)) {</span>
+                    // publishProgress(R.string.sync_no_changes_message);
+<span class="nc" id="L310">                    noChanges = true;</span>
+                } else {
+                    // publishProgress(R.string.sync_database_acknowledge);
+                }
+<span class="nc" id="L314">            } else {</span>
+                try {
+                    // Disable sync cancellation for full-sync
+<span class="nc" id="L317">                    sIsCancellable = false;</span>
+<span class="nc" id="L318">                    server = new FullSyncer(col, hkey, this);</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                    if (conflictResolution.equals(&quot;upload&quot;)) {</span>
+<span class="nc" id="L320">                        Timber.i(&quot;Sync - fullsync - upload collection&quot;);</span>
+<span class="nc" id="L321">                        publishProgress(R.string.sync_preparing_full_sync_message);</span>
+<span class="nc" id="L322">                        Object[] ret = server.upload();</span>
+<span class="nc" id="L323">                        col.reopen();</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                        if (ret == null) {</span>
+<span class="nc" id="L325">                            data.success = false;</span>
+<span class="nc" id="L326">                            data.result = new Object[] { &quot;genericError&quot; };</span>
+<span class="nc" id="L327">                            return data;</span>
+                        }
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                        if (!ret[0].equals(HttpSyncer.ANKIWEB_STATUS_OK)) {</span>
+<span class="nc" id="L330">                            data.success = false;</span>
+<span class="nc" id="L331">                            data.result = ret;</span>
+<span class="nc" id="L332">                            return data;</span>
+                        }
+<span class="nc bnc" id="L334" title="All 2 branches missed.">                    } else if (conflictResolution.equals(&quot;download&quot;)) {</span>
+<span class="nc" id="L335">                        Timber.i(&quot;Sync - fullsync - download collection&quot;);</span>
+<span class="nc" id="L336">                        publishProgress(R.string.sync_downloading_message);</span>
+<span class="nc" id="L337">                        Object[] ret = server.download();</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                        if (ret == null) {</span>
+<span class="nc" id="L339">                            data.success = false;</span>
+<span class="nc" id="L340">                            data.result = new Object[] { &quot;genericError&quot; };</span>
+<span class="nc" id="L341">                            return data;</span>
+                        }
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                        if (ret[0].equals(&quot;success&quot;)) {</span>
+<span class="nc" id="L344">                            data.success = true;</span>
+<span class="nc" id="L345">                            col.reopen();</span>
+                        }
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                        if (!ret[0].equals(&quot;success&quot;)) {</span>
+<span class="nc" id="L348">                            data.success = false;</span>
+<span class="nc" id="L349">                            data.result = ret;</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                            if (!colCorruptFullSync) {</span>
+<span class="nc" id="L351">                                col.reopen();</span>
+                            }
+<span class="nc" id="L353">                            return data;</span>
+                        }
+                    }
+<span class="nc" id="L356">                } catch (OutOfMemoryError e) {</span>
+<span class="nc" id="L357">                    AnkiDroidApp.sendExceptionReport(e, &quot;doInBackgroundSync-fullSync&quot;);</span>
+<span class="nc" id="L358">                    data.success = false;</span>
+<span class="nc" id="L359">                    data.result = new Object[] { &quot;OutOfMemoryError&quot; };</span>
+<span class="nc" id="L360">                    return data;</span>
+<span class="nc" id="L361">                } catch (RuntimeException e) {</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                    if (timeoutOccured(e)) {</span>
+<span class="nc" id="L363">                        data.result = new Object[] {&quot;connectionError&quot; };</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                    } else if (e.getMessage().equals(&quot;UserAbortedSync&quot;)) {</span>
+<span class="nc" id="L365">                        data.result = new Object[] {&quot;UserAbortedSync&quot; };</span>
+                    } else {
+<span class="nc" id="L367">                        AnkiDroidApp.sendExceptionReport(e, &quot;doInBackgroundSync-fullSync&quot;);</span>
+<span class="nc" id="L368">                        data.result = new Object[] { &quot;IOException&quot; };</span>
+                    }
+<span class="nc" id="L370">                    data.success = false;</span>
+<span class="nc" id="L371">                    return data;</span>
+<span class="nc" id="L372">                }</span>
+            }
+
+            // clear undo to avoid non syncing orphans (because undo resets usn too
+<span class="nc bnc" id="L376" title="All 2 branches missed.">            if (!noChanges) {</span>
+<span class="nc" id="L377">                col.clearUndo();</span>
+            }
+            // then move on to media sync
+<span class="nc" id="L380">            sIsCancellable = true;</span>
+<span class="nc" id="L381">            boolean noMediaChanges = false;</span>
+<span class="nc" id="L382">            String mediaError = null;</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">            if (media) {</span>
+<span class="nc" id="L384">                server = new RemoteMediaServer(col, hkey, this);</span>
+<span class="nc" id="L385">                MediaSyncer mediaClient = new MediaSyncer(col, (RemoteMediaServer) server, this);</span>
+                String ret;
+                try {
+<span class="nc" id="L388">                    ret = mediaClient.sync();</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                    if (ret == null) {</span>
+<span class="nc" id="L390">                        mediaError = AnkiDroidApp.getAppResources().getString(R.string.sync_media_error);</span>
+                    } else {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">                        if (ret.equals(&quot;noChanges&quot;)) {</span>
+<span class="nc" id="L393">                            publishProgress(R.string.sync_media_no_changes);</span>
+<span class="nc" id="L394">                            noMediaChanges = true;</span>
+                        }
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                        if (ret.equals(&quot;sanityFailed&quot;)) {</span>
+<span class="nc" id="L397">                            mediaError = AnkiDroidApp.getAppResources().getString(R.string.sync_media_sanity_failed);</span>
+                        } else {
+<span class="nc" id="L399">                            publishProgress(R.string.sync_media_success);</span>
+                        }
+                    }
+<span class="nc" id="L402">                } catch (RuntimeException e) {</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                    if (timeoutOccured(e)) {</span>
+<span class="nc" id="L404">                        data.result = new Object[] {&quot;connectionError&quot; };</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                    } else if (e.getMessage().equals(&quot;UserAbortedSync&quot;)) {</span>
+<span class="nc" id="L406">                        data.result = new Object[] {&quot;UserAbortedSync&quot; };</span>
+                    } else {
+<span class="nc" id="L408">                        AnkiDroidApp.sendExceptionReport(e, &quot;doInBackgroundSync-mediaSync&quot;);</span>
+                    }
+<span class="nc" id="L410">                    mediaError = e.getLocalizedMessage();</span>
+<span class="nc" id="L411">                }</span>
+            }
+<span class="nc bnc" id="L413" title="All 6 branches missed.">            if (noChanges &amp;&amp; (!media || noMediaChanges)) {</span>
+<span class="nc" id="L414">                data.success = false;</span>
+<span class="nc" id="L415">                data.result = new Object[] { &quot;noChanges&quot; };</span>
+<span class="nc" id="L416">                return data;</span>
+            } else {
+<span class="nc" id="L418">                data.success = true;</span>
+<span class="nc" id="L419">                data.data = new Object[] { conflictResolution, col, mediaError };</span>
+<span class="nc" id="L420">                return data;</span>
+            }
+<span class="nc" id="L422">        } catch (MediaSyncException e) {</span>
+<span class="nc" id="L423">            Timber.e(&quot;Media sync rejected by server&quot;);</span>
+<span class="nc" id="L424">            data.success = false;</span>
+<span class="nc" id="L425">            data.result = new Object[] {&quot;mediaSyncServerError&quot;};</span>
+<span class="nc" id="L426">            AnkiDroidApp.sendExceptionReport(e, &quot;doInBackgroundSync&quot;);</span>
+<span class="nc" id="L427">            return data;</span>
+<span class="nc" id="L428">        } catch (UnknownHttpResponseException e) {</span>
+<span class="nc" id="L429">            Timber.e(&quot;doInBackgroundSync -- unknown response code error&quot;);</span>
+<span class="nc" id="L430">            e.printStackTrace();</span>
+<span class="nc" id="L431">            data.success = false;</span>
+<span class="nc" id="L432">            Integer code = e.getResponseCode();</span>
+<span class="nc" id="L433">            String msg = e.getLocalizedMessage();</span>
+<span class="nc" id="L434">            data.result = new Object[] { &quot;error&quot;, code , msg };</span>
+<span class="nc" id="L435">            return data;</span>
+<span class="nc" id="L436">        } catch (Exception e) {</span>
+            // Global error catcher.
+            // Try to give a human readable error, otherwise print the raw error message
+<span class="nc" id="L439">            Timber.e(&quot;doInBackgroundSync error&quot;);</span>
+<span class="nc" id="L440">            e.printStackTrace();</span>
+<span class="nc" id="L441">            data.success = false;</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">            if (timeoutOccured(e)) {</span>
+<span class="nc" id="L443">                data.result = new Object[]{&quot;connectionError&quot;};</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">            } else if (e.getMessage().equals(&quot;UserAbortedSync&quot;)) {</span>
+<span class="nc" id="L445">                data.result = new Object[] {&quot;UserAbortedSync&quot; };</span>
+            } else {
+<span class="nc" id="L447">                AnkiDroidApp.sendExceptionReport(e, &quot;doInBackgroundSync&quot;);</span>
+<span class="nc" id="L448">                data.result = new Object[] {e.getLocalizedMessage()};</span>
+            }
+<span class="nc" id="L450">            return data;</span>
+        } finally {
+            // don't bump mod time unless we explicitly save
+<span class="nc bnc" id="L453" title="All 2 branches missed.">            if (col != null) {</span>
+<span class="nc" id="L454">                col.close(false);</span>
+            }
+<span class="nc" id="L456">            CollectionHelper.getInstance().unlockCollection();</span>
+        }
+    }
+
+
+    public void publishProgress(int id) {
+<span class="nc" id="L462">        super.publishProgress(id);</span>
+<span class="nc" id="L463">    }</span>
+
+
+    public void publishProgress(String message) {
+<span class="nc" id="L467">        super.publishProgress(message);</span>
+<span class="nc" id="L468">    }</span>
+
+
+    public void publishProgress(int id, long up, long down) {
+<span class="nc" id="L472">        super.publishProgress(id, up, down);</span>
+<span class="nc" id="L473">    }</span>
+
+    public static boolean isOnline() {
+<span class="nc" id="L476">        ConnectivityManager cm = (ConnectivityManager) AnkiDroidApp.getInstance().getApplicationContext()</span>
+<span class="nc" id="L477">                .getSystemService(Context.CONNECTIVITY_SERVICE);</span>
+<span class="nc" id="L478">        NetworkInfo netInfo = cm.getActiveNetworkInfo();</span>
+<span class="nc bnc" id="L479" title="All 6 branches missed.">        if (netInfo == null || !netInfo.isConnected() || !netInfo.isAvailable()) {</span>
+<span class="nc" id="L480">            return false;</span>
+        }
+<span class="nc" id="L482">        return true;</span>
+    }
+
+
+    public static interface TaskListener {
+        public void onPreExecute();
+
+
+        public void onProgressUpdate(Object... values);
+
+
+        public void onPostExecute(Payload data);
+
+
+        public void onDisconnected();
+    }
+
+    public static interface CancellableTaskListener extends TaskListener {
+        public void onCancelled();
+    }
+
+    public static class Payload {
+        public int taskType;
+        public Object[] data;
+        public Object result;
+        public boolean success;
+        public int returnType;
+        public Exception exception;
+        public String message;
+        public Collection col;
+
+
+<span class="nc" id="L514">        public Payload() {</span>
+<span class="nc" id="L515">            data = null;</span>
+<span class="nc" id="L516">            success = true;</span>
+<span class="nc" id="L517">        }</span>
+
+
+<span class="nc" id="L520">        public Payload(Object[] data) {</span>
+<span class="nc" id="L521">            this.data = data;</span>
+<span class="nc" id="L522">            success = true;</span>
+<span class="nc" id="L523">        }</span>
+
+
+<span class="nc" id="L526">        public Payload(int taskType, Object[] data) {</span>
+<span class="nc" id="L527">            this.taskType = taskType;</span>
+<span class="nc" id="L528">            this.data = data;</span>
+<span class="nc" id="L529">            success = true;</span>
+<span class="nc" id="L530">        }</span>
+
+<span class="nc" id="L532">        public Payload(int taskType, Object[] data, String path) {</span>
+<span class="nc" id="L533">            this.taskType = taskType;</span>
+<span class="nc" id="L534">            this.data = data;</span>
+<span class="nc" id="L535">            success = true;</span>
+<span class="nc" id="L536">        }</span>
+    }
+
+    public synchronized static void cancel() {
+<span class="nc" id="L540">        Timber.d(&quot;Cancelled Connection task&quot;);</span>
+<span class="nc" id="L541">        sInstance.cancel(true);</span>
+<span class="nc" id="L542">        sIsCancelled = true;</span>
+<span class="nc" id="L543">    }</span>
+
+    public synchronized static boolean isCancellable() {
+<span class="nc" id="L546">        return sIsCancellable;</span>
+    }
+
+<span class="nc" id="L549">    public class CancelCallback {</span>
+<span class="nc" id="L550">        private WeakReference&lt;ThreadSafeClientConnManager&gt; mConnectionManager = null;</span>
+
+
+        public void setConnectionManager(ThreadSafeClientConnManager connectionManager) {
+<span class="nc" id="L554">            mConnectionManager = new WeakReference&lt;&gt;(connectionManager);</span>
+<span class="nc" id="L555">        }</span>
+
+
+        public void cancelAllConnections() {
+<span class="nc" id="L559">            Timber.d(&quot;cancelAllConnections()&quot;);</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            if (mConnectionManager != null) {</span>
+<span class="nc" id="L561">                ThreadSafeClientConnManager connectionManager = mConnectionManager.get();</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">                if (connectionManager != null) {</span>
+<span class="nc" id="L563">                    connectionManager.shutdown();</span>
+                }
+            }
+<span class="nc" id="L566">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

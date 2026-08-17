@@ -1,0 +1,443 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OsmQuestController.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.data.osm.osmquests</a> &gt; <span class="el_source">OsmQuestController.kt</span></div><h1>OsmQuestController.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.data.osm.osmquests
+
+import android.util.Log
+import de.westnordost.countryboundaries.CountryBoundaries
+import de.westnordost.streetcomplete.ApplicationConstants
+import de.westnordost.streetcomplete.data.osm.edits.MapDataWithEditsSource
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometry
+import de.westnordost.streetcomplete.data.osm.mapdata.BoundingBox
+import de.westnordost.streetcomplete.data.osm.mapdata.Element
+import de.westnordost.streetcomplete.data.osm.mapdata.ElementKey
+import de.westnordost.streetcomplete.data.osm.mapdata.LatLon
+import de.westnordost.streetcomplete.data.osm.mapdata.MapDataWithGeometry
+import de.westnordost.streetcomplete.data.osm.mapdata.MutableMapDataWithGeometry
+import de.westnordost.streetcomplete.data.osm.mapdata.key
+import de.westnordost.streetcomplete.data.osmnotes.Note
+import de.westnordost.streetcomplete.data.osmnotes.edits.NotesWithEditsSource
+import de.westnordost.streetcomplete.data.quest.OsmQuestKey
+import de.westnordost.streetcomplete.data.quest.QuestTypeRegistry
+import de.westnordost.streetcomplete.quests.address.AddHousenumber
+import de.westnordost.streetcomplete.quests.cycleway.AddCycleway
+import de.westnordost.streetcomplete.quests.existence.CheckExistence
+import de.westnordost.streetcomplete.quests.oneway_suspects.AddSuspectedOneway
+import de.westnordost.streetcomplete.quests.opening_hours.AddOpeningHours
+import de.westnordost.streetcomplete.quests.place_name.AddPlaceName
+import de.westnordost.streetcomplete.util.ktx.format
+import de.westnordost.streetcomplete.util.ktx.intersects
+import de.westnordost.streetcomplete.util.ktx.isInAny
+import de.westnordost.streetcomplete.util.ktx.nowAsEpochMilliseconds
+import de.westnordost.streetcomplete.util.math.contains
+import de.westnordost.streetcomplete.util.math.enclosingBoundingBox
+import de.westnordost.streetcomplete.util.math.enlargedBy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.FutureTask
+
+/** Controller for managing OsmQuests. Takes care of persisting OsmQuest objects and notifying
+ *  listeners about changes */
+<span class="fc" id="L45">class OsmQuestController internal constructor(</span>
+<span class="fc" id="L46">    private val db: OsmQuestDao,</span>
+<span class="fc" id="L47">    private val hiddenDB: OsmQuestsHiddenDao,</span>
+<span class="fc" id="L48">    private val mapDataSource: MapDataWithEditsSource,</span>
+<span class="fc" id="L49">    private val notesSource: NotesWithEditsSource,</span>
+<span class="fc" id="L50">    private val questTypeRegistry: QuestTypeRegistry,</span>
+<span class="fc" id="L51">    private val countryBoundariesFuture: FutureTask&lt;CountryBoundaries&gt;</span>
+) : OsmQuestSource, HideOsmQuestController {
+
+    /* Must be a singleton because there is a listener that should respond to a change in the
+     *  database table */
+
+    interface HideOsmQuestListener {
+        fun onHid(edit: OsmQuestHidden)
+        fun onUnhid(edit: OsmQuestHidden)
+        fun onUnhidAll()
+    }
+<span class="fc" id="L62">    private val hideListeners: MutableList&lt;HideOsmQuestListener&gt; = CopyOnWriteArrayList()</span>
+
+<span class="fc" id="L64">    private val listeners: MutableList&lt;OsmQuestSource.Listener&gt; = CopyOnWriteArrayList()</span>
+
+<span class="fc" id="L66">    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)</span>
+
+<span class="nc" id="L68">    private val allQuestTypes get() = questTypeRegistry.filterIsInstance&lt;OsmElementQuestType&lt;*&gt;&gt;()</span>
+<span class="nc" id="L69">        .sortedBy { it.chonkerIndex }</span>
+
+<span class="fc" id="L71">    private val mapDataSourceListener = object : MapDataWithEditsSource.Listener {</span>
+
+        /** For the given elements, replace the current quests with the given ones. Called when
+         *  OSM elements are updated, so the quests that reference that element need to be updated
+         *  as well. */
+        override fun onUpdated(updated: MapDataWithGeometry, deleted: Collection&lt;ElementKey&gt;) {
+<span class="nc" id="L77">            val time = nowAsEpochMilliseconds()</span>
+
+<span class="nc" id="L79">            val deferredQuests = mutableListOf&lt;Deferred&lt;OsmQuest?&gt;&gt;()</span>
+
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            for (element in updated) {</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                val geometry = updated.getGeometry(element.type, element.id) ?: continue</span>
+<span class="nc" id="L83">                deferredQuests.addAll(createQuestsForElementDeferred(element, geometry, allQuestTypes))</span>
+            }
+<span class="nc" id="L85">            val quests = runBlocking { deferredQuests.awaitAll().filterNotNull() }</span>
+
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            for (quest in quests) {</span>
+<span class="nc" id="L88">                Log.d(TAG, &quot;Created ${quest.type.name} for ${quest.elementType.name}#${quest.elementId}&quot;)</span>
+            }
+
+<span class="nc" id="L91">            val obsoleteQuestKeys: List&lt;OsmQuestKey&gt;</span>
+<span class="nc" id="L92">            synchronized(this) {</span>
+<span class="nc" id="L93">                val previousQuests = db.getAllForElements(updated.map { it.key })</span>
+                // quests that refer to elements that have been deleted shall be deleted
+<span class="nc" id="L95">                val deleteQuestKeys = db.getAllForElements(deleted).map { it.key }</span>
+
+<span class="nc" id="L97">                val seconds = (nowAsEpochMilliseconds() - time) / 1000.0</span>
+<span class="nc" id="L98">                Log.i(TAG, &quot;Created ${quests.size} quests for ${updated.size} updated elements in ${seconds.format(1)}s&quot;)</span>
+
+<span class="nc" id="L100">                obsoleteQuestKeys = getObsoleteQuestKeys(quests, previousQuests, deleteQuestKeys)</span>
+<span class="nc" id="L101">                updateQuests(quests, obsoleteQuestKeys)</span>
+<span class="nc" id="L102">            }</span>
+
+<span class="nc" id="L104">            onUpdated(added = quests, deletedKeys = obsoleteQuestKeys)</span>
+<span class="nc" id="L105">        }</span>
+
+        /** Replace all quests of the given types in the given bounding box with the given quests.
+         *  Called on download of a quest type for a bounding box. */
+        override fun onReplacedForBBox(bbox: BoundingBox, mapDataWithGeometry: MapDataWithGeometry) {
+<span class="nc" id="L110">            val quests = createQuestsForBBox(bbox, mapDataWithGeometry, allQuestTypes)</span>
+<span class="nc" id="L111">            val obsoleteQuestKeys: List&lt;OsmQuestKey&gt;</span>
+<span class="nc" id="L112">            synchronized(this) {</span>
+<span class="nc" id="L113">                val previousQuests = db.getAllInBBox(bbox)</span>
+<span class="nc" id="L114">                obsoleteQuestKeys = getObsoleteQuestKeys(quests, previousQuests, emptyList())</span>
+<span class="nc" id="L115">                updateQuests(quests, obsoleteQuestKeys)</span>
+<span class="nc" id="L116">            }</span>
+
+<span class="nc" id="L118">            onUpdated(added = quests, deletedKeys = obsoleteQuestKeys)</span>
+<span class="nc" id="L119">        }</span>
+
+        override fun onCleared() {
+<span class="nc" id="L122">            db.clear()</span>
+<span class="nc" id="L123">            listeners.forEach { it.onInvalidated() }</span>
+<span class="nc" id="L124">        }</span>
+    }
+
+<span class="fc" id="L127">    private val notesSourceListener = object : NotesWithEditsSource.Listener {</span>
+        override fun onUpdated(added: Collection&lt;Note&gt;, updated: Collection&lt;Note&gt;, deleted: Collection&lt;Long&gt;) {
+<span class="nc" id="L129">            onInvalidated()</span>
+<span class="nc" id="L130">        }</span>
+
+        override fun onCleared() {
+<span class="nc" id="L133">            onInvalidated()</span>
+<span class="nc" id="L134">        }</span>
+    }
+
+<span class="fc" id="L137">    init {</span>
+<span class="fc" id="L138">        mapDataSource.addListener(mapDataSourceListener)</span>
+<span class="fc" id="L139">        notesSource.addListener(notesSourceListener)</span>
+<span class="fc" id="L140">    }</span>
+
+    private fun createQuestsForBBox(
+        bbox: BoundingBox,
+        mapDataWithGeometry: MapDataWithGeometry,
+        questTypes: Collection&lt;OsmElementQuestType&lt;*&gt;&gt;,
+    ): Collection&lt;OsmQuest&gt; {
+<span class="nc" id="L147">        val time = nowAsEpochMilliseconds()</span>
+
+<span class="nc" id="L149">        val countryBoundaries = countryBoundariesFuture.get()</span>
+
+        // Remove elements without tags, to be used for quests that are never applicable without
+        // tags. These quests are usually OsmFilterQuestType, where questType.filter.mayEvaluateToTrueWithNoTags
+        // guarantees we can skip elements without tags completely. Also those quests don't use geometry.
+        // This shortcut reduces time for creating quests by ~15-30%.
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        val onlyElementsWithTags = MutableMapDataWithGeometry(mapDataWithGeometry.filter { it.tags.isNotEmpty() }, emptyList())</span>
+
+<span class="nc" id="L157">        val deferredQuests: List&lt;Deferred&lt;List&lt;OsmQuest&gt;&gt;&gt; = questTypes.map { questType -&gt;</span>
+<span class="nc" id="L158">            scope.async {</span>
+<span class="nc" id="L159">                val questsForType = ArrayList&lt;OsmQuest&gt;()</span>
+<span class="nc" id="L160">                val questTypeName = questType.name</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (!countryBoundaries.intersects(bbox, questType.enabledInCountries)) {</span>
+<span class="nc" id="L162">                    Log.d(TAG, &quot;$questTypeName: Skipped because it is disabled for this country&quot;)</span>
+<span class="nc" id="L163">                    emptyList()</span>
+                } else {
+<span class="nc" id="L165">                    val questTime = nowAsEpochMilliseconds()</span>
+<span class="nc" id="L166">                    var questCount = 0</span>
+<span class="nc bnc" id="L167" title="All 4 branches missed.">                    val mapDataToUse = if (questType is OsmFilterQuestType &amp;&amp; !questType.filter.mayEvaluateToTrueWithNoTags) {</span>
+<span class="nc" id="L168">                            onlyElementsWithTags</span>
+                    } else {
+<span class="nc" id="L170">                            mapDataWithGeometry</span>
+                    }
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                    for (element in questType.getApplicableElements(mapDataToUse)) {</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                        val geometry = mapDataWithGeometry.getGeometry(element.type, element.id)</span>
+<span class="nc" id="L174">                            ?: continue</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                        if (!mayCreateQuest(questType, geometry, bbox)) continue</span>
+<span class="nc" id="L176">                        questsForType.add(OsmQuest(questType, element.type, element.id, geometry))</span>
+<span class="nc" id="L177">                        questCount++</span>
+                    }
+
+<span class="nc" id="L180">                    val questSeconds = nowAsEpochMilliseconds() - questTime</span>
+<span class="nc" id="L181">                    Log.d(TAG, &quot;$questTypeName: Found $questCount quests in ${questSeconds}ms&quot;)</span>
+<span class="nc" id="L182">                    questsForType</span>
+                }
+            }
+        }
+<span class="nc" id="L186">        val quests = runBlocking { deferredQuests.awaitAll().flatten() }</span>
+
+<span class="nc" id="L188">        val seconds = (nowAsEpochMilliseconds() - time) / 1000.0</span>
+<span class="nc" id="L189">        Log.i(TAG, &quot;Created ${quests.size} quests for bbox in ${seconds.format(1)}s&quot;)</span>
+
+<span class="nc" id="L191">        return quests</span>
+    }
+
+    private fun createQuestsForElementDeferred(
+        element: Element,
+        geometry: ElementGeometry,
+        questTypes: Collection&lt;OsmElementQuestType&lt;*&gt;&gt;
+    ): List&lt;Deferred&lt;OsmQuest?&gt;&gt; {
+<span class="nc" id="L199">        val paddedBounds = geometry.getBounds().enlargedBy(ApplicationConstants.QUEST_FILTER_PADDING)</span>
+<span class="nc" id="L200">        val lazyMapData by lazy { mapDataSource.getMapDataWithGeometry(paddedBounds) }</span>
+
+<span class="nc" id="L202">        return questTypes.map { questType -&gt;</span>
+<span class="nc" id="L203">            scope.async {</span>
+<span class="nc" id="L204">                var appliesToElement = questType.isApplicableTo(element)</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                if (appliesToElement == null) {</span>
+<span class="nc" id="L206">                    Log.d(TAG, &quot;${questType.name} requires surrounding map data to determine applicability to ${element.type.name}#${element.id}&quot;)</span>
+<span class="nc" id="L207">                    val mapData = withContext(Dispatchers.IO) { lazyMapData }</span>
+<span class="nc" id="L208">                    appliesToElement = questType.getApplicableElements(mapData)</span>
+<span class="nc bnc" id="L209" title="All 4 branches missed.">                        .any { it.id == element.id &amp;&amp; it.type == element.type }</span>
+                }
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                if (!appliesToElement) return@async null</span>
+
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                if (mayCreateQuest(questType, geometry, null)) {</span>
+<span class="nc" id="L214">                    OsmQuest(questType, element.type, element.id, geometry)</span>
+                } else {
+<span class="nc" id="L216">                    null</span>
+                }
+            }
+        }
+    }
+
+    private fun getObsoleteQuestKeys(
+        questsNow: Collection&lt;OsmQuest&gt;,
+        questsPreviously: Collection&lt;OsmQuestDaoEntry&gt;,
+        deletedQuestKeys: Collection&lt;OsmQuestKey&gt;
+    ): List&lt;OsmQuestKey&gt; {
+<span class="nc" id="L227">        val previousQuestsByKey = mutableMapOf&lt;OsmQuestKey, OsmQuestDaoEntry&gt;()</span>
+<span class="nc" id="L228">        questsPreviously.associateByTo(previousQuestsByKey) { it.key }</span>
+
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        for (quest in questsNow) {</span>
+<span class="nc" id="L231">            previousQuestsByKey.remove(quest.key)</span>
+        }
+        // quests that were created previously for an element but now not anymore shall be deleted
+<span class="nc" id="L234">        return previousQuestsByKey.values.map { it.key } + deletedQuestKeys</span>
+    }
+
+    private fun updateQuests(questsNow: Collection&lt;OsmQuest&gt;, obsoleteQuestKeys: Collection&lt;OsmQuestKey&gt;) {
+<span class="nc" id="L238">        val time = nowAsEpochMilliseconds()</span>
+
+<span class="nc" id="L240">        db.deleteAll(obsoleteQuestKeys)</span>
+<span class="nc" id="L241">        db.putAll(questsNow)</span>
+
+<span class="nc" id="L243">        val seconds = (nowAsEpochMilliseconds() - time) / 1000.0</span>
+<span class="nc" id="L244">        Log.i(TAG, &quot;Persisted ${questsNow.size} new and removed ${obsoleteQuestKeys.size} already resolved quests in ${seconds.format(1)}s&quot;)</span>
+<span class="nc" id="L245">    }</span>
+
+    private fun mayCreateQuest(
+        questType: OsmElementQuestType&lt;*&gt;,
+        geometry: ElementGeometry,
+        downloadedBoundingBox: BoundingBox?
+    ): Boolean {
+<span class="nc" id="L252">        val pos = geometry.center</span>
+
+        // outside downloaded area: skip
+<span class="nc bnc" id="L255" title="All 4 branches missed.">        if (downloadedBoundingBox != null &amp;&amp; !downloadedBoundingBox.contains(pos)) return false</span>
+
+        // do not create quests in countries where the quest is not activated
+<span class="nc" id="L258">        val countries = questType.enabledInCountries</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (!countryBoundariesFuture.get().isInAny(pos, countries)) return false</span>
+
+<span class="nc" id="L261">        return true</span>
+    }
+
+    fun delete(key: OsmQuestKey) {
+<span class="nc" id="L265">        db.delete(key)</span>
+<span class="nc" id="L266">        onUpdated(deletedKeys = listOf(key))</span>
+<span class="nc" id="L267">    }</span>
+
+    override fun getVisible(key: OsmQuestKey): OsmQuest? {
+<span class="nc bnc" id="L270" title="All 2 branches missed.">        val entry = db.get(key) ?: return null</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if (hiddenDB.contains(entry.key)) return null</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        val geometry = mapDataSource.getGeometry(entry.elementType, entry.elementId) ?: return null</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (isBlacklistedPosition(geometry.center)) return null</span>
+<span class="nc" id="L274">        return createOsmQuest(entry, geometry)</span>
+    }
+
+    override fun getAllVisibleInBBox(bbox: BoundingBox, questTypes: Collection&lt;String&gt;?): List&lt;OsmQuest&gt; {
+<span class="nc" id="L278">        val hiddenQuestKeys = getHiddenQuests()</span>
+<span class="nc" id="L279">        val hiddenPositions = getBlacklistedPositions(bbox)</span>
+<span class="nc" id="L280">        val entries = db.getAllInBBox(bbox, questTypes).filter { entry -&gt;</span>
+<span class="nc bnc" id="L281" title="All 4 branches missed.">            entry.key !in hiddenQuestKeys &amp;&amp; entry.position.truncateTo5Decimals() !in hiddenPositions</span>
+        }
+
+<span class="nc" id="L284">        val elementKeys = HashSet&lt;ElementKey&gt;()</span>
+<span class="nc" id="L285">        entries.mapTo(elementKeys) { ElementKey(it.elementType, it.elementId) }</span>
+
+<span class="nc" id="L287">        val geometriesByKey = mapDataSource.getGeometries(elementKeys).associateBy { it.key }</span>
+
+<span class="nc" id="L289">        return entries.mapNotNull { entry -&gt;</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            val geometry = geometriesByKey[ElementKey(entry.elementType, entry.elementId)]?.geometry</span>
+<span class="nc" id="L291">            createOsmQuest(entry, geometry)</span>
+        }
+    }
+
+    private fun createOsmQuest(entry: OsmQuestDaoEntry, geometry: ElementGeometry?): OsmQuest? {
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (geometry == null) return null</span>
+<span class="nc bnc" id="L297" title="All 4 branches missed.">        val questType = questTypeRegistry.getByName(entry.questTypeName) as? OsmElementQuestType&lt;*&gt; ?: return null</span>
+<span class="nc" id="L298">        return OsmQuest(questType, entry.elementType, entry.elementId, geometry)</span>
+    }
+
+    /* ----------------------------------- Hiding / Unhiding  ----------------------------------- */
+
+    private fun getBlacklistedPositions(bbox: BoundingBox): Set&lt;LatLon&gt; =
+<span class="nc" id="L304">        notesSource</span>
+<span class="nc" id="L305">            .getAllPositions(bbox.enlargedBy(1.2))</span>
+<span class="nc" id="L306">            .map { it.truncateTo5Decimals() }</span>
+<span class="nc" id="L307">            .toSet()</span>
+
+    private fun isBlacklistedPosition(pos: LatLon): Boolean =
+<span class="nc" id="L310">        pos.truncateTo5Decimals() in getBlacklistedPositions(BoundingBox(pos, pos))</span>
+
+    private fun getHiddenQuests(): Set&lt;OsmQuestKey&gt; =
+<span class="nc" id="L313">        hiddenDB.getAllIds().toSet()</span>
+
+    /** Mark the quest as hidden by user interaction */
+    override fun hide(key: OsmQuestKey) {
+<span class="nc" id="L317">        synchronized(this) { hiddenDB.add(key) }</span>
+
+<span class="nc" id="L319">        val hidden = getHidden(key)</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (hidden != null) onHid(hidden)</span>
+<span class="nc" id="L321">        onUpdated(deletedKeys = listOf(key))</span>
+<span class="nc" id="L322">    }</span>
+
+    fun unhide(key: OsmQuestKey): Boolean {
+<span class="nc" id="L325">        val hidden = getHidden(key)</span>
+<span class="nc" id="L326">        synchronized(this) {</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (!hiddenDB.delete(key)) return false</span>
+<span class="nc" id="L328">        }</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        if (hidden != null) onUnhid(hidden)</span>
+<span class="nc" id="L330">        val quest = getVisible(key)</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        if (quest != null) onUpdated(added = listOf(quest))</span>
+<span class="nc" id="L332">        return true</span>
+    }
+
+    /** Un-hides all previously hidden quests by user interaction */
+    fun unhideAll(): Int {
+<span class="nc" id="L337">        val unhidCount = synchronized(this) { hiddenDB.deleteAll() }</span>
+<span class="nc" id="L338">        onUnhidAll()</span>
+<span class="nc" id="L339">        onInvalidated()</span>
+<span class="nc" id="L340">        return unhidCount</span>
+    }
+
+    fun getHidden(key: OsmQuestKey): OsmQuestHidden? {
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        val timestamp = hiddenDB.getTimestamp(key) ?: return null</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        val pos = mapDataSource.getGeometry(key.elementType, key.elementId)?.center</span>
+<span class="nc" id="L346">        return createOsmQuestHidden(key, pos, timestamp)</span>
+    }
+
+    fun getAllHiddenNewerThan(timestamp: Long): List&lt;OsmQuestHidden&gt; {
+<span class="fc" id="L350">        val questKeysWithTimestamp = hiddenDB.getNewerThan(timestamp)</span>
+
+<span class="fc" id="L352">        val elementKeys = HashSet&lt;ElementKey&gt;()</span>
+<span class="fc" id="L353">        questKeysWithTimestamp.mapTo(elementKeys) {</span>
+<span class="nc" id="L354">            ElementKey(it.osmQuestKey.elementType, it.osmQuestKey.elementId)</span>
+        }
+
+<span class="pc" id="L357">        val geometriesByKey = mapDataSource.getGeometries(elementKeys).associateBy { it.key }</span>
+
+<span class="pc" id="L359">        return questKeysWithTimestamp.mapNotNull { (key, timestamp) -&gt;</span>
+<span class="nc bnc" id="L360" title="All 4 branches missed.">            val pos = geometriesByKey[ElementKey(key.elementType, key.elementId)]?.geometry?.center</span>
+<span class="nc" id="L361">            createOsmQuestHidden(key, pos, timestamp)</span>
+        }
+    }
+
+    private fun createOsmQuestHidden(key: OsmQuestKey, position: LatLon?, timestamp: Long): OsmQuestHidden? {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        if (position == null) return null</span>
+<span class="nc bnc" id="L367" title="All 4 branches missed.">        val questType = questTypeRegistry.getByName(key.questTypeName) as? OsmElementQuestType&lt;*&gt; ?: return null</span>
+<span class="nc" id="L368">        return OsmQuestHidden(key.elementType, key.elementId, questType, position, timestamp)</span>
+    }
+
+    /* ---------------------------------------- Listeners --------------------------------------- */
+
+    override fun addListener(listener: OsmQuestSource.Listener) {
+<span class="fc" id="L374">        listeners.add(listener)</span>
+<span class="fc" id="L375">    }</span>
+    override fun removeListener(listener: OsmQuestSource.Listener) {
+<span class="nc" id="L377">        listeners.remove(listener)</span>
+<span class="nc" id="L378">    }</span>
+
+<span class="nc" id="L380">    private fun onUpdated(</span>
+<span class="nc" id="L381">        added: Collection&lt;OsmQuest&gt; = emptyList(),</span>
+<span class="nc" id="L382">        deletedKeys: Collection&lt;OsmQuestKey&gt; = emptyList()</span>
+    ) {
+<span class="nc bnc" id="L384" title="All 4 branches missed.">        if (added.isEmpty() &amp;&amp; deletedKeys.isEmpty()) return</span>
+
+<span class="nc bnc" id="L386" title="All 4 branches missed.">        val visibleAdded = if (added.isNotEmpty()) {</span>
+<span class="nc" id="L387">            val hiddenIds = getHiddenQuests()</span>
+<span class="nc" id="L388">            val bbox = added.map { it.position }.enclosingBoundingBox()</span>
+<span class="nc" id="L389">            val hiddenPositions = getBlacklistedPositions(bbox)</span>
+<span class="nc bnc" id="L390" title="All 4 branches missed.">            added.filter { it.key !in hiddenIds &amp;&amp; it.position.truncateTo5Decimals() !in hiddenPositions }</span>
+        } else {
+<span class="nc" id="L392">            added</span>
+        }
+
+<span class="nc" id="L395">        listeners.forEach { it.onUpdated(visibleAdded, deletedKeys) }</span>
+<span class="nc" id="L396">    }</span>
+    private fun onInvalidated() {
+<span class="nc" id="L398">        listeners.forEach { it.onInvalidated() }</span>
+<span class="nc" id="L399">    }</span>
+
+    /* ------------------------------------- Hide Listeners ------------------------------------- */
+
+    fun addHideQuestsListener(listener: HideOsmQuestListener) {
+<span class="fc" id="L404">        hideListeners.add(listener)</span>
+<span class="fc" id="L405">    }</span>
+    fun removeHideQuestsListener(listener: HideOsmQuestListener) {
+<span class="nc" id="L407">        hideListeners.remove(listener)</span>
+<span class="nc" id="L408">    }</span>
+
+    private fun onHid(edit: OsmQuestHidden) {
+<span class="nc" id="L411">        hideListeners.forEach { it.onHid(edit) }</span>
+<span class="nc" id="L412">    }</span>
+    private fun onUnhid(edit: OsmQuestHidden) {
+<span class="nc" id="L414">        hideListeners.forEach { it.onUnhid(edit) }</span>
+<span class="nc" id="L415">    }</span>
+    private fun onUnhidAll() {
+<span class="nc" id="L417">        hideListeners.forEach { it.onUnhidAll() }</span>
+<span class="nc" id="L418">    }</span>
+
+    companion object {
+        private const val TAG = &quot;OsmQuestController&quot;
+    }
+}
+
+// the resulting precision is about ~1 meter (see #1089)
+<span class="nc" id="L426">private fun LatLon.truncateTo5Decimals() = LatLon(latitude.truncateTo5Decimals(), longitude.truncateTo5Decimals())</span>
+
+<span class="nc" id="L428">private fun Double.truncateTo5Decimals() = (this * 1e5).toInt().toDouble() / 1e5</span>
+
+/** an index by which a list of quest types can be sorted so that quests that are the slowest to
+ *  evaluate are evaluated first. This is a performance improvement because the evaluation is done
+ *  in parallel on as many threads as there are CPU cores. So if all threads are done except one,
+ *  all have to wait for that one thread. So, better enqueue the expensive work at the beginning. */
+<span class="nc" id="L434">private val OsmElementQuestType&lt;*&gt;.chonkerIndex: Int get() = when (this) {</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">    is AddOpeningHours -&gt; 0 // OpeningHoursParser, extensive filter</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">    is AddSuspectedOneway -&gt; 0 // Download, IO TODO</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">    is CheckExistence -&gt; 1 // FeatureDictionary, extensive filter</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">    is AddHousenumber -&gt; 1 // complex filter</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">    is AddCycleway -&gt; 2 // complex filter</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">    is AddPlaceName -&gt; 2 // FeatureDictionary, extensive filter</span>
+<span class="nc" id="L441">    else -&gt; 10</span>
+<span class="nc" id="L442">}</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

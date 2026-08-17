@@ -1,0 +1,550 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlaybackResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE newpipe</a> &gt; <a href="index.source.html" class="el_package">org.schabi.newpipe.player.resolver</a> &gt; <span class="el_source">PlaybackResolver.java</span></div><h1>PlaybackResolver.java</h1><pre class="source lang-java linenums">package org.schabi.newpipe.player.resolver;
+
+import static org.schabi.newpipe.extractor.stream.AudioStream.UNKNOWN_BITRATE;
+import static org.schabi.newpipe.extractor.stream.VideoStream.RESOLUTION_UNKNOWN;
+import static org.schabi.newpipe.player.helper.PlayerDataSource.LIVE_STREAM_EDGE_GAP_MILLIS;
+
+import android.net.Uri;
+import android.util.Log;
+
+import androidx.annotation.Nullable;
+
+import com.google.android.exoplayer2.C;
+import com.google.android.exoplayer2.MediaItem;
+import com.google.android.exoplayer2.source.MediaSource;
+import com.google.android.exoplayer2.source.ProgressiveMediaSource;
+import com.google.android.exoplayer2.source.dash.DashMediaSource;
+import com.google.android.exoplayer2.source.dash.manifest.DashManifest;
+import com.google.android.exoplayer2.source.dash.manifest.DashManifestParser;
+import com.google.android.exoplayer2.source.hls.HlsMediaSource;
+import com.google.android.exoplayer2.source.smoothstreaming.SsMediaSource;
+import com.google.android.exoplayer2.source.smoothstreaming.manifest.SsManifest;
+import com.google.android.exoplayer2.source.smoothstreaming.manifest.SsManifestParser;
+
+import org.schabi.newpipe.extractor.MediaFormat;
+import org.schabi.newpipe.extractor.ServiceList;
+import org.schabi.newpipe.extractor.services.youtube.ItagItem;
+import org.schabi.newpipe.extractor.services.youtube.dashmanifestcreators.CreationException;
+import org.schabi.newpipe.extractor.services.youtube.dashmanifestcreators.YoutubeOtfDashManifestCreator;
+import org.schabi.newpipe.extractor.services.youtube.dashmanifestcreators.YoutubePostLiveStreamDvrDashManifestCreator;
+import org.schabi.newpipe.extractor.services.youtube.dashmanifestcreators.YoutubeProgressiveDashManifestCreator;
+import org.schabi.newpipe.extractor.stream.AudioStream;
+import org.schabi.newpipe.extractor.stream.DeliveryMethod;
+import org.schabi.newpipe.extractor.stream.Stream;
+import org.schabi.newpipe.extractor.stream.StreamInfo;
+import org.schabi.newpipe.extractor.stream.StreamType;
+import org.schabi.newpipe.extractor.stream.VideoStream;
+import org.schabi.newpipe.player.datasource.NonUriHlsDataSourceFactory;
+import org.schabi.newpipe.player.helper.PlayerDataSource;
+import org.schabi.newpipe.player.mediaitem.MediaItemTag;
+import org.schabi.newpipe.player.mediaitem.StreamInfoTag;
+import org.schabi.newpipe.util.StreamTypeUtil;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Objects;
+
+/**
+ * This interface is just a shorthand for {@link Resolver} with {@link StreamInfo} as source and
+ * {@link MediaSource} as product. It contains many static methods that can be used by classes
+ * implementing this interface, and nothing else.
+ */
+public interface PlaybackResolver extends Resolver&lt;StreamInfo, MediaSource&gt; {
+<span class="nc" id="L54">    String TAG = PlaybackResolver.class.getSimpleName();</span>
+
+
+    //region Cache key generation
+    private static StringBuilder commonCacheKeyOf(final StreamInfo info,
+                                                  final Stream stream,
+                                                  final boolean resolutionOrBitrateUnknown) {
+        // stream info service id
+<span class="nc" id="L62">        final StringBuilder cacheKey = new StringBuilder(info.getServiceId());</span>
+
+        // stream info id
+<span class="nc" id="L65">        cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L66">        cacheKey.append(info.getId());</span>
+
+        // stream id (even if unknown)
+<span class="nc" id="L69">        cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L70">        cacheKey.append(stream.getId());</span>
+
+        // mediaFormat (if not null)
+<span class="nc" id="L73">        final MediaFormat mediaFormat = stream.getFormat();</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (mediaFormat != null) {</span>
+<span class="nc" id="L75">            cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L76">            cacheKey.append(mediaFormat.getName());</span>
+        }
+
+        // content (only if other information is missing)
+        // If the media format and the resolution/bitrate are both missing, then we don't have
+        // enough information to distinguish this stream from other streams.
+        // So, only in that case, we use the content (i.e. url or manifest) to differentiate
+        // between streams.
+        // Note that if the content were used even when other information is present, then two
+        // streams with the same stats but with different contents (e.g. because the url was
+        // refreshed) will be considered different (i.e. with a different cacheKey), making the
+        // cache useless.
+<span class="nc bnc" id="L88" title="All 4 branches missed.">        if (resolutionOrBitrateUnknown &amp;&amp; mediaFormat == null) {</span>
+<span class="nc" id="L89">            cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L90">            cacheKey.append(Objects.hash(stream.getContent(), stream.getManifestUrl()));</span>
+        }
+
+<span class="nc" id="L93">        return cacheKey;</span>
+    }
+
+    /**
+     * Builds the cache key of a {@link VideoStream video stream}.
+     *
+     * &lt;p&gt;
+     * A cache key is unique to the features of the provided video stream, and when possible
+     * independent of &lt;i&gt;transient&lt;/i&gt; parameters (such as the URL of the stream).
+     * This ensures that there are no conflicts, but also that the cache is used as much as
+     * possible: the same cache should be used for two streams which have the same features but
+     * e.g. a different URL, since the URL might have been reloaded in the meantime, but the stream
+     * actually referenced by the URL is still the same.
+     * &lt;/p&gt;
+     *
+     * @param info        the {@link StreamInfo stream info}, to distinguish between streams with
+     *                    the same features but coming from different stream infos
+     * @param videoStream the {@link VideoStream video stream} for which the cache key should be
+     *                    created
+     * @return a key to be used to store the cache of the provided {@link VideoStream video stream}
+     */
+    static String cacheKeyOf(final StreamInfo info, final VideoStream videoStream) {
+<span class="nc" id="L115">        final boolean resolutionUnknown = videoStream.getResolution().equals(RESOLUTION_UNKNOWN);</span>
+<span class="nc" id="L116">        final StringBuilder cacheKey = commonCacheKeyOf(info, videoStream, resolutionUnknown);</span>
+
+        // resolution (if known)
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (!resolutionUnknown) {</span>
+<span class="nc" id="L120">            cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L121">            cacheKey.append(videoStream.getResolution());</span>
+        }
+
+        // isVideoOnly
+<span class="nc" id="L125">        cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L126">        cacheKey.append(videoStream.isVideoOnly());</span>
+
+<span class="nc" id="L128">        return cacheKey.toString();</span>
+    }
+
+    /**
+     * Builds the cache key of an audio stream.
+     *
+     * &lt;p&gt;
+     * A cache key is unique to the features of the provided {@link AudioStream audio stream}, and
+     * when possible independent of &lt;i&gt;transient&lt;/i&gt; parameters (such as the URL of the stream).
+     * This ensures that there are no conflicts, but also that the cache is used as much as
+     * possible: the same cache should be used for two streams which have the same features but
+     * e.g. a different URL, since the URL might have been reloaded in the meantime, but the stream
+     * actually referenced by the URL is still the same.
+     * &lt;/p&gt;
+     *
+     * @param info        the {@link StreamInfo stream info}, to distinguish between streams with
+     *                    the same features but coming from different stream infos
+     * @param audioStream the {@link AudioStream audio stream} for which the cache key should be
+     *                    created
+     * @return a key to be used to store the cache of the provided {@link AudioStream audio stream}
+     */
+    static String cacheKeyOf(final StreamInfo info, final AudioStream audioStream) {
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        final boolean averageBitrateUnknown = audioStream.getAverageBitrate() == UNKNOWN_BITRATE;</span>
+<span class="nc" id="L151">        final StringBuilder cacheKey = commonCacheKeyOf(info, audioStream, averageBitrateUnknown);</span>
+
+        // averageBitrate (if known)
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (!averageBitrateUnknown) {</span>
+<span class="nc" id="L155">            cacheKey.append(&quot; &quot;);</span>
+<span class="nc" id="L156">            cacheKey.append(audioStream.getAverageBitrate());</span>
+        }
+
+<span class="nc" id="L159">        return cacheKey.toString();</span>
+    }
+
+    /**
+     * Use common base type {@link Stream} to handle {@link AudioStream} or {@link VideoStream}
+     * transparently. For more info see {@link #cacheKeyOf(StreamInfo, AudioStream)} or
+     * {@link #cacheKeyOf(StreamInfo, VideoStream)}.
+     *
+     * @param info   the {@link StreamInfo stream info}, to distinguish between streams with
+     *               the same features but coming from different stream infos
+     * @param stream the {@link Stream} ({@link AudioStream} or {@link VideoStream})
+     *               for which the cache key should be created
+     * @return a key to be used to store the cache of the provided {@link Stream}
+     */
+    static String cacheKeyOf(final StreamInfo info, final Stream stream) {
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (stream instanceof AudioStream) {</span>
+<span class="nc" id="L175">            return cacheKeyOf(info, (AudioStream) stream);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        } else if (stream instanceof VideoStream) {</span>
+<span class="nc" id="L177">            return cacheKeyOf(info, (VideoStream) stream);</span>
+        }
+<span class="nc" id="L179">        throw new RuntimeException(&quot;no audio or video stream. That should never happen&quot;);</span>
+    }
+    //endregion
+
+
+    //region Live media sources
+    @Nullable
+    static MediaSource maybeBuildLiveMediaSource(final PlayerDataSource dataSource,
+                                                 final StreamInfo info) {
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (!StreamTypeUtil.isLiveStream(info.getStreamType())) {</span>
+<span class="nc" id="L189">            return null;</span>
+        }
+
+        try {
+<span class="nc" id="L193">            final StreamInfoTag tag = StreamInfoTag.of(info);</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            if (!info.getHlsUrl().isEmpty()) {</span>
+<span class="nc" id="L195">                return buildLiveMediaSource(dataSource, info.getHlsUrl(), C.CONTENT_TYPE_HLS, tag);</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            } else if (!info.getDashMpdUrl().isEmpty()) {</span>
+<span class="nc" id="L197">                return buildLiveMediaSource(</span>
+<span class="nc" id="L198">                        dataSource, info.getDashMpdUrl(), C.CONTENT_TYPE_DASH, tag);</span>
+            }
+<span class="nc" id="L200">        } catch (final Exception e) {</span>
+<span class="nc" id="L201">            Log.w(TAG, &quot;Error when generating live media source, falling back to standard sources&quot;,</span>
+                    e);
+<span class="nc" id="L203">        }</span>
+
+<span class="nc" id="L205">        return null;</span>
+    }
+
+    static MediaSource buildLiveMediaSource(final PlayerDataSource dataSource,
+                                            final String sourceUrl,
+                                            @C.ContentType final int type,
+                                            final MediaItemTag metadata) throws ResolverException {
+        final MediaSource.Factory factory;
+<span class="nc bnc" id="L213" title="All 4 branches missed.">        switch (type) {</span>
+            case C.CONTENT_TYPE_SS:
+<span class="nc" id="L215">                factory = dataSource.getLiveSsMediaSourceFactory();</span>
+<span class="nc" id="L216">                break;</span>
+            case C.CONTENT_TYPE_DASH:
+<span class="nc" id="L218">                factory = dataSource.getLiveDashMediaSourceFactory();</span>
+<span class="nc" id="L219">                break;</span>
+            case C.CONTENT_TYPE_HLS:
+<span class="nc" id="L221">                factory = dataSource.getLiveHlsMediaSourceFactory();</span>
+<span class="nc" id="L222">                break;</span>
+            case C.CONTENT_TYPE_OTHER:
+            case C.CONTENT_TYPE_RTSP:
+            default:
+<span class="nc" id="L226">                throw new ResolverException(&quot;Unsupported type: &quot; + type);</span>
+        }
+
+<span class="nc" id="L229">        return factory.createMediaSource(</span>
+                new MediaItem.Builder()
+<span class="nc" id="L231">                        .setTag(metadata)</span>
+<span class="nc" id="L232">                        .setUri(Uri.parse(sourceUrl))</span>
+<span class="nc" id="L233">                        .setLiveConfiguration(</span>
+                                new MediaItem.LiveConfiguration.Builder()
+<span class="nc" id="L235">                                        .setTargetOffsetMs(LIVE_STREAM_EDGE_GAP_MILLIS)</span>
+<span class="nc" id="L236">                                        .build())</span>
+<span class="nc" id="L237">                        .build());</span>
+    }
+    //endregion
+
+
+    //region Generic media sources
+    static MediaSource buildMediaSource(final PlayerDataSource dataSource,
+                                        final Stream stream,
+                                        final StreamInfo streamInfo,
+                                        final String cacheKey,
+                                        final MediaItemTag metadata) throws ResolverException {
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (streamInfo.getService() == ServiceList.YouTube) {</span>
+<span class="nc" id="L249">            return createYoutubeMediaSource(stream, streamInfo, dataSource, cacheKey, metadata);</span>
+        }
+
+<span class="nc" id="L252">        final DeliveryMethod deliveryMethod = stream.getDeliveryMethod();</span>
+<span class="nc bnc" id="L253" title="All 5 branches missed.">        switch (deliveryMethod) {</span>
+            case PROGRESSIVE_HTTP:
+<span class="nc" id="L255">                return buildProgressiveMediaSource(dataSource, stream, cacheKey, metadata);</span>
+            case DASH:
+<span class="nc" id="L257">                return buildDashMediaSource(dataSource, stream, cacheKey, metadata);</span>
+            case HLS:
+<span class="nc" id="L259">                return buildHlsMediaSource(dataSource, stream, cacheKey, metadata);</span>
+            case SS:
+<span class="nc" id="L261">                return buildSSMediaSource(dataSource, stream, cacheKey, metadata);</span>
+            // Torrent streams are not supported by ExoPlayer
+            default:
+<span class="nc" id="L264">                throw new ResolverException(&quot;Unsupported delivery type: &quot; + deliveryMethod);</span>
+        }
+    }
+
+    private static ProgressiveMediaSource buildProgressiveMediaSource(
+            final PlayerDataSource dataSource,
+            final Stream stream,
+            final String cacheKey,
+            final MediaItemTag metadata) throws ResolverException {
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (!stream.isUrl()) {</span>
+<span class="nc" id="L274">            throw new ResolverException(&quot;Non URI progressive contents are not supported&quot;);</span>
+        }
+<span class="nc" id="L276">        throwResolverExceptionIfUrlNullOrEmpty(stream.getContent());</span>
+<span class="nc" id="L277">        return dataSource.getProgressiveMediaSourceFactory().createMediaSource(</span>
+                new MediaItem.Builder()
+<span class="nc" id="L279">                        .setTag(metadata)</span>
+<span class="nc" id="L280">                        .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L281">                        .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L282">                        .build());</span>
+    }
+
+    private static DashMediaSource buildDashMediaSource(final PlayerDataSource dataSource,
+                                                        final Stream stream,
+                                                        final String cacheKey,
+                                                        final MediaItemTag metadata)
+            throws ResolverException {
+
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        if (stream.isUrl()) {</span>
+<span class="nc" id="L292">            throwResolverExceptionIfUrlNullOrEmpty(stream.getContent());</span>
+<span class="nc" id="L293">            return dataSource.getDashMediaSourceFactory().createMediaSource(</span>
+                    new MediaItem.Builder()
+<span class="nc" id="L295">                            .setTag(metadata)</span>
+<span class="nc" id="L296">                            .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L297">                            .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L298">                            .build());</span>
+        }
+
+        try {
+<span class="nc" id="L302">            return dataSource.getDashMediaSourceFactory().createMediaSource(</span>
+<span class="nc" id="L303">                    createDashManifest(stream.getContent(), stream),</span>
+                    new MediaItem.Builder()
+<span class="nc" id="L305">                            .setTag(metadata)</span>
+<span class="nc" id="L306">                            .setUri(manifestUrlToUri(stream.getManifestUrl()))</span>
+<span class="nc" id="L307">                            .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L308">                            .build());</span>
+<span class="nc" id="L309">        } catch (final IOException e) {</span>
+<span class="nc" id="L310">            throw new ResolverException(</span>
+                    &quot;Could not create a DASH media source/manifest from the manifest text&quot;, e);
+        }
+    }
+
+    private static DashManifest createDashManifest(final String manifestContent,
+                                                   final Stream stream) throws IOException {
+<span class="nc" id="L317">        return new DashManifestParser().parse(manifestUrlToUri(stream.getManifestUrl()),</span>
+<span class="nc" id="L318">                new ByteArrayInputStream(manifestContent.getBytes(StandardCharsets.UTF_8)));</span>
+    }
+
+    private static HlsMediaSource buildHlsMediaSource(final PlayerDataSource dataSource,
+                                                      final Stream stream,
+                                                      final String cacheKey,
+                                                      final MediaItemTag metadata)
+            throws ResolverException {
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (stream.isUrl()) {</span>
+<span class="nc" id="L327">            throwResolverExceptionIfUrlNullOrEmpty(stream.getContent());</span>
+<span class="nc" id="L328">            return dataSource.getHlsMediaSourceFactory(null).createMediaSource(</span>
+                    new MediaItem.Builder()
+<span class="nc" id="L330">                            .setTag(metadata)</span>
+<span class="nc" id="L331">                            .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L332">                            .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L333">                            .build());</span>
+        }
+
+<span class="nc" id="L336">        final NonUriHlsDataSourceFactory.Builder hlsDataSourceFactoryBuilder =</span>
+                new NonUriHlsDataSourceFactory.Builder();
+<span class="nc" id="L338">        hlsDataSourceFactoryBuilder.setPlaylistString(stream.getContent());</span>
+
+<span class="nc" id="L340">        return dataSource.getHlsMediaSourceFactory(hlsDataSourceFactoryBuilder)</span>
+<span class="nc" id="L341">                .createMediaSource(new MediaItem.Builder()</span>
+<span class="nc" id="L342">                        .setTag(metadata)</span>
+<span class="nc" id="L343">                        .setUri(manifestUrlToUri(stream.getManifestUrl()))</span>
+<span class="nc" id="L344">                        .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L345">                        .build());</span>
+    }
+
+    private static SsMediaSource buildSSMediaSource(final PlayerDataSource dataSource,
+                                                    final Stream stream,
+                                                    final String cacheKey,
+                                                    final MediaItemTag metadata)
+            throws ResolverException {
+<span class="nc bnc" id="L353" title="All 2 branches missed.">        if (stream.isUrl()) {</span>
+<span class="nc" id="L354">            throwResolverExceptionIfUrlNullOrEmpty(stream.getContent());</span>
+<span class="nc" id="L355">            return dataSource.getSSMediaSourceFactory().createMediaSource(</span>
+                    new MediaItem.Builder()
+<span class="nc" id="L357">                            .setTag(metadata)</span>
+<span class="nc" id="L358">                            .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L359">                            .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L360">                            .build());</span>
+        }
+
+<span class="nc" id="L363">        final Uri manifestUri = manifestUrlToUri(stream.getManifestUrl());</span>
+
+        final SsManifest smoothStreamingManifest;
+        try {
+<span class="nc" id="L367">            final ByteArrayInputStream smoothStreamingManifestInput = new ByteArrayInputStream(</span>
+<span class="nc" id="L368">                    stream.getContent().getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L369">            smoothStreamingManifest = new SsManifestParser().parse(manifestUri,</span>
+                    smoothStreamingManifestInput);
+<span class="nc" id="L371">        } catch (final IOException e) {</span>
+<span class="nc" id="L372">            throw new ResolverException(&quot;Error when parsing manual SS manifest&quot;, e);</span>
+<span class="nc" id="L373">        }</span>
+
+<span class="nc" id="L375">        return dataSource.getSSMediaSourceFactory().createMediaSource(</span>
+                smoothStreamingManifest,
+                new MediaItem.Builder()
+<span class="nc" id="L378">                        .setTag(metadata)</span>
+<span class="nc" id="L379">                        .setUri(manifestUri)</span>
+<span class="nc" id="L380">                        .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L381">                        .build());</span>
+    }
+    //endregion
+
+
+    //region YouTube media sources
+    private static MediaSource createYoutubeMediaSource(final Stream stream,
+                                                        final StreamInfo streamInfo,
+                                                        final PlayerDataSource dataSource,
+                                                        final String cacheKey,
+                                                        final MediaItemTag metadata)
+            throws ResolverException {
+<span class="nc bnc" id="L393" title="All 4 branches missed.">        if (!(stream instanceof AudioStream || stream instanceof VideoStream)) {</span>
+<span class="nc" id="L394">            throw new ResolverException(&quot;Generation of YouTube DASH manifest for &quot;</span>
+<span class="nc" id="L395">                    + stream.getClass().getSimpleName() + &quot; is not supported&quot;);</span>
+        }
+
+<span class="nc" id="L398">        final StreamType streamType = streamInfo.getStreamType();</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        if (streamType == StreamType.VIDEO_STREAM) {</span>
+<span class="nc" id="L400">            return createYoutubeMediaSourceOfVideoStreamType(dataSource, stream, streamInfo,</span>
+                    cacheKey, metadata);
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        } else if (streamType == StreamType.POST_LIVE_STREAM) {</span>
+            // If the content is not an URL, uses the DASH delivery method and if the stream type
+            // of the stream is a post live stream, it means that the content is an ended
+            // livestream so we need to generate the manifest corresponding to the content
+            // (which is the last segment of the stream)
+
+            try {
+<span class="nc" id="L409">                final ItagItem itagItem = Objects.requireNonNull(stream.getItagItem());</span>
+<span class="nc" id="L410">                final String manifestString = YoutubePostLiveStreamDvrDashManifestCreator</span>
+<span class="nc" id="L411">                        .fromPostLiveStreamDvrStreamingUrl(stream.getContent(),</span>
+                                itagItem,
+<span class="nc" id="L413">                                itagItem.getTargetDurationSec(),</span>
+<span class="nc" id="L414">                                streamInfo.getDuration());</span>
+<span class="nc" id="L415">                return buildYoutubeManualDashMediaSource(dataSource,</span>
+<span class="nc" id="L416">                        createDashManifest(manifestString, stream), stream, cacheKey,</span>
+                        metadata);
+<span class="nc" id="L418">            } catch (final CreationException | IOException | NullPointerException e) {</span>
+<span class="nc" id="L419">                throw new ResolverException(</span>
+                        &quot;Error when generating the DASH manifest of YouTube ended live stream&quot;, e);
+            }
+        } else {
+<span class="nc" id="L423">            throw new ResolverException(</span>
+                    &quot;DASH manifest generation of YouTube livestreams is not supported&quot;);
+        }
+    }
+
+    private static MediaSource createYoutubeMediaSourceOfVideoStreamType(
+            final PlayerDataSource dataSource,
+            final Stream stream,
+            final StreamInfo streamInfo,
+            final String cacheKey,
+            final MediaItemTag metadata) throws ResolverException {
+<span class="nc" id="L434">        final DeliveryMethod deliveryMethod = stream.getDeliveryMethod();</span>
+<span class="nc bnc" id="L435" title="All 4 branches missed.">        switch (deliveryMethod) {</span>
+            case PROGRESSIVE_HTTP:
+<span class="nc bnc" id="L437" title="All 6 branches missed.">                if ((stream instanceof VideoStream &amp;&amp; ((VideoStream) stream).isVideoOnly())</span>
+                        || stream instanceof AudioStream) {
+                    try {
+<span class="nc" id="L440">                        final String manifestString = YoutubeProgressiveDashManifestCreator</span>
+<span class="nc" id="L441">                                .fromProgressiveStreamingUrl(stream.getContent(),</span>
+<span class="nc" id="L442">                                        Objects.requireNonNull(stream.getItagItem()),</span>
+<span class="nc" id="L443">                                        streamInfo.getDuration());</span>
+<span class="nc" id="L444">                        return buildYoutubeManualDashMediaSource(dataSource,</span>
+<span class="nc" id="L445">                                createDashManifest(manifestString, stream), stream, cacheKey,</span>
+                                metadata);
+<span class="nc" id="L447">                    } catch (final CreationException | IOException | NullPointerException e) {</span>
+<span class="nc" id="L448">                        Log.w(TAG, &quot;Error when generating or parsing DASH manifest of &quot;</span>
+                                + &quot;YouTube progressive stream, falling back to a &quot;
+                                + &quot;ProgressiveMediaSource.&quot;, e);
+<span class="nc" id="L451">                        return buildYoutubeProgressiveMediaSource(dataSource, stream, cacheKey,</span>
+                                metadata);
+                    }
+                } else {
+                    // Legacy progressive streams, subtitles are handled by
+                    // VideoPlaybackResolver
+<span class="nc" id="L457">                    return buildYoutubeProgressiveMediaSource(dataSource, stream, cacheKey,</span>
+                            metadata);
+                }
+            case DASH:
+                // If the content is not a URL, uses the DASH delivery method and if the stream
+                // type of the stream is a video stream, it means the content is an OTF stream
+                // so we need to generate the manifest corresponding to the content (which is
+                // the base URL of the OTF stream).
+
+                try {
+<span class="nc" id="L467">                    final String manifestString = YoutubeOtfDashManifestCreator</span>
+<span class="nc" id="L468">                            .fromOtfStreamingUrl(stream.getContent(),</span>
+<span class="nc" id="L469">                                    Objects.requireNonNull(stream.getItagItem()),</span>
+<span class="nc" id="L470">                                    streamInfo.getDuration());</span>
+<span class="nc" id="L471">                    return buildYoutubeManualDashMediaSource(dataSource,</span>
+<span class="nc" id="L472">                            createDashManifest(manifestString, stream), stream, cacheKey,</span>
+                            metadata);
+<span class="nc" id="L474">                } catch (final CreationException | IOException | NullPointerException e) {</span>
+<span class="nc" id="L475">                    Log.e(TAG,</span>
+                            &quot;Error when generating the DASH manifest of YouTube OTF stream&quot;, e);
+<span class="nc" id="L477">                    throw new ResolverException(</span>
+                            &quot;Error when generating the DASH manifest of YouTube OTF stream&quot;, e);
+                }
+            case HLS:
+<span class="nc" id="L481">                return dataSource.getYoutubeHlsMediaSourceFactory().createMediaSource(</span>
+                        new MediaItem.Builder()
+<span class="nc" id="L483">                                .setTag(metadata)</span>
+<span class="nc" id="L484">                                .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L485">                                .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L486">                                .build());</span>
+            default:
+<span class="nc" id="L488">                throw new ResolverException(&quot;Unsupported delivery method for YouTube contents: &quot;</span>
+                        + deliveryMethod);
+        }
+    }
+
+    private static DashMediaSource buildYoutubeManualDashMediaSource(
+            final PlayerDataSource dataSource,
+            final DashManifest dashManifest,
+            final Stream stream,
+            final String cacheKey,
+            final MediaItemTag metadata) {
+<span class="nc" id="L499">        return dataSource.getYoutubeDashMediaSourceFactory().createMediaSource(dashManifest,</span>
+                new MediaItem.Builder()
+<span class="nc" id="L501">                        .setTag(metadata)</span>
+<span class="nc" id="L502">                        .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L503">                        .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L504">                        .build());</span>
+    }
+
+    private static ProgressiveMediaSource buildYoutubeProgressiveMediaSource(
+            final PlayerDataSource dataSource,
+            final Stream stream,
+            final String cacheKey,
+            final MediaItemTag metadata) {
+<span class="nc" id="L512">        return dataSource.getYoutubeProgressiveMediaSourceFactory()</span>
+<span class="nc" id="L513">                .createMediaSource(new MediaItem.Builder()</span>
+<span class="nc" id="L514">                        .setTag(metadata)</span>
+<span class="nc" id="L515">                        .setUri(Uri.parse(stream.getContent()))</span>
+<span class="nc" id="L516">                        .setCustomCacheKey(cacheKey)</span>
+<span class="nc" id="L517">                        .build());</span>
+    }
+    //endregion
+
+
+    //region Utils
+    private static Uri manifestUrlToUri(final String manifestUrl) {
+<span class="nc" id="L524">        return Uri.parse(Objects.requireNonNullElse(manifestUrl, &quot;&quot;));</span>
+    }
+
+    private static void throwResolverExceptionIfUrlNullOrEmpty(@Nullable final String url)
+            throws ResolverException {
+<span class="nc bnc" id="L529" title="All 2 branches missed.">        if (url == null) {</span>
+<span class="nc" id="L530">            throw new ResolverException(&quot;Null stream URL&quot;);</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">        } else if (url.isEmpty()) {</span>
+<span class="nc" id="L532">            throw new ResolverException(&quot;Empty stream URL&quot;);</span>
+        }
+<span class="nc" id="L534">    }</span>
+    //endregion
+
+
+    //region Resolver exception
+    final class ResolverException extends Exception {
+        public ResolverException(final String message) {
+<span class="nc" id="L541">            super(message);</span>
+<span class="nc" id="L542">        }</span>
+
+        public ResolverException(final String message, final Throwable cause) {
+<span class="nc" id="L545">            super(message, cause);</span>
+<span class="nc" id="L546">        }</span>
+    }
+    //endregion
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

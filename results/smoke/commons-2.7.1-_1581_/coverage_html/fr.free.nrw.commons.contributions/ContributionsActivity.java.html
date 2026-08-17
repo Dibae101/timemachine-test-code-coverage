@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContributionsActivity.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE commons</a> &gt; <a href="index.source.html" class="el_package">fr.free.nrw.commons.contributions</a> &gt; <span class="el_source">ContributionsActivity.java</span></div><h1>ContributionsActivity.java</h1><pre class="source lang-java linenums">package fr.free.nrw.commons.contributions;
+
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.database.DataSetObserver;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.support.v4.app.FragmentManager;
+import android.support.v4.app.LoaderManager;
+import android.support.v4.content.CursorLoader;
+import android.support.v4.content.Loader;
+import android.support.v4.widget.CursorAdapter;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.widget.Adapter;
+import android.widget.AdapterView;
+
+import java.util.ArrayList;
+
+import javax.inject.Inject;
+import javax.inject.Named;
+
+import butterknife.ButterKnife;
+import fr.free.nrw.commons.BuildConfig;
+import fr.free.nrw.commons.HandlerService;
+import fr.free.nrw.commons.Media;
+import fr.free.nrw.commons.R;
+import fr.free.nrw.commons.auth.AuthenticatedActivity;
+import fr.free.nrw.commons.auth.SessionManager;
+import fr.free.nrw.commons.media.MediaDetailPagerFragment;
+import fr.free.nrw.commons.mwapi.MediaWikiApi;
+import fr.free.nrw.commons.settings.Prefs;
+import fr.free.nrw.commons.upload.UploadService;
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.schedulers.Schedulers;
+import timber.log.Timber;
+
+import static android.content.ContentResolver.requestSync;
+import static fr.free.nrw.commons.contributions.Contribution.STATE_FAILED;
+import static fr.free.nrw.commons.contributions.ContributionDao.Table.ALL_FIELDS;
+import static fr.free.nrw.commons.contributions.ContributionsContentProvider.BASE_URI;
+import static fr.free.nrw.commons.settings.Prefs.UPLOADS_SHOWING;
+
+<span class="nc" id="L50">public  class       ContributionsActivity</span>
+        extends     AuthenticatedActivity
+        implements  LoaderManager.LoaderCallbacks&lt;Cursor&gt;,
+                    AdapterView.OnItemClickListener,
+                    MediaDetailPagerFragment.MediaDetailProvider,
+                    FragmentManager.OnBackStackChangedListener,
+                    ContributionsListFragment.SourceRefresher {
+
+    @Inject MediaWikiApi mediaWikiApi;
+    @Inject SessionManager sessionManager;
+    @Inject @Named(&quot;default_preferences&quot;) SharedPreferences prefs;
+    @Inject ContributionDao contributionDao;
+
+    private Cursor allContributions;
+    private ContributionsListFragment contributionsList;
+    private MediaDetailPagerFragment mediaDetails;
+    private UploadService uploadService;
+    private boolean isUploadServiceConnected;
+<span class="nc" id="L68">    private ArrayList&lt;DataSetObserver&gt; observersWaitingForLoad = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L70">    private CompositeDisposable compositeDisposable = new CompositeDisposable();</span>
+
+<span class="nc" id="L72">    private ServiceConnection uploadServiceConnection = new ServiceConnection() {</span>
+        @Override
+        public void onServiceConnected(ComponentName componentName, IBinder binder) {
+<span class="nc" id="L75">            uploadService = (UploadService) ((HandlerService.HandlerServiceLocalBinder) binder)</span>
+<span class="nc" id="L76">                    .getService();</span>
+<span class="nc" id="L77">            isUploadServiceConnected = true;</span>
+<span class="nc" id="L78">        }</span>
+
+        @Override
+        public void onServiceDisconnected(ComponentName componentName) {
+            // this should never happen
+<span class="nc" id="L83">            Timber.e(new RuntimeException(&quot;UploadService died but the rest of the process did not!&quot;));</span>
+<span class="nc" id="L84">        }</span>
+    };
+
+    @Override
+    protected void onDestroy() {
+<span class="nc" id="L89">        compositeDisposable.clear();</span>
+<span class="nc" id="L90">        getSupportFragmentManager().removeOnBackStackChangedListener(this);</span>
+<span class="nc" id="L91">        super.onDestroy();</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        if (isUploadServiceConnected) {</span>
+<span class="nc" id="L93">            unbindService(uploadServiceConnection);</span>
+        }
+<span class="nc" id="L95">    }</span>
+
+    @Override
+    protected void onResume() {
+<span class="nc" id="L99">        super.onResume();</span>
+<span class="nc" id="L100">        boolean isSettingsChanged = prefs.getBoolean(Prefs.IS_CONTRIBUTION_COUNT_CHANGED, false);</span>
+<span class="nc" id="L101">        prefs.edit().putBoolean(Prefs.IS_CONTRIBUTION_COUNT_CHANGED, false).apply();</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if (isSettingsChanged) {</span>
+<span class="nc" id="L103">            refreshSource();</span>
+        }
+<span class="nc" id="L105">    }</span>
+
+    @Override
+    protected void onAuthCookieAcquired(String authCookie) {
+        // Do a sync everytime we get here!
+<span class="nc" id="L110">        requestSync(sessionManager.getCurrentAccount(), ContributionsContentProvider.CONTRIBUTION_AUTHORITY, new Bundle());</span>
+<span class="nc" id="L111">        Intent uploadServiceIntent = new Intent(this, UploadService.class);</span>
+<span class="nc" id="L112">        uploadServiceIntent.setAction(UploadService.ACTION_START_SERVICE);</span>
+<span class="nc" id="L113">        startService(uploadServiceIntent);</span>
+<span class="nc" id="L114">        bindService(uploadServiceIntent, uploadServiceConnection, Context.BIND_AUTO_CREATE);</span>
+
+<span class="nc" id="L116">        allContributions = contributionDao.loadAllContributions();</span>
+
+<span class="nc" id="L118">        getSupportLoaderManager().initLoader(0, null, this);</span>
+<span class="nc" id="L119">    }</span>
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+<span class="nc" id="L123">        super.onCreate(savedInstanceState);</span>
+<span class="nc" id="L124">        setContentView(R.layout.activity_contributions);</span>
+<span class="nc" id="L125">        ButterKnife.bind(this);</span>
+
+        // Activity can call methods in the fragment by acquiring a
+        // reference to the Fragment from FragmentManager, using findFragmentById()
+<span class="nc" id="L129">        FragmentManager supportFragmentManager = getSupportFragmentManager();</span>
+<span class="nc" id="L130">        contributionsList = (ContributionsListFragment)supportFragmentManager</span>
+<span class="nc" id="L131">                .findFragmentById(R.id.contributionsListFragment);</span>
+
+<span class="nc" id="L133">        supportFragmentManager.addOnBackStackChangedListener(this);</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if (savedInstanceState != null) {</span>
+<span class="nc" id="L135">            mediaDetails = (MediaDetailPagerFragment)supportFragmentManager</span>
+<span class="nc" id="L136">                    .findFragmentById(R.id.contributionsFragmentContainer);</span>
+
+<span class="nc" id="L138">            getSupportLoaderManager().initLoader(0, null, this);</span>
+        }
+<span class="nc" id="L140">        requestAuthToken();</span>
+<span class="nc" id="L141">        initDrawer();</span>
+<span class="nc" id="L142">        setTitle(getString(R.string.title_activity_contributions));</span>
+
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if(!BuildConfig.FLAVOR.equalsIgnoreCase(&quot;beta&quot;)){</span>
+<span class="nc" id="L145">            setUploadCount();</span>
+        }
+
+<span class="nc" id="L148">    }</span>
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+<span class="nc" id="L152">        super.onSaveInstanceState(outState);</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">        boolean mediaDetailsVisible = mediaDetails != null &amp;&amp; mediaDetails.isVisible();</span>
+<span class="nc" id="L154">        outState.putBoolean(&quot;mediaDetailsVisible&quot;, mediaDetailsVisible);</span>
+<span class="nc" id="L155">    }</span>
+
+    /**
+     * Replace whatever is in the current contributionsFragmentContainer view with
+     * mediaDetailPagerFragment, and preserve previous state in back stack.
+     * Called when user selects a contribution.
+     */
+    private void showDetail(int i) {
+<span class="nc bnc" id="L163" title="All 4 branches missed.">        if (mediaDetails == null || !mediaDetails.isVisible()) {</span>
+<span class="nc" id="L164">            mediaDetails = new MediaDetailPagerFragment();</span>
+<span class="nc" id="L165">            FragmentManager supportFragmentManager = getSupportFragmentManager();</span>
+<span class="nc" id="L166">            supportFragmentManager</span>
+<span class="nc" id="L167">                    .beginTransaction()</span>
+<span class="nc" id="L168">                    .replace(R.id.contributionsFragmentContainer, mediaDetails)</span>
+<span class="nc" id="L169">                    .addToBackStack(null)</span>
+<span class="nc" id="L170">                    .commit();</span>
+<span class="nc" id="L171">            supportFragmentManager.executePendingTransactions();</span>
+        }
+<span class="nc" id="L173">        mediaDetails.showImage(i);</span>
+<span class="nc" id="L174">    }</span>
+
+    public void retryUpload(int i) {
+<span class="nc" id="L177">        allContributions.moveToPosition(i);</span>
+<span class="nc" id="L178">        Contribution c = contributionDao.fromCursor(allContributions);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (c.getState() == STATE_FAILED) {</span>
+<span class="nc" id="L180">            uploadService.queue(UploadService.ACTION_UPLOAD_FILE, c);</span>
+<span class="nc" id="L181">            Timber.d(&quot;Restarting for %s&quot;, c.toString());</span>
+        } else {
+<span class="nc" id="L183">            Timber.d(&quot;Skipping re-upload for non-failed %s&quot;, c.toString());</span>
+        }
+<span class="nc" id="L185">    }</span>
+
+    public void deleteUpload(int i) {
+<span class="nc" id="L188">        allContributions.moveToPosition(i);</span>
+<span class="nc" id="L189">        Contribution c = contributionDao.fromCursor(allContributions);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (c.getState() == STATE_FAILED) {</span>
+<span class="nc" id="L191">            Timber.d(&quot;Deleting failed contrib %s&quot;, c.toString());</span>
+<span class="nc" id="L192">            contributionDao.delete(c);</span>
+        } else {
+<span class="nc" id="L194">            Timber.d(&quot;Skipping deletion for non-failed contrib %s&quot;, c.toString());</span>
+        }
+<span class="nc" id="L196">    }</span>
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        switch (item.getItemId()) {</span>
+            case android.R.id.home:
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                if (mediaDetails.isVisible()) {</span>
+<span class="nc" id="L203">                    getSupportFragmentManager().popBackStack();</span>
+                }
+<span class="nc" id="L205">                return true;</span>
+            default:
+<span class="nc" id="L207">                return super.onOptionsItemSelected(item);</span>
+        }
+    }
+
+    @Override
+    protected void onAuthFailure() {
+<span class="nc" id="L213">        finish(); // If authentication failed, we just exit</span>
+<span class="nc" id="L214">    }</span>
+
+    @Override
+    public void onItemClick(AdapterView&lt;?&gt; adapterView, View view, int position, long item) {
+<span class="nc" id="L218">        showDetail(position);</span>
+<span class="nc" id="L219">    }</span>
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+<span class="nc" id="L223">        return super.onCreateOptionsMenu(menu);</span>
+    }
+
+    @Override
+    public Loader&lt;Cursor&gt; onCreateLoader(int i, Bundle bundle) {
+<span class="nc" id="L228">        int uploads = prefs.getInt(UPLOADS_SHOWING, 100);</span>
+<span class="nc" id="L229">        return new CursorLoader(this, BASE_URI,</span>
+                ALL_FIELDS, &quot;&quot;, null,
+                ContributionDao.CONTRIBUTION_SORT + &quot;LIMIT &quot; + uploads);
+    }
+
+    @Override
+    public void onLoadFinished(Loader&lt;Cursor&gt; cursorLoader, Cursor cursor) {
+<span class="nc" id="L236">        contributionsList.changeProgressBarVisibility(false);</span>
+
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (contributionsList.getAdapter() == null) {</span>
+<span class="nc" id="L239">            contributionsList.setAdapter(new ContributionsListAdapter(getApplicationContext(),</span>
+                    cursor, 0, contributionDao));
+        } else {
+<span class="nc" id="L242">            ((CursorAdapter) contributionsList.getAdapter()).swapCursor(cursor);</span>
+        }
+
+<span class="nc" id="L245">        contributionsList.clearSyncMessage();</span>
+<span class="nc" id="L246">        notifyAndMigrateDataSetObservers();</span>
+<span class="nc" id="L247">    }</span>
+
+    @Override
+    public void onLoaderReset(Loader&lt;Cursor&gt; cursorLoader) {
+<span class="nc" id="L251">        ((CursorAdapter) contributionsList.getAdapter()).swapCursor(null);</span>
+<span class="nc" id="L252">    }</span>
+
+    //FIXME: Potential cause of wrong image display bug
+    @Override
+    public Media getMediaAtPosition(int i) {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">        if (contributionsList.getAdapter() == null) {</span>
+            // not yet ready to return data
+<span class="nc" id="L259">            return null;</span>
+        } else {
+<span class="nc" id="L261">            return contributionDao.fromCursor((Cursor) contributionsList.getAdapter().getItem(i));</span>
+        }
+    }
+
+    @Override
+    public int getTotalMediaCount() {
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (contributionsList.getAdapter() == null) {</span>
+<span class="nc" id="L268">            return 0;</span>
+        }
+<span class="nc" id="L270">        return contributionsList.getAdapter().getCount();</span>
+    }
+
+    @SuppressWarnings(&quot;ConstantConditions&quot;)
+    private void setUploadCount() {
+<span class="nc" id="L275">        compositeDisposable.add(mediaWikiApi</span>
+<span class="nc" id="L276">                .getUploadCount(sessionManager.getCurrentAccount().name)</span>
+<span class="nc" id="L277">                .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L278">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L279">                .subscribe(</span>
+<span class="nc" id="L280">                        uploadCount -&gt; getSupportActionBar().setSubtitle(getResources()</span>
+<span class="nc" id="L281">                                .getQuantityString(R.plurals.contributions_subtitle,</span>
+<span class="nc" id="L282">                                        uploadCount, uploadCount)),</span>
+<span class="nc" id="L283">                        t -&gt; Timber.e(t, &quot;Fetching upload count failed&quot;)</span>
+                ));
+<span class="nc" id="L285">    }</span>
+
+    public void betaSetUploadCount(int betaUploadCount){
+<span class="nc" id="L288">        getSupportActionBar().setSubtitle(getResources()</span>
+<span class="nc" id="L289">                .getQuantityString(R.plurals.contributions_subtitle, betaUploadCount, betaUploadCount));</span>
+<span class="nc" id="L290">    }</span>
+
+
+    @Override
+    public void notifyDatasetChanged() {
+        // Do nothing for now
+<span class="nc" id="L296">    }</span>
+
+    private void notifyAndMigrateDataSetObservers() {
+<span class="nc" id="L299">        Adapter adapter = contributionsList.getAdapter();</span>
+
+        // First, move the observers over to the adapter now that we have it.
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        for (DataSetObserver observer : observersWaitingForLoad) {</span>
+<span class="nc" id="L303">            adapter.registerDataSetObserver(observer);</span>
+<span class="nc" id="L304">        }</span>
+<span class="nc" id="L305">        observersWaitingForLoad.clear();</span>
+
+        // Now fire off a first notification...
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        for (DataSetObserver observer : observersWaitingForLoad) {</span>
+<span class="nc" id="L309">            observer.onChanged();</span>
+<span class="nc" id="L310">        }</span>
+<span class="nc" id="L311">    }</span>
+
+    @Override
+    public void registerDataSetObserver(DataSetObserver observer) {
+<span class="nc" id="L315">        Adapter adapter = contributionsList.getAdapter();</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (adapter == null) {</span>
+<span class="nc" id="L317">            observersWaitingForLoad.add(observer);</span>
+        } else {
+<span class="nc" id="L319">            adapter.registerDataSetObserver(observer);</span>
+        }
+<span class="nc" id="L321">    }</span>
+
+    @Override
+    public void unregisterDataSetObserver(DataSetObserver observer) {
+<span class="nc" id="L325">        Adapter adapter = contributionsList.getAdapter();</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (adapter == null) {</span>
+<span class="nc" id="L327">            observersWaitingForLoad.remove(observer);</span>
+        } else {
+<span class="nc" id="L329">            adapter.unregisterDataSetObserver(observer);</span>
+        }
+<span class="nc" id="L331">    }</span>
+
+    @Override
+    public void onBackStackChanged() {
+<span class="nc" id="L335">        initBackButton();</span>
+<span class="nc" id="L336">    }</span>
+
+    @Override
+    public void refreshSource() {
+<span class="nc" id="L340">        getSupportLoaderManager().restartLoader(0, null, this);</span>
+<span class="nc" id="L341">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FeedLoadManager.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE newpipe</a> &gt; <a href="index.source.html" class="el_package">org.schabi.newpipe.local.feed.service</a> &gt; <span class="el_source">FeedLoadManager.kt</span></div><h1>FeedLoadManager.kt</h1><pre class="source lang-java linenums">package org.schabi.newpipe.local.feed.service
+
+import android.content.Context
+import androidx.preference.PreferenceManager
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
+import io.reactivex.rxjava3.core.Completable
+import io.reactivex.rxjava3.core.Flowable
+import io.reactivex.rxjava3.core.Notification
+import io.reactivex.rxjava3.core.Single
+import io.reactivex.rxjava3.functions.Consumer
+import io.reactivex.rxjava3.processors.PublishProcessor
+import io.reactivex.rxjava3.schedulers.Schedulers
+import org.schabi.newpipe.R
+import org.schabi.newpipe.database.feed.model.FeedGroupEntity
+import org.schabi.newpipe.database.subscription.NotificationMode
+import org.schabi.newpipe.extractor.ListInfo
+import org.schabi.newpipe.extractor.stream.StreamInfoItem
+import org.schabi.newpipe.local.feed.FeedDatabaseManager
+import org.schabi.newpipe.local.subscription.SubscriptionManager
+import org.schabi.newpipe.util.ExtractorHelper
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+<span class="nc" id="L26">class FeedLoadManager(private val context: Context) {</span>
+
+<span class="nc" id="L28">    private val subscriptionManager = SubscriptionManager(context)</span>
+<span class="nc" id="L29">    private val feedDatabaseManager = FeedDatabaseManager(context)</span>
+
+<span class="nc" id="L31">    private val notificationUpdater = PublishProcessor.create&lt;String&gt;()</span>
+<span class="nc" id="L32">    private val currentProgress = AtomicInteger(-1)</span>
+<span class="nc" id="L33">    private val maxProgress = AtomicInteger(-1)</span>
+<span class="nc" id="L34">    private val cancelSignal = AtomicBoolean()</span>
+<span class="nc" id="L35">    private val feedResultsHolder = FeedResultsHolder()</span>
+
+<span class="nc" id="L37">    val notification: Flowable&lt;FeedLoadState&gt; = notificationUpdater.map { description -&gt;</span>
+<span class="nc" id="L38">        FeedLoadState(description, maxProgress.get(), currentProgress.get())</span>
+    }
+
+    /**
+     * Start checking for new streams of a subscription group.
+     * @param groupId The ID of the subscription group to load. When using
+     * [FeedGroupEntity.GROUP_ALL_ID], all subscriptions are loaded. When using
+     * [GROUP_NOTIFICATION_ENABLED], only subscriptions with enabled notifications for new streams
+     * are loaded. Using an id of a group created by the user results in that specific group to be
+     * loaded.
+     * @param ignoreOutdatedThreshold When `false`, only subscriptions which have not been updated
+     * within the `feed_update_threshold` are checked for updates. This threshold can be set by
+     * the user in the app settings. When `true`, all subscriptions are checked for new streams.
+     */
+<span class="nc" id="L52">    fun startLoading(</span>
+<span class="nc" id="L53">        groupId: Long = FeedGroupEntity.GROUP_ALL_ID,</span>
+<span class="nc" id="L54">        ignoreOutdatedThreshold: Boolean = false,</span>
+    ): Single&lt;List&lt;Notification&lt;FeedUpdateInfo&gt;&gt;&gt; {
+<span class="nc" id="L56">        val defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)</span>
+<span class="nc" id="L57">        val useFeedExtractor = defaultSharedPreferences.getBoolean(</span>
+<span class="nc" id="L58">            context.getString(R.string.feed_use_dedicated_fetch_method_key),</span>
+<span class="nc" id="L59">            false</span>
+        )
+
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        val outdatedThreshold = if (ignoreOutdatedThreshold) {</span>
+<span class="nc" id="L63">            OffsetDateTime.now(ZoneOffset.UTC)</span>
+        } else {
+<span class="nc" id="L65">            val thresholdOutdatedSeconds = (</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                defaultSharedPreferences.getString(</span>
+<span class="nc" id="L67">                    context.getString(R.string.feed_update_threshold_key),</span>
+<span class="nc" id="L68">                    context.getString(R.string.feed_update_threshold_default_value)</span>
+<span class="nc" id="L69">                ) ?: context.getString(R.string.feed_update_threshold_default_value)</span>
+<span class="nc" id="L70">                ).toInt()</span>
+<span class="nc" id="L71">            OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(thresholdOutdatedSeconds.toLong())</span>
+        }
+
+        /**
+         * subscriptions which have not been updated within the feed updated threshold
+         */
+<span class="nc" id="L77">        val outdatedSubscriptions = when (groupId) {</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            FeedGroupEntity.GROUP_ALL_ID -&gt; feedDatabaseManager.outdatedSubscriptions(outdatedThreshold)</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            GROUP_NOTIFICATION_ENABLED -&gt; feedDatabaseManager.outdatedSubscriptionsWithNotificationMode(</span>
+<span class="nc" id="L80">                outdatedThreshold, NotificationMode.ENABLED</span>
+            )
+<span class="nc" id="L82">            else -&gt; feedDatabaseManager.outdatedSubscriptionsForGroup(groupId, outdatedThreshold)</span>
+        }
+
+<span class="nc" id="L85">        return outdatedSubscriptions</span>
+<span class="nc" id="L86">            .take(1)</span>
+<span class="nc" id="L87">            .doOnNext {</span>
+<span class="nc" id="L88">                currentProgress.set(0)</span>
+<span class="nc" id="L89">                maxProgress.set(it.size)</span>
+<span class="nc" id="L90">            }</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            .filter { it.isNotEmpty() }</span>
+<span class="nc" id="L92">            .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L93">            .doOnNext {</span>
+<span class="nc" id="L94">                notificationUpdater.onNext(&quot;&quot;)</span>
+<span class="nc" id="L95">                broadcastProgress()</span>
+<span class="nc" id="L96">            }</span>
+<span class="nc" id="L97">            .observeOn(Schedulers.io())</span>
+<span class="nc" id="L98">            .flatMap { Flowable.fromIterable(it) }</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            .takeWhile { !cancelSignal.get() }</span>
+<span class="nc" id="L100">            .parallel(PARALLEL_EXTRACTIONS, PARALLEL_EXTRACTIONS * 2)</span>
+<span class="nc" id="L101">            .runOn(Schedulers.io(), PARALLEL_EXTRACTIONS * 2)</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">            .filter { !cancelSignal.get() }</span>
+<span class="nc" id="L103">            .map { subscriptionEntity -&gt;</span>
+<span class="nc" id="L104">                var error: Throwable? = null</span>
+<span class="nc" id="L105">                try {</span>
+                    // check for and load new streams
+                    // either by using the dedicated feed method or by getting the channel info
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                    val listInfo = if (useFeedExtractor) {</span>
+                        ExtractorHelper
+<span class="nc" id="L110">                            .getFeedInfoFallbackToChannelInfo(</span>
+<span class="nc" id="L111">                                subscriptionEntity.serviceId,</span>
+<span class="nc" id="L112">                                subscriptionEntity.url</span>
+                            )
+<span class="nc" id="L114">                            .onErrorReturn {</span>
+<span class="nc" id="L115">                                error = it // store error, otherwise wrapped into RuntimeException</span>
+<span class="nc" id="L116">                                throw it</span>
+                            }
+<span class="nc" id="L118">                            .blockingGet()</span>
+                    } else {
+                        ExtractorHelper
+<span class="nc" id="L121">                            .getChannelInfo(</span>
+<span class="nc" id="L122">                                subscriptionEntity.serviceId,</span>
+<span class="nc" id="L123">                                subscriptionEntity.url,</span>
+<span class="nc" id="L124">                                true</span>
+                            )
+<span class="nc" id="L126">                            .onErrorReturn {</span>
+<span class="nc" id="L127">                                error = it // store error, otherwise wrapped into RuntimeException</span>
+<span class="nc" id="L128">                                throw it</span>
+                            }
+<span class="nc" id="L130">                            .blockingGet()</span>
+                    } as ListInfo&lt;StreamInfoItem&gt;
+
+<span class="nc" id="L133">                    return@map Notification.createOnNext(</span>
+<span class="nc" id="L134">                        FeedUpdateInfo(</span>
+<span class="nc" id="L135">                            subscriptionEntity,</span>
+<span class="nc" id="L136">                            listInfo</span>
+                        )
+                    )
+<span class="nc" id="L139">                } catch (e: Throwable) {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                    if (error == null) {</span>
+                        // do this to prevent blockingGet() from wrapping into RuntimeException
+<span class="nc" id="L142">                        error = e</span>
+                    }
+
+<span class="nc" id="L145">                    val request = &quot;${subscriptionEntity.serviceId}:${subscriptionEntity.url}&quot;</span>
+<span class="nc" id="L146">                    val wrapper =</span>
+<span class="nc" id="L147">                        FeedLoadService.RequestException(subscriptionEntity.uid, request, error!!)</span>
+<span class="nc" id="L148">                    return@map Notification.createOnError&lt;FeedUpdateInfo&gt;(wrapper)</span>
+                }
+            }
+<span class="nc" id="L151">            .sequential()</span>
+<span class="nc" id="L152">            .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L153">            .doOnNext(NotificationConsumer())</span>
+<span class="nc" id="L154">            .observeOn(Schedulers.io())</span>
+<span class="nc" id="L155">            .buffer(BUFFER_COUNT_BEFORE_INSERT)</span>
+<span class="nc" id="L156">            .doOnNext(DatabaseConsumer())</span>
+<span class="nc" id="L157">            .subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L158">            .toList()</span>
+<span class="nc" id="L159">            .flatMap { x -&gt; postProcessFeed().toSingleDefault(x.flatten()) }</span>
+    }
+
+    fun cancel() {
+<span class="nc" id="L163">        cancelSignal.set(true)</span>
+<span class="nc" id="L164">    }</span>
+
+    private fun broadcastProgress() {
+<span class="nc" id="L167">        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(currentProgress.get(), maxProgress.get()))</span>
+<span class="nc" id="L168">    }</span>
+
+    /**
+     * Keep the feed and the stream tables small
+     * to reduce loading times when trying to display the feed.
+     * &lt;br&gt;
+     * Remove streams from the feed which are older than [FeedDatabaseManager.FEED_OLDEST_ALLOWED_DATE].
+     * Remove streams from the database which are not linked / used by any table.
+     */
+<span class="nc" id="L177">    private fun postProcessFeed() = Completable.fromRunnable {</span>
+<span class="nc" id="L178">        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))</span>
+<span class="nc" id="L179">        feedDatabaseManager.removeOrphansOrOlderStreams()</span>
+
+<span class="nc" id="L181">        FeedEventManager.postEvent(FeedEventManager.Event.SuccessResultEvent(feedResultsHolder.itemsErrors))</span>
+<span class="nc" id="L182">    }.doOnSubscribe {</span>
+<span class="nc" id="L183">        currentProgress.set(-1)</span>
+<span class="nc" id="L184">        maxProgress.set(-1)</span>
+
+<span class="nc" id="L186">        notificationUpdater.onNext(context.getString(R.string.feed_processing_message))</span>
+<span class="nc" id="L187">        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))</span>
+<span class="nc" id="L188">    }.subscribeOn(Schedulers.io())</span>
+
+<span class="nc" id="L190">    private inner class NotificationConsumer : Consumer&lt;Notification&lt;FeedUpdateInfo&gt;&gt; {</span>
+        override fun accept(item: Notification&lt;FeedUpdateInfo&gt;) {
+<span class="nc" id="L192">            currentProgress.incrementAndGet()</span>
+<span class="nc bnc" id="L193" title="All 4 branches missed.">            notificationUpdater.onNext(item.value?.name.orEmpty())</span>
+
+<span class="nc" id="L195">            broadcastProgress()</span>
+<span class="nc" id="L196">        }</span>
+    }
+
+<span class="nc" id="L199">    private inner class DatabaseConsumer : Consumer&lt;List&lt;Notification&lt;FeedUpdateInfo&gt;&gt;&gt; {</span>
+
+        override fun accept(list: List&lt;Notification&lt;FeedUpdateInfo&gt;&gt;) {
+<span class="nc" id="L202">            feedDatabaseManager.database().runInTransaction {</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                for (notification in list) {</span>
+<span class="nc" id="L204">                    when {</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                        notification.isOnNext -&gt; {</span>
+<span class="nc" id="L206">                            val subscriptionId = notification.value!!.uid</span>
+<span class="nc" id="L207">                            val info = notification.value!!.listInfo</span>
+
+<span class="nc" id="L209">                            notification.value!!.newStreams = filterNewStreams(</span>
+<span class="nc" id="L210">                                notification.value!!.listInfo.relatedItems</span>
+                            )
+
+<span class="nc" id="L213">                            feedDatabaseManager.upsertAll(subscriptionId, info.relatedItems)</span>
+<span class="nc" id="L214">                            subscriptionManager.updateFromInfo(subscriptionId, info)</span>
+
+<span class="nc bnc" id="L216" title="All 4 branches missed.">                            if (info.errors.isNotEmpty()) {</span>
+<span class="nc" id="L217">                                feedResultsHolder.addErrors(</span>
+<span class="nc" id="L218">                                    FeedLoadService.RequestException.wrapList(</span>
+<span class="nc" id="L219">                                        subscriptionId,</span>
+<span class="nc" id="L220">                                        info</span>
+                                    )
+                                )
+<span class="nc" id="L223">                                feedDatabaseManager.markAsOutdated(subscriptionId)</span>
+                            }
+                        }
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                        notification.isOnError -&gt; {</span>
+<span class="nc" id="L227">                            val error = notification.error</span>
+<span class="nc" id="L228">                            feedResultsHolder.addError(error!!)</span>
+
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                            if (error is FeedLoadService.RequestException) {</span>
+<span class="nc" id="L231">                                feedDatabaseManager.markAsOutdated(error.subscriptionId)</span>
+                            }
+                        }
+                    }
+                }
+<span class="nc" id="L236">            }</span>
+<span class="nc" id="L237">        }</span>
+
+        private fun filterNewStreams(list: List&lt;StreamInfoItem&gt;): List&lt;StreamInfoItem&gt; {
+<span class="nc" id="L240">            return list.filter {</span>
+<span class="nc bnc" id="L241" title="All 4 branches missed.">                !feedDatabaseManager.doesStreamExist(it) &amp;&amp;</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                    it.uploadDate != null &amp;&amp;</span>
+                    // Streams older than this date are automatically removed from the feed.
+                    // Therefore, streams which are not in the database,
+                    // but older than this date, are considered old.
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                    it.uploadDate!!.offsetDateTime().isAfter(</span>
+<span class="nc" id="L247">                        FeedDatabaseManager.FEED_OLDEST_ALLOWED_DATE</span>
+                    )
+            }
+        }
+    }
+
+    companion object {
+
+        /**
+         * Constant used to check for updates of subscriptions with [NotificationMode.ENABLED].
+         */
+        const val GROUP_NOTIFICATION_ENABLED = -2L
+
+        /**
+         * How many extractions will be running in parallel.
+         */
+        private const val PARALLEL_EXTRACTIONS = 6
+
+        /**
+         * Number of items to buffer to mass-insert in the database.
+         */
+        private const val BUFFER_COUNT_BEFORE_INSERT = 20
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

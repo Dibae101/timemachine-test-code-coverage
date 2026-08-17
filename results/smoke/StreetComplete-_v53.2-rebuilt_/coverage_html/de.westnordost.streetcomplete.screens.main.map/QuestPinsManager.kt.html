@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestPinsManager.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.screens.main.map</a> &gt; <span class="el_source">QuestPinsManager.kt</span></div><h1>QuestPinsManager.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.screens.main.map
+
+import android.content.res.Resources
+import android.graphics.RectF
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import de.westnordost.streetcomplete.data.download.tiles.TilesRect
+import de.westnordost.streetcomplete.data.download.tiles.enclosingTilesRect
+import de.westnordost.streetcomplete.data.osm.mapdata.ElementType
+import de.westnordost.streetcomplete.data.quest.OsmNoteQuestKey
+import de.westnordost.streetcomplete.data.quest.OsmQuestKey
+import de.westnordost.streetcomplete.data.quest.Quest
+import de.westnordost.streetcomplete.data.quest.QuestKey
+import de.westnordost.streetcomplete.data.quest.QuestType
+import de.westnordost.streetcomplete.data.quest.QuestTypeRegistry
+import de.westnordost.streetcomplete.data.quest.VisibleQuestsSource
+import de.westnordost.streetcomplete.data.visiblequests.QuestTypeOrderSource
+import de.westnordost.streetcomplete.screens.main.map.components.Pin
+import de.westnordost.streetcomplete.screens.main.map.components.PinsMapComponent
+import de.westnordost.streetcomplete.screens.main.map.tangram.KtMapController
+import de.westnordost.streetcomplete.util.math.contains
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
+
+/** Manages the layer of quest pins in the map view:
+ *  Gets told by the QuestsMapFragment when a new area is in view and independently pulls the quests
+ *  for the bbox surrounding the area from database and holds it in memory. */
+<span class="nc" id="L36">class QuestPinsManager(</span>
+<span class="nc" id="L37">    private val ctrl: KtMapController,</span>
+<span class="nc" id="L38">    private val pinsMapComponent: PinsMapComponent,</span>
+<span class="nc" id="L39">    private val questTypeOrderSource: QuestTypeOrderSource,</span>
+<span class="nc" id="L40">    private val questTypeRegistry: QuestTypeRegistry,</span>
+<span class="nc" id="L41">    private val resources: Resources,</span>
+<span class="nc" id="L42">    private val visibleQuestsSource: VisibleQuestsSource</span>
+) : DefaultLifecycleObserver {
+
+    // draw order in which the quest types should be rendered on the map
+<span class="nc" id="L46">    private val questTypeOrders: MutableMap&lt;QuestType, Int&gt; = mutableMapOf()</span>
+    // last displayed rect of (zoom 16) tiles
+    private var lastDisplayedRect: TilesRect? = null
+    // quests in current view: key -&gt; [pin, ...]
+<span class="nc" id="L50">    private val questsInView: MutableMap&lt;QuestKey, List&lt;Pin&gt;&gt; = mutableMapOf()</span>
+
+<span class="nc" id="L52">    private val viewLifecycleScope: CoroutineScope = CoroutineScope(SupervisorJob())</span>
+
+    private var updateJob: Job? = null
+
+    /** Switch visibility of quest pins layer */
+<span class="nc" id="L57">    var isVisible: Boolean = false</span>
+        set(value) {
+<span class="nc bnc" id="L59" title="All 2 branches missed.">            if (field == value) return</span>
+<span class="nc" id="L60">            field = value</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">            if (value) show() else hide()</span>
+<span class="nc" id="L62">        }</span>
+
+    private var isStarted: Boolean = false
+
+<span class="nc" id="L66">    private val visibleQuestsListener = object : VisibleQuestsSource.Listener {</span>
+        override fun onUpdatedVisibleQuests(added: Collection&lt;Quest&gt;, removed: Collection&lt;QuestKey&gt;) {
+<span class="nc" id="L68">            val oldUpdateJob = updateJob</span>
+<span class="nc" id="L69">            updateJob = viewLifecycleScope.launch {</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                oldUpdateJob?.join() // don't cancel, as updateQuestPins only updates existing data</span>
+<span class="nc" id="L71">                updateQuestPins(added, removed)</span>
+<span class="nc" id="L72">            }</span>
+<span class="nc" id="L73">        }</span>
+
+        override fun onVisibleQuestsInvalidated() {
+<span class="nc" id="L76">            invalidate()</span>
+<span class="nc" id="L77">        }</span>
+    }
+
+<span class="nc" id="L80">    private val questTypeOrderListener = object : QuestTypeOrderSource.Listener {</span>
+        override fun onQuestTypeOrderAdded(item: QuestType, toAfter: QuestType) {
+<span class="nc" id="L82">            reinitializeQuestTypeOrders()</span>
+<span class="nc" id="L83">        }</span>
+
+        override fun onQuestTypeOrdersChanged() {
+<span class="nc" id="L86">            reinitializeQuestTypeOrders()</span>
+<span class="nc" id="L87">        }</span>
+    }
+
+    override fun onStart(owner: LifecycleOwner) {
+<span class="nc" id="L91">        super.onStart(owner)</span>
+<span class="nc" id="L92">        isStarted = true</span>
+<span class="nc" id="L93">        show()</span>
+<span class="nc" id="L94">    }</span>
+
+    override fun onStop(owner: LifecycleOwner) {
+<span class="nc" id="L97">        super.onStop(owner)</span>
+<span class="nc" id="L98">        isStarted = false</span>
+<span class="nc" id="L99">        hide()</span>
+<span class="nc" id="L100">    }</span>
+
+    override fun onDestroy(owner: LifecycleOwner) {
+<span class="nc" id="L103">        viewLifecycleScope.cancel()</span>
+<span class="nc" id="L104">    }</span>
+
+    private fun show() {
+<span class="nc bnc" id="L107" title="All 4 branches missed.">        if (!isStarted || !isVisible) return</span>
+<span class="nc" id="L108">        initializeQuestTypeOrders()</span>
+<span class="nc" id="L109">        onNewScreenPosition()</span>
+<span class="nc" id="L110">        visibleQuestsSource.addListener(visibleQuestsListener)</span>
+<span class="nc" id="L111">        questTypeOrderSource.addListener(questTypeOrderListener)</span>
+<span class="nc" id="L112">    }</span>
+
+    private fun hide() {
+<span class="nc" id="L115">        viewLifecycleScope.coroutineContext.cancelChildren()</span>
+<span class="nc" id="L116">        clear()</span>
+<span class="nc" id="L117">        visibleQuestsSource.removeListener(visibleQuestsListener)</span>
+<span class="nc" id="L118">        questTypeOrderSource.removeListener(questTypeOrderListener)</span>
+<span class="nc" id="L119">    }</span>
+
+    private fun invalidate() {
+<span class="nc" id="L122">        clear()</span>
+<span class="nc" id="L123">        onNewScreenPosition()</span>
+<span class="nc" id="L124">    }</span>
+
+    private fun clear() {
+<span class="nc" id="L127">        synchronized(questsInView) { questsInView.clear() }</span>
+<span class="nc" id="L128">        lastDisplayedRect = null</span>
+<span class="nc" id="L129">        viewLifecycleScope.launch { pinsMapComponent.clear() }</span>
+<span class="nc" id="L130">    }</span>
+
+    fun getQuestKey(properties: Map&lt;String, String&gt;): QuestKey? =
+<span class="nc" id="L133">        properties.toQuestKey()</span>
+
+    fun onNewScreenPosition() {
+<span class="nc bnc" id="L136" title="All 4 branches missed.">        if (!isStarted || !isVisible) return</span>
+<span class="nc" id="L137">        val zoom = ctrl.cameraPosition.zoom</span>
+        // require zoom &gt;= 14, which is the lowest zoom level where quests are shown
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        if (zoom &lt; 14) return</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        val displayedArea = ctrl.screenAreaToBoundingBox(RectF()) ?: return</span>
+<span class="nc" id="L141">        val tilesRect = displayedArea.enclosingTilesRect(TILES_ZOOM)</span>
+        // area too big -&gt; skip (performance)
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (tilesRect.size &gt; 16) return</span>
+<span class="nc bnc" id="L144" title="All 6 branches missed.">        if (lastDisplayedRect?.contains(tilesRect) != true) {</span>
+<span class="nc" id="L145">            lastDisplayedRect = tilesRect</span>
+<span class="nc" id="L146">            onNewTilesRect(tilesRect)</span>
+        }
+<span class="nc" id="L148">    }</span>
+
+    private fun onNewTilesRect(tilesRect: TilesRect) {
+<span class="nc" id="L151">        val bbox = tilesRect.asBoundingBox(TILES_ZOOM)</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        updateJob?.cancel()</span>
+<span class="nc" id="L153">        updateJob = viewLifecycleScope.launch {</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            val quests = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L155">                synchronized(visibleQuestsSource) {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                    if (!coroutineContext.isActive) null</span>
+<span class="nc" id="L157">                    else visibleQuestsSource.getAllVisible(bbox)</span>
+                }
+<span class="nc" id="L159">            } ?: return@launch</span>
+<span class="nc" id="L160">            setQuestPins(quests)</span>
+<span class="nc" id="L161">        }</span>
+<span class="nc" id="L162">    }</span>
+
+    private suspend fun setQuestPins(quests: List&lt;Quest&gt;) {
+<span class="nc" id="L165">        val pins = synchronized(questsInView) {</span>
+<span class="nc" id="L166">            questsInView.clear()</span>
+<span class="nc" id="L167">            quests.forEach { questsInView[it.key] = createQuestPins(it) }</span>
+<span class="nc" id="L168">            questsInView.values.flatten()</span>
+        }
+<span class="nc" id="L170">        synchronized(pinsMapComponent) {</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            if (coroutineContext.isActive) {</span>
+<span class="nc" id="L172">                pinsMapComponent.set(pins)</span>
+<span class="nc" id="L173">                ctrl.requestRender()</span>
+            }
+<span class="nc" id="L175">        }</span>
+<span class="nc" id="L176">    }</span>
+
+    private suspend fun updateQuestPins(added: Collection&lt;Quest&gt;, removed: Collection&lt;QuestKey&gt;) {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        val displayedBBox = lastDisplayedRect?.asBoundingBox(TILES_ZOOM)</span>
+<span class="nc bnc" id="L180" title="All 6 branches missed.">        val addedInView = added.filter { displayedBBox?.contains(it.position) != false }</span>
+<span class="nc" id="L181">        var deletedAny = false</span>
+<span class="nc" id="L182">        val pins = synchronized(questsInView) {</span>
+<span class="nc" id="L183">            addedInView.forEach { questsInView[it.key] = createQuestPins(it) }</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            removed.forEach { if (questsInView.remove(it) != null) deletedAny = true }</span>
+<span class="nc" id="L185">            questsInView.values.flatten()</span>
+        }
+<span class="nc bnc" id="L187" title="All 6 branches missed.">        if (deletedAny || addedInView.isNotEmpty()) {</span>
+<span class="nc" id="L188">            synchronized(pinsMapComponent) {</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                if (coroutineContext.isActive) {</span>
+<span class="nc" id="L190">                    pinsMapComponent.set(pins)</span>
+<span class="nc" id="L191">                    ctrl.requestRender()</span>
+                }
+<span class="nc" id="L193">            }</span>
+        }
+<span class="nc" id="L195">    }</span>
+
+    private fun initializeQuestTypeOrders() {
+        // this needs to be reinitialized when the quest order changes
+<span class="nc" id="L199">        val sortedQuestTypes = questTypeRegistry.toMutableList()</span>
+<span class="nc" id="L200">        questTypeOrderSource.sort(sortedQuestTypes)</span>
+<span class="nc" id="L201">        synchronized(questTypeOrders) {</span>
+<span class="nc" id="L202">            questTypeOrders.clear()</span>
+<span class="nc" id="L203">            sortedQuestTypes.forEachIndexed { index, questType -&gt;</span>
+<span class="nc" id="L204">                questTypeOrders[questType] = index</span>
+<span class="nc" id="L205">            }</span>
+<span class="nc" id="L206">        }</span>
+<span class="nc" id="L207">    }</span>
+
+    private fun createQuestPins(quest: Quest): List&lt;Pin&gt; {
+<span class="nc" id="L210">        val iconName = resources.getResourceEntryName(quest.type.icon)</span>
+<span class="nc" id="L211">        val props = quest.key.toProperties()</span>
+<span class="nc" id="L212">        val importance = getQuestImportance(quest)</span>
+<span class="nc" id="L213">        return quest.markerLocations.map { Pin(it, iconName, props, importance) }</span>
+    }
+
+    /** returns values from 0 to 100000, the higher the number, the more important */
+<span class="nc" id="L217">    private fun getQuestImportance(quest: Quest): Int = synchronized(questTypeOrders) {</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        val questTypeOrder = questTypeOrders[quest.type] ?: 0</span>
+<span class="nc" id="L219">        val freeValuesForEachQuest = 100000 / questTypeOrders.size</span>
+        /* position is used to add values unique to each quest to make ordering consistent
+           freeValuesForEachQuest is an int, so % freeValuesForEachQuest will fit into int */
+<span class="nc" id="L222">        val hopefullyUniqueValueForQuest = quest.position.hashCode() % freeValuesForEachQuest</span>
+<span class="nc" id="L223">        return 100000 - questTypeOrder * freeValuesForEachQuest + hopefullyUniqueValueForQuest</span>
+    }
+
+    private fun reinitializeQuestTypeOrders() {
+<span class="nc" id="L227">        initializeQuestTypeOrders()</span>
+<span class="nc" id="L228">        invalidate()</span>
+<span class="nc" id="L229">    }</span>
+
+    companion object {
+        private const val TILES_ZOOM = 16
+    }
+}
+
+private const val MARKER_QUEST_GROUP = &quot;quest_group&quot;
+
+private const val MARKER_ELEMENT_TYPE = &quot;element_type&quot;
+private const val MARKER_ELEMENT_ID = &quot;element_id&quot;
+private const val MARKER_QUEST_TYPE = &quot;quest_type&quot;
+private const val MARKER_NOTE_ID = &quot;note_id&quot;
+
+private const val QUEST_GROUP_OSM = &quot;osm&quot;
+private const val QUEST_GROUP_OSM_NOTE = &quot;osm_note&quot;
+
+<span class="nc" id="L246">private fun QuestKey.toProperties(): List&lt;Pair&lt;String, String&gt;&gt; = when (this) {</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">    is OsmNoteQuestKey -&gt; listOf(</span>
+<span class="nc" id="L248">        MARKER_QUEST_GROUP to QUEST_GROUP_OSM_NOTE,</span>
+<span class="nc" id="L249">        MARKER_NOTE_ID to noteId.toString()</span>
+    )
+<span class="nc" id="L251">    is OsmQuestKey -&gt; listOf(</span>
+<span class="nc" id="L252">        MARKER_QUEST_GROUP to QUEST_GROUP_OSM,</span>
+<span class="nc" id="L253">        MARKER_ELEMENT_TYPE to elementType.name,</span>
+<span class="nc" id="L254">        MARKER_ELEMENT_ID to elementId.toString(),</span>
+<span class="nc" id="L255">        MARKER_QUEST_TYPE to questTypeName</span>
+    )
+<span class="nc" id="L257">}</span>
+
+<span class="nc" id="L259">private fun Map&lt;String, String&gt;.toQuestKey(): QuestKey? = when (get(MARKER_QUEST_GROUP)) {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">    QUEST_GROUP_OSM_NOTE -&gt;</span>
+<span class="nc" id="L261">        OsmNoteQuestKey(getValue(MARKER_NOTE_ID).toLong())</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">    QUEST_GROUP_OSM -&gt;</span>
+<span class="nc" id="L263">        OsmQuestKey(</span>
+<span class="nc" id="L264">            getValue(MARKER_ELEMENT_TYPE).let { ElementType.valueOf(it) },</span>
+<span class="nc" id="L265">            getValue(MARKER_ELEMENT_ID).toLong(),</span>
+<span class="nc" id="L266">            getValue(MARKER_QUEST_TYPE)</span>
+        )
+<span class="nc" id="L268">    else -&gt; null</span>
+<span class="nc" id="L269">}</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

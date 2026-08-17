@@ -1,0 +1,542 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MapDataCache.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.data.osm.mapdata</a> &gt; <span class="el_source">MapDataCache.kt</span></div><h1>MapDataCache.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.data.osm.mapdata
+
+import de.westnordost.streetcomplete.data.download.tiles.enclosingTilesRect
+import de.westnordost.streetcomplete.data.download.tiles.minTileRect
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometry
+import de.westnordost.streetcomplete.data.osm.geometry.ElementGeometryEntry
+import de.westnordost.streetcomplete.data.osm.geometry.ElementPointGeometry
+import de.westnordost.streetcomplete.util.SpatialCache
+import de.westnordost.streetcomplete.util.math.contains
+import de.westnordost.streetcomplete.util.math.isCompletelyInside
+
+/**
+ * Cache for MapDataController that uses SpatialCache for nodes (i.e. geometry) and hash maps
+ * for ways, relations and their geometry.
+ *
+ * The [initialCapacity] is the initial capacity for nodes, the initial capacities for the other
+ * element types are derived from that because the ratio is usually similar.
+ *
+ * Way and relation data outside the cached tiles may be cached, but will be removed on any trim
+ */
+<span class="fc" id="L21">class MapDataCache(</span>
+<span class="fc" id="L22">    private val tileZoom: Int,</span>
+<span class="pc" id="L23">    val maxTiles: Int,</span>
+    initialCapacity: Int,
+<span class="fc" id="L25">    private val fetchMapData: (BoundingBox) -&gt; Pair&lt;Collection&lt;Element&gt;, Collection&lt;ElementGeometryEntry&gt;&gt;, // used if the tile is not contained</span>
+<span class="fc" id="L26">    private val fetchNodes: (Collection&lt;Long&gt;) -&gt; Collection&lt;Node&gt;,</span>
+) {
+<span class="fc" id="L28">    private val spatialCache = SpatialCache(</span>
+<span class="fc" id="L29">        tileZoom,</span>
+<span class="fc" id="L30">        maxTiles,</span>
+<span class="fc" id="L31">        initialCapacity,</span>
+<span class="pc" id="L32">        { emptyList() }, // data is fetched using fetchMapData and put using spatialCache.replaceAllInBBox</span>
+<span class="fc" id="L33">        Node::id, Node::position</span>
+    )
+    // initial values obtained from a spot check:
+    //  approximately 80% of all elements were found to be nodes
+    //  approximately every second node is part of a way
+    //  more than 90% of elements are not part of a relation
+<span class="fc" id="L39">    private val nodesOutsideSpatialCache = HashMap&lt;Long, Node&gt;(initialCapacity)</span>
+<span class="fc" id="L40">    private val wayCache = HashMap&lt;Long, Way&gt;(initialCapacity / 6)</span>
+<span class="fc" id="L41">    private val relationCache = HashMap&lt;Long, Relation&gt;(initialCapacity / 10)</span>
+<span class="fc" id="L42">    private val wayGeometryCache = HashMap&lt;Long, ElementGeometry&gt;(initialCapacity / 6)</span>
+<span class="fc" id="L43">    private val relationGeometryCache = HashMap&lt;Long, ElementGeometry&gt;(initialCapacity / 10)</span>
+<span class="fc" id="L44">    private val wayIdsByNodeIdCache = HashMap&lt;Long, MutableList&lt;Long&gt;&gt;(initialCapacity / 2)</span>
+<span class="fc" id="L45">    private val relationIdsByElementKeyCache = HashMap&lt;ElementKey, MutableList&lt;Long&gt;&gt;(initialCapacity / 10)</span>
+
+    /**
+     * Removes elements and geometries with keys in [deletedKeys] from cache and puts the
+     * [updatedElements] and [updatedGeometries] into cache.
+     * If a [bbox] is provided, all tiles that make up the bbox are added to spatialCache,
+     * or cleared if they already exist.
+     */
+<span class="nc" id="L53">    fun update(</span>
+<span class="nc" id="L54">        deletedKeys: Collection&lt;ElementKey&gt; = emptyList(),</span>
+<span class="nc" id="L55">        updatedElements: Iterable&lt;Element&gt; = emptyList(),</span>
+<span class="nc" id="L56">        updatedGeometries: Iterable&lt;ElementGeometryEntry&gt; = emptyList(),</span>
+<span class="nc" id="L57">        bbox: BoundingBox? = null</span>
+<span class="nc" id="L58">    ) { synchronized(this) {</span>
+
+<span class="nc" id="L60">        val updatedNodes = updatedElements.filterIsInstance&lt;Node&gt;()</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        val deletedNodeIds = deletedKeys.mapNotNull { if (it.type == ElementType.NODE) it.id else null }</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (bbox == null) {</span>
+            // just update nodes if the containing tile
+<span class="nc" id="L64">            spatialCache.update(updatedOrAdded = updatedNodes, deleted = deletedNodeIds)</span>
+        } else {
+            // delete first, then put bbox and nodes to spatialCache (adds/clears tiles in bbox)
+<span class="nc" id="L67">            spatialCache.update(deleted = deletedNodeIds)</span>
+<span class="nc" id="L68">            spatialCache.replaceAllInBBox(updatedNodes, bbox)</span>
+        }
+        // remove all cached nodes that are now in spatialCache
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        nodesOutsideSpatialCache.keys.removeAll { spatialCache.get(it) != null }</span>
+
+        // delete nodes, ways and relations
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        for (key in deletedKeys) {</span>
+<span class="nc bnc" id="L75" title="All 4 branches missed.">            when (key.type) {</span>
+                ElementType.NODE -&gt; {
+<span class="nc" id="L77">                    wayIdsByNodeIdCache.remove(key.id)</span>
+<span class="nc" id="L78">                    nodesOutsideSpatialCache.remove(key.id)</span>
+                }
+                ElementType.WAY -&gt; {
+<span class="nc bnc" id="L81" title="All 4 branches missed.">                    val deletedWayNodeIds = wayCache.remove(key.id)?.nodeIds.orEmpty()</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                    for (nodeId in deletedWayNodeIds) {</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                        wayIdsByNodeIdCache[nodeId]?.remove(key.id)</span>
+                    }
+<span class="nc" id="L85">                    wayGeometryCache.remove(key.id)</span>
+                }
+                ElementType.RELATION -&gt; {
+<span class="nc bnc" id="L88" title="All 4 branches missed.">                    val deletedRelationMembers = relationCache.remove(key.id)?.members.orEmpty()</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                    for (member in deletedRelationMembers) {</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                        relationIdsByElementKeyCache[member.key]?.remove(key.id)</span>
+                    }
+<span class="nc" id="L92">                    relationGeometryCache.remove(key.id)</span>
+                }
+            }
+        }
+
+        // update way and relation geometries
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        for (entry in updatedGeometries) {</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (entry.elementType == ElementType.WAY) {</span>
+<span class="nc" id="L100">                wayGeometryCache[entry.elementId] = entry.geometry</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">            } else if (entry.elementType == ElementType.RELATION) {</span>
+<span class="nc" id="L102">                relationGeometryCache[entry.elementId] = entry.geometry</span>
+            }
+        }
+
+        // add nodes that are not in spatialCache to nodeCache
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        updatedNodes.forEach { if (spatialCache.get(it.id) == null) nodesOutsideSpatialCache[it.id] = it }</span>
+
+        // update ways
+<span class="nc" id="L110">        val updatedWays = updatedElements.filterIsInstance&lt;Way&gt;()</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        for (way in updatedWays) {</span>
+            // updated way may have different node ids than old one, so those need to be removed first
+<span class="nc" id="L113">            val oldWay = wayCache[way.id]</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (oldWay != null) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                for (oldNodeId in oldWay.nodeIds) {</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                    wayIdsByNodeIdCache[oldNodeId]?.remove(way.id)</span>
+                }
+            }
+<span class="nc" id="L119">            wayCache[way.id] = way</span>
+            // ...and then the new node ids added
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            for (nodeId in way.nodeIds) {</span>
+                // only if the node is already in spatial cache, the way ids it refers to must be known:
+                // wayIdsByNodeIdCache is required for getMapDataWithGeometry(bbox), because a way is
+                // inside the bbox if it contains a node inside the bbox.
+                // But when adding a new entry to wayIdsByNodeIdCache, we must be sure to have ALL
+                // way(Id)s for that node cached. This is only possible if the node is in spatialCache,
+                // or if an entry for that node already exists (cached from getWaysForNode).
+                // Otherwise the cache may return an incomplete list of ways in getWaysForNode,
+                // instead of fetching the correct list.
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                val wayIdsReferredByNode = if (spatialCache.get(nodeId) != null) {</span>
+<span class="nc" id="L131">                    wayIdsByNodeIdCache.getOrPut(nodeId) { ArrayList(2) }</span>
+                } else {
+<span class="nc" id="L133">                    wayIdsByNodeIdCache[nodeId]</span>
+                }
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                wayIdsReferredByNode?.add(way.id)</span>
+            }
+        }
+
+        // update relations
+<span class="nc" id="L140">        val updatedRelations = updatedElements.filterIsInstance&lt;Relation&gt;()</span>
+<span class="nc bnc" id="L141" title="All 4 branches missed.">        if (updatedRelations.isNotEmpty()) {</span>
+
+            // for adding relations to relationIdsByElementKeyCache we want the element to be
+            // in spatialCache, or have a node / member in spatialCache (same reasoning as for ways)
+<span class="nc" id="L145">            val (wayIds, relationIds) = determineWayAndRelationIdsWithElementsInSpatialCache()</span>
+
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            for (relation in updatedRelations) {</span>
+                // old relation may now have different members, so they need to be removed first
+<span class="nc" id="L149">                val oldRelation = relationCache[relation.id]</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                if (oldRelation != null) {</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                    for (oldMember in oldRelation.members) {</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                        relationIdsByElementKeyCache[oldMember.key]?.remove(relation.id)</span>
+                    }
+                }
+<span class="nc" id="L155">                relationCache[relation.id] = relation</span>
+
+                // ...and then the new members added
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                for (member in relation.members) {</span>
+<span class="nc" id="L159">                    val memberKey = member.key</span>
+                    // only if the node member is already in the spatial cache or any node of a member
+                    // is, the relation ids it refers to must be known:
+                    // relationIdsByElementKeyCache is required for getMapDataWithGeometry(bbox),
+                    // because a relation is inside the bbox if it contains a member inside the bbox,
+                    // see comment above for wayIdsReferredByNode
+<span class="nc bnc" id="L165" title="All 3 branches missed.">                    val isInSpatialCache = when (member.type) {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                        ElementType.NODE -&gt; spatialCache.get(member.ref) != null</span>
+<span class="nc" id="L167">                        ElementType.WAY -&gt; member.ref in wayIds</span>
+<span class="nc" id="L168">                        ElementType.RELATION -&gt; member.ref in relationIds</span>
+                    }
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                    val relationIdsReferredByMember = if (isInSpatialCache) {</span>
+<span class="nc" id="L171">                        relationIdsByElementKeyCache.getOrPut(memberKey) { ArrayList(2) }</span>
+                    } else {
+<span class="nc" id="L173">                        relationIdsByElementKeyCache[memberKey]</span>
+                    }
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                    relationIdsReferredByMember?.add(relation.id)</span>
+                }
+            }
+        }
+<span class="nc" id="L179">    } }</span>
+
+    /**
+     * Gets the element with the given [type] and [id] from cache. If the element is not cached,
+     * [fetch] is called, and the result is cached and then returned.
+     */
+    fun getElement(
+        type: ElementType,
+        id: Long,
+        fetch: (ElementType, Long) -&gt; Element?
+<span class="nc" id="L189">    ): Element? = synchronized(this) {</span>
+<span class="nc bnc" id="L190" title="All 3 branches missed.">        when (type) {</span>
+<span class="nc bnc" id="L191" title="All 4 branches missed.">            ElementType.NODE -&gt; spatialCache.get(id) ?: nodesOutsideSpatialCache.getOrPutIfNotNull(id) { fetch(type, id) as? Node }</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            ElementType.WAY -&gt; wayCache.getOrPutIfNotNull(id) { fetch(type, id) as? Way }</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            ElementType.RELATION -&gt; relationCache.getOrPutIfNotNull(id) { fetch(type, id) as? Relation }</span>
+        }
+<span class="nc" id="L195">    }</span>
+
+    /**
+     * Gets the geometry of the element with the given [type] and [id] from cache. If the geometry
+     * is not cached, [fetch] is called, and the result is cached and then returned.
+     */
+    fun getGeometry(
+        type: ElementType,
+        id: Long,
+        fetch: (ElementType, Long) -&gt; ElementGeometry?
+<span class="nc" id="L205">    ): ElementGeometry? = synchronized(this) {</span>
+<span class="nc bnc" id="L206" title="All 3 branches missed.">        return when (type) {</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">            ElementType.NODE -&gt; getCachedNode(id)?.let { ElementPointGeometry(it.position) } ?: fetch(type, id)</span>
+<span class="nc" id="L208">            ElementType.WAY -&gt; wayGeometryCache.getOrPutIfNotNull(id) { fetch(type, id) }</span>
+<span class="nc" id="L209">            ElementType.RELATION -&gt; relationGeometryCache.getOrPutIfNotNull(id) { fetch(type, id) }</span>
+        }
+    }
+
+    /**
+     * Gets the elements with the given [keys] from cache. If any of the elements are not
+     * cached, [fetch] is called for the missing elements. The fetched elements are cached and the
+     * complete list is returned.
+     * Note that the elements are returned in no particular order.
+     */
+    fun getElements(
+        keys: Collection&lt;ElementKey&gt;,
+        fetch: (Collection&lt;ElementKey&gt;) -&gt; List&lt;Element&gt;
+<span class="nc" id="L222">    ): List&lt;Element&gt; = synchronized(this) {</span>
+<span class="nc" id="L223">        val cachedElements = keys.mapNotNull { key -&gt;</span>
+<span class="nc bnc" id="L224" title="All 3 branches missed.">            when (key.type) {</span>
+<span class="nc" id="L225">                ElementType.NODE -&gt; getCachedNode(key.id)</span>
+<span class="nc" id="L226">                ElementType.WAY -&gt; wayCache[key.id]</span>
+<span class="nc" id="L227">                ElementType.RELATION -&gt; relationCache[key.id]</span>
+            }
+        }
+
+        // exit early if everything is cached
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        if (keys.size == cachedElements.size) return cachedElements</span>
+
+        // otherwise, fetch the rest &amp; save to cache
+<span class="nc" id="L235">        val cachedKeys = cachedElements.map { it.key }.toSet()</span>
+<span class="nc" id="L236">        val keysToFetch = keys.filterNot { it in cachedKeys }</span>
+<span class="nc" id="L237">        val fetchedElements = fetch(keysToFetch)</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        for (element in fetchedElements) {</span>
+<span class="nc bnc" id="L239" title="All 4 branches missed.">            when (element.type) {</span>
+<span class="nc" id="L240">                ElementType.NODE -&gt; nodesOutsideSpatialCache[element.id] = element as Node</span>
+<span class="nc" id="L241">                ElementType.WAY -&gt; wayCache[element.id] = element as Way</span>
+<span class="nc" id="L242">                ElementType.RELATION -&gt; relationCache[element.id] = element as Relation</span>
+            }
+        }
+<span class="nc" id="L245">        return cachedElements + fetchedElements</span>
+    }
+
+    /** Gets the nodes with the given [ids] from cache. If any of the nodes are not cached, [fetch]
+     *  is called for the missing nodes. */
+<span class="nc" id="L250">    fun getNodes(ids: Collection&lt;Long&gt;, fetch: (Collection&lt;Long&gt;) -&gt; List&lt;Node&gt;): List&lt;Node&gt; = synchronized(this) {</span>
+<span class="nc" id="L251">        val cachedNodes = ids.mapNotNull { getCachedNode(it) }</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        if (ids.size == cachedNodes.size) return cachedNodes</span>
+
+        // not all in cache: must fetch the rest from db
+<span class="nc" id="L255">        val cachedNodeIds = cachedNodes.map { it.id }.toSet()</span>
+<span class="nc" id="L256">        val missingNodeIds = ids.filterNot { it in cachedNodeIds }</span>
+<span class="nc" id="L257">        val fetchedNodes = fetch(missingNodeIds)</span>
+<span class="nc" id="L258">        fetchedNodes.forEach { nodesOutsideSpatialCache[it.id] = it }</span>
+<span class="nc" id="L259">        return cachedNodes + fetchedNodes</span>
+    }
+
+    /** Gets the ways with the given [ids] from cache. If any of the ways are not cached, [fetch]
+     *  is called for the missing ways. The fetched ways are cached and the complete list is
+     *  returned. */
+    fun getWays(ids: Collection&lt;Long&gt;, fetch: (Collection&lt;Long&gt;) -&gt; List&lt;Way&gt;): List&lt;Way&gt; {
+<span class="nc" id="L266">        val wayKeys = ids.map { ElementKey(ElementType.WAY, it) }</span>
+<span class="nc" id="L267">        return getElements(wayKeys) { keys -&gt; fetch(keys.map { it.id }) }.filterIsInstance&lt;Way&gt;()</span>
+    }
+
+    /** Gets the relations with the given [ids] from cache. If any of the relations are not cached,
+     *  [fetch] is called for the missing relations. The fetched relations are cached and the
+     *  complete list is returned. */
+    fun getRelations(ids: Collection&lt;Long&gt;, fetch: (Collection&lt;Long&gt;) -&gt; List&lt;Relation&gt;): List&lt;Relation&gt; {
+<span class="nc" id="L274">        val relationKeys = ids.map { ElementKey(ElementType.RELATION, it) }</span>
+<span class="nc" id="L275">        return getElements(relationKeys) { keys -&gt; fetch(keys.map { it.id }) }.filterIsInstance&lt;Relation&gt;()</span>
+    }
+
+    /**
+     * Gets the geometries of the elements with the given [keys] from cache. If any of the
+     * geometries are not cached, [fetch] is called for the missing geometries. The fetched
+     * geometries are cached and the complete list is returned.
+     * Note that the elements are returned in no particular order.
+     */
+    fun getGeometries(
+        keys: Collection&lt;ElementKey&gt;,
+        fetch: (Collection&lt;ElementKey&gt;) -&gt; List&lt;ElementGeometryEntry&gt;
+<span class="fc" id="L287">    ): List&lt;ElementGeometryEntry&gt; = synchronized(this) {</span>
+        // the implementation here is quite identical to the implementation in getElements, only
+        // that geometries and not elements are returned and thus different caches are accessed
+<span class="fc" id="L290">        val cachedEntries = keys.mapNotNull { key -&gt;</span>
+<span class="nc bnc" id="L291" title="All 3 branches missed.">            when (key.type) {</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                ElementType.NODE -&gt; getCachedNode(key.id)?.let { ElementPointGeometry(it.position) }</span>
+<span class="nc" id="L293">                ElementType.WAY -&gt; wayGeometryCache[key.id]</span>
+<span class="nc" id="L294">                ElementType.RELATION -&gt; relationGeometryCache[key.id]</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            }?.let { ElementGeometryEntry(key.type, key.id, it) }</span>
+        }
+
+        // exit early if everything is cached
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (keys.size == cachedEntries.size) return cachedEntries</span>
+
+        // otherwise, fetch the rest &amp; save to cache
+<span class="nc" id="L302">        val cachedKeys = cachedEntries.map { it.key }.toSet()</span>
+<span class="nc" id="L303">        val keysToFetch = keys.filterNot { it in cachedKeys }</span>
+<span class="nc" id="L304">        val fetchedEntries = fetch(keysToFetch)</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        for (entry in fetchedEntries) {</span>
+<span class="nc bnc" id="L306" title="All 3 branches missed.">            when (entry.elementType) {</span>
+<span class="nc" id="L307">                ElementType.WAY -&gt; wayGeometryCache[entry.elementId] = entry.geometry</span>
+<span class="nc" id="L308">                ElementType.RELATION -&gt; relationGeometryCache[entry.elementId] = entry.geometry</span>
+<span class="nc" id="L309">                else -&gt; Unit</span>
+            }
+        }
+<span class="nc" id="L312">        return cachedEntries + fetchedEntries</span>
+    }
+
+    /**
+     * Gets all ways for the node with the given [id] from cache. If the list of ways is not known,
+     * or any way is missing in cache, [fetch] is called and the result cached.
+     */
+<span class="nc" id="L319">    fun getWaysForNode(id: Long, fetch: (Long) -&gt; List&lt;Way&gt;): List&lt;Way&gt; = synchronized(this) {</span>
+<span class="nc" id="L320">        val wayIds = wayIdsByNodeIdCache.getOrPut(id) {</span>
+<span class="nc" id="L321">            val ways = fetch(id)</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">            for (way in ways) { wayCache[way.id] = way }</span>
+<span class="nc" id="L323">            ways.map { it.id }.toMutableList()</span>
+        }
+<span class="nc" id="L325">        return wayIds.mapNotNull { wayCache[it] }</span>
+    }
+
+    /**
+     * Gets all relations for the node with the given [id] from cache. If the list of relations is
+     * not known, or any relation is missing in cache, [fetch] is called and the result cached.
+     */
+    fun getRelationsForNode(id: Long, fetch: (Long) -&gt; List&lt;Relation&gt;) =
+<span class="nc" id="L333">        getRelationsForElement(ElementType.NODE, id) { fetch(id) }</span>
+
+    /**
+     * Gets all relations for way with the given [id] from cache. If the list of relations is not
+     * known, or any relation is missing in cache, [fetch] is called and the result cached.
+     */
+    fun getRelationsForWay(id: Long, fetch: (Long) -&gt; List&lt;Relation&gt;) =
+<span class="nc" id="L340">        getRelationsForElement(ElementType.WAY, id) { fetch(id) }</span>
+
+    /**
+     * Gets all relations for way with the given [id] from cache. If the list of relations is not
+     * known, or any relation is missing in cache, [fetch] is called and the result cached.
+     */
+    fun getRelationsForRelation(id: Long, fetch: (Long) -&gt; List&lt;Relation&gt;) =
+<span class="nc" id="L347">        getRelationsForElement(ElementType.RELATION, id) { fetch(id) }</span>
+
+    private fun getRelationsForElement(
+        type: ElementType,
+        id: Long,
+        fetch: () -&gt; List&lt;Relation&gt;
+<span class="nc" id="L353">    ): List&lt;Relation&gt; = synchronized(this) {</span>
+<span class="nc" id="L354">        val relationIds = relationIdsByElementKeyCache.getOrPut(ElementKey(type, id)) {</span>
+<span class="nc" id="L355">            val relations = fetch()</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            for (relation in relations) { relationCache[relation.id] = relation }</span>
+<span class="nc" id="L357">            relations.map { it.id }.toMutableList()</span>
+        }
+<span class="nc" id="L359">        return relationIds.mapNotNull { relationCache[it] }</span>
+    }
+
+    /**
+     * Gets all elements and geometries inside [bbox]. This returns all nodes, all ways containing
+     * at least one of the nodes, and all relations containing at least one of the ways or nodes,
+     * and their geometries.
+     * If data is not cached, tiles containing the [bbox] are fetched from database and cached.
+     */
+<span class="nc" id="L368">    fun getMapDataWithGeometry(bbox: BoundingBox): MutableMapDataWithGeometry = synchronized(this) {</span>
+<span class="nc" id="L369">        val requiredTiles = bbox.enclosingTilesRect(tileZoom).asTilePosSequence().toList()</span>
+<span class="nc" id="L370">        val cachedTiles = spatialCache.getTiles()</span>
+<span class="nc" id="L371">        val tilesToFetch = requiredTiles.filterNot { it in cachedTiles }</span>
+<span class="nc" id="L372">        val tilesRectToFetch = tilesToFetch.minTileRect()</span>
+
+<span class="nc" id="L374">        val result = MutableMapDataWithGeometry()</span>
+<span class="nc" id="L375">        result.boundingBox = bbox</span>
+        val nodes: Collection&lt;Node&gt;
+<span class="nc bnc" id="L377" title="All 2 branches missed.">        if (tilesRectToFetch != null) {</span>
+            // fetch needed data
+<span class="nc" id="L379">            val fetchBBox = tilesRectToFetch.asBoundingBox(tileZoom)</span>
+<span class="nc" id="L380">            val (elements, geometries) = fetchMapData(fetchBBox)</span>
+
+            // get nodes from spatial cache
+            // this may not contain all nodes, but tiles that were cached initially might
+            // get dropped when the caches are updated
+            // duplicate fetch might be unnecessary in many cases, but it's very fast anyway
+
+            // get(bbox) for tiles not in spatialCache calls spatialCache.fetch, but this is still
+            // safe as tiles are replaced and properly filled as part of the following update
+<span class="nc" id="L389">            nodes = HashSet&lt;Node&gt;(spatialCache.get(bbox))</span>
+<span class="nc" id="L390">            update(updatedElements = elements, updatedGeometries = geometries, bbox = fetchBBox)</span>
+
+            // return data if we need exactly what was just fetched
+<span class="nc bnc" id="L393" title="All 2 branches missed.">            if (fetchBBox == bbox) {</span>
+<span class="nc" id="L394">                val nodeGeometryEntries = elements.filterIsInstance&lt;Node&gt;().map { it.toElementGeometryEntry() }</span>
+<span class="nc" id="L395">                result.putAll(elements, geometries + nodeGeometryEntries)</span>
+<span class="nc" id="L396">                return result</span>
+            }
+
+            // add newly fetched nodes from elements
+            // getting nodes from spatialCache can cause issues, as tiles in the bbox may now be removed unexpectedly
+            // see https://github.com/streetcomplete/StreetComplete/issues/4980#issuecomment-1531960544
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            for (element in elements) {</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                if (element !is Node) continue</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                if (element.position in bbox) nodes.add(element)</span>
+            }
+        } else {
+<span class="nc" id="L407">            nodes = spatialCache.get(bbox)</span>
+        }
+
+<span class="nc" id="L410">        val wayIds = HashSet&lt;Long&gt;(nodes.size / 5)</span>
+<span class="nc" id="L411">        val relationIds = HashSet&lt;Long&gt;(nodes.size / 10)</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        for (node in nodes) {</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">            wayIdsByNodeIdCache[node.id]?.let { wayIds.addAll(it) }</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            relationIdsByElementKeyCache[node.key]?.let { relationIds.addAll(it) }</span>
+<span class="nc" id="L415">            result.put(node, ElementPointGeometry(node.position))</span>
+        }
+
+<span class="nc" id="L418">        val nodesToFetch = hashSetOf&lt;Long&gt;()</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">        for (wayId in wayIds) {</span>
+<span class="nc" id="L420">            val way = wayCache[wayId]!!</span>
+<span class="nc" id="L421">            val wayGeometry = wayGeometryCache[wayId]</span>
+<span class="nc" id="L422">            result.put(way, wayGeometry)</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">            relationIdsByElementKeyCache[way.key]?.let { relationIds.addAll(it) }</span>
+
+            // find all nodes that are part of the way, but not in result
+<span class="nc bnc" id="L426" title="All 8 branches missed.">            if (wayGeometry?.getBounds()?.isCompletelyInside(bbox) == true) continue // no need to check</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            for (nodeId in way.nodeIds) {</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">                if (result.getNode(nodeId) != null) continue</span>
+<span class="nc" id="L429">                val cachedNode = getCachedNode(nodeId)</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                if (cachedNode != null) {</span>
+<span class="nc" id="L431">                    result.put(cachedNode, ElementPointGeometry(cachedNode.position))</span>
+<span class="nc" id="L432">                    continue</span>
+                }
+<span class="nc" id="L434">                nodesToFetch.add(nodeId)</span>
+            }
+        }
+<span class="nc bnc" id="L437" title="All 4 branches missed.">        if (nodesToFetch.isNotEmpty()) {</span>
+<span class="nc" id="L438">            fetchNodes(nodesToFetch).forEach {</span>
+<span class="nc" id="L439">                nodesOutsideSpatialCache[it.id] = it</span>
+<span class="nc" id="L440">                result.put(it, ElementPointGeometry(it.position))</span>
+<span class="nc" id="L441">            }</span>
+        }
+
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        for (relationId in relationIds) {</span>
+<span class="nc" id="L445">            result.put(relationCache[relationId]!!, relationGeometryCache[relationId])</span>
+            // don't add relations of relations, because elementDao.getAll(bbox) also isn't doing that
+        }
+
+        // trim if we fetched new data, and spatialCache is full
+        // trim to 66%, so trim is (probably) not immediately called on next fetch
+<span class="nc bnc" id="L451" title="All 6 branches missed.">        if (spatialCache.size &gt;= maxTiles &amp;&amp; tilesToFetch.isNotEmpty()) {</span>
+<span class="nc" id="L452">            trim((maxTiles * 2) / 3)</span>
+        }
+<span class="nc" id="L454">        return result</span>
+    }
+
+    /** Clears the cache */
+<span class="nc" id="L458">    fun clear() { synchronized(this) {</span>
+<span class="nc" id="L459">        spatialCache.clear()</span>
+<span class="nc" id="L460">        nodesOutsideSpatialCache.clear()</span>
+<span class="nc" id="L461">        wayCache.clear()</span>
+<span class="nc" id="L462">        relationCache.clear()</span>
+<span class="nc" id="L463">        wayGeometryCache.clear()</span>
+<span class="nc" id="L464">        relationGeometryCache.clear()</span>
+<span class="nc" id="L465">        wayIdsByNodeIdCache.clear()</span>
+<span class="nc" id="L466">        relationIdsByElementKeyCache.clear()</span>
+<span class="nc" id="L467">    } }</span>
+
+    /** Reduces cache size to the given number of non-empty [tiles], and removes all data
+     *  not contained in the remaining tiles.
+     */
+<span class="nc" id="L472">    fun trim(tiles: Int) { synchronized(this) {</span>
+<span class="nc" id="L473">        spatialCache.trim(tiles)</span>
+<span class="nc" id="L474">        nodesOutsideSpatialCache.clear() // simply clear nodeCache, as transferring some nodes from spatialCache is slow</span>
+
+        // ways and relations with at least one element in cache should not be removed
+<span class="nc" id="L477">        val (wayIds, relationIds) = determineWayAndRelationIdsWithElementsInSpatialCache()</span>
+
+<span class="nc" id="L479">        wayCache.keys.retainAll { it in wayIds }</span>
+<span class="nc" id="L480">        relationCache.keys.retainAll { it in relationIds }</span>
+<span class="nc" id="L481">        wayGeometryCache.keys.retainAll { it in wayIds }</span>
+<span class="nc" id="L482">        relationGeometryCache.keys.retainAll { it in relationIds }</span>
+
+        // now clean up wayIdsByNodeIdCache and relationIdsByElementKeyCache
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        wayIdsByNodeIdCache.keys.retainAll { spatialCache.get(it) != null }</span>
+<span class="nc" id="L486">        relationIdsByElementKeyCache.keys.retainAll {</span>
+<span class="nc bnc" id="L487" title="All 3 branches missed.">            when (it.type) {</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">                ElementType.NODE -&gt; spatialCache.get(it.id) != null</span>
+<span class="nc" id="L489">                ElementType.WAY -&gt; it.id in wayIds</span>
+<span class="nc" id="L490">                ElementType.RELATION -&gt; it.id in relationIds</span>
+            }
+        }
+<span class="nc" id="L493">    } }</span>
+
+    /** return the ids of all ways whose nodes are in the spatial cache plus as all ids of
+     *  relations referred to by those ways or nodes that are in the spatial cache */
+    private fun determineWayAndRelationIdsWithElementsInSpatialCache(): Pair&lt;Set&lt;Long&gt;, Set&lt;Long&gt;&gt; {
+
+        // note: wayIdsByNodeIdCache and relationIdsByElementKeyCache cannot be used here to get the
+        // result because this method is called in places where the spatial cache has been updated
+        // and now the other caches are outdated. So this method exists to find those elements that
+        // are STILL referred to directly or indirectly by the spatial cache.
+
+<span class="nc" id="L504">        val wayIds = HashSet&lt;Long&gt;(wayCache.size)</span>
+<span class="nc bnc" id="L505" title="All 2 branches missed.">        for (way in wayCache.values) {</span>
+<span class="nc bnc" id="L506" title="All 4 branches missed.">            if (way.nodeIds.any { spatialCache.get(it) != null }) {</span>
+<span class="nc" id="L507">                wayIds.add(way.id)</span>
+            }
+        }
+
+        fun RelationMember.isCachedWayOrNode(): Boolean =
+<span class="nc bnc" id="L512" title="All 4 branches missed.">            type == ElementType.NODE &amp;&amp; spatialCache.get(ref) != null</span>
+<span class="nc bnc" id="L513" title="All 4 branches missed.">                || type == ElementType.WAY &amp;&amp; ref in wayIds</span>
+
+        fun RelationMember.hasCachedMembers(): Boolean =
+<span class="nc bnc" id="L516" title="All 2 branches missed.">            type == ElementType.RELATION</span>
+<span class="nc bnc" id="L517" title="All 8 branches missed.">                &amp;&amp; relationCache[ref]?.members?.any { it.isCachedWayOrNode() } == true</span>
+
+<span class="nc" id="L519">        val relationIds = HashSet&lt;Long&gt;(relationCache.size)</span>
+<span class="nc bnc" id="L520" title="All 2 branches missed.">        for (relation in relationCache.values) {</span>
+<span class="nc bnc" id="L521" title="All 6 branches missed.">            if (relation.members.any { it.isCachedWayOrNode() || it.hasCachedMembers() }) {</span>
+<span class="nc" id="L522">                relationIds.add(relation.id)</span>
+            }
+        }
+<span class="nc" id="L525">        return wayIds to relationIds</span>
+    }
+
+    private fun &lt;K, V&gt; HashMap&lt;K, V&gt;.getOrPutIfNotNull(key: K, valueOrNull: () -&gt; V?): V? {
+<span class="nc" id="L529">        val v = get(key)</span>
+<span class="nc bnc" id="L530" title="All 2 branches missed.">        if (v != null) return v</span>
+
+<span class="nc" id="L532">        val computed = valueOrNull()</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if (computed != null) put(key, computed)</span>
+<span class="nc" id="L534">        return computed</span>
+    }
+
+    private fun Node.toElementGeometryEntry() =
+<span class="nc" id="L538">        ElementGeometryEntry(type, id, ElementPointGeometry(position))</span>
+
+<span class="nc bnc" id="L540" title="All 2 branches missed.">    private fun getCachedNode(id: Long): Node? = spatialCache.get(id) ?: nodesOutsideSpatialCache[id]</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

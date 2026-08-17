@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CommunicationBridge.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wikipedia</a> &gt; <a href="index.source.html" class="el_package">org.wikipedia.bridge</a> &gt; <span class="el_source">CommunicationBridge.kt</span></div><h1>CommunicationBridge.kt</h1><pre class="source lang-java linenums">package org.wikipedia.bridge
+
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
+import android.webkit.*
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import org.wikipedia.bridge.JavaScriptActionHandler.setUp
+import org.wikipedia.dataclient.RestService
+import org.wikipedia.dataclient.ServiceFactory
+import org.wikipedia.json.JsonUtil
+import org.wikipedia.page.PageTitle
+import org.wikipedia.page.PageViewModel
+import org.wikipedia.util.UriUtil
+import org.wikipedia.util.log.L
+
+/**
+ * Two-way communications bridge between JS in a WebView and Java.
+ *
+ * Messages TO the WebView are sent by calling loadUrl() with the Javascript payload in it.
+ *
+ * Messages FROM the WebView are received by leveraging @JavascriptInterface methods.
+ */
+<span class="nc" id="L26">@SuppressLint(&quot;AddJavascriptInterface&quot;, &quot;SetJavaScriptEnabled&quot;)</span>
+<span class="nc" id="L27">class CommunicationBridge constructor(private val communicationBridgeListener: CommunicationBridgeListener) {</span>
+<span class="nc" id="L28">    private val eventListeners = HashMap&lt;String, MutableList&lt;JSEventListener&gt;&gt;()</span>
+    private var isMetadataReady = false
+    private var isPcsReady = false
+<span class="nc" id="L31">    private val pendingJSMessages = ArrayList&lt;String&gt;()</span>
+<span class="nc" id="L32">    private val pendingEvals = HashMap&lt;String, ValueCallback&lt;String&gt;&gt;()</span>
+
+    fun interface JSEventListener {
+        fun onMessage(messageType: String, messagePayload: JsonObject?)
+    }
+
+    interface CommunicationBridgeListener {
+        val webView: WebView
+        val model: PageViewModel
+        val isPreview: Boolean
+        val toolbarMargin: Int
+    }
+
+<span class="nc" id="L45">    init {</span>
+<span class="nc" id="L46">        communicationBridgeListener.webView.settings.javaScriptEnabled = true</span>
+<span class="nc" id="L47">        communicationBridgeListener.webView.settings.allowUniversalAccessFromFileURLs = true</span>
+<span class="nc" id="L48">        communicationBridgeListener.webView.settings.mediaPlaybackRequiresUserGesture = false</span>
+<span class="nc" id="L49">        communicationBridgeListener.webView.webChromeClient = CommunicatingChrome()</span>
+<span class="nc" id="L50">        communicationBridgeListener.webView.addJavascriptInterface(PcsClientJavascriptInterface(), &quot;pcsClient&quot;)</span>
+<span class="nc" id="L51">    }</span>
+
+    fun onPcsReady() {
+<span class="nc" id="L54">        isPcsReady = true</span>
+<span class="nc" id="L55">        flushMessages()</span>
+<span class="nc" id="L56">    }</span>
+
+    fun loadBlankPage() {
+<span class="nc" id="L59">        communicationBridgeListener.webView.loadUrl(&quot;about:blank&quot;)</span>
+<span class="nc" id="L60">    }</span>
+
+    fun onMetadataReady() {
+<span class="nc" id="L63">        isMetadataReady = true</span>
+<span class="nc" id="L64">        flushMessages()</span>
+<span class="nc" id="L65">    }</span>
+
+    val isLoading: Boolean
+<span class="nc bnc" id="L68" title="All 4 branches missed.">        get() = !(isMetadataReady &amp;&amp; isPcsReady)</span>
+
+    fun resetHtml(pageTitle: PageTitle) {
+<span class="nc" id="L71">        isPcsReady = false</span>
+<span class="nc" id="L72">        isMetadataReady = false</span>
+<span class="nc" id="L73">        pendingJSMessages.clear()</span>
+<span class="nc" id="L74">        pendingEvals.clear()</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (communicationBridgeListener.model.shouldLoadAsMobileWeb) {</span>
+<span class="nc" id="L76">            communicationBridgeListener.webView.loadUrl(pageTitle.mobileUri)</span>
+        } else {
+<span class="nc" id="L78">            communicationBridgeListener.webView.loadUrl(ServiceFactory.getRestBasePath(pageTitle.wikiSite) +</span>
+<span class="nc" id="L79">                    RestService.PAGE_HTML_ENDPOINT + UriUtil.encodeURL(pageTitle.prefixedText))</span>
+        }
+<span class="nc" id="L81">    }</span>
+
+    fun cleanup() {
+<span class="nc" id="L84">        pendingJSMessages.clear()</span>
+<span class="nc" id="L85">        pendingEvals.clear()</span>
+<span class="nc" id="L86">        eventListeners.clear()</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        incomingMessageHandler?.removeCallbacksAndMessages(null)</span>
+<span class="nc" id="L88">        incomingMessageHandler = null</span>
+<span class="nc" id="L89">        communicationBridgeListener.webView.webViewClient = WebViewClient()</span>
+<span class="nc" id="L90">        communicationBridgeListener.webView.removeJavascriptInterface(&quot;pcsClient&quot;)</span>
+        // Explicitly load a blank page into the WebView, to stop playback of any media.
+<span class="nc" id="L92">        loadBlankPage()</span>
+<span class="nc" id="L93">    }</span>
+
+    fun addListener(type: String, listener: JSEventListener) {
+<span class="nc" id="L96">        eventListeners.getOrPut(type) { ArrayList() }.add(listener)</span>
+<span class="nc" id="L97">    }</span>
+
+    fun execute(js: String) {
+<span class="nc" id="L100">        pendingJSMessages.add(&quot;javascript:$js&quot;)</span>
+<span class="nc" id="L101">        flushMessages()</span>
+<span class="nc" id="L102">    }</span>
+
+    fun evaluate(js: String, callback: ValueCallback&lt;String&gt;) {
+<span class="nc" id="L105">        pendingEvals[js] = callback</span>
+<span class="nc" id="L106">        flushMessages()</span>
+<span class="nc" id="L107">    }</span>
+
+    fun evaluateImmediate(js: String, callback: ValueCallback&lt;String?&gt;?) {
+<span class="nc" id="L110">        communicationBridgeListener.webView.evaluateJavascript(js, callback)</span>
+<span class="nc" id="L111">    }</span>
+
+    private fun flushMessages() {
+<span class="nc bnc" id="L114" title="All 4 branches missed.">        if (!isPcsReady || !isMetadataReady) {</span>
+<span class="nc" id="L115">            return</span>
+        }
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        for (jsString in pendingJSMessages) {</span>
+<span class="nc" id="L118">            communicationBridgeListener.webView.loadUrl(jsString)</span>
+        }
+<span class="nc" id="L120">        pendingJSMessages.clear()</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        for ((key, callback) in pendingEvals) {</span>
+<span class="nc" id="L122">            communicationBridgeListener.webView.evaluateJavascript(key, callback)</span>
+        }
+<span class="nc" id="L124">        pendingEvals.clear()</span>
+<span class="nc" id="L125">    }</span>
+
+<span class="nc" id="L127">    private var incomingMessageHandler: Handler? = Handler(Looper.getMainLooper(), Handler.Callback { msg -&gt;</span>
+<span class="nc" id="L128">        val message = msg.obj as BridgeMessage</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (!eventListeners.containsKey(message.action)) {</span>
+<span class="nc" id="L130">            L.e(&quot;No such message type registered: &quot; + message.action)</span>
+<span class="nc" id="L131">            return@Callback false</span>
+        }
+<span class="nc" id="L133">        try {</span>
+<span class="nc" id="L134">            val listeners: List&lt;JSEventListener&gt; = eventListeners[message.action]!!</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">            for (listener in listeners) {</span>
+<span class="nc" id="L136">                listener.onMessage(message.action, message.data)</span>
+            }
+<span class="nc" id="L138">        } catch (e: Exception) {</span>
+<span class="nc" id="L139">            e.printStackTrace()</span>
+<span class="nc" id="L140">            L.logRemoteError(e)</span>
+        }
+<span class="nc" id="L142">        false</span>
+    })
+
+<span class="nc" id="L145">    private class CommunicatingChrome : WebChromeClient() {</span>
+        override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+<span class="nc" id="L147">            L.d(consoleMessage.sourceId() + &quot;:&quot; + consoleMessage.lineNumber() + &quot; - &quot; + consoleMessage.message())</span>
+<span class="nc" id="L148">            return true</span>
+        }
+    }
+
+<span class="nc" id="L152">    private inner class PcsClientJavascriptInterface {</span>
+        /**
+         * Called from Javascript to send a message packet to the Java layer. The message must be
+         * formatted in JSON, and URL-encoded.
+         *
+         * @param message JSON structured message received from the WebView.
+         */
+        @JavascriptInterface
+        @Synchronized
+        fun onReceiveMessage(message: String?) {
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (incomingMessageHandler != null) {</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                val bridgeMessage: BridgeMessage? = JsonUtil.decodeFromString(message.orEmpty())</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                if (bridgeMessage != null) {</span>
+<span class="nc" id="L165">                    val msg = Message.obtain(incomingMessageHandler, MESSAGE_HANDLE_MESSAGE_FROM_JS, bridgeMessage)</span>
+<span class="nc" id="L166">                    incomingMessageHandler!!.sendMessage(msg)</span>
+                } else {
+<span class="nc" id="L168">                    L.w(&quot;Received malformed message: $message&quot;)</span>
+                }
+            }
+<span class="nc" id="L171">        }</span>
+
+        @get:Synchronized
+        @get:JavascriptInterface
+        val setupSettings: String
+<span class="nc" id="L176">            get() = setUp(communicationBridgeListener.webView.context,</span>
+<span class="nc" id="L177">                    communicationBridgeListener.model.title!!, communicationBridgeListener.isPreview,</span>
+<span class="nc" id="L178">                    communicationBridgeListener.toolbarMargin)</span>
+    }
+
+<span class="nc bnc" id="L181" title="All 22 branches missed.">    @Serializable</span>
+<span class="nc" id="L182">    private class BridgeMessage {</span>
+<span class="nc bnc" id="L183" title="All 4 branches missed.">        val action: String = &quot;&quot;</span>
+<span class="nc" id="L184">        val data: JsonObject? = null</span>
+<span class="nc" id="L185">    }</span>
+
+    companion object {
+        private const val MESSAGE_HANDLE_MESSAGE_FROM_JS = 1
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BallPitView.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.screens.user.statistics</a> &gt; <span class="el_source">BallPitView.kt</span></div><h1>BallPitView.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.screens.user.statistics
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.RectF
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Handler
+import android.os.Looper
+import android.util.AttributeSet
+import android.view.GestureDetector
+import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.Surface
+import android.view.View
+import android.view.animation.DecelerateInterpolator
+import android.widget.FrameLayout
+import androidx.core.content.getSystemService
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import de.westnordost.streetcomplete.databinding.ViewBallPitBinding
+import de.westnordost.streetcomplete.util.ktx.awaitPreDraw
+import de.westnordost.streetcomplete.util.ktx.sumByFloat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import org.jbox2d.collision.shapes.ChainShape
+import org.jbox2d.collision.shapes.CircleShape
+import org.jbox2d.common.Vec2
+import org.jbox2d.dynamics.Body
+import org.jbox2d.dynamics.BodyDef
+import org.jbox2d.dynamics.BodyType
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+/** Shows the contained views in a physics simulated ball pit of some kind. */
+<span class="nc" id="L46">class BallPitView @JvmOverloads constructor(</span>
+    context: Context,
+<span class="nc" id="L48">    attrs: AttributeSet? = null,</span>
+<span class="nc" id="L49">    defStyleAttr: Int = 0</span>
+<span class="nc" id="L50">) : FrameLayout(context, attrs, defStyleAttr), DefaultLifecycleObserver {</span>
+
+<span class="nc" id="L52">    private val binding = ViewBallPitBinding.inflate(LayoutInflater.from(context), this)</span>
+    private val sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
+
+<span class="nc" id="L56">    private val physicsController = PhysicsWorldController(Vec2(0f, -10f))</span>
+<span class="nc" id="L57">    private var minPixelsPerMeter = 1f</span>
+    private val bubbleBodyDef: BodyDef
+    private lateinit var worldBounds: RectF
+
+    private var isSceneSetup = false
+<span class="nc" id="L62">    private val sceneSetupLock = Any()</span>
+
+<span class="nc" id="L64">    private val mainHandler = Handler(Looper.getMainLooper())</span>
+
+<span class="nc" id="L66">    private val viewLifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)</span>
+
+<span class="nc" id="L68">    private val sensorEventListener = object : SensorEventListener {</span>
+<span class="nc" id="L69">        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) { }</span>
+
+        override fun onSensorChanged(event: SensorEvent?) {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            if (event == null) return</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            if (display == null) return</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            if (event.accuracy &lt; SensorManager.SENSOR_STATUS_ACCURACY_LOW) return</span>
+<span class="nc" id="L75">            val x = event.values[0]</span>
+<span class="nc" id="L76">            val y = event.values[1]</span>
+<span class="nc" id="L77">            val z = event.values[2]</span>
+<span class="nc bnc" id="L78" title="All 4 branches missed.">            physicsController.gravity = when (display.rotation) {</span>
+<span class="nc" id="L79">                Surface.ROTATION_90 -&gt; Vec2(y, -x)</span>
+<span class="nc" id="L80">                Surface.ROTATION_180 -&gt; Vec2(x, y)</span>
+<span class="nc" id="L81">                Surface.ROTATION_270 -&gt; Vec2(-y, x)</span>
+<span class="nc" id="L82">                else -&gt; Vec2(-x, -y)</span>
+            }
+<span class="nc" id="L84">        }</span>
+    }
+
+<span class="nc" id="L87">    init {</span>
+<span class="nc" id="L88">        physicsController.listener = object : PhysicsWorldController.Listener {</span>
+            override fun onWorldStep() {
+<span class="nc" id="L90">                binding.physicsView.postInvalidate()</span>
+<span class="nc" id="L91">            }</span>
+        }
+
+<span class="nc" id="L94">        bubbleBodyDef = BodyDef()</span>
+<span class="nc" id="L95">        bubbleBodyDef.type = BodyType.DYNAMIC</span>
+<span class="nc" id="L96">        bubbleBodyDef.fixedRotation = false</span>
+
+<span class="nc" id="L98">        sensorManager = context.getSystemService()!!</span>
+<span class="nc" id="L99">        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)</span>
+<span class="nc" id="L100">    }</span>
+
+    override fun onResume(owner: LifecycleOwner) {
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        accelerometer?.let { sensorManager.registerListener(sensorEventListener, it, SensorManager.SENSOR_DELAY_GAME, mainHandler) }</span>
+<span class="nc" id="L104">        physicsController.resume()</span>
+<span class="nc" id="L105">    }</span>
+
+    override fun onPause(owner: LifecycleOwner) {
+<span class="nc" id="L108">        sensorManager.unregisterListener(sensorEventListener)</span>
+<span class="nc" id="L109">        mainHandler.removeCallbacksAndMessages(null)</span>
+<span class="nc" id="L110">        physicsController.pause()</span>
+<span class="nc" id="L111">    }</span>
+
+    override fun onDestroy(owner: LifecycleOwner) {
+<span class="nc" id="L114">        physicsController.destroy()</span>
+<span class="nc" id="L115">        viewLifecycleScope.cancel()</span>
+<span class="nc" id="L116">    }</span>
+
+    fun setViews(viewsAndSizes: List&lt;Pair&lt;View, Int&gt;&gt;) {
+<span class="nc" id="L119">        synchronized(sceneSetupLock) {</span>
+<span class="nc bnc" id="L120" title="All 4 branches missed.">            check(!isSceneSetup) { &quot;Views can only be set once!&quot; }</span>
+<span class="nc" id="L121">            isSceneSetup = true</span>
+<span class="nc" id="L122">        }</span>
+
+<span class="nc" id="L124">        val areaInMeters = max(1f, viewsAndSizes.map { it.second }.sumByFloat { getBubbleArea(it) })</span>
+<span class="nc" id="L125">        viewLifecycleScope.launch {</span>
+<span class="nc" id="L126">            setupScene(areaInMeters / BALLPIT_FILL_FACTOR)</span>
+<span class="nc" id="L127">            addBubblesToScene(viewsAndSizes)</span>
+<span class="nc" id="L128">        }</span>
+<span class="nc" id="L129">    }</span>
+
+    /* --------------------------------- Set up physics layout  --------------------------------- */
+
+    private suspend fun setupScene(areaInMeters: Float) {
+<span class="nc" id="L134">        binding.physicsView.awaitPreDraw()</span>
+
+<span class="nc" id="L136">        val width = binding.physicsView.width.toFloat()</span>
+<span class="nc" id="L137">        val height = binding.physicsView.height.toFloat()</span>
+<span class="nc" id="L138">        minPixelsPerMeter = sqrt(width * height / areaInMeters)</span>
+<span class="nc" id="L139">        binding.physicsView.pixelsPerMeter = minPixelsPerMeter</span>
+
+<span class="nc" id="L141">        val widthInMeters = width / minPixelsPerMeter</span>
+<span class="nc" id="L142">        val heightInMeters = height / minPixelsPerMeter</span>
+<span class="nc" id="L143">        worldBounds = RectF(0f, 0f, widthInMeters, heightInMeters)</span>
+
+<span class="nc" id="L145">        createWorldBounds(worldBounds)</span>
+<span class="nc" id="L146">    }</span>
+
+    private suspend fun createWorldBounds(rect: RectF): Body {
+<span class="nc" id="L149">        val bodyDef = BodyDef()</span>
+<span class="nc" id="L150">        bodyDef.type = BodyType.STATIC</span>
+
+<span class="nc" id="L152">        val shape = ChainShape()</span>
+<span class="nc" id="L153">        shape.createLoop(arrayOf(</span>
+<span class="nc" id="L154">            Vec2(0f, 0f),</span>
+<span class="nc" id="L155">            Vec2(rect.width(), 0f),</span>
+<span class="nc" id="L156">            Vec2(rect.width(), rect.height()),</span>
+<span class="nc" id="L157">            Vec2(0f, rect.height())</span>
+<span class="nc" id="L158">        ), 4)</span>
+
+<span class="nc" id="L160">        return physicsController.createBody(bodyDef, shape, 0f)</span>
+    }
+
+    private suspend fun addBubblesToScene(viewsAndSizes: List&lt;Pair&lt;View, Int&gt;&gt;) {
+        // add the biggest quest bubbles first so that the smaller ones have a higher z rank
+        // because they are added later. So, they will still be clickable
+<span class="nc" id="L166">        val sortedBySize = viewsAndSizes.sortedByDescending { it.second }</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        for ((view, size) in sortedBySize) {</span>
+<span class="nc" id="L168">            val radius = getBubbleRadius(size)</span>
+<span class="nc" id="L169">            val spawnPos = Vec2(</span>
+<span class="nc" id="L170">                radius + Math.random().toFloat() * (worldBounds.width() - 2 * radius),</span>
+<span class="nc" id="L171">                radius + Math.random().toFloat() * (worldBounds.height() - 2 * radius)</span>
+            )
+<span class="nc" id="L173">            addBubble(view, size, spawnPos)</span>
+        }
+<span class="nc" id="L175">    }</span>
+
+    @SuppressLint(&quot;ClickableViewAccessibility&quot;)
+<span class="nc" id="L178">    private suspend fun addBubble(view: View, size: Int, position: Vec2) {</span>
+<span class="nc" id="L179">        val radius = min(getBubbleRadius(size), min(worldBounds.width(), worldBounds.height()) / 3)</span>
+<span class="nc" id="L180">        val body = createBubbleBody(position, radius)</span>
+
+<span class="nc" id="L182">        startInflatingAnimation(view, size, position.y)</span>
+<span class="nc" id="L183">        view.setOnTouchListener(object : SimpleGestureListener(view) {</span>
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+<span class="nc" id="L185">                view.performClick()</span>
+<span class="nc" id="L186">                return true</span>
+            }
+
+            override fun onFling(e1: MotionEvent, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+<span class="nc" id="L190">                val a = view.rotation / 180.0 * PI</span>
+<span class="nc" id="L191">                val vx = (cos(a) * velocityX - sin(a) * velocityY).toFloat()</span>
+<span class="nc" id="L192">                val vy = (cos(a) * velocityY + sin(a) * velocityX).toFloat()</span>
+<span class="nc" id="L193">                onFlingBubbleBody(body, vx, vy)</span>
+<span class="nc" id="L194">                return true</span>
+            }
+        })
+<span class="nc" id="L197">        binding.physicsView.addView(view, body)</span>
+<span class="nc" id="L198">    }</span>
+
+    private suspend fun createBubbleBody(position: Vec2, radius: Float): Body {
+<span class="nc" id="L201">        val shape = CircleShape()</span>
+<span class="nc" id="L202">        shape.radius = radius</span>
+        // bubbles behave like balls, not circles
+<span class="nc" id="L204">        val density = 4f / 3f * radius</span>
+<span class="nc" id="L205">        bubbleBodyDef.position = position</span>
+<span class="nc" id="L206">        return physicsController.createBody(bubbleBodyDef, shape, density)</span>
+    }
+
+    private fun startInflatingAnimation(view: View, size: Int, yPosition: Float) {
+<span class="nc" id="L210">        view.scaleX = 0.3f</span>
+<span class="nc" id="L211">        view.alpha = 0f</span>
+<span class="nc" id="L212">        view.scaleY = 0.3f</span>
+        // bigger bubbles take longer to &quot;inflate&quot;, also those further down inflate first
+<span class="nc" id="L214">        view.animate()</span>
+<span class="nc" id="L215">            .scaleX(1f).scaleY(1f)</span>
+<span class="nc" id="L216">            .alpha(1f)</span>
+<span class="nc" id="L217">            .setStartDelay((1600 * yPosition / worldBounds.height()).toLong())</span>
+<span class="nc" id="L218">            .setDuration((200 + (size * 150.0).pow(0.5)).toLong())</span>
+<span class="nc" id="L219">            .setInterpolator(DecelerateInterpolator())</span>
+<span class="nc" id="L220">            .start()</span>
+<span class="nc" id="L221">    }</span>
+
+    private fun getBubbleRadius(size: Int): Float =
+<span class="nc" id="L224">        (3.0 * size * BUBBLE_BASE_SIZE_IN_M3 / 4.0 / PI).pow(1.0 / 3.0).toFloat()</span>
+
+    private fun getBubbleArea(size: Int): Float {
+<span class="nc" id="L227">        val r = getBubbleRadius(size)</span>
+<span class="nc" id="L228">        return (PI * r * r).toFloat()</span>
+    }
+
+    /* ---------------------------- Interaction with quest bubbles  ----------------------------- */
+
+    private fun onFlingBubbleBody(body: Body, velocityX: Float, velocityY: Float) {
+<span class="nc" id="L234">        val pixelsPerMeter = binding.physicsView.pixelsPerMeter</span>
+<span class="nc" id="L235">        val vx = FLING_SPEED_FACTOR * velocityX / pixelsPerMeter</span>
+<span class="nc" id="L236">        val vy = FLING_SPEED_FACTOR * -velocityY / pixelsPerMeter</span>
+<span class="nc" id="L237">        body.linearVelocity = Vec2(vx, vy).addLocal(body.linearVelocity)</span>
+<span class="nc" id="L238">    }</span>
+
+    companion object {
+        private const val BUBBLE_BASE_SIZE_IN_M3 = 0.01f
+        private const val BALLPIT_FILL_FACTOR = 0.55f
+        private const val FLING_SPEED_FACTOR = 0.3f
+    }
+<span class="nc" id="L245">}</span>
+
+<span class="nc" id="L247">private open class SimpleGestureListener(private val view: View) : GestureDetector.SimpleOnGestureListener(), View.OnTouchListener {</span>
+<span class="nc" id="L248">    private val gestureDetector = GestureDetector(view.context, this)</span>
+
+    @SuppressLint(&quot;ClickableViewAccessibility&quot;)
+    override fun onTouch(v: View?, event: MotionEvent): Boolean {
+<span class="nc bnc" id="L252" title="All 3 branches missed.">        when (event.actionMasked) {</span>
+<span class="nc" id="L253">            MotionEvent.ACTION_DOWN -&gt; view.isPressed = true</span>
+<span class="nc" id="L254">            MotionEvent.ACTION_UP -&gt; view.isPressed = false</span>
+        }
+<span class="nc bnc" id="L256" title="All 4 branches missed.">        v?.parent?.requestDisallowInterceptTouchEvent(true)</span>
+<span class="nc" id="L257">        return gestureDetector.onTouchEvent(event)</span>
+    }
+
+<span class="nc" id="L260">    override fun onDown(e: MotionEvent): Boolean = true</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

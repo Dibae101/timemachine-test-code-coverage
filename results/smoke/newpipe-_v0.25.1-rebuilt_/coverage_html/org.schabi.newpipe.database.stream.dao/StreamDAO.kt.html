@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StreamDAO.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE newpipe</a> &gt; <a href="index.source.html" class="el_package">org.schabi.newpipe.database.stream.dao</a> &gt; <span class="el_source">StreamDAO.kt</span></div><h1>StreamDAO.kt</h1><pre class="source lang-java linenums">package org.schabi.newpipe.database.stream.dao
+
+import androidx.room.ColumnInfo
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Transaction
+import io.reactivex.rxjava3.core.Completable
+import io.reactivex.rxjava3.core.Flowable
+import org.schabi.newpipe.database.BasicDAO
+import org.schabi.newpipe.database.stream.model.StreamEntity
+import org.schabi.newpipe.database.stream.model.StreamEntity.Companion.STREAM_ID
+import org.schabi.newpipe.extractor.stream.StreamType
+import org.schabi.newpipe.util.StreamTypeUtil
+import java.time.OffsetDateTime
+
+<span class="fc" id="L18">@Dao</span>
+<span class="fc" id="L19">abstract class StreamDAO : BasicDAO&lt;StreamEntity&gt; {</span>
+    @Query(&quot;SELECT * FROM streams&quot;)
+    abstract override fun getAll(): Flowable&lt;List&lt;StreamEntity&gt;&gt;
+
+    @Query(&quot;DELETE FROM streams&quot;)
+    abstract override fun deleteAll(): Int
+
+    @Query(&quot;SELECT * FROM streams WHERE service_id = :serviceId&quot;)
+    abstract override fun listByService(serviceId: Int): Flowable&lt;List&lt;StreamEntity&gt;&gt;
+
+    @Query(&quot;SELECT * FROM streams WHERE url = :url AND service_id = :serviceId&quot;)
+    abstract fun getStream(serviceId: Long, url: String): Flowable&lt;List&lt;StreamEntity&gt;&gt;
+
+    @Query(&quot;UPDATE streams SET uploader_url = :uploaderUrl WHERE url = :url AND service_id = :serviceId&quot;)
+    abstract fun setUploaderUrl(serviceId: Long, url: String, uploaderUrl: String): Completable
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    internal abstract fun silentInsertInternal(stream: StreamEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    internal abstract fun silentInsertAllInternal(streams: List&lt;StreamEntity&gt;): List&lt;Long&gt;
+
+    @Query(&quot;SELECT COUNT(*) != 0 FROM streams WHERE url = :url AND service_id = :serviceId&quot;)
+    internal abstract fun exists(serviceId: Int, url: String): Boolean
+
+    @Query(
+        &quot;&quot;&quot;
+        SELECT uid, stream_type, textual_upload_date, upload_date, is_upload_date_approximation, duration 
+        FROM streams WHERE url = :url AND service_id = :serviceId
+        &quot;&quot;&quot;
+    )
+    internal abstract fun getMinimalStreamForCompare(serviceId: Int, url: String): StreamCompareFeed?
+
+    @Transaction
+    open fun upsert(newerStream: StreamEntity): Long {
+<span class="nc" id="L54">        val uid = silentInsertInternal(newerStream)</span>
+
+<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (uid != -1L) {</span>
+<span class="nc" id="L57">            newerStream.uid = uid</span>
+<span class="nc" id="L58">            return uid</span>
+        }
+
+<span class="nc" id="L61">        compareAndUpdateStream(newerStream)</span>
+
+<span class="nc" id="L63">        update(newerStream)</span>
+<span class="nc" id="L64">        return newerStream.uid</span>
+    }
+
+    @Transaction
+    open fun upsertAll(streams: List&lt;StreamEntity&gt;): List&lt;Long&gt; {
+<span class="nc" id="L69">        val insertUidList = silentInsertAllInternal(streams)</span>
+
+<span class="nc" id="L71">        val streamIds = ArrayList&lt;Long&gt;(streams.size)</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">        for ((index, uid) in insertUidList.withIndex()) {</span>
+<span class="nc" id="L73">            val newerStream = streams[index]</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            if (uid != -1L) {</span>
+<span class="nc" id="L75">                streamIds.add(uid)</span>
+<span class="nc" id="L76">                newerStream.uid = uid</span>
+<span class="nc" id="L77">                continue</span>
+            }
+
+<span class="nc" id="L80">            compareAndUpdateStream(newerStream)</span>
+<span class="nc" id="L81">            streamIds.add(newerStream.uid)</span>
+        }
+
+<span class="nc" id="L84">        update(streams)</span>
+<span class="nc" id="L85">        return streamIds</span>
+    }
+
+    private fun compareAndUpdateStream(newerStream: StreamEntity) {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        val existentMinimalStream = getMinimalStreamForCompare(newerStream.serviceId, newerStream.url)</span>
+<span class="nc" id="L90">            ?: throw IllegalStateException(&quot;Stream cannot be null just after insertion.&quot;)</span>
+<span class="nc" id="L91">        newerStream.uid = existentMinimalStream.uid</span>
+
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (!StreamTypeUtil.isLiveStream(newerStream.streamType)) {</span>
+
+            // Use the existent upload date if the newer stream does not have a better precision
+            // (i.e. is an approximation). This is done to prevent unnecessary changes.
+<span class="nc" id="L97">            val hasBetterPrecision =</span>
+<span class="nc bnc" id="L98" title="All 4 branches missed.">                newerStream.uploadDate != null &amp;&amp; newerStream.isUploadDateApproximation != true</span>
+<span class="nc bnc" id="L99" title="All 4 branches missed.">            if (existentMinimalStream.uploadDate != null &amp;&amp; !hasBetterPrecision) {</span>
+<span class="nc" id="L100">                newerStream.uploadDate = existentMinimalStream.uploadDate</span>
+<span class="nc" id="L101">                newerStream.textualUploadDate = existentMinimalStream.textualUploadDate</span>
+<span class="nc" id="L102">                newerStream.isUploadDateApproximation = existentMinimalStream.isUploadDateApproximation</span>
+            }
+
+<span class="nc bnc" id="L105" title="All 4 branches missed.">            if (existentMinimalStream.duration &gt; 0 &amp;&amp; newerStream.duration &lt; 0) {</span>
+<span class="nc" id="L106">                newerStream.duration = existentMinimalStream.duration</span>
+            }
+        }
+<span class="nc" id="L109">    }</span>
+
+    @Query(
+        &quot;&quot;&quot;
+        DELETE FROM streams WHERE
+
+        NOT EXISTS (SELECT 1 FROM stream_history sh
+        WHERE sh.stream_id = streams.uid)
+
+        AND NOT EXISTS (SELECT 1 FROM playlist_stream_join ps
+        WHERE ps.stream_id = streams.uid)
+
+        AND NOT EXISTS (SELECT 1 FROM feed f
+        WHERE f.stream_id = streams.uid)
+        &quot;&quot;&quot;
+    )
+    abstract fun deleteOrphans(): Int
+
+    /**
+     * Minimal entry class used when comparing/updating an existent stream.
+     */
+<span class="nc" id="L130">    internal data class StreamCompareFeed(</span>
+<span class="nc" id="L131">        @ColumnInfo(name = STREAM_ID)</span>
+<span class="nc" id="L132">        var uid: Long = 0,</span>
+
+<span class="nc" id="L134">        @ColumnInfo(name = StreamEntity.STREAM_TYPE)</span>
+<span class="nc" id="L135">        var streamType: StreamType,</span>
+
+<span class="nc" id="L137">        @ColumnInfo(name = StreamEntity.STREAM_TEXTUAL_UPLOAD_DATE)</span>
+<span class="nc" id="L138">        var textualUploadDate: String? = null,</span>
+
+<span class="nc" id="L140">        @ColumnInfo(name = StreamEntity.STREAM_UPLOAD_DATE)</span>
+<span class="nc" id="L141">        var uploadDate: OffsetDateTime? = null,</span>
+
+<span class="nc" id="L143">        @ColumnInfo(name = StreamEntity.STREAM_IS_UPLOAD_DATE_APPROXIMATION)</span>
+<span class="nc" id="L144">        var isUploadDateApproximation: Boolean? = null,</span>
+
+<span class="nc" id="L146">        @ColumnInfo(name = StreamEntity.STREAM_DURATION)</span>
+<span class="nc" id="L147">        var duration: Long</span>
+<span class="nc" id="L148">    )</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

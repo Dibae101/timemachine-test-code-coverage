@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MediaSyncer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.libanki.sync</a> &gt; <span class="el_source">MediaSyncer.java</span></div><h1>MediaSyncer.java</h1><pre class="source lang-java linenums">/****************************************************************************************
+ * Copyright (c) 2012 Kostas Spyropoulos &lt;inigo.aldana@gmail.com&gt;                       *
+ * Copyright (c) 2014 Houssam Salem &lt;houssam.salem.au@gmail.com&gt;                        *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General Public License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General Public License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.libanki.sync;
+
+import android.text.TextUtils;
+import android.util.Pair;
+
+import com.ichi2.anki.AnkiDroidApp;
+import com.ichi2.anki.R;
+import com.ichi2.anki.exception.MediaSyncException;
+import com.ichi2.anki.exception.UnknownHttpResponseException;
+import com.ichi2.async.Connection;
+import com.ichi2.libanki.Collection;
+import com.ichi2.libanki.Consts;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.zip.ZipFile;
+
+import timber.log.Timber;
+
+/**
+ * About conflicts:
+ * - to minimize data loss, if both sides are marked for sending and one
+ *   side has been deleted, favour the add
+ * - if added/changed on both sides, favour the server version on the
+ *   assumption other syncers are in sync with the server
+ * 
+ * A note about differences to the original python version of this class. We found that:
+ *  1 - There is no reliable way to detect changes to the media directory on Android due to the
+ *      file systems used (mainly FAT32 for sdcards) and the utilities available to probe them.
+ *  2 - Scanning for media changes can take a very long time with thousands of files.
+ * 
+ * Given these two points, we have decided to avoid the call to findChanges() on every sync and
+ * only do it on the first sync to build the initial database. Changes to the media collection
+ * made through AnkiDroid (e.g., multimedia note editor, media check) are recorded directly in
+ * the media database as they are made. This allows us to skip finding media changes entirely
+ * as the database already contains the changes.
+ * 
+ * The downside to this approach is that changes made to the media directory externally (e.g.,
+ * through a file manager) will not be recorded and will not be synced. In this case, the user
+ * must issue a media check command through the UI to bring the database up-to-date.
+ */
+public class MediaSyncer {
+    private Collection mCol;
+    private RemoteMediaServer mServer;
+    private int mDownloadCount;
+    // Needed to update progress to UI
+    private Connection mCon;
+
+<span class="nc" id="L75">    public MediaSyncer(Collection col, RemoteMediaServer server, Connection con) {</span>
+<span class="nc" id="L76">        mCol = col;</span>
+<span class="nc" id="L77">        mServer = server;</span>
+<span class="nc" id="L78">        mCon = con;</span>
+<span class="nc" id="L79">    }</span>
+
+
+    public String sync() throws UnknownHttpResponseException, MediaSyncException {
+        try {
+            // check if there have been any changes
+            // If we haven't built the media db yet, do so on this sync. See note at the top
+            // of this class about this difference to the original.
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            if (mCol.getMedia().needScan()) {</span>
+<span class="nc" id="L88">                mCon.publishProgress(R.string.sync_media_find);</span>
+<span class="nc" id="L89">                mCol.log(&quot;findChanges&quot;);</span>
+<span class="nc" id="L90">                mCol.getMedia().findChanges();</span>
+            }
+
+            // begin session and check if in sync
+<span class="nc" id="L94">            int lastUsn = mCol.getMedia().lastUsn();</span>
+<span class="nc" id="L95">            JSONObject ret = mServer.begin();</span>
+<span class="nc" id="L96">            int srvUsn = ret.getInt(&quot;usn&quot;);</span>
+<span class="nc bnc" id="L97" title="All 4 branches missed.">            if ((lastUsn == srvUsn) &amp;&amp; !(mCol.getMedia().haveDirty())) {</span>
+<span class="nc" id="L98">                return &quot;noChanges&quot;;</span>
+            }
+            // loop through and process changes from server
+<span class="nc" id="L101">            mCol.log(&quot;last local usn is &quot; + lastUsn);</span>
+<span class="nc" id="L102">            mDownloadCount = 0;</span>
+            while (true) {
+                // Allow cancellation
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                if (Connection.getIsCancelled()) {</span>
+<span class="nc" id="L106">                    Timber.i(&quot;Sync was cancelled&quot;);</span>
+                    try {
+<span class="nc" id="L108">                        mServer.finish();</span>
+<span class="nc" id="L109">                    } catch (UnknownHttpResponseException e) {</span>
+<span class="nc" id="L110">                    }</span>
+<span class="nc" id="L111">                    throw new RuntimeException(&quot;UserAbortedSync&quot;);</span>
+                }
+<span class="nc" id="L113">                JSONArray data = mServer.mediaChanges(lastUsn);</span>
+<span class="nc" id="L114">                mCol.log(&quot;mediaChanges resp count: &quot;, data.length());</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                if (data.length() == 0) {</span>
+<span class="nc" id="L116">                    break;</span>
+                }
+
+<span class="nc" id="L119">                List&lt;String&gt; need = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L120">                lastUsn = data.getJSONArray(data.length()-1).getInt(1);</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                for (int i = 0; i &lt; data.length(); i++) {</span>
+<span class="nc" id="L122">                    String fname = data.getJSONArray(i).getString(0);</span>
+<span class="nc" id="L123">                    int rusn = data.getJSONArray(i).getInt(1);</span>
+<span class="nc" id="L124">                    String rsum = data.getJSONArray(i).optString(2);</span>
+<span class="nc" id="L125">                    Pair&lt;String, Integer&gt; info = mCol.getMedia().syncInfo(fname);</span>
+<span class="nc" id="L126">                    String lsum = info.first;</span>
+<span class="nc" id="L127">                    int ldirty = info.second;</span>
+<span class="nc" id="L128">                    mCol.log(String.format(Locale.US,</span>
+                            &quot;check: lsum=%s rsum=%s ldirty=%d rusn=%d fname=%s&quot;,
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                            TextUtils.isEmpty(lsum) ? &quot;&quot; : lsum.subSequence(0, 4),</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                            TextUtils.isEmpty(rsum) ? &quot;&quot; : rsum.subSequence(0, 4),</span>
+<span class="nc" id="L132">                            ldirty,</span>
+<span class="nc" id="L133">                            rusn,</span>
+                            fname));
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                    if (!TextUtils.isEmpty(rsum)) {</span>
+                        // added/changed remotely
+<span class="nc bnc" id="L138" title="All 4 branches missed.">                        if (TextUtils.isEmpty(lsum) || !lsum.equals(rsum)) {</span>
+<span class="nc" id="L139">                            mCol.log(&quot;will fetch&quot;);</span>
+<span class="nc" id="L140">                            need.add(fname);</span>
+                        } else {
+<span class="nc" id="L142">                            mCol.log(&quot;have same already&quot;);</span>
+                        }
+<span class="nc" id="L144">                        mCol.getMedia().markClean(Collections.singletonList(fname));</span>
+                        
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                    } else if (!TextUtils.isEmpty(lsum)) {</span>
+                        // deleted remotely
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                        if (ldirty != 0) {</span>
+<span class="nc" id="L149">                            mCol.log(&quot;delete local&quot;);</span>
+<span class="nc" id="L150">                            mCol.getMedia().syncDelete(fname);</span>
+                        } else {
+                            // conflict: local add overrides remote delete
+<span class="nc" id="L153">                            mCol.log(&quot;conflict; will send&quot;);</span>
+                        }
+                    } else {
+                        // deleted both sides
+<span class="nc" id="L157">                        mCol.log(&quot;both sides deleted&quot;);</span>
+<span class="nc" id="L158">                        mCol.getMedia().markClean(Collections.singletonList(fname));</span>
+                    }
+                }
+<span class="nc" id="L161">                _downloadFiles(need);</span>
+
+<span class="nc" id="L163">                mCol.log(&quot;update last usn to &quot; + lastUsn);</span>
+<span class="nc" id="L164">                mCol.getMedia().setLastUsn(lastUsn); // commits</span>
+<span class="nc" id="L165">            }</span>
+
+            // at this point, we're all up to date with the server's changes,
+            // and we need to send our own
+
+<span class="nc" id="L170">            boolean updateConflict = false;</span>
+<span class="nc" id="L171">            int toSend = mCol.getMedia().dirtyCount();</span>
+            while (true) {
+<span class="nc" id="L173">                Pair&lt;File, List&lt;String&gt;&gt; changesZip = mCol.getMedia().mediaChangesZip();</span>
+<span class="nc" id="L174">                File zip = changesZip.first;</span>
+                try {
+<span class="nc" id="L176">                    List&lt;String&gt; fnames = changesZip.second;</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                    if (fnames.size() == 0) {</span>
+                        break;
+                    }
+
+<span class="nc" id="L181">                    mCon.publishProgress(String.format(</span>
+<span class="nc" id="L182">                            AnkiDroidApp.getAppResources().getString(R.string.sync_media_changes_count), toSend));</span>
+
+<span class="nc" id="L184">                    JSONArray changes = mServer.uploadChanges(zip);</span>
+<span class="nc" id="L185">                    int processedCnt = changes.getInt(0);</span>
+<span class="nc" id="L186">                    int serverLastUsn = changes.getInt(1);</span>
+<span class="nc" id="L187">                    mCol.getMedia().markClean(fnames.subList(0, processedCnt));</span>
+
+<span class="nc" id="L189">                    mCol.log(String.format(Locale.US,</span>
+                            &quot;processed %d, serverUsn %d, clientUsn %d&quot;,
+<span class="nc" id="L191">                            processedCnt, serverLastUsn, lastUsn));</span>
+
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                    if (serverLastUsn - processedCnt == lastUsn) {</span>
+<span class="nc" id="L194">                        mCol.log(&quot;lastUsn in sync, updating local&quot;);</span>
+<span class="nc" id="L195">                        lastUsn = serverLastUsn;</span>
+<span class="nc" id="L196">                        mCol.getMedia().setLastUsn(serverLastUsn); // commits</span>
+                    } else {
+<span class="nc" id="L198">                        mCol.log(&quot;concurrent update, skipping usn update&quot;);</span>
+                        // commit for markClean
+<span class="nc" id="L200">                        mCol.getMedia().getDb().commit();</span>
+<span class="nc" id="L201">                        updateConflict = true;</span>
+                    }
+
+<span class="nc" id="L204">                    toSend -= processedCnt;</span>
+                } finally {
+<span class="nc" id="L206">                    zip.delete();</span>
+                }
+<span class="nc" id="L208">            }</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (updateConflict) {</span>
+<span class="nc" id="L210">                mCol.log(&quot;restart sync due to concurrent update&quot;);</span>
+<span class="nc" id="L211">                return sync();</span>
+            }
+
+<span class="nc" id="L214">            int lcnt = mCol.getMedia().mediacount();</span>
+<span class="nc" id="L215">            String sRet = mServer.mediaSanity(lcnt);</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (sRet.equals(&quot;OK&quot;)) {</span>
+<span class="nc" id="L217">                return &quot;OK&quot;;</span>
+            } else {
+<span class="nc" id="L219">                mCol.getMedia().forceResync();</span>
+<span class="nc" id="L220">                return sRet;</span>
+            }
+<span class="nc" id="L222">        } catch (JSONException e) {</span>
+<span class="nc" id="L223">            throw new RuntimeException(e);</span>
+        }
+    }
+
+
+    private void _downloadFiles(List&lt;String&gt; fnames) {
+<span class="nc" id="L229">        mCol.log(fnames.size() + &quot; files to fetch&quot;);</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        while (fnames.size() &gt; 0) {</span>
+            try {
+<span class="nc" id="L232">                List&lt;String&gt; top = fnames.subList(0, Math.min(fnames.size(), Consts.SYNC_ZIP_COUNT));</span>
+<span class="nc" id="L233">                mCol.log(&quot;fetch &quot; + top);</span>
+<span class="nc" id="L234">                ZipFile zipData = mServer.downloadFiles(top);</span>
+<span class="nc" id="L235">                int cnt = mCol.getMedia().addFilesFromZip(zipData);</span>
+<span class="nc" id="L236">                mDownloadCount += cnt;</span>
+<span class="nc" id="L237">                mCol.log(&quot;received &quot; + cnt + &quot; files&quot;);</span>
+                // NOTE: The python version uses slices which return an empty list when indexed beyond what
+                // the list contains. Since we can't slice out an empty sublist in Java, we must check
+                // if we've reached the end and clear the fnames list manually.
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                if (cnt == fnames.size()) {</span>
+<span class="nc" id="L242">                    fnames.clear();</span>
+                } else {
+<span class="nc" id="L244">                    fnames = fnames.subList(cnt, fnames.size());</span>
+                }
+<span class="nc" id="L246">                mCon.publishProgress(String.format(</span>
+<span class="nc" id="L247">                        AnkiDroidApp.getAppResources().getString(R.string.sync_media_downloaded_count), mDownloadCount));</span>
+<span class="nc" id="L248">            } catch (IOException | UnknownHttpResponseException e) {</span>
+<span class="nc" id="L249">                Timber.e(e, &quot;Error downloading media files&quot;);</span>
+<span class="nc" id="L250">                throw new RuntimeException(e);</span>
+<span class="nc" id="L251">            }</span>
+        }
+<span class="nc" id="L253">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>
