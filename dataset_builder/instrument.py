@@ -93,10 +93,32 @@ def agp_major(tree):
 
 
 def find_manifest(module_dir):
+    """The module's main manifest.
+
+    src/main is the convention but not a rule: MyExpenses keeps its manifest
+    under a custom sourceSet, so fall back to the shallowest manifest in the
+    module that declares an <application>.
+    """
     p = os.path.join(module_dir, "src", "main", "AndroidManifest.xml")
     if os.path.isfile(p):
         return p
-    raise InstrumentError("no src/main/AndroidManifest.xml in %s" % module_dir)
+    candidates = []
+    for root, dirs, files in os.walk(module_dir):
+        dirs[:] = [d for d in dirs if d not in ("build", ".git", "androidTest",
+                                                "test", "debug")]
+        if "AndroidManifest.xml" in files:
+            path = os.path.join(root, "AndroidManifest.xml")
+            try:
+                if "<application" in open(path, encoding="utf-8",
+                                          errors="replace").read():
+                    candidates.append((root[len(module_dir):].count(os.sep), path))
+            except OSError:
+                pass
+    if candidates:
+        candidates.sort()
+        return candidates[0][1]
+    raise InstrumentError("no AndroidManifest.xml with <application> in %s"
+                          % os.path.basename(module_dir))
 
 
 def harness_package(module_dir, gradle_file):
