@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FetchHomeWorker.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Fedilab</a> &gt; <a href="index.source.html" class="el_package">app.fedilab.android.mastodon.jobs</a> &gt; <span class="el_source">FetchHomeWorker.java</span></div><h1>FetchHomeWorker.java</h1><pre class="source lang-java linenums">package app.fedilab.android.mastodon.jobs;
+/* Copyright 2023 Thomas Schneider
+ *
+ * This file is a part of Fedilab
+ *
+ * This program is free software; you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation; either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * Fedilab is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with Fedilab; if not,
+ * see &lt;http://www.gnu.org/licenses&gt;. */
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.pm.ServiceInfo;
+import android.graphics.BitmapFactory;
+import android.os.Build;
+
+import androidx.annotation.NonNull;
+import androidx.core.app.NotificationCompat;
+import androidx.preference.PreferenceManager;
+import androidx.work.Data;
+import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.ForegroundInfo;
+import androidx.work.PeriodicWorkRequest;
+import androidx.work.WorkManager;
+import androidx.work.Worker;
+import androidx.work.WorkerParameters;
+
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+
+import java.io.IOException;
+import java.net.IDN;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import app.fedilab.android.R;
+import app.fedilab.android.mastodon.client.endpoints.MastodonTimelinesService;
+import app.fedilab.android.mastodon.client.entities.api.Pagination;
+import app.fedilab.android.mastodon.client.entities.api.Status;
+import app.fedilab.android.mastodon.client.entities.app.Account;
+import app.fedilab.android.mastodon.client.entities.app.BaseAccount;
+import app.fedilab.android.mastodon.client.entities.app.StatusCache;
+import app.fedilab.android.mastodon.client.entities.app.Timeline;
+import app.fedilab.android.mastodon.client.entities.app.TimelineCacheLogs;
+import app.fedilab.android.mastodon.exception.DBException;
+import app.fedilab.android.mastodon.helper.Helper;
+import app.fedilab.android.mastodon.helper.MastodonHelper;
+import okhttp3.OkHttpClient;
+import retrofit2.Call;
+import retrofit2.Response;
+import retrofit2.Retrofit;
+import retrofit2.converter.gson.GsonConverterFactory;
+
+
+public class FetchHomeWorker extends Worker {
+
+    private static final int FETCH_HOME_CHANNEL_ID = 5;
+    private static final String CHANNEL_ID = &quot;fedilab_home&quot;;
+<span class="nc" id="L68">    final OkHttpClient okHttpClient = Helper.myOkHttpClient(getApplicationContext());</span>
+    private final NotificationManager notificationManager;
+
+
+    public FetchHomeWorker(@NonNull Context context, @NonNull WorkerParameters workerParams) {
+<span class="nc" id="L73">        super(context, workerParams);</span>
+<span class="nc" id="L74">        notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);</span>
+<span class="nc" id="L75">    }</span>
+
+    public static void setRepeatHome(Context context, BaseAccount account, Data inputData) {
+<span class="nc" id="L78">        WorkManager.getInstance(context).cancelAllWorkByTag(Helper.WORKER_REFRESH_HOME + account.user_id + account.instance);</span>
+<span class="nc" id="L79">        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);</span>
+<span class="nc" id="L80">        String value = prefs.getString(context.getString(R.string.SET_FETCH_HOME_DELAY_VALUE) + account.user_id + account.instance, &quot;60&quot;);</span>
+<span class="nc" id="L81">        PeriodicWorkRequest notificationPeriodic = new PeriodicWorkRequest.Builder(FetchHomeWorker.class, Long.parseLong(value), TimeUnit.MINUTES)</span>
+<span class="nc" id="L82">                .setInputData(inputData)</span>
+<span class="nc" id="L83">                .addTag(Helper.WORKER_REFRESH_HOME + account.user_id + account.instance)</span>
+<span class="nc" id="L84">                .build();</span>
+<span class="nc" id="L85">        WorkManager.getInstance(context).enqueueUniquePeriodicWork(Helper.WORKER_REFRESH_HOME + account.user_id + account.instance, ExistingPeriodicWorkPolicy.REPLACE, notificationPeriodic);</span>
+<span class="nc" id="L86">    }</span>
+
+    @NonNull
+    @Override
+    public ListenableFuture&lt;ForegroundInfo&gt; getForegroundInfoAsync() {
+<span class="nc bnc" id="L91" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= 26) {</span>
+<span class="nc" id="L92">            String channelName = &quot;Fetch Home&quot;;</span>
+<span class="nc" id="L93">            String channelDescription = &quot;Fetch home messages&quot;;</span>
+<span class="nc" id="L94">            NotificationChannel fetchHomeChannel = new NotificationChannel(CHANNEL_ID, channelName, NotificationManager.IMPORTANCE_LOW);</span>
+<span class="nc" id="L95">            fetchHomeChannel.setDescription(channelDescription);</span>
+<span class="nc" id="L96">            fetchHomeChannel.setSound(null, null);</span>
+<span class="nc" id="L97">            fetchHomeChannel.setShowBadge(false);</span>
+<span class="nc" id="L98">            notificationManager.createNotificationChannel(fetchHomeChannel);</span>
+        }
+<span class="nc" id="L100">        NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID);</span>
+<span class="nc" id="L101">        notificationBuilder.setSmallIcon(R.drawable.ic_notification)</span>
+<span class="nc" id="L102">                .setLargeIcon(BitmapFactory.decodeResource(getApplicationContext().getResources(), R.drawable.ic_launcher_foreground))</span>
+<span class="nc" id="L103">                .setContentTitle(getApplicationContext().getString(R.string.notifications))</span>
+<span class="nc" id="L104">                .setContentText(getApplicationContext().getString(R.string.fetch_notifications))</span>
+<span class="nc" id="L105">                .setDefaults(NotificationCompat.DEFAULT_ALL)</span>
+<span class="nc" id="L106">                .setPriority(Notification.PRIORITY_DEFAULT);</span>
+
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.Q) {</span>
+<span class="nc" id="L109">            return Futures.immediateFuture(new ForegroundInfo(FETCH_HOME_CHANNEL_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC));</span>
+        } else {
+<span class="nc" id="L111">            return Futures.immediateFuture(new ForegroundInfo(FETCH_HOME_CHANNEL_ID, notificationBuilder.build()));</span>
+        }
+    }
+
+    @NonNull
+    private ForegroundInfo createForegroundInfo() {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= 26) {</span>
+<span class="nc" id="L118">            String channelName = &quot;Fetch Home&quot;;</span>
+<span class="nc" id="L119">            String channelDescription = &quot;Fetch home messages&quot;;</span>
+<span class="nc" id="L120">            NotificationChannel fetchHomeChannel = new NotificationChannel(CHANNEL_ID, channelName, NotificationManager.IMPORTANCE_LOW);</span>
+<span class="nc" id="L121">            fetchHomeChannel.setSound(null, null);</span>
+<span class="nc" id="L122">            fetchHomeChannel.setShowBadge(false);</span>
+<span class="nc" id="L123">            fetchHomeChannel.setDescription(channelDescription);</span>
+<span class="nc" id="L124">            notificationManager.createNotificationChannel(fetchHomeChannel);</span>
+
+        }
+<span class="nc" id="L127">        NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID);</span>
+<span class="nc" id="L128">        notificationBuilder.setSmallIcon(R.drawable.ic_notification)</span>
+<span class="nc" id="L129">                .setLargeIcon(BitmapFactory.decodeResource(getApplicationContext().getResources(), R.drawable.ic_launcher_foreground))</span>
+<span class="nc" id="L130">                .setContentTitle(getApplicationContext().getString(R.string.fetch_home_messages))</span>
+<span class="nc" id="L131">                .setContentText(getApplicationContext().getString(R.string.set_fetch_home))</span>
+<span class="nc" id="L132">                .setDefaults(NotificationCompat.DEFAULT_ALL)</span>
+<span class="nc" id="L133">                .setSilent(true)</span>
+<span class="nc" id="L134">                .setPriority(Notification.PRIORITY_LOW);</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.Q) {</span>
+<span class="nc" id="L137">            return new ForegroundInfo(FETCH_HOME_CHANNEL_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);</span>
+        } else {
+<span class="nc" id="L139">            return new ForegroundInfo(FETCH_HOME_CHANNEL_ID, notificationBuilder.build());</span>
+        }
+    }
+
+    @NonNull
+    @Override
+    public Result doWork() {
+
+<span class="nc" id="L147">        setForegroundAsync(createForegroundInfo());</span>
+
+<span class="nc" id="L149">        String instance = getInputData().getString(Helper.ARG_INSTANCE);</span>
+<span class="nc" id="L150">        String userId = getInputData().getString(Helper.ARG_USER_ID);</span>
+
+        try {
+<span class="nc" id="L153">            BaseAccount account = new Account(getApplicationContext()).getUniqAccount(userId, instance);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            if (account != null) {</span>
+                try {
+<span class="nc" id="L156">                    fetchHome(getApplicationContext(), account);</span>
+<span class="nc" id="L157">                } catch (IOException e) {</span>
+<span class="nc" id="L158">                    e.printStackTrace();</span>
+<span class="nc" id="L159">                }</span>
+            }
+<span class="nc" id="L161">        } catch (DBException e) {</span>
+<span class="nc" id="L162">            e.printStackTrace();</span>
+<span class="nc" id="L163">        }</span>
+<span class="nc" id="L164">        return Result.success(new Data.Builder().putString(&quot;WORK_RESULT&quot;, getApplicationContext().getString(R.string.notifications)).build());</span>
+    }
+
+    private void fetchHome(Context context, BaseAccount account) throws IOException {
+<span class="nc" id="L168">        SharedPreferences prefs = PreferenceManager</span>
+<span class="nc" id="L169">                .getDefaultSharedPreferences(context);</span>
+<span class="nc" id="L170">        boolean fetch_home = prefs.getBoolean(context.getString(R.string.SET_FETCH_HOME) + account.user_id + account.instance, false);</span>
+
+<span class="nc" id="L172">        boolean failed = false;</span>
+<span class="nc" id="L173">        int fetched = 0, inserted = 0, updated = 0, frequency = 0;</span>
+<span class="nc" id="L174">        String timeRefresh = prefs.getString(context.getString(R.string.SET_FETCH_HOME_DELAY_VALUE) + account.user_id + account.instance, &quot;60&quot;);</span>
+        try {
+<span class="nc" id="L176">            frequency = Integer.parseInt(timeRefresh);</span>
+<span class="nc" id="L177">        } catch (Exception ignored) {</span>
+<span class="nc" id="L178">        }</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (fetch_home) {</span>
+<span class="nc" id="L180">            int max_calls = 10;</span>
+<span class="nc" id="L181">            int status_per_page = 40;</span>
+            int insertValue;
+            //Browse last 400 home messages
+<span class="nc" id="L184">            boolean canContinue = true;</span>
+<span class="nc" id="L185">            int call = 0;</span>
+<span class="nc" id="L186">            String max_id = null;</span>
+<span class="nc" id="L187">            MastodonTimelinesService mastodonTimelinesService = init(account.instance);</span>
+<span class="nc bnc" id="L188" title="All 4 branches missed.">            while (canContinue &amp;&amp; call &lt; max_calls) {</span>
+<span class="nc" id="L189">                Call&lt;List&lt;Status&gt;&gt; homeCall = mastodonTimelinesService.getHome(account.token, max_id, null, null, status_per_page, null);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (homeCall != null) {</span>
+<span class="nc" id="L191">                    Response&lt;List&lt;Status&gt;&gt; homeResponse = homeCall.execute();</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                    if (homeResponse.isSuccessful()) {</span>
+<span class="nc" id="L193">                        List&lt;Status&gt; statusList = homeResponse.body();</span>
+<span class="nc bnc" id="L194" title="All 4 branches missed.">                        if (statusList != null &amp;&amp; statusList.size() &gt; 0) {</span>
+<span class="nc" id="L195">                            fetched += statusList.size();</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                            for (Status status : statusList) {</span>
+<span class="nc" id="L197">                                StatusCache statusCacheDAO = new StatusCache(getApplicationContext());</span>
+<span class="nc" id="L198">                                StatusCache statusCache = new StatusCache();</span>
+<span class="nc" id="L199">                                statusCache.instance = account.instance;</span>
+<span class="nc" id="L200">                                statusCache.user_id = account.user_id;</span>
+<span class="nc" id="L201">                                statusCache.status = status;</span>
+<span class="nc" id="L202">                                statusCache.type = Timeline.TimeLineEnum.HOME;</span>
+<span class="nc" id="L203">                                statusCache.status_id = status.id;</span>
+                                try {
+<span class="nc" id="L205">                                    insertValue = statusCacheDAO.insertOrUpdate(statusCache, Timeline.TimeLineEnum.HOME.getValue());</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                                    if (insertValue == 1) {</span>
+<span class="nc" id="L207">                                        inserted++;</span>
+                                    } else {
+<span class="nc" id="L209">                                        updated++;</span>
+                                    }
+<span class="nc" id="L211">                                } catch (DBException e) {</span>
+<span class="nc" id="L212">                                    e.printStackTrace();</span>
+<span class="nc" id="L213">                                }</span>
+<span class="nc" id="L214">                            }</span>
+
+<span class="nc" id="L216">                            Pagination pagination = MastodonHelper.getPagination(homeResponse.headers());</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                            if (pagination.max_id != null) {</span>
+<span class="nc" id="L218">                                max_id = pagination.max_id;</span>
+                            } else {
+<span class="nc" id="L220">                                canContinue = false;</span>
+                            }
+<span class="nc" id="L222">                        } else {</span>
+<span class="nc" id="L223">                            canContinue = false;</span>
+                        }
+<span class="nc" id="L225">                    } else {</span>
+<span class="nc" id="L226">                        canContinue = false;</span>
+<span class="nc" id="L227">                        failed = true;</span>
+                    }
+<span class="nc" id="L229">                } else {</span>
+<span class="nc" id="L230">                    canContinue = false;</span>
+<span class="nc" id="L231">                    failed = true;</span>
+                }
+                //Pause between calls (1 second)
+                try {
+<span class="nc" id="L235">                    Thread.sleep(2000);</span>
+<span class="nc" id="L236">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L237">                    e.printStackTrace();</span>
+<span class="nc" id="L238">                }</span>
+<span class="nc" id="L239">                call++;</span>
+<span class="nc" id="L240">            }</span>
+<span class="nc" id="L241">            TimelineCacheLogs timelineCacheLogs = new TimelineCacheLogs();</span>
+<span class="nc" id="L242">            timelineCacheLogs.frequency = frequency;</span>
+<span class="nc" id="L243">            timelineCacheLogs.fetched = fetched;</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">            timelineCacheLogs.failed = failed ? 1 : 0;</span>
+<span class="nc" id="L245">            timelineCacheLogs.updated = updated;</span>
+<span class="nc" id="L246">            timelineCacheLogs.inserted = inserted;</span>
+<span class="nc" id="L247">            timelineCacheLogs.slug = Timeline.TimeLineEnum.HOME.getValue();</span>
+<span class="nc" id="L248">            timelineCacheLogs.type = Timeline.TimeLineEnum.HOME;</span>
+<span class="nc" id="L249">            timelineCacheLogs.user_id = account.user_id;</span>
+<span class="nc" id="L250">            timelineCacheLogs.instance = account.instance;</span>
+            try {
+<span class="nc" id="L252">                new TimelineCacheLogs(context).insert(timelineCacheLogs);</span>
+<span class="nc" id="L253">            } catch (DBException e) {</span>
+<span class="nc" id="L254">                throw new RuntimeException(e);</span>
+<span class="nc" id="L255">            }</span>
+        }
+<span class="nc" id="L257">    }</span>
+
+    private MastodonTimelinesService init(String instance) {
+<span class="nc" id="L260">        Retrofit retrofit = new Retrofit.Builder()</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                .baseUrl(&quot;https://&quot; + (instance != null ? IDN.toASCII(instance, IDN.ALLOW_UNASSIGNED) : null) + &quot;/api/v1/&quot;)</span>
+<span class="nc" id="L262">                .addConverterFactory(GsonConverterFactory.create(Helper.getDateBuilder()))</span>
+<span class="nc" id="L263">                .client(okHttpClient)</span>
+<span class="nc" id="L264">                .build();</span>
+<span class="nc" id="L265">        return retrofit.create(MastodonTimelinesService.class);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UploadFileFromFileSystemWorker.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ownCloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.workers</a> &gt; <span class="el_source">UploadFileFromFileSystemWorker.kt</span></div><h1>UploadFileFromFileSystemWorker.kt</h1><pre class="source lang-java linenums">/**
+ * ownCloud Android client application
+ *
+ * @author Abel García de Prada
+ * @author Juan Carlos Garrote Gascón
+ *
+ * Copyright (C) 2023 ownCloud GmbH.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2,
+ * as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.workers
+
+import android.accounts.Account
+import android.content.Context
+import androidx.work.CoroutineWorker
+import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import com.owncloud.android.R
+import com.owncloud.android.data.executeRemoteOperation
+import com.owncloud.android.domain.camerauploads.model.UploadBehavior
+import com.owncloud.android.domain.capabilities.usecases.GetStoredCapabilitiesUseCase
+import com.owncloud.android.domain.exceptions.LocalFileNotFoundException
+import com.owncloud.android.domain.exceptions.UnauthorizedException
+import com.owncloud.android.domain.files.model.OCFile.Companion.PATH_SEPARATOR
+import com.owncloud.android.domain.files.usecases.CleanConflictUseCase
+import com.owncloud.android.domain.files.usecases.GetFileByRemotePathUseCase
+import com.owncloud.android.domain.files.usecases.GetWebDavUrlForSpaceUseCase
+import com.owncloud.android.domain.files.usecases.SaveFileOrFolderUseCase
+import com.owncloud.android.domain.transfers.TransferRepository
+import com.owncloud.android.domain.transfers.model.OCTransfer
+import com.owncloud.android.domain.transfers.model.TransferResult
+import com.owncloud.android.domain.transfers.model.TransferStatus
+import com.owncloud.android.extensions.parseError
+import com.owncloud.android.lib.common.OwnCloudAccount
+import com.owncloud.android.lib.common.OwnCloudClient
+import com.owncloud.android.lib.common.SingleSessionManager
+import com.owncloud.android.lib.common.network.OnDatatransferProgressListener
+import com.owncloud.android.lib.common.operations.RemoteOperationResult.ResultCode
+import com.owncloud.android.lib.resources.files.CheckPathExistenceRemoteOperation
+import com.owncloud.android.lib.resources.files.CreateRemoteFolderOperation
+import com.owncloud.android.lib.resources.files.FileUtils
+import com.owncloud.android.lib.resources.files.UploadFileFromFileSystemOperation
+import com.owncloud.android.lib.resources.files.chunks.ChunkedUploadFromFileSystemOperation
+import com.owncloud.android.lib.resources.files.chunks.ChunkedUploadFromFileSystemOperation.Companion.CHUNK_SIZE
+import com.owncloud.android.lib.resources.files.services.implementation.OCChunkService
+import com.owncloud.android.presentation.authentication.AccountUtils
+import com.owncloud.android.utils.NotificationUtils
+import com.owncloud.android.utils.RemoteFileUtils.Companion.getAvailableRemotePath
+import com.owncloud.android.utils.SecurityUtils
+import com.owncloud.android.utils.UPLOAD_NOTIFICATION_CHANNEL_ID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
+import timber.log.Timber
+import java.io.File
+
+<span class="nc" id="L70">class UploadFileFromFileSystemWorker(</span>
+<span class="nc" id="L71">    private val appContext: Context,</span>
+<span class="nc" id="L72">    private val workerParameters: WorkerParameters</span>
+<span class="nc" id="L73">) : CoroutineWorker(</span>
+<span class="nc" id="L74">    appContext,</span>
+<span class="nc" id="L75">    workerParameters</span>
+), KoinComponent, OnDatatransferProgressListener {
+
+    private lateinit var account: Account
+    private lateinit var fileSystemPath: String
+    private lateinit var lastModified: String
+    private lateinit var behavior: UploadBehavior
+    private lateinit var uploadPath: String
+    private lateinit var mimetype: String
+<span class="nc" id="L84">    private var uploadIdInStorageManager: Long = -1</span>
+    private lateinit var ocTransfer: OCTransfer
+    private var fileSize: Long = 0
+    private var spaceWebDavUrl: String? = null
+
+    private lateinit var uploadFileOperation: UploadFileFromFileSystemOperation
+<span class="nc" id="L90">    private val saveFileOrFolderUseCase: SaveFileOrFolderUseCase by inject()</span>
+<span class="nc" id="L91">    private val cleanConflictUseCase: CleanConflictUseCase by inject()</span>
+<span class="nc" id="L92">    private val getWebdavUrlForSpaceUseCase: GetWebDavUrlForSpaceUseCase by inject()</span>
+
+    // Etag in conflict required to overwrite files in server. Otherwise, the upload will be rejected.
+<span class="nc" id="L95">    private var eTagInConflict: String = &quot;&quot;</span>
+
+    private var lastPercent = 0
+
+<span class="nc" id="L99">    private val transferRepository: TransferRepository by inject()</span>
+
+    override suspend fun doWork(): Result {
+
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (!areParametersValid()) return Result.failure()</span>
+
+<span class="nc" id="L105">        transferRepository.updateTransferStatusToInProgressById(uploadIdInStorageManager)</span>
+
+<span class="nc" id="L107">        spaceWebDavUrl =</span>
+<span class="nc" id="L108">            getWebdavUrlForSpaceUseCase(GetWebDavUrlForSpaceUseCase.Params(accountName = account.name, spaceId = ocTransfer.spaceId))</span>
+
+<span class="nc" id="L110">        return try {</span>
+<span class="nc" id="L111">            checkPermissionsToReadDocumentAreGranted()</span>
+<span class="nc" id="L112">            val clientForThisUpload = getClientForThisUpload()</span>
+<span class="nc" id="L113">            checkParentFolderExistence(clientForThisUpload)</span>
+<span class="nc" id="L114">            checkNameCollisionAndGetAnAvailableOneInCase(clientForThisUpload)</span>
+<span class="nc" id="L115">            uploadDocument(clientForThisUpload)</span>
+<span class="nc" id="L116">            updateUploadsDatabaseWithResult(null)</span>
+<span class="nc" id="L117">            updateFilesDatabaseWithLatestDetails()</span>
+<span class="nc" id="L118">            Result.success()</span>
+<span class="nc" id="L119">        } catch (throwable: Throwable) {</span>
+<span class="nc" id="L120">            Timber.e(throwable)</span>
+<span class="nc" id="L121">            showNotification(throwable)</span>
+<span class="nc" id="L122">            updateUploadsDatabaseWithResult(throwable)</span>
+<span class="nc" id="L123">            Result.failure()</span>
+        }
+    }
+
+    private fun areParametersValid(): Boolean {
+<span class="nc" id="L128">        val paramAccountName = workerParameters.inputData.getString(KEY_PARAM_ACCOUNT_NAME)</span>
+<span class="nc" id="L129">        val paramUploadPath = workerParameters.inputData.getString(KEY_PARAM_UPLOAD_PATH)</span>
+<span class="nc" id="L130">        val paramLastModified = workerParameters.inputData.getString(KEY_PARAM_LAST_MODIFIED)</span>
+<span class="nc" id="L131">        val paramBehavior = workerParameters.inputData.getString(KEY_PARAM_BEHAVIOR)</span>
+<span class="nc" id="L132">        val paramFileSystemUri = workerParameters.inputData.getString(KEY_PARAM_LOCAL_PATH)</span>
+<span class="nc" id="L133">        val paramUploadId = workerParameters.inputData.getLong(KEY_PARAM_UPLOAD_ID, -1)</span>
+
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        account = AccountUtils.getOwnCloudAccountByName(appContext, paramAccountName) ?: return false</span>
+<span class="nc bnc" id="L136" title="All 8 branches missed.">        fileSystemPath = paramFileSystemUri.takeUnless { it.isNullOrBlank() } ?: return false</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        uploadPath = paramUploadPath ?: return false</span>
+<span class="nc bnc" id="L138" title="All 4 branches missed.">        behavior = paramBehavior?.let { UploadBehavior.valueOf(it) } ?: return false</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        lastModified = paramLastModified ?: return false</span>
+<span class="nc bnc" id="L140" title="All 6 branches missed.">        uploadIdInStorageManager = paramUploadId.takeUnless { it == -1L } ?: return false</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        ocTransfer = retrieveUploadInfoFromDatabase() ?: return false</span>
+
+<span class="nc" id="L143">        return true</span>
+    }
+
+    private fun retrieveUploadInfoFromDatabase(): OCTransfer? {
+<span class="nc" id="L147">        return transferRepository.getTransferById(uploadIdInStorageManager).also {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (it != null) {</span>
+<span class="nc" id="L149">                Timber.d(&quot;Upload with id ($uploadIdInStorageManager) has been found in database.&quot;)</span>
+<span class="nc" id="L150">                Timber.d(&quot;Upload info: $it&quot;)</span>
+            } else {
+<span class="nc" id="L152">                Timber.w(&quot;Upload with id ($uploadIdInStorageManager) has not been found in database.&quot;)</span>
+<span class="nc" id="L153">                Timber.w(&quot;$uploadPath won't be uploaded&quot;)</span>
+            }
+<span class="nc" id="L155">        }</span>
+    }
+
+    private fun checkPermissionsToReadDocumentAreGranted() {
+<span class="nc" id="L159">        val fileInFileSystem = File(fileSystemPath)</span>
+<span class="nc bnc" id="L160" title="All 6 branches missed.">        if (!fileInFileSystem.exists() || !fileInFileSystem.isFile || !fileInFileSystem.canRead()) {</span>
+            // Permissions not granted. Throw an exception to ask for them.
+<span class="nc" id="L162">            throw LocalFileNotFoundException()</span>
+        }
+<span class="nc" id="L164">        mimetype = fileInFileSystem.extension</span>
+<span class="nc" id="L165">        fileSize = fileInFileSystem.length()</span>
+<span class="nc" id="L166">    }</span>
+
+    private fun getClientForThisUpload(): OwnCloudClient =
+<span class="nc" id="L169">        SingleSessionManager.getDefaultSingleton()</span>
+<span class="nc" id="L170">            .getClientFor(</span>
+<span class="nc" id="L171">                OwnCloudAccount(AccountUtils.getOwnCloudAccountByName(appContext, account.name), appContext),</span>
+<span class="nc" id="L172">                appContext,</span>
+<span class="nc" id="L173">            )</span>
+
+    private fun checkParentFolderExistence(client: OwnCloudClient) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        var pathToGrant: String = File(uploadPath).parent ?: &quot;&quot;</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        pathToGrant = if (pathToGrant.endsWith(File.separator)) pathToGrant else pathToGrant + File.separator</span>
+
+<span class="nc" id="L179">        val checkPathExistenceOperation = CheckPathExistenceRemoteOperation(pathToGrant, false, spaceWebDavUrl)</span>
+<span class="nc" id="L180">        val checkPathExistenceResult = checkPathExistenceOperation.execute(client)</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        if (checkPathExistenceResult.code == ResultCode.FILE_NOT_FOUND) {</span>
+<span class="nc" id="L182">            val createRemoteFolderOperation = CreateRemoteFolderOperation(</span>
+<span class="nc" id="L183">                remotePath = pathToGrant,</span>
+<span class="nc" id="L184">                createFullPath = true,</span>
+<span class="nc" id="L185">                spaceWebDavUrl = spaceWebDavUrl,</span>
+            )
+<span class="nc" id="L187">            createRemoteFolderOperation.execute(client)</span>
+        }
+<span class="nc" id="L189">    }</span>
+
+    private fun checkNameCollisionAndGetAnAvailableOneInCase(client: OwnCloudClient) {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (ocTransfer.forceOverwrite) {</span>
+
+<span class="nc" id="L194">            val getFileByRemotePathUseCase: GetFileByRemotePathUseCase by inject()</span>
+<span class="nc" id="L195">            val useCaseResult = getFileByRemotePathUseCase(</span>
+<span class="nc" id="L196">                GetFileByRemotePathUseCase.Params(</span>
+<span class="nc" id="L197">                    ocTransfer.accountName,</span>
+<span class="nc" id="L198">                    ocTransfer.remotePath,</span>
+<span class="nc" id="L199">                    ocTransfer.spaceId</span>
+                )
+            )
+
+<span class="nc bnc" id="L203" title="All 4 branches missed.">            eTagInConflict = useCaseResult.getDataOrNull()?.etagInConflict.orEmpty()</span>
+
+<span class="nc" id="L205">            Timber.d(&quot;Upload will overwrite current server file with the following etag in conflict: $eTagInConflict&quot;)</span>
+        } else {
+
+<span class="nc" id="L208">            Timber.d(&quot;Checking name collision in server&quot;)</span>
+<span class="nc" id="L209">            val remotePath = getAvailableRemotePath(</span>
+<span class="nc" id="L210">                ownCloudClient = client,</span>
+<span class="nc" id="L211">                remotePath = uploadPath,</span>
+<span class="nc" id="L212">                spaceWebDavUrl = spaceWebDavUrl,</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                isUserLogged = AccountUtils.getCurrentOwnCloudAccount(appContext) != null,</span>
+            )
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            if (remotePath != uploadPath) {</span>
+<span class="nc" id="L216">                uploadPath = remotePath</span>
+<span class="nc" id="L217">                Timber.d(&quot;Name collision detected, let's rename it to $remotePath&quot;)</span>
+            }
+        }
+<span class="nc" id="L220">    }</span>
+
+    private fun uploadDocument(client: OwnCloudClient) {
+<span class="nc" id="L223">        val getStoredCapabilitiesUseCase: GetStoredCapabilitiesUseCase by inject()</span>
+<span class="nc" id="L224">        val capabilitiesForAccount = getStoredCapabilitiesUseCase(</span>
+<span class="nc" id="L225">            GetStoredCapabilitiesUseCase.Params(</span>
+<span class="nc" id="L226">                accountName = account.name</span>
+            )
+        )
+<span class="nc bnc" id="L229" title="All 4 branches missed.">        val isChunkingAllowed = capabilitiesForAccount != null &amp;&amp; capabilitiesForAccount.isChunkingAllowed()</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        Timber.d(&quot;Chunking is allowed: %s, and file size is greater than the minimum chunk size: %s&quot;, isChunkingAllowed, fileSize &gt; CHUNK_SIZE)</span>
+
+<span class="nc bnc" id="L232" title="All 4 branches missed.">        if (isChunkingAllowed &amp;&amp; fileSize &gt; CHUNK_SIZE) {</span>
+<span class="nc" id="L233">            uploadChunkedFile(client)</span>
+        } else {
+<span class="nc" id="L235">            uploadPlainFile(client)</span>
+        }
+<span class="nc" id="L237">    }</span>
+
+    private fun uploadPlainFile(client: OwnCloudClient) {
+<span class="nc" id="L240">        uploadFileOperation = UploadFileFromFileSystemOperation(</span>
+<span class="nc" id="L241">            localPath = fileSystemPath,</span>
+<span class="nc" id="L242">            remotePath = uploadPath,</span>
+<span class="nc" id="L243">            mimeType = mimetype,</span>
+<span class="nc" id="L244">            lastModifiedTimestamp = lastModified,</span>
+<span class="nc" id="L245">            requiredEtag = eTagInConflict,</span>
+<span class="nc" id="L246">            spaceWebDavUrl = spaceWebDavUrl,</span>
+<span class="nc" id="L247">        ).also {</span>
+<span class="nc" id="L248">            it.addDataTransferProgressListener(this)</span>
+<span class="nc" id="L249">        }</span>
+
+<span class="nc" id="L251">        val result = executeRemoteOperation { uploadFileOperation.execute(client) }</span>
+
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (result == Unit) {</span>
+<span class="nc" id="L254">            removeLocalFile() // Removed file from tmp folder</span>
+        }
+<span class="nc" id="L256">    }</span>
+
+    private fun uploadChunkedFile(client: OwnCloudClient) {
+<span class="nc" id="L259">        val immutableHashForChunkedFile = SecurityUtils.stringToMD5Hash(uploadPath) + System.currentTimeMillis()</span>
+        // Step 1: Create folder where the chunks will be uploaded.
+<span class="nc" id="L261">        val createChunksRemoteFolderOperation = CreateRemoteFolderOperation(</span>
+<span class="nc" id="L262">            remotePath = immutableHashForChunkedFile,</span>
+<span class="nc" id="L263">            createFullPath = false,</span>
+<span class="nc" id="L264">            isChunksFolder = true</span>
+        )
+<span class="nc" id="L266">        executeRemoteOperation { createChunksRemoteFolderOperation.execute(client) }</span>
+
+        // Step 2: Upload file by chunks
+<span class="nc" id="L269">        uploadFileOperation = ChunkedUploadFromFileSystemOperation(</span>
+<span class="nc" id="L270">            transferId = immutableHashForChunkedFile,</span>
+<span class="nc" id="L271">            localPath = fileSystemPath,</span>
+<span class="nc" id="L272">            remotePath = uploadPath,</span>
+<span class="nc" id="L273">            mimeType = mimetype,</span>
+<span class="nc" id="L274">            lastModifiedTimestamp = lastModified,</span>
+<span class="nc" id="L275">            requiredEtag = eTagInConflict,</span>
+<span class="nc" id="L276">        ).also {</span>
+<span class="nc" id="L277">            it.addDataTransferProgressListener(this)</span>
+<span class="nc" id="L278">        }</span>
+
+<span class="nc" id="L280">        val result = executeRemoteOperation { uploadFileOperation.execute(client) }</span>
+
+        // Step 3: Move remote file to the final remote destination
+<span class="nc" id="L283">        val ocChunkService = OCChunkService(client)</span>
+<span class="nc" id="L284">        ocChunkService.moveFile(</span>
+<span class="nc" id="L285">            sourceRemotePath = &quot;$immutableHashForChunkedFile$PATH_SEPARATOR${FileUtils.FINAL_CHUNKS_FILE}&quot;,</span>
+<span class="nc" id="L286">            targetRemotePath = uploadPath,</span>
+<span class="nc" id="L287">            fileLastModificationTimestamp = lastModified,</span>
+<span class="nc" id="L288">            fileLength = fileSize</span>
+        )
+
+        // Step 4: Remove tmp file folder after uploading
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        if (result == Unit) {</span>
+<span class="nc" id="L293">            removeLocalFile()</span>
+        }
+<span class="nc" id="L295">    }</span>
+
+    private fun removeLocalFile() {
+<span class="nc" id="L298">        val fileDeleted = File(fileSystemPath).delete()</span>
+<span class="nc" id="L299">        Timber.d(&quot;File with path: $fileSystemPath has been removed: $fileDeleted after uploading.&quot;)</span>
+<span class="nc" id="L300">    }</span>
+
+    private fun updateUploadsDatabaseWithResult(throwable: Throwable?) {
+<span class="nc" id="L303">        transferRepository.updateTransferWhenFinished(</span>
+<span class="nc" id="L304">            id = uploadIdInStorageManager,</span>
+<span class="nc" id="L305">            status = getUploadStatusForThrowable(throwable),</span>
+<span class="nc" id="L306">            transferEndTimestamp = System.currentTimeMillis(),</span>
+<span class="nc" id="L307">            lastResult = TransferResult.fromThrowable(throwable)</span>
+        )
+<span class="nc" id="L309">    }</span>
+
+    private fun getUploadStatusForThrowable(throwable: Throwable?): TransferStatus {
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        return if (throwable == null) {</span>
+<span class="nc" id="L313">            TransferStatus.TRANSFER_SUCCEEDED</span>
+        } else {
+<span class="nc" id="L315">            TransferStatus.TRANSFER_FAILED</span>
+        }
+    }
+
+    /**
+     * Update the database with latest details about this file.
+     *
+     * We will ask for thumbnails after the upload
+     * We will update info about the file (modification timestamp and etag)
+     */
+    private fun updateFilesDatabaseWithLatestDetails() {
+<span class="nc" id="L326">        val currentTime = System.currentTimeMillis()</span>
+<span class="nc" id="L327">        val getFileByRemotePathUseCase: GetFileByRemotePathUseCase by inject()</span>
+<span class="nc" id="L328">        val file = getFileByRemotePathUseCase(GetFileByRemotePathUseCase.Params(account.name, ocTransfer.remotePath, ocTransfer.spaceId))</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        file.getDataOrNull()?.let { ocFile -&gt;</span>
+<span class="nc" id="L330">            val fileWithNewDetails =</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">                if (ocTransfer.forceOverwrite) {</span>
+<span class="nc" id="L332">                    ocFile.copy(</span>
+<span class="nc" id="L333">                        needsToUpdateThumbnail = true,</span>
+<span class="nc" id="L334">                        etag = uploadFileOperation.etag,</span>
+<span class="nc" id="L335">                        length = (File(ocTransfer.localPath).length()),</span>
+<span class="nc" id="L336">                        lastSyncDateForData = currentTime,</span>
+<span class="nc" id="L337">                        modifiedAtLastSyncForData = currentTime,</span>
+                    )
+                } else {
+                    // Uploading a file should remove any conflicts on the file.
+<span class="nc" id="L341">                    ocFile.copy(</span>
+<span class="nc" id="L342">                        storagePath = null,</span>
+                    )
+                }
+<span class="nc" id="L345">            saveFileOrFolderUseCase(SaveFileOrFolderUseCase.Params(fileWithNewDetails))</span>
+<span class="nc" id="L346">            cleanConflictUseCase(</span>
+<span class="nc" id="L347">                CleanConflictUseCase.Params(</span>
+<span class="nc" id="L348">                    fileId = ocFile.id!!</span>
+                )
+            )
+        }
+<span class="nc" id="L352">    }</span>
+
+    private fun showNotification(throwable: Throwable) {
+        // check credentials error
+<span class="nc" id="L356">        val needsToUpdateCredentials = throwable is UnauthorizedException</span>
+
+<span class="nc" id="L358">        val tickerId =</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if (needsToUpdateCredentials) R.string.uploader_upload_failed_credentials_error else R.string.uploader_upload_failed_ticker</span>
+
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        val pendingIntent = if (needsToUpdateCredentials) {</span>
+<span class="nc" id="L362">            NotificationUtils.composePendingIntentToRefreshCredentials(appContext, account)</span>
+        } else {
+<span class="nc" id="L364">            NotificationUtils.composePendingIntentToUploadList(appContext)</span>
+        }
+
+<span class="nc" id="L367">        NotificationUtils.createBasicNotification(</span>
+<span class="nc" id="L368">            context = appContext,</span>
+<span class="nc" id="L369">            contentTitle = appContext.getString(tickerId),</span>
+<span class="nc" id="L370">            contentText = throwable.parseError(&quot;&quot;, appContext.resources, true).toString(),</span>
+<span class="nc" id="L371">            notificationChannelId = UPLOAD_NOTIFICATION_CHANNEL_ID,</span>
+<span class="nc" id="L372">            notificationId = 12,</span>
+<span class="nc" id="L373">            intent = pendingIntent,</span>
+<span class="nc" id="L374">            onGoing = false,</span>
+<span class="nc" id="L375">            timeOut = null</span>
+        )
+<span class="nc" id="L377">    }</span>
+
+    override fun onTransferProgress(
+        progressRate: Long,
+        totalTransferredSoFar: Long,
+        totalToTransfer: Long,
+        filePath: String
+    ) {
+<span class="nc" id="L385">        val percent: Int = (100.0 * totalTransferredSoFar.toDouble() / totalToTransfer.toDouble()).toInt()</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        if (percent == lastPercent) return</span>
+
+        // Set current progress. Observers will listen.
+<span class="nc" id="L389">        CoroutineScope(Dispatchers.IO).launch {</span>
+<span class="nc" id="L390">            val progress = workDataOf(DownloadFileWorker.WORKER_KEY_PROGRESS to percent)</span>
+<span class="nc" id="L391">            setProgress(progress)</span>
+<span class="nc" id="L392">        }</span>
+
+<span class="nc" id="L394">        lastPercent = percent</span>
+<span class="nc" id="L395">    }</span>
+
+    companion object {
+        const val KEY_PARAM_ACCOUNT_NAME = &quot;KEY_PARAM_ACCOUNT_NAME&quot;
+        const val KEY_PARAM_BEHAVIOR = &quot;KEY_PARAM_BEHAVIOR&quot;
+        const val KEY_PARAM_LOCAL_PATH = &quot;KEY_PARAM_LOCAL_PATH&quot;
+        const val KEY_PARAM_LAST_MODIFIED = &quot;KEY_PARAM_LAST_MODIFIED&quot;
+        const val KEY_PARAM_UPLOAD_PATH = &quot;KEY_PARAM_UPLOAD_PATH&quot;
+        const val KEY_PARAM_UPLOAD_ID = &quot;KEY_PARAM_UPLOAD_ID&quot;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

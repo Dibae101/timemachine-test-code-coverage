@@ -1,0 +1,730 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PreRoomMigration.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Orgzly-Revived</a> &gt; <a href="index.source.html" class="el_package">com.orgzly.android.db</a> &gt; <span class="el_source">PreRoomMigration.kt</span></div><h1>PreRoomMigration.kt</h1><pre class="source lang-java linenums">package com.orgzly.android.db
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.Cursor
+import android.database.sqlite.SQLiteDatabase
+import android.text.TextUtils
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteQuery
+import androidx.sqlite.db.SupportSQLiteQueryBuilder
+import com.orgzly.android.App
+import com.orgzly.android.db.mappers.OrgTimestampMapper
+import com.orgzly.android.prefs.AppPreferences
+import com.orgzly.android.util.MiscUtils
+import com.orgzly.org.datetime.OrgDateTime
+import com.orgzly.org.parser.OrgNestedSetParser
+import java.util.*
+import java.util.regex.Pattern
+
+object PreRoomMigration {
+<span class="fc" id="L22">    val MIGRATION_130_131 = object : Migration(130, 131) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L24">            db.execSQL(&quot;ALTER TABLE books ADD COLUMN title&quot;) // TITLE</span>
+<span class="nc" id="L25">        }</span>
+    }
+
+<span class="fc" id="L28">    val MIGRATION_131_132 = object : Migration(131, 132) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L30">            db.execSQL(&quot;ALTER TABLE books ADD COLUMN is_indented INTEGER DEFAULT 0&quot;) // IS_INDENTED</span>
+<span class="nc" id="L31">            db.execSQL(&quot;ALTER TABLE books ADD COLUMN used_encoding TEXT&quot;) // USED_ENCODING</span>
+<span class="nc" id="L32">            db.execSQL(&quot;ALTER TABLE books ADD COLUMN detected_encoding TEXT&quot;) // DETECTED_ENCODING</span>
+<span class="nc" id="L33">            db.execSQL(&quot;ALTER TABLE books ADD COLUMN selected_encoding TEXT&quot;) // SELECTED_ENCODING</span>
+<span class="nc" id="L34">        }</span>
+    }
+
+<span class="fc" id="L37">    val MIGRATION_132_133 = object : Migration(132, 133) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L40">        }</span>
+    }
+
+<span class="fc" id="L43">    val MIGRATION_133_134 = object : Migration(133, 134) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L45">            db.execSQL(&quot;ALTER TABLE notes ADD COLUMN parent_id&quot;) // PARENT_ID</span>
+
+<span class="nc" id="L47">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_notes_is_visible ON notes(is_visible)&quot;) // LFT</span>
+<span class="nc" id="L48">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_notes_parent_position ON notes(parent_position)&quot;) // RGT</span>
+<span class="nc" id="L49">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_notes_is_collapsed ON notes(is_collapsed)&quot;) // IS_FOLDED</span>
+<span class="nc" id="L50">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_notes_is_under_collapsed ON notes(is_under_collapsed)&quot;) // FOLDED_UNDER_ID</span>
+<span class="nc" id="L51">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_notes_parent_id ON notes(parent_id)&quot;) // PARENT_ID</span>
+<span class="nc" id="L52">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_notes_has_children ON notes(has_children)&quot;) // DESCENDANTS_COUNT</span>
+
+<span class="nc" id="L54">            convertNotebooksFromPositionToNestedSet(db)</span>
+<span class="nc" id="L55">        }</span>
+    }
+
+    private fun convertNotebooksFromPositionToNestedSet(db: SupportSQLiteDatabase) {
+<span class="nc" id="L59">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L60">                .builder(&quot;books&quot;)</span>
+<span class="nc" id="L61">                .columns(arrayOf(&quot;_id&quot;))</span>
+<span class="nc" id="L62">                .create()</span>
+
+<span class="nc" id="L64">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L65">            val bookId = cursor.getLong(0)</span>
+<span class="nc" id="L66">            convertNotebookFromPositionToNestedSet(db, bookId)</span>
+<span class="nc" id="L67">            updateParentIds(db, bookId)</span>
+<span class="nc" id="L68">        }</span>
+<span class="nc" id="L69">    }</span>
+
+    private fun convertNotebookFromPositionToNestedSet(db: SupportSQLiteDatabase, bookId: Long) {
+        /* Insert root note. */
+<span class="nc" id="L73">        val rootNoteValues = ContentValues()</span>
+<span class="nc" id="L74">        rootNoteValues.put(&quot;level&quot;, 0)</span>
+<span class="nc" id="L75">        rootNoteValues.put(&quot;book_id&quot;, bookId)</span>
+<span class="nc" id="L76">        rootNoteValues.put(&quot;position&quot;, 0)</span>
+<span class="nc" id="L77">        db.insert(&quot;notes&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, rootNoteValues)</span>
+
+<span class="nc" id="L79">        updateNotesPositionsFromLevel(db, bookId)</span>
+<span class="nc" id="L80">    }</span>
+
+    private fun updateNotesPositionsFromLevel(db: SupportSQLiteDatabase, bookId: Long) {
+<span class="nc" id="L83">        val stack = Stack&lt;NotePosition&gt;()</span>
+<span class="nc" id="L84">        var prevLevel = -1</span>
+<span class="nc" id="L85">        var sequence = OrgNestedSetParser.STARTING_VALUE - 1</span>
+
+<span class="nc" id="L87">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L88">                .builder(&quot;notes&quot;)</span>
+<span class="nc" id="L89">                .selection(&quot;book_id = $bookId&quot;, null)</span>
+<span class="nc" id="L90">                .orderBy(&quot;position&quot;)</span>
+<span class="nc" id="L91">                .create()</span>
+
+<span class="nc" id="L93">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L94">            val note = noteFromCursor(cursor)</span>
+
+<span class="nc bnc" id="L96" title="All 2 branches missed.">            if (prevLevel &lt; note.level) {</span>
+                /*
+                 * This is a descendant of previous thisNode.
+                 */
+
+                /* Put the current thisNode on the stack. */
+<span class="nc" id="L102">                sequence += 1</span>
+<span class="nc" id="L103">                note.lft = sequence</span>
+<span class="nc" id="L104">                stack.push(note)</span>
+
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            } else if (prevLevel == note.level) {</span>
+                /*
+                 * This is a sibling, which means that the last thisNode visited can be completed.
+                 * Take it off the stack, update its rgt value and announce it.
+                 */
+<span class="nc" id="L111">                val nodeFromStack = stack.pop()</span>
+<span class="nc" id="L112">                sequence += 1</span>
+<span class="nc" id="L113">                nodeFromStack.rgt = sequence</span>
+<span class="nc" id="L114">                calculateAndSetDescendantsCount(nodeFromStack)</span>
+<span class="nc" id="L115">                updateNotePositionValues(db, nodeFromStack)</span>
+
+                /* Put the current thisNode on the stack. */
+<span class="nc" id="L118">                sequence += 1</span>
+<span class="nc" id="L119">                note.lft = sequence</span>
+<span class="nc" id="L120">                stack.push(note)</span>
+
+            } else {
+                /*
+                 * Note has lower level then the previous one - we're out of the set.
+                 * Start popping the stack, up to and including the thisNode with the same level.
+                 */
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                while (!stack.empty()) {</span>
+<span class="nc" id="L128">                    val nodeFromStack = stack.peek()</span>
+
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                    if (nodeFromStack.level &gt;= note.level) {</span>
+<span class="nc" id="L131">                        stack.pop()</span>
+
+<span class="nc" id="L133">                        sequence += 1</span>
+<span class="nc" id="L134">                        nodeFromStack.rgt = sequence</span>
+<span class="nc" id="L135">                        calculateAndSetDescendantsCount(nodeFromStack)</span>
+<span class="nc" id="L136">                        updateNotePositionValues(db, nodeFromStack)</span>
+
+                    } else {
+<span class="nc" id="L139">                        break</span>
+                    }
+                }
+
+                /* Put the current thisNode on the stack. */
+<span class="nc" id="L144">                sequence += 1</span>
+<span class="nc" id="L145">                note.lft = sequence</span>
+<span class="nc" id="L146">                stack.push(note)</span>
+            }
+
+<span class="nc" id="L149">            prevLevel = note.level</span>
+<span class="nc" id="L150">        }</span>
+
+        /* Pop remaining nodes. */
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        while (!stack.empty()) {</span>
+<span class="nc" id="L154">            val nodeFromStack = stack.pop()</span>
+<span class="nc" id="L155">            sequence += 1</span>
+<span class="nc" id="L156">            nodeFromStack.rgt = sequence</span>
+<span class="nc" id="L157">            calculateAndSetDescendantsCount(nodeFromStack)</span>
+<span class="nc" id="L158">            updateNotePositionValues(db, nodeFromStack)</span>
+        }
+<span class="nc" id="L160">    }</span>
+
+    private fun updateNotePositionValues(db: SupportSQLiteDatabase, note: NotePosition): Int {
+<span class="nc" id="L163">        val values = contentValuesFromNote(note)</span>
+
+<span class="nc" id="L165">        return db.update(&quot;notes&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values, &quot;_id = ${note.id}&quot;, null)</span>
+    }
+
+    private fun calculateAndSetDescendantsCount(node: NotePosition) {
+<span class="nc" id="L169">        node.descendantsCount = (node.rgt - node.lft - 1).toInt() / (2 * 1)</span>
+<span class="nc" id="L170">    }</span>
+
+    private fun updateParentIds(db: SupportSQLiteDatabase, bookId: Long) {
+<span class="nc" id="L173">        val parentId = &quot;(SELECT _id FROM notes AS n WHERE &quot; +</span>
+<span class="nc" id="L174">                &quot;book_id = &quot; + bookId + &quot; AND &quot; +</span>
+                &quot;n.is_visible &lt; notes.is_visible AND &quot; +
+                &quot;notes.parent_position &lt; n.parent_position ORDER BY n.is_visible DESC LIMIT 1)&quot;
+
+<span class="nc" id="L178">        db.execSQL(&quot;UPDATE notes SET parent_id = &quot; + parentId +</span>
+<span class="nc" id="L179">                &quot; WHERE book_id = &quot; + bookId + &quot; AND is_cut = 0 AND level &gt; 0&quot;)</span>
+<span class="nc" id="L180">    }</span>
+
+    private fun noteFromCursor(cursor: Cursor): NotePosition {
+<span class="nc" id="L183">        val position = NotePosition()</span>
+
+<span class="nc" id="L185">        position.id = cursor.getLong(cursor.getColumnIndex(&quot;_id&quot;))</span>
+<span class="nc" id="L186">        position.bookId = cursor.getLong(cursor.getColumnIndex(&quot;book_id&quot;))</span>
+<span class="nc" id="L187">        position.level = cursor.getInt(cursor.getColumnIndex(&quot;level&quot;))</span>
+<span class="nc" id="L188">        position.lft = cursor.getLong(cursor.getColumnIndex(&quot;is_visible&quot;))</span>
+<span class="nc" id="L189">        position.rgt = cursor.getLong(cursor.getColumnIndex(&quot;parent_position&quot;))</span>
+<span class="nc" id="L190">        position.descendantsCount = cursor.getInt(cursor.getColumnIndex(&quot;has_children&quot;))</span>
+<span class="nc" id="L191">        position.foldedUnderId = cursor.getLong(cursor.getColumnIndex(&quot;is_under_collapsed&quot;))</span>
+<span class="nc" id="L192">        position.parentId = cursor.getLong(cursor.getColumnIndex(&quot;parent_id&quot;))</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        position.isFolded = cursor.getInt(cursor.getColumnIndex(&quot;is_collapsed&quot;)) != 0</span>
+
+<span class="nc" id="L195">        return position</span>
+    }
+
+    private fun contentValuesFromNote(position: NotePosition): ContentValues {
+<span class="nc" id="L199">        val values = ContentValues()</span>
+
+        // values.put(&quot;_id&quot;, position.id)
+<span class="nc" id="L202">        values.put(&quot;book_id&quot;, position.bookId)</span>
+<span class="nc" id="L203">        values.put(&quot;level&quot;, position.level)</span>
+<span class="nc" id="L204">        values.put(&quot;is_visible&quot;, position.lft)</span>
+<span class="nc" id="L205">        values.put(&quot;parent_position&quot;, position.rgt)</span>
+<span class="nc" id="L206">        values.put(&quot;has_children&quot;, position.descendantsCount)</span>
+<span class="nc" id="L207">        values.put(&quot;is_under_collapsed&quot;, position.foldedUnderId)</span>
+<span class="nc" id="L208">        values.put(&quot;parent_id&quot;, position.parentId)</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        values.put(&quot;is_collapsed&quot;, if (position.isFolded) 1 else 0)</span>
+<span class="nc" id="L210">        values.put(&quot;position&quot;, 0)</span>
+
+<span class="nc" id="L212">        return values</span>
+    }
+
+<span class="nc" id="L215">    private class NotePosition {</span>
+<span class="nc" id="L216">        var id: Long = 0</span>
+
+<span class="nc" id="L218">        var bookId: Long = 0</span>
+
+<span class="nc" id="L220">        var lft: Long = 0</span>
+<span class="nc" id="L221">        var rgt: Long = 0</span>
+
+<span class="nc" id="L223">        var level: Int = 0</span>
+
+<span class="nc" id="L225">        var descendantsCount: Int = 0</span>
+
+<span class="nc" id="L227">        var foldedUnderId: Long = 0</span>
+
+<span class="nc" id="L229">        var parentId: Long = 0</span>
+
+<span class="nc" id="L231">        var isFolded: Boolean = false</span>
+    }
+
+<span class="fc" id="L234">    val MIGRATION_134_135 = object : Migration(134, 135) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L236">            fixOrgRanges(db)</span>
+<span class="nc" id="L237">        }</span>
+    }
+
+    /**
+     * 1.4-beta.1 misused insertWithOnConflict due to
+     * https://code.google.com/p/android/issues/detail?id=13045.
+     *
+     * org_ranges ended up with duplicates having -1 for
+     * start_timestamp_id and end_timestamp_id.
+     *
+     * Delete those, update notes tables and add a unique constraint to the org_ranges.
+     */
+    private fun fixOrgRanges(db: SupportSQLiteDatabase) {
+<span class="nc" id="L250">        val notesFields = arrayOf(&quot;scheduled_range_id&quot;, &quot;deadline_range_id&quot;, &quot;closed_range_id&quot;, &quot;clock_range_id&quot;)</span>
+
+<span class="nc" id="L252">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L253">                .builder(&quot;org_ranges&quot;)</span>
+<span class="nc" id="L254">                .columns(arrayOf(&quot;_id&quot;, &quot;string&quot;))</span>
+<span class="nc" id="L255">                .selection(&quot;start_timestamp_id = -1 OR end_timestamp_id = -1&quot;, null)</span>
+<span class="nc" id="L256">                .create()</span>
+
+<span class="nc" id="L258">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L259">            val id = cursor.getLong(0)</span>
+<span class="nc" id="L260">            val string = cursor.getString(1)</span>
+
+<span class="nc" id="L262">            val validTimestampId = &quot;(start_timestamp_id IS NULL OR start_timestamp_id != -1) AND (end_timestamp_id IS NULL OR end_timestamp_id != -1)&quot;</span>
+<span class="nc" id="L263">            val validEntry = &quot;(SELECT _id FROM org_ranges WHERE string = &quot; + android.database.DatabaseUtils.sqlEscapeString(string) + &quot; and &quot; + validTimestampId + &quot;)&quot;</span>
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            for (field in notesFields) {</span>
+<span class="nc" id="L266">                db.execSQL(&quot;UPDATE notes SET $field = $validEntry WHERE $field = $id&quot;)</span>
+            }
+<span class="nc" id="L268">        }</span>
+
+<span class="nc" id="L270">        db.execSQL(&quot;DELETE FROM org_ranges WHERE start_timestamp_id = -1 OR end_timestamp_id = -1&quot;)</span>
+<span class="nc" id="L271">        db.execSQL(&quot;CREATE UNIQUE INDEX IF NOT EXISTS i_org_ranges_string ON org_ranges(string)&quot;)</span>
+<span class="nc" id="L272">    }</span>
+
+    /* Properties moved from content. */
+<span class="fc" id="L275">    val MIGRATION_135_136 = object : Migration(135, 136) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L277">            db.execSQL(&quot;CREATE TABLE IF NOT EXISTS note_properties (&quot; +</span>
+                    &quot;_id INTEGER PRIMARY KEY AUTOINCREMENT,&quot; +
+                    &quot;note_id INTEGER,&quot; +
+                    &quot;position INTEGER,&quot; +
+                    &quot;property_id INTEGER,&quot; +
+                    &quot;UNIQUE(note_id, position, property_id))&quot;)
+
+<span class="nc" id="L284">            db.execSQL(&quot;CREATE TABLE IF NOT EXISTS property_names (&quot; +</span>
+                    &quot;_id INTEGER PRIMARY KEY AUTOINCREMENT,&quot; +
+                    &quot;name TEXT UNIQUE)&quot;)
+
+<span class="nc" id="L288">            db.execSQL(&quot;CREATE TABLE IF NOT EXISTS property_values (&quot; +</span>
+                    &quot;_id INTEGER PRIMARY KEY AUTOINCREMENT,&quot; +
+                    &quot;value TEXT UNIQUE)&quot;)
+
+<span class="nc" id="L292">            db.execSQL(&quot;CREATE TABLE IF NOT EXISTS properties (&quot; +</span>
+                    &quot;_id INTEGER PRIMARY KEY AUTOINCREMENT,&quot; +
+                    &quot;name_id INTEGER,&quot; +
+                    &quot;value_id INTEGER,&quot; +
+                    &quot;UNIQUE(name_id, value_id))&quot;)
+
+<span class="nc" id="L298">            movePropertiesFromBody(db)</span>
+<span class="nc" id="L299">        }</span>
+    }
+
+    private fun movePropertiesFromBody(db: SupportSQLiteDatabase) {
+<span class="nc" id="L303">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L304">                .builder(&quot;notes&quot;)</span>
+<span class="nc" id="L305">                .columns(arrayOf(&quot;_id&quot;, &quot;content&quot;))</span>
+<span class="nc" id="L306">                .create()</span>
+
+<span class="nc" id="L308">        val contentUpdates = hashMapOf&lt;Long, ContentValues&gt;()</span>
+
+<span class="nc" id="L310">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L311">            val noteId = cursor.getLong(0)</span>
+<span class="nc" id="L312">            val content = cursor.getString(1)</span>
+
+<span class="nc bnc" id="L314" title="All 2 branches missed.">            if (!TextUtils.isEmpty(content)) {</span>
+<span class="nc" id="L315">                val newContent = StringBuilder()</span>
+<span class="nc" id="L316">                val properties = getPropertiesFromContent(content, newContent)</span>
+
+<span class="nc bnc" id="L318" title="All 4 branches missed.">                if (properties.isNotEmpty()) {</span>
+<span class="nc" id="L319">                    var pos = 1</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                    for (property in properties) {</span>
+<span class="nc" id="L321">                        val nameId = getOrInsert(</span>
+<span class="nc" id="L322">                                db, &quot;property_names&quot;, arrayOf(&quot;name&quot;), arrayOf(property[0]))</span>
+<span class="nc" id="L323">                        val valueId = getOrInsert(</span>
+<span class="nc" id="L324">                                db, &quot;property_values&quot;, arrayOf(&quot;value&quot;), arrayOf(property[1]))</span>
+
+<span class="nc" id="L326">                        val propertyId = getOrInsert(</span>
+<span class="nc" id="L327">                                db,</span>
+<span class="nc" id="L328">                                &quot;properties&quot;,</span>
+<span class="nc" id="L329">                                arrayOf(&quot;name_id&quot;, &quot;value_id&quot;),</span>
+<span class="nc" id="L330">                                arrayOf(nameId.toString(), valueId.toString()))</span>
+
+<span class="nc" id="L332">                        getOrInsert(</span>
+<span class="nc" id="L333">                                db,</span>
+<span class="nc" id="L334">                                &quot;note_properties&quot;,</span>
+<span class="nc" id="L335">                                arrayOf(&quot;note_id&quot;, &quot;position&quot;, &quot;property_id&quot;),</span>
+<span class="nc" id="L336">                                arrayOf(noteId.toString(), pos++.toString(), propertyId.toString()))</span>
+                    }
+
+                    // New content and its line count
+<span class="nc" id="L340">                    contentUpdates[noteId] = ContentValues().apply {</span>
+<span class="nc" id="L341">                        put(&quot;content&quot;, newContent.toString())</span>
+<span class="nc" id="L342">                        put(&quot;content_line_count&quot;, MiscUtils.lineCount(newContent.toString()))</span>
+<span class="nc" id="L343">                    }</span>
+                }
+            }
+<span class="nc" id="L346">        }</span>
+
+        // This was causing issues (skipped notes) when done inside eachForQuery loop
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        for ((id, values) in contentUpdates) {</span>
+<span class="nc" id="L350">            db.update(&quot;notes&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values, &quot;_id = $id&quot;, null)</span>
+        }
+<span class="nc" id="L352">    }</span>
+
+    private fun getOrInsert(
+            db: SupportSQLiteDatabase,
+            table: String,
+            fieldNames: Array&lt;String&gt;,
+            fieldValues: Array&lt;String&gt;): Long {
+
+<span class="nc" id="L360">        val selection = fieldNames.joinToString(&quot; AND &quot;) { &quot;$it = ?&quot; }</span>
+
+<span class="nc" id="L362">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L363">                .builder(table)</span>
+<span class="nc" id="L364">                .columns(arrayOf(&quot;_id&quot;))</span>
+<span class="nc" id="L365">                .selection(selection, fieldValues)</span>
+<span class="nc" id="L366">                .create()</span>
+
+<span class="nc" id="L368">        val id = db.query(query).use { cursor -&gt;</span>
+<span class="nc bnc" id="L369" title="All 4 branches missed.">            if (cursor != null &amp;&amp; cursor.moveToFirst()) {</span>
+<span class="nc" id="L370">                cursor.getLong(0)</span>
+            } else {
+<span class="nc" id="L372">                0</span>
+            }
+        }
+
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        return if (id &gt; 0) {</span>
+<span class="nc" id="L377">            id</span>
+
+        } else {
+<span class="nc" id="L380">            val values = ContentValues()</span>
+
+<span class="nc" id="L382">            fieldNames.forEachIndexed { index, field -&gt;</span>
+<span class="nc" id="L383">                values.put(field, fieldValues[index])</span>
+<span class="nc" id="L384">            }</span>
+
+<span class="nc" id="L386">            db.insert(table, SQLiteDatabase.CONFLICT_ROLLBACK, values)</span>
+        }
+    }
+
+    private fun getPropertiesFromContent(content: String, newContent: StringBuilder): List&lt;Array&lt;String&gt;&gt; {
+<span class="nc" id="L391">        val properties = ArrayList&lt;Array&lt;String&gt;&gt;()</span>
+
+<span class="nc" id="L393">        val propertiesPattern = Pattern.compile(&quot;^\\s*:PROPERTIES:(.*?):END: *\n*(.*)&quot;, Pattern.DOTALL)</span>
+<span class="nc" id="L394">        val propertyPattern = Pattern.compile(&quot;^:([^:\\s]+):\\s+(.*)\\s*$&quot;)</span>
+
+<span class="nc" id="L396">        val m = propertiesPattern.matcher(content)</span>
+
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (m.find()) {</span>
+<span class="nc bnc" id="L399" title="All 4 branches missed.">            val propertyLines = m.group(1)?.split(&quot;\n&quot;) ?: emptyList()</span>
+
+<span class="nc bnc" id="L401" title="All 2 branches missed.">            for (propertyLine in propertyLines) {</span>
+<span class="nc" id="L402">                val pm = propertyPattern.matcher(propertyLine.trim())</span>
+
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                if (pm.find()) {</span>
+<span class="nc" id="L405">                    val name = pm.group(1)</span>
+<span class="nc" id="L406">                    val value = pm.group(2)</span>
+
+                    // Add name-value pair
+<span class="nc bnc" id="L409" title="All 4 branches missed.">                    if (name != null &amp;&amp; value != null) {</span>
+<span class="nc" id="L410">                        properties.add(arrayOf(name, value))</span>
+                    }
+                }
+            }
+
+<span class="nc" id="L415">            newContent.append(m.group(2))</span>
+        }
+
+<span class="nc" id="L418">        return properties</span>
+    }
+
+<span class="fc" id="L421">    val MIGRATION_136_137 = object : Migration(136, 137) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L423">            encodeRookUris(db)</span>
+<span class="nc" id="L424">        }</span>
+    }
+
+    /**
+     * file:/dir/file name.org
+     * file:/dir/file%20name.org
+     */
+    private fun encodeRookUris(db: SupportSQLiteDatabase) {
+<span class="nc" id="L432">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L433">                .builder(&quot;rook_urls&quot;)</span>
+<span class="nc" id="L434">                .columns(arrayOf(&quot;_id&quot;, &quot;rook_url&quot;))</span>
+<span class="nc" id="L435">                .create()</span>
+
+<span class="nc" id="L437">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L438">            val id = cursor.getLong(0)</span>
+<span class="nc" id="L439">            val uri = cursor.getString(1)</span>
+
+<span class="nc" id="L441">            val encodedUri = MiscUtils.encodeUri(uri)</span>
+
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            if (uri != encodedUri) {</span>
+<span class="nc" id="L444">                encodeRookUri(db, id, encodedUri)</span>
+            }
+<span class="nc" id="L446">        }</span>
+<span class="nc" id="L447">    }</span>
+
+    /* Update unless same URL already exists. */
+    private fun encodeRookUri(db: SupportSQLiteDatabase, id: Long, encodedUri: String?) {
+<span class="nc" id="L451">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L452">                .builder(&quot;rook_urls&quot;)</span>
+<span class="nc" id="L453">                .columns(arrayOf(&quot;_id&quot;))</span>
+<span class="nc" id="L454">                .selection(&quot;rook_url = ?&quot;, arrayOf(encodedUri))</span>
+<span class="nc" id="L455">                .create()</span>
+
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (!db.query(query).moveToFirst()) {</span>
+<span class="nc" id="L458">            val values = ContentValues()</span>
+<span class="nc" id="L459">            values.put(&quot;rook_url&quot;, encodedUri)</span>
+<span class="nc" id="L460">            db.update(&quot;rook_urls&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values, &quot;_id = $id&quot;, null)</span>
+        }
+<span class="nc" id="L462">    }</span>
+
+<span class="fc" id="L464">    val MIGRATION_137_138 = object : Migration(137, 138) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L466">            db.execSQL(&quot;&quot;&quot;</span>
+                    CREATE TABLE IF NOT EXISTS note_ancestors (
+                    book_id INTEGER,
+                    note_id INTEGER,
+<span class="nc" id="L470">                    ancestor_note_id INTEGER)&quot;&quot;&quot;.trimIndent())</span>
+
+<span class="nc" id="L472">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_note_ancestors_&quot; + &quot;book_id&quot; + &quot; ON note_ancestors(&quot; + &quot;book_id&quot; + &quot;)&quot;)</span>
+<span class="nc" id="L473">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_note_ancestors_&quot; + &quot;note_id&quot; + &quot; ON note_ancestors(&quot; + &quot;note_id&quot; + &quot;)&quot;)</span>
+<span class="nc" id="L474">            db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_note_ancestors_&quot; + &quot;ancestor_note_id&quot; + &quot; ON note_ancestors(&quot; + &quot;ancestor_note_id&quot; + &quot;)&quot;)</span>
+
+<span class="nc" id="L476">            db.execSQL(&quot;INSERT INTO note_ancestors (book_id, note_id, ancestor_note_id) &quot; +</span>
+                    &quot;SELECT n.book_id, n._id, a._id FROM notes n &quot; +
+                    &quot;JOIN notes a on (n.book_id = a.book_id AND a.is_visible &lt; n.is_visible AND n.parent_position &lt; a.parent_position) &quot; +
+                    &quot;WHERE a.level &gt; 0&quot;)
+<span class="nc" id="L480">        }</span>
+    }
+
+<span class="fc" id="L483">    val MIGRATION_138_139 = object : Migration(138, 139) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L485">            migrateOrgTimestamps(db)</span>
+<span class="nc" id="L486">        }</span>
+    }
+
+    private fun migrateOrgTimestamps(db: SupportSQLiteDatabase) {
+<span class="nc" id="L490">        db.execSQL(&quot;ALTER TABLE org_timestamps RENAME TO org_timestamps_prev&quot;)</span>
+
+<span class="nc" id="L492">        db.execSQL(&quot;&quot;&quot;</span>
+                CREATE TABLE IF NOT EXISTS org_timestamps (
+                _id INTEGER PRIMARY KEY AUTOINCREMENT,
+                string TEXT NOT NULL UNIQUE,
+                is_active INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                day INTEGER NOT NULL,
+                hour INTEGER,
+                minute INTEGER,
+                second INTEGER,
+                end_hour INTEGER,
+                end_minute INTEGER,
+                end_second INTEGER,
+                repeater_type INTEGER,
+                repeater_value INTEGER,
+                repeater_unit INTEGER,
+                habit_deadline_value INTEGER,
+                habit_deadline_unit INTEGER,
+                delay_type INTEGER,
+                delay_value INTEGER,
+                delay_unit INTEGER,
+                timestamp INTEGER,
+<span class="nc" id="L515">                end_timestamp INTEGER)&quot;&quot;&quot;.trimIndent())</span>
+
+<span class="nc" id="L517">        db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_org_timestamps_string ON org_timestamps(string)&quot;)</span>
+<span class="nc" id="L518">        db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_org_timestamps_timestamp ON org_timestamps(timestamp)&quot;)</span>
+<span class="nc" id="L519">        db.execSQL(&quot;CREATE INDEX IF NOT EXISTS i_org_timestamps_end_timestamp ON org_timestamps(end_timestamp)&quot;)</span>
+
+<span class="nc" id="L521">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L522">                .builder(&quot;org_timestamps_prev&quot;)</span>
+<span class="nc" id="L523">                .columns(arrayOf(&quot;_id&quot;, &quot;string&quot;))</span>
+<span class="nc" id="L524">                .create()</span>
+
+<span class="nc" id="L526">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L527">            val id = cursor.getLong(0)</span>
+<span class="nc" id="L528">            val string = cursor.getString(1)</span>
+
+<span class="nc" id="L530">            val orgDateTime = OrgDateTime.parse(string)</span>
+
+<span class="nc" id="L532">            val values = ContentValues()</span>
+<span class="nc" id="L533">            values.put(&quot;_id&quot;, id)</span>
+<span class="nc" id="L534">            toContentValues(values, orgDateTime)</span>
+
+<span class="nc" id="L536">            db.insert(&quot;org_timestamps&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values)</span>
+<span class="nc" id="L537">        }</span>
+
+<span class="nc" id="L539">        db.execSQL(&quot;DROP TABLE org_timestamps_prev&quot;)</span>
+<span class="nc" id="L540">    }</span>
+
+    private fun toContentValues(values: ContentValues, orgDateTime: OrgDateTime) {
+<span class="nc" id="L543">        values.put(&quot;string&quot;, orgDateTime.toString())</span>
+
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        values.put(&quot;is_active&quot;, if (orgDateTime.isActive) 1 else 0)</span>
+
+<span class="nc" id="L547">        values.put(&quot;year&quot;, orgDateTime.calendar.get(Calendar.YEAR))</span>
+<span class="nc" id="L548">        values.put(&quot;month&quot;, orgDateTime.calendar.get(Calendar.MONTH) + 1)</span>
+<span class="nc" id="L549">        values.put(&quot;day&quot;, orgDateTime.calendar.get(Calendar.DAY_OF_MONTH))</span>
+
+<span class="nc bnc" id="L551" title="All 2 branches missed.">        if (orgDateTime.hasTime()) {</span>
+<span class="nc" id="L552">            values.put(&quot;hour&quot;, orgDateTime.calendar.get(Calendar.HOUR_OF_DAY))</span>
+<span class="nc" id="L553">            values.put(&quot;minute&quot;, orgDateTime.calendar.get(Calendar.MINUTE))</span>
+<span class="nc" id="L554">            values.put(&quot;second&quot;, orgDateTime.calendar.get(Calendar.SECOND))</span>
+        } else {
+<span class="nc" id="L556">            values.putNull(&quot;hour&quot;)</span>
+<span class="nc" id="L557">            values.putNull(&quot;minute&quot;)</span>
+<span class="nc" id="L558">            values.putNull(&quot;second&quot;)</span>
+        }
+
+<span class="nc" id="L561">        values.put(&quot;timestamp&quot;, orgDateTime.calendar.timeInMillis)</span>
+
+<span class="nc bnc" id="L563" title="All 2 branches missed.">        if (orgDateTime.hasEndTime()) {</span>
+<span class="nc" id="L564">            values.put(&quot;end_hour&quot;, orgDateTime.endCalendar.get(Calendar.HOUR_OF_DAY))</span>
+<span class="nc" id="L565">            values.put(&quot;end_minute&quot;, orgDateTime.endCalendar.get(Calendar.MINUTE))</span>
+<span class="nc" id="L566">            values.put(&quot;end_second&quot;, orgDateTime.endCalendar.get(Calendar.SECOND))</span>
+<span class="nc" id="L567">            values.put(&quot;end_timestamp&quot;, orgDateTime.endCalendar.timeInMillis)</span>
+        } else {
+<span class="nc" id="L569">            values.putNull(&quot;end_hour&quot;)</span>
+<span class="nc" id="L570">            values.putNull(&quot;end_minute&quot;)</span>
+<span class="nc" id="L571">            values.putNull(&quot;end_second&quot;)</span>
+<span class="nc" id="L572">            values.putNull(&quot;end_timestamp&quot;)</span>
+        }
+
+<span class="nc bnc" id="L575" title="All 2 branches missed.">        if (orgDateTime.hasRepeater()) {</span>
+<span class="nc" id="L576">            values.put(&quot;repeater_type&quot;, OrgTimestampMapper.repeaterType(orgDateTime.repeater.type))</span>
+<span class="nc" id="L577">            values.put(&quot;repeater_value&quot;, orgDateTime.repeater.value)</span>
+<span class="nc" id="L578">            values.put(&quot;repeater_unit&quot;, OrgTimestampMapper.timeUnit(orgDateTime.repeater.unit))</span>
+
+<span class="nc bnc" id="L580" title="All 2 branches missed.">            if (orgDateTime.repeater.hasHabitDeadline()) {</span>
+<span class="nc" id="L581">                values.put(&quot;habit_deadline_value&quot;, orgDateTime.repeater.habitDeadline.value)</span>
+<span class="nc" id="L582">                values.put(&quot;habit_deadline_unit&quot;, OrgTimestampMapper.timeUnit(orgDateTime.repeater.habitDeadline.unit))</span>
+            } else {
+<span class="nc" id="L584">                values.putNull(&quot;habit_deadline_value&quot;)</span>
+<span class="nc" id="L585">                values.putNull(&quot;habit_deadline_unit&quot;)</span>
+            }
+
+        } else {
+<span class="nc" id="L589">            values.putNull(&quot;repeater_type&quot;)</span>
+<span class="nc" id="L590">            values.putNull(&quot;repeater_value&quot;)</span>
+<span class="nc" id="L591">            values.putNull(&quot;repeater_unit&quot;)</span>
+<span class="nc" id="L592">            values.putNull(&quot;habit_deadline_value&quot;)</span>
+<span class="nc" id="L593">            values.putNull(&quot;habit_deadline_unit&quot;)</span>
+        }
+
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        if (orgDateTime.hasDelay()) {</span>
+<span class="nc" id="L597">            values.put(&quot;delay_type&quot;, OrgTimestampMapper.delayType(orgDateTime.delay.type))</span>
+<span class="nc" id="L598">            values.put(&quot;delay_value&quot;, orgDateTime.delay.value)</span>
+<span class="nc" id="L599">            values.put(&quot;delay_unit&quot;, OrgTimestampMapper.timeUnit(orgDateTime.delay.unit))</span>
+        } else {
+<span class="nc" id="L601">            values.putNull(&quot;delay_type&quot;)</span>
+<span class="nc" id="L602">            values.putNull(&quot;delay_value&quot;)</span>
+<span class="nc" id="L603">            values.putNull(&quot;delay_unit&quot;)</span>
+        }
+<span class="nc" id="L605">    }</span>
+
+<span class="fc" id="L607">    val MIGRATION_139_140 = object : Migration(139, 140) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L610">        }</span>
+    }
+
+<span class="fc" id="L613">    val MIGRATION_140_141 = object : Migration(140, 141) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L616">        }</span>
+    }
+
+<span class="fc" id="L619">    val MIGRATION_141_142 = object : Migration(141, 142) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L622">        }</span>
+    }
+
+<span class="fc" id="L625">    val MIGRATION_142_143 = object : Migration(142, 143) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L628">        }</span>
+    }
+
+<span class="fc" id="L631">    val MIGRATION_143_144 = object : Migration(143, 144) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L634">        }</span>
+    }
+
+<span class="fc" id="L637">    val MIGRATION_144_145 = object : Migration(144, 145) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L640">        }</span>
+    }
+
+<span class="fc" id="L643">    val MIGRATION_145_146 = object : Migration(145, 146) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L645">            insertAgendaSavedSearch(db)</span>
+<span class="nc" id="L646">        }</span>
+    }
+
+<span class="fc" id="L649">    val MIGRATION_146_147 = object : Migration(146, 147) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L651">            addAndSetCreatedAt(db, App.getAppContext())</span>
+<span class="nc" id="L652">        }</span>
+    }
+
+<span class="fc" id="L655">    val MIGRATION_147_148 = object : Migration(147, 148) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Views-only updates
+<span class="nc" id="L658">        }</span>
+    }
+
+<span class="fc" id="L661">    val MIGRATION_148_149 = object : Migration(148, 149) {</span>
+        override fun migrate(db: SupportSQLiteDatabase) {
+<span class="nc" id="L663">            db.execSQL(&quot;ALTER TABLE book_links ADD COLUMN repo_id INTEGER&quot;)</span>
+<span class="nc" id="L664">            db.execSQL(&quot;UPDATE book_links SET repo_id = (SELECT repo_id FROM rooks WHERE rooks._id = rook_id)&quot;)</span>
+<span class="nc" id="L665">        }</span>
+    }
+
+    private fun addAndSetCreatedAt(db: SupportSQLiteDatabase, context: Context) {
+<span class="nc" id="L669">        db.execSQL(&quot;ALTER TABLE notes ADD COLUMN created_at INTEGER DEFAULT 0&quot;)</span>
+
+<span class="nc bnc" id="L671" title="All 2 branches missed.">        if (!AppPreferences.createdAt(context)) {</span>
+<span class="nc" id="L672">            return</span>
+        }
+
+<span class="nc" id="L675">        val createdAtPropName = AppPreferences.createdAtProperty(context)</span>
+
+<span class="nc" id="L677">        val query = SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L678">                .builder(&quot;note_properties&quot;</span>
+                        + &quot; JOIN notes ON (notes._id = note_properties.note_id)&quot;
+                        + &quot; JOIN properties ON (properties._id = note_properties.property_id)&quot;
+                        + &quot; JOIN property_names ON (property_names._id = properties.name_id)&quot;
+                        + &quot; JOIN property_values ON (property_values._id = properties.value_id)&quot;)
+<span class="nc" id="L683">                .columns(arrayOf(&quot;notes._id AS note_id&quot;, &quot;property_values.value AS value&quot;))</span>
+<span class="nc" id="L684">                .selection(&quot;note_id IS NOT NULL AND name IS NOT NULL AND value IS NOT NULL AND name = ?&quot;, arrayOf(createdAtPropName))</span>
+<span class="nc" id="L685">                .distinct()</span>
+<span class="nc" id="L686">                .create()</span>
+
+<span class="nc" id="L688">        eachForQuery(db, query) { cursor -&gt;</span>
+<span class="nc" id="L689">            val noteId = cursor.getLong(0)</span>
+<span class="nc" id="L690">            val propValue = cursor.getString(1)</span>
+
+<span class="nc" id="L692">            val dateTime = OrgDateTime.doParse(propValue)</span>
+
+<span class="nc bnc" id="L694" title="All 2 branches missed.">            if (dateTime != null) {</span>
+<span class="nc" id="L695">                val millis = dateTime.calendar.timeInMillis</span>
+<span class="nc" id="L696">                val values = ContentValues()</span>
+<span class="nc" id="L697">                values.put(&quot;created_at&quot;, millis)</span>
+<span class="nc" id="L698">                db.update(&quot;notes&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values, &quot;_id = $noteId&quot;, null)</span>
+            }
+<span class="nc" id="L700">        }</span>
+<span class="nc" id="L701">    }</span>
+
+    private fun insertAgendaSavedSearch(db: SupportSQLiteDatabase) {
+<span class="nc" id="L704">        val values = ContentValues()</span>
+
+<span class="nc" id="L706">        values.put(&quot;name&quot;, &quot;Agenda&quot;)</span>
+<span class="nc" id="L707">        values.put(&quot;search&quot;, &quot;.it.done ad.7&quot;)</span>
+<span class="nc" id="L708">        values.put(&quot;position&quot;, -2) // Display first</span>
+
+<span class="nc" id="L710">        db.insert(&quot;searches&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values)</span>
+
+<span class="nc" id="L712">        values.put(&quot;name&quot;, &quot;Next 3 days&quot;)</span>
+<span class="nc" id="L713">        values.put(&quot;search&quot;, &quot;.it.done s.ge.today ad.3&quot;)</span>
+<span class="nc" id="L714">        values.put(&quot;position&quot;, -1) // Display second</span>
+
+<span class="nc" id="L716">        db.insert(&quot;searches&quot;, SQLiteDatabase.CONFLICT_ROLLBACK, values)</span>
+<span class="nc" id="L717">    }</span>
+
+    private fun eachForQuery(db: SupportSQLiteDatabase, query: SupportSQLiteQuery, action: (Cursor) -&gt; Unit) {
+<span class="nc" id="L720">        db.query(query).use { cursor -&gt;</span>
+<span class="nc bnc" id="L721" title="All 2 branches missed.">            if (cursor.moveToFirst()) {</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">                while (!cursor.isAfterLast) {</span>
+<span class="nc" id="L723">                    action(cursor)</span>
+<span class="nc" id="L724">                    cursor.moveToNext()</span>
+                }
+            }
+<span class="nc" id="L727">        }</span>
+<span class="nc" id="L728">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

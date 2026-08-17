@@ -1,0 +1,550 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SafFileSystem.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE LibreTorrent</a> &gt; <a href="index.source.html" class="el_package">org.proninyaroslav.libretorrent.core.system</a> &gt; <span class="el_source">SafFileSystem.java</span></div><h1>SafFileSystem.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2019, 2020 Yaroslav Pronin &lt;proninyaroslav@mail.ru&gt;
+ *
+ * This file is part of LibreTorrent.
+ *
+ * LibreTorrent is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * LibreTorrent is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with LibreTorrent.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package org.proninyaroslav.libretorrent.core.system;
+
+import android.annotation.TargetApi;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.net.Uri;
+import android.os.ParcelFileDescriptor;
+import android.provider.DocumentsContract;
+import android.text.TextUtils;
+import android.util.Log;
+import android.util.LruCache;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.documentfile.provider.DocumentFile;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+
+/**
+ * A class that representing a wrapper around SAF (Storage Access Framework) for
+ * providing API for working with files that SAF provides by their Uri.
+ * &quot;SAF root&quot; in this context means a tree Uri obtained by calling
+ * `Intent.ACTION_OPEN_DOCUMENT_TREE`, so many methods don't work with Android 4.4, only with API &gt;= 21.
+ *
+ * `SafFileSystem` also supports the so-called fake paths to files (`FakePath` class),
+ * which is a hybrid of the SAF path and the classic system path, making such path valid for passing
+ * through an object of `File` class (Note: `File` class still can't work with this path,
+ * for example, creating or deleting a file). This is makes for compatibility with `libtorrent`
+ * (via `LibTorrentSafAdapter`), which works with the classic `File` object.
+ *
+ * Fake path example: '/saf_root(com.android.externalstorage.documents/tree/volumeId/);/foo/bar.txt'
+ *
+ *     'saf_root()'  - a special path format that encapsulates the SAF path and helps
+ *                     distinguish it from the rest of the path.
+ *                     You can consider this as a special name for the classic root ('/') dir,
+ *                     but in the SAF context (Uri obtained by calling `Intent.ACTION_OPEN_DOCUMENT_TREE`)
+ *     'foo/bar.txt' - a relative path (optional), regarding SAF root, which is represented in the
+ *                     normal system format.
+ */
+
+public class SafFileSystem
+{
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="nc" id="L64">    private static final String TAG = SafFileSystem.class.getSimpleName();</span>
+
+    private static final int CACHE_MAX_SIZE = 1000;
+
+    private static volatile SafFileSystem INSTANCE;
+    private Context appContext;
+<span class="nc" id="L70">    private static final LruCache&lt;String, DocumentFile&gt; CACHE = new LruCache&lt;&gt;(CACHE_MAX_SIZE);</span>
+
+    public static SafFileSystem getInstance(@NonNull Context appContext)
+    {
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (INSTANCE == null) {</span>
+<span class="nc" id="L75">            synchronized (SafFileSystem.class) {</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">                if (INSTANCE == null)</span>
+<span class="nc" id="L77">                    INSTANCE = new SafFileSystem(appContext);</span>
+<span class="nc" id="L78">            }</span>
+        }
+
+<span class="nc" id="L81">        return INSTANCE;</span>
+    }
+
+    private SafFileSystem(Context appContext)
+<span class="nc" id="L85">    {</span>
+<span class="nc" id="L86">        this.appContext = appContext;</span>
+<span class="nc" id="L87">    }</span>
+
+    public static class FakePath
+    {
+        private static final String SAF_ROOT_TAG_OPEN = &quot;saf_root(&quot;;
+        private static final String SAF_ROOT_TAG_CLOSE = &quot;);&quot;;
+        private static final String SCHEME = &quot;content://&quot;;
+
+        private Uri safRoot;
+        private String relativePath;
+
+        public FakePath(@NonNull Uri safRoot, @NonNull String relativePath)
+<span class="nc" id="L99">        {</span>
+<span class="nc" id="L100">            this.safRoot = safRoot;</span>
+<span class="nc" id="L101">            this.relativePath = normalizeRelativePath(relativePath);</span>
+<span class="nc" id="L102">        }</span>
+
+        private String normalizeRelativePath(String path)
+        {
+<span class="nc bnc" id="L106" title="All 4 branches missed.">            if (path.equals(File.separator) || !path.startsWith(File.separator))</span>
+<span class="nc" id="L107">                return path;</span>
+            else
+<span class="nc" id="L109">                return path.substring(1);</span>
+        }
+
+        /*
+         * Returns string path in the following format:
+         *     'saf_root(`safRoot`);`relativePath (optional)`'
+         * or null if the path is invalid
+         */
+
+        public static FakePath deserialize(@NonNull String fakePath)
+        {
+<span class="nc" id="L120">            int openTagIdx = fakePath.lastIndexOf(SAF_ROOT_TAG_OPEN);</span>
+<span class="nc" id="L121">            int closeTagIdx = fakePath.lastIndexOf(SAF_ROOT_TAG_CLOSE);</span>
+<span class="nc bnc" id="L122" title="All 6 branches missed.">            if (openTagIdx &lt; 0 || closeTagIdx &lt; 0 || closeTagIdx &lt;= openTagIdx)</span>
+<span class="nc" id="L123">                return null;</span>
+
+<span class="nc" id="L125">            String safRootStr = fakePath.substring(openTagIdx + SAF_ROOT_TAG_OPEN.length(), closeTagIdx);</span>
+<span class="nc" id="L126">            Uri safRoot = Uri.parse(SCHEME + safRootStr);</span>
+<span class="nc" id="L127">            String relativePath = fakePath.substring(closeTagIdx + SAF_ROOT_TAG_CLOSE.length());</span>
+
+<span class="nc" id="L129">            return new FakePath(safRoot, relativePath);</span>
+        }
+
+        private String serialize()
+        {
+            /* Remove 'content://' scheme */
+<span class="nc" id="L135">            String safRootStr = safRoot.toString().substring(SCHEME.length());</span>
+
+<span class="nc" id="L137">            return SAF_ROOT_TAG_OPEN + safRootStr + SAF_ROOT_TAG_CLOSE + relativePath;</span>
+        }
+
+        public String[] makeRelativePathNodes()
+        {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            return (TextUtils.isEmpty(relativePath) ?</span>
+<span class="nc" id="L143">                    new String[0] :</span>
+<span class="nc" id="L144">                    relativePath.split(File.separator));</span>
+        }
+
+        public Uri safRoot()
+        {
+<span class="nc" id="L149">            return safRoot;</span>
+        }
+
+        public String relativePath()
+        {
+<span class="nc" id="L154">            return relativePath;</span>
+        }
+
+        public static boolean isFakePath(@NonNull String path)
+        {
+<span class="nc bnc" id="L159" title="All 4 branches missed.">            return path.startsWith(&quot;/&quot; + SAF_ROOT_TAG_OPEN) || path.startsWith(SAF_ROOT_TAG_OPEN);</span>
+        }
+
+        @NonNull
+        @Override
+        public String toString()
+        {
+<span class="nc" id="L166">            return serialize();</span>
+        }
+    }
+
+    public static class Stat
+    {
+        public String name;
+        public boolean isDir;
+        public long length;
+        public long lastModified;
+
+        public Stat(String name, boolean isDir,
+                    long length, long lastModified)
+<span class="nc" id="L179">        {</span>
+<span class="nc" id="L180">            this.name = name;</span>
+<span class="nc" id="L181">            this.isDir = isDir;</span>
+<span class="nc" id="L182">            this.length = length;</span>
+<span class="nc" id="L183">            this.lastModified = lastModified;</span>
+<span class="nc" id="L184">        }</span>
+    }
+
+    /*
+     * Return true if the uri is a SAF path
+     */
+
+    public boolean isSafPath(@NonNull Uri path)
+    {
+<span class="nc" id="L193">        String scheme = path.getScheme();</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        if (scheme == null)</span>
+<span class="nc" id="L195">            throw new IllegalArgumentException(&quot;Scheme of &quot; + path + &quot; is null&quot;);</span>
+
+<span class="nc" id="L197">        return scheme.equals(ContentResolver.SCHEME_CONTENT);</span>
+    }
+
+    /*
+     * Returns Uri of the file by the given file name or
+     * null if the file doesn't exists
+     */
+
+    @TargetApi(21)
+    @Nullable
+    public Uri getFileUri(@NonNull Uri safRoot, @NonNull String fileName, boolean create)
+    {
+<span class="nc" id="L209">        String cacheKey = safRoot.toString() + File.separator + fileName;</span>
+<span class="nc" id="L210">        DocumentFile f = CACHE.get(cacheKey);</span>
+
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L213">            DocumentFile tree = DocumentFile.fromTreeUri(appContext, safRoot);</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">            if (tree == null)</span>
+<span class="nc" id="L215">                return null;</span>
+<span class="nc" id="L216">            f = getFile(tree, fileName, create);</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L218">                CACHE.put(cacheKey, f);</span>
+        }
+
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        return (f == null ? null : f.getUri());</span>
+    }
+
+    /*
+     * Returns Uri of the last file in the given path and
+     * creates it (and also dirs), if `create` parameter is true.
+     * Еhe last file is always created as a file, even if it was meant as a directory.
+     * For example, for path='/saf_root/foo/bar.txt' method returns
+     * Uri of the 'bar.txt' file or null if the file
+     * doesn't exists or one of the directories in the path doesn't exist.
+     */
+
+    @TargetApi(21)
+    @Nullable
+    public Uri getFileUri(@NonNull FakePath path, boolean create)
+    {
+<span class="nc" id="L237">        String cacheKey = path.toString();</span>
+<span class="nc" id="L238">        DocumentFile f = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L240">            f = getFile(path, create);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L242">                CACHE.put(cacheKey, f);</span>
+        }
+
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        return (f == null ? null : f.getUri());</span>
+    }
+
+    private DocumentFile getFile(DocumentFile tree, String fileName, boolean create)
+    {
+        try {
+<span class="nc" id="L251">            DocumentFile f = tree.findFile(fileName);</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">            if (f == null &amp;&amp; create)</span>
+<span class="nc" id="L253">                f = tree.createFile(&quot;application/octet-stream&quot;, fileName);</span>
+
+<span class="nc bnc" id="L255" title="All 4 branches missed.">            return (f != null &amp;&amp; f.isFile() ? f : null);</span>
+
+<span class="nc" id="L257">        } catch (UnsupportedOperationException e) {</span>
+<span class="nc" id="L258">            return null;</span>
+        }
+    }
+
+    private DocumentFile getFile(FakePath path, boolean create)
+    {
+<span class="nc" id="L264">        DocumentFile currNode = DocumentFile.fromTreeUri(appContext, path.safRoot());</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (currNode == null)</span>
+<span class="nc" id="L266">            return null;</span>
+
+<span class="nc" id="L268">        String[] nodes = path.makeRelativePathNodes();</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        for (int i = 0; i &lt; nodes.length; i++) {</span>
+<span class="nc" id="L270">            String nodeName = nodes[i];</span>
+
+            DocumentFile node;
+<span class="nc bnc" id="L273" title="All 2 branches missed.">            if (i + 1 == nodes.length) {</span>
+<span class="nc" id="L274">                node = getFile(currNode, nodeName, create);</span>
+                /* Try to get directory */
+<span class="nc bnc" id="L276" title="All 2 branches missed.">                if (node == null)</span>
+<span class="nc" id="L277">                    node = getDir(currNode, nodeName, create);</span>
+            } else {
+<span class="nc" id="L279">                node = getDir(currNode, nodeName, create);</span>
+            }
+
+<span class="nc bnc" id="L282" title="All 2 branches missed.">            if (node == null)</span>
+<span class="nc" id="L283">                return null;</span>
+
+<span class="nc" id="L285">            currNode = node;</span>
+        }
+
+<span class="nc" id="L288">        return currNode;</span>
+    }
+
+    private DocumentFile getDir(DocumentFile tree, String dirName, boolean create)
+    {
+        try {
+<span class="nc" id="L294">            DocumentFile f = tree.findFile(dirName);</span>
+<span class="nc bnc" id="L295" title="All 4 branches missed.">            if (f == null &amp;&amp; create)</span>
+<span class="nc" id="L296">                f = tree.createDirectory(dirName);</span>
+
+<span class="nc bnc" id="L298" title="All 4 branches missed.">            return (f != null &amp;&amp; f.isDirectory() ? f : null);</span>
+
+<span class="nc" id="L300">        } catch (UnsupportedOperationException e) {</span>
+<span class="nc" id="L301">            return null;</span>
+        }
+    }
+
+    /*
+     * Returns true if the file was deleted successfully
+     */
+
+    @TargetApi(19)
+    public boolean delete(@NonNull Uri filePath) throws FileNotFoundException
+    {
+<span class="nc" id="L312">        return DocumentsContract.deleteDocument(appContext.getContentResolver(), filePath);</span>
+    }
+
+    @TargetApi(19)
+    public boolean delete(@NonNull FakePath path) throws FileNotFoundException
+    {
+<span class="nc" id="L318">        Uri filePath = getFileUri(path, false);</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        if (filePath == null)</span>
+<span class="nc" id="L320">            return false;</span>
+
+<span class="nc" id="L322">        return DocumentsContract.deleteDocument(appContext.getContentResolver(), filePath);</span>
+    }
+
+    /*
+     * Returns true if the file is exists
+     */
+
+    @TargetApi(19)
+    public boolean exists(@NonNull Uri filePath)
+    {
+<span class="nc" id="L332">        String cacheKey = filePath.toString();</span>
+<span class="nc" id="L333">        DocumentFile f = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L335">            f = DocumentFile.fromSingleUri(appContext, filePath);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L337">                CACHE.put(cacheKey, f);</span>
+        }
+
+<span class="nc bnc" id="L340" title="All 4 branches missed.">        return f != null &amp;&amp; f.exists();</span>
+    }
+
+    @TargetApi(21)
+    public boolean exists(@NonNull FakePath path)
+    {
+<span class="nc" id="L346">        String cacheKey = path.toString();</span>
+<span class="nc" id="L347">        DocumentFile cached = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        if (cached != null)</span>
+<span class="nc" id="L349">            return cached.exists();</span>
+
+<span class="nc" id="L351">        DocumentFile currNode = DocumentFile.fromTreeUri(appContext, path.safRoot());</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (currNode == null)</span>
+<span class="nc" id="L353">            return false;</span>
+
+<span class="nc" id="L355">        String[] nodes = path.makeRelativePathNodes();</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        for (String nodeName : nodes) {</span>
+<span class="nc" id="L357">            DocumentFile f = currNode.findFile(nodeName);</span>
+<span class="nc bnc" id="L358" title="All 4 branches missed.">            if (f == null || !f.exists())</span>
+<span class="nc" id="L359">                return false;</span>
+
+<span class="nc" id="L361">            currNode = f;</span>
+        }
+<span class="nc" id="L363">        CACHE.put(cacheKey, currNode);</span>
+
+<span class="nc" id="L365">        return true;</span>
+    }
+
+    @TargetApi(21)
+    public Uri makeSafRootDir(@NonNull Uri dir)
+    {
+<span class="nc" id="L371">        return DocumentsContract.buildDocumentUriUsingTree(dir,</span>
+<span class="nc" id="L372">                DocumentsContract.getTreeDocumentId(dir));</span>
+    }
+
+    /*
+     * Returns the file native descriptor
+     * (for reading (mode='r'), writing (mode='w') or
+     * reading and writing (mode='rw') by the given name
+     */
+
+    @TargetApi(21)
+    public int openFD(@NonNull Uri dir,
+                      @NonNull String fileName,
+                      @NonNull String mode)
+    {
+<span class="nc" id="L386">        Uri filePath = getFileUri(dir, fileName, true);</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        if (filePath == null)</span>
+<span class="nc" id="L388">            return -1;</span>
+
+<span class="nc" id="L390">        return openFD(filePath, mode);</span>
+    }
+
+    @TargetApi(21)
+    public int openFD(@NonNull FakePath path,
+                      @NonNull String mode)
+    {
+<span class="nc" id="L397">        Uri filePath = getFileUri(path, true);</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (filePath == null)</span>
+<span class="nc" id="L399">            return -1;</span>
+
+<span class="nc" id="L401">        return openFD(filePath, mode);</span>
+    }
+
+    public int openFD(@NonNull Uri filePath, String mode)
+    {
+<span class="nc bnc" id="L406" title="All 6 branches missed.">        if (!(&quot;r&quot;.equals(mode) || &quot;w&quot;.equals(mode) || &quot;rw&quot;.equals(mode))) {</span>
+<span class="nc" id="L407">            Log.e(TAG, &quot;Only r, w or rw modes supported&quot;);</span>
+<span class="nc" id="L408">            return -1;</span>
+        }
+
+<span class="nc" id="L411">        ContentResolver cr = appContext.getContentResolver();</span>
+<span class="nc" id="L412">        try (ParcelFileDescriptor fd = cr.openFileDescriptor(filePath, mode)) {</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">            if (fd == null)</span>
+<span class="nc" id="L414">                return -1;</span>
+
+<span class="nc" id="L416">            return fd.detachFd();</span>
+
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        } catch (Throwable e) {</span>
+<span class="nc" id="L419">            Log.e(TAG, &quot;Unable to get native fd&quot;, e);</span>
+<span class="nc" id="L420">            return -1;</span>
+        }
+    }
+
+    @TargetApi(21)
+    @Nullable
+    public Stat stat(@NonNull Uri safRoot, @NonNull String fileName)
+    {
+<span class="nc" id="L428">        String cacheKey = safRoot.toString() + File.separator + fileName;</span>
+<span class="nc" id="L429">        DocumentFile f = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L431">            DocumentFile tree = DocumentFile.fromTreeUri(appContext, safRoot);</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (tree == null)</span>
+<span class="nc" id="L433">                return null;</span>
+<span class="nc" id="L434">            f = getFile(tree, fileName, false);</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L436">                CACHE.put(cacheKey, f);</span>
+        }
+
+<span class="nc" id="L439">        return stat(f);</span>
+    }
+
+    @TargetApi(21)
+    @Nullable
+    public Stat statSafRoot(@NonNull Uri safRoot)
+    {
+<span class="nc" id="L446">        String cacheKey = safRoot.toString();</span>
+<span class="nc" id="L447">        DocumentFile tree = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">        if (tree == null) {</span>
+<span class="nc" id="L449">            tree = DocumentFile.fromTreeUri(appContext, safRoot);</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            if (tree != null)</span>
+<span class="nc" id="L451">                CACHE.put(cacheKey, tree);</span>
+        }
+
+<span class="nc" id="L454">        return stat(tree);</span>
+    }
+
+    @TargetApi(19)
+    @Nullable
+    public Stat stat(@NonNull Uri filePath)
+    {
+<span class="nc" id="L461">        String cacheKey = filePath.toString();</span>
+<span class="nc" id="L462">        DocumentFile f = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L464">            f = DocumentFile.fromSingleUri(appContext, filePath);</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L466">                CACHE.put(cacheKey, f);</span>
+        }
+
+<span class="nc" id="L469">        return stat(f);</span>
+    }
+
+    @TargetApi(21)
+    @Nullable
+    public Stat stat(@NonNull FakePath path)
+    {
+<span class="nc" id="L476">        String cacheKey = path.toString();</span>
+<span class="nc" id="L477">        DocumentFile f = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L479">            f = getFile(path, true);</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L481">                CACHE.put(cacheKey, f);</span>
+        }
+
+<span class="nc" id="L484">        return stat(f);</span>
+    }
+
+    private Stat stat(DocumentFile f)
+    {
+<span class="nc bnc" id="L489" title="All 2 branches missed.">        return (f == null ?</span>
+<span class="nc" id="L490">                null :</span>
+<span class="nc" id="L491">                new Stat(f.getName(), f.isDirectory(),</span>
+<span class="nc" id="L492">                    f.length(), f.lastModified()));</span>
+    }
+
+    /*
+     * Creates the directory named by this path, including any
+     * necessary but nonexistent parent directories.
+     * For example, for path='/saf_root/foo/bar'
+     * method creates `foo` and `bar` directories.
+     * Even if the file has an extension called `foo.txt`,
+     * the directory `foo.txt` will be created, not the file
+     */
+
+    @TargetApi(21)
+    public boolean mkdirs(@NonNull FakePath path)
+    {
+<span class="nc" id="L507">        String cacheKey = path.toString();</span>
+<span class="nc" id="L508">        DocumentFile cached = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L509" title="All 4 branches missed.">        if (cached != null &amp;&amp; cached.exists())</span>
+<span class="nc" id="L510">            return true;</span>
+
+<span class="nc" id="L512">        DocumentFile currNode = DocumentFile.fromTreeUri(appContext, path.safRoot());</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">        if (currNode == null)</span>
+<span class="nc" id="L514">            return false;</span>
+
+<span class="nc" id="L516">        String[] nodes = path.makeRelativePathNodes();</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">        for (String nodeName : nodes) {</span>
+<span class="nc" id="L518">            DocumentFile node = currNode.findFile(nodeName);</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">            if (node == null)</span>
+<span class="nc" id="L520">                node = currNode.createDirectory(nodeName);</span>
+
+<span class="nc bnc" id="L522" title="All 2 branches missed.">            if (node == null)</span>
+<span class="nc" id="L523">                return false;</span>
+
+<span class="nc" id="L525">            currNode = node;</span>
+        }
+<span class="nc" id="L527">        CACHE.put(cacheKey, currNode);</span>
+
+<span class="nc" id="L529">        return true;</span>
+    }
+
+    @TargetApi(19)
+    public Uri getParentDirUri(@NonNull Uri filePath)
+    {
+<span class="nc" id="L535">        String cacheKey = filePath.toString();</span>
+<span class="nc" id="L536">        DocumentFile f = CACHE.get(cacheKey);</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">        if (f == null) {</span>
+<span class="nc" id="L538">            f = DocumentFile.fromSingleUri(appContext, filePath);</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">            if (f != null)</span>
+<span class="nc" id="L540">                CACHE.put(cacheKey, f);</span>
+        }
+<span class="nc bnc" id="L542" title="All 2 branches missed.">        if (f == null)</span>
+<span class="nc" id="L543">            return null;</span>
+
+<span class="nc" id="L545">        DocumentFile parent = f.getParentFile();</span>
+
+<span class="nc bnc" id="L547" title="All 4 branches missed.">        return (parent == null || !parent.isDirectory() ? null : parent.getUri());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

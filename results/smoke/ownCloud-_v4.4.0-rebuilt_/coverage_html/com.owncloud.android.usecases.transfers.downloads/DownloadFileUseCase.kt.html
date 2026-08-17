@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DownloadFileUseCase.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ownCloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.usecases.transfers.downloads</a> &gt; <span class="el_source">DownloadFileUseCase.kt</span></div><h1>DownloadFileUseCase.kt</h1><pre class="source lang-java linenums">/**
+ * ownCloud Android client application
+ *
+ * @author Abel García de Prada
+ * Copyright (C) 2021 ownCloud GmbH.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2,
+ * as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+package com.owncloud.android.usecases.transfers.downloads
+
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.owncloud.android.domain.BaseUseCase
+import com.owncloud.android.domain.files.model.OCFile
+import com.owncloud.android.extensions.PENDING_WORK_STATUS
+import com.owncloud.android.extensions.buildWorkQuery
+import com.owncloud.android.extensions.getTagsForDownload
+import com.owncloud.android.usecases.transfers.MAXIMUM_NUMBER_OF_RETRIES
+import com.owncloud.android.usecases.transfers.TRANSFER_TAG_DOWNLOAD
+import com.owncloud.android.workers.DownloadFileWorker
+import timber.log.Timber
+import java.util.UUID
+
+/**
+ * We will use [WorkManager] to perform downloads.
+ * We will send the file Id and the owner account as parameters. We cannot send complex objects as parameters.
+ * The worker will retrieve the file from database and the account from the account manager to make it work.
+ * The worker will have 3 tags. FileId, Account and the operation TAG.
+ * This is helpful if we want to cancel or observe enqueued workers when an account, of a file is removed.
+ * In that case, we will cancel every worker with that TAG
+ *
+ * @return UUID - UUID for the enqueued worker. It is important if we want to observe its process.
+ */
+<span class="fc" id="L45">class DownloadFileUseCase(</span>
+<span class="fc" id="L46">    private val workManager: WorkManager</span>
+<span class="fc" id="L47">) : BaseUseCase&lt;UUID?, DownloadFileUseCase.Params&gt;() {</span>
+
+    override fun run(params: Params): UUID? {
+<span class="nc" id="L50">        val ocFile = params.file</span>
+<span class="nc" id="L51">        val accountName = params.accountName</span>
+
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if (ocFile.id == null) return null</span>
+
+<span class="nc bnc" id="L55" title="All 2 branches missed.">        if (isDownloadAlreadyEnqueued(accountName, ocFile)) {</span>
+<span class="nc" id="L56">            return null</span>
+        }
+
+<span class="nc" id="L59">        return enqueueNewDownload(ocFile, accountName)</span>
+    }
+
+    private fun isDownloadAlreadyEnqueued(accountName: String, file: OCFile): Boolean {
+<span class="nc" id="L63">        val tagsToFilter = getTagsForDownload(file, accountName)</span>
+<span class="nc" id="L64">        val workQuery = buildWorkQuery(</span>
+<span class="nc" id="L65">            tags = tagsToFilter,</span>
+<span class="nc" id="L66">            states = PENDING_WORK_STATUS,</span>
+        )
+
+<span class="nc" id="L69">        val downloadWorkersForFile =</span>
+<span class="nc" id="L70">            workManager.getWorkInfos(workQuery).get().filter { it.tags.containsAll(tagsToFilter) }</span>
+
+<span class="nc" id="L72">        var isEnqueued = false</span>
+<span class="nc" id="L73">        downloadWorkersForFile.forEach {</span>
+            // Let's cancel a work if it has several retries and enqueue it again
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            if (it.runAttemptCount &gt; MAXIMUM_NUMBER_OF_RETRIES) {</span>
+<span class="nc" id="L76">                workManager.cancelWorkById(it.id)</span>
+            } else {
+<span class="nc" id="L78">                isEnqueued = true</span>
+            }
+<span class="nc" id="L80">        }</span>
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (isEnqueued) {</span>
+<span class="nc" id="L83">            Timber.i(&quot;Download of ${file.fileName} has not finished yet. Do not enqueue it again.&quot;)</span>
+        }
+
+<span class="nc" id="L86">        return isEnqueued</span>
+    }
+
+    private fun enqueueNewDownload(ocFile: OCFile, accountName: String): UUID {
+<span class="nc" id="L90">        val inputData = workDataOf(</span>
+<span class="nc" id="L91">            DownloadFileWorker.KEY_PARAM_ACCOUNT to accountName,</span>
+<span class="nc" id="L92">            DownloadFileWorker.KEY_PARAM_FILE_ID to ocFile.id</span>
+        )
+
+<span class="nc" id="L95">        val downloadFileWork = OneTimeWorkRequestBuilder&lt;DownloadFileWorker&gt;()</span>
+<span class="nc" id="L96">            .setInputData(inputData)</span>
+<span class="nc" id="L97">            .addTag(ocFile.id.toString())</span>
+<span class="nc" id="L98">            .addTag(accountName)</span>
+<span class="nc" id="L99">            .addTag(TRANSFER_TAG_DOWNLOAD)</span>
+<span class="nc" id="L100">            .build()</span>
+
+<span class="nc" id="L102">        workManager.enqueue(downloadFileWork)</span>
+<span class="nc" id="L103">        Timber.i(&quot;Download of ${ocFile.fileName} has been enqueued.&quot;)</span>
+
+<span class="nc" id="L105">        return downloadFileWork.id</span>
+    }
+
+<span class="nc" id="L108">    data class Params(</span>
+<span class="nc" id="L109">        val accountName: String,</span>
+<span class="nc" id="L110">        val file: OCFile</span>
+    )
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

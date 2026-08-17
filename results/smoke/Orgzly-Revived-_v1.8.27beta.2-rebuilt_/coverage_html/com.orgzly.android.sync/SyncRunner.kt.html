@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncRunner.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Orgzly-Revived</a> &gt; <a href="index.source.html" class="el_package">com.orgzly.android.sync</a> &gt; <span class="el_source">SyncRunner.kt</span></div><h1>SyncRunner.kt</h1><pre class="source lang-java linenums">package com.orgzly.android.sync
+
+import android.content.Intent
+import androidx.core.content.ContextCompat.startActivity
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Transformations
+import androidx.work.*
+import com.orgzly.BuildConfig
+import com.orgzly.R
+import com.orgzly.android.App
+import com.orgzly.android.ui.repos.ReposActivity
+import com.orgzly.android.ui.showSnackbar
+import com.orgzly.android.util.LogUtils
+import java.util.concurrent.TimeUnit
+
+object SyncRunner {
+    const val IS_AUTO_SYNC = &quot;auto-sync&quot;
+
+<span class="fc" id="L20">    private val TAG: String = SyncRunner::class.java.name</span>
+
+    private const val UNIQUE_WORK_NAME = &quot;sync&quot;
+
+    @JvmStatic
+    fun startAuto() {
+<span class="nc" id="L26">        startSync(true)</span>
+<span class="nc" id="L27">    }</span>
+
+    @JvmStatic
+    @JvmOverloads
+<span class="nc" id="L31">    fun startSync(autoSync: Boolean = false) {</span>
+<span class="nc" id="L32">        val workManager = WorkManager.getInstance(App.getAppContext())</span>
+
+
+        // There is a bug in WorkManager, documented here https://issuetracker.google.com/issues/115575872,
+        // due to which an ACTION_UPDATE intent is sent to AppWidgetProviders when the last worker finishes.
+        // This leads to an ugly flickering and resetting of the scroll position when using the Orgzly widget,
+        // especially in th case of marking a task done, while having auto update activated.
+        // The provided solution is to schedule a worker in the &quot;infinite&quot; future, thus preventing the case
+        // of the last worker finishing.
+<span class="nc" id="L41">        val infiniteScheduledWorkerToPreventWidgetUpdate = OneTimeWorkRequestBuilder&lt;SyncWorker&gt;()</span>
+<span class="nc" id="L42">            .setInitialDelay(10 * 365, TimeUnit.DAYS)</span>
+<span class="nc" id="L43">            .build()</span>
+
+<span class="nc" id="L45">        workManager.beginUniqueWork(</span>
+<span class="nc" id="L46">            &quot;infiniteScheduledWorkerToPreventWidgetUpdate&quot;,</span>
+<span class="nc" id="L47">            ExistingWorkPolicy.REPLACE,</span>
+<span class="nc" id="L48">            infiniteScheduledWorkerToPreventWidgetUpdate</span>
+<span class="nc" id="L49">        ).enqueue()</span>
+
+        // Enqueue the sync worker
+<span class="nc" id="L52">        val syncWorker = OneTimeWorkRequestBuilder&lt;SyncWorker&gt;()</span>
+            // On Android &gt;= 12 notification from overridden getForegroundInfo might not be shown
+            // Sync-in-progress notification cannot be canceled if app is killed by the system,
+            // when handling notification manually from the worker.
+<span class="nc" id="L56">            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)</span>
+<span class="nc" id="L57">            .setInputData(workDataOf(IS_AUTO_SYNC to autoSync))</span>
+<span class="nc" id="L58">            .build()</span>
+
+<span class="nc" id="L60">        workManager</span>
+<span class="nc" id="L61">            .beginUniqueWork(UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, syncWorker)</span>
+<span class="nc" id="L62">            .enqueue()</span>
+<span class="nc" id="L63">    }</span>
+
+    @JvmStatic
+    fun showSyncFailedSnackBar(activity: FragmentActivity, state: SyncState) {
+<span class="nc" id="L67">        if (BuildConfig.LOG_DEBUG) LogUtils.d(TAG, activity, state)</span>
+
+<span class="nc" id="L69">        val msg = state.getDescription(activity)</span>
+
+<span class="nc" id="L71">        activity.showSnackbar(msg, R.string.repositories) {</span>
+<span class="nc" id="L72">            val intent = Intent(Intent.ACTION_VIEW).apply {</span>
+<span class="nc" id="L73">                setClass(activity, ReposActivity::class.java)</span>
+<span class="nc" id="L74">            }</span>
+<span class="nc" id="L75">            startActivity(activity, intent, null)</span>
+<span class="nc" id="L76">        }</span>
+<span class="nc" id="L77">    }</span>
+
+    @JvmStatic
+    fun stopSync() {
+<span class="nc" id="L81">        val workManager = WorkManager.getInstance(App.getAppContext())</span>
+<span class="nc" id="L82">        workManager.cancelUniqueWork(UNIQUE_WORK_NAME)</span>
+<span class="nc" id="L83">    }</span>
+
+    @JvmStatic
+    fun onStateChange(tag: String): LiveData&lt;SyncState&gt; {
+<span class="fc" id="L87">        return Transformations.map(onAllWorkInfo()) { workInfoList -&gt;</span>
+<span class="fc" id="L88">            syncStateFromWorkInfoList(workInfoList).also { state -&gt;</span>
+<span class="fc" id="L89">                logStateChange(tag, state, workInfoList)</span>
+<span class="fc" id="L90">            }</span>
+        }
+
+//        return MediatorLiveData&lt;SyncState&gt;().apply {
+//            addSource(onInitWorkInfo()) {
+//                value = state
+//            }
+//
+//            addSource(onMainWorkInfo()) {
+//                value = state
+//            }
+//        }
+    }
+
+    private fun logStateChange(tag: String, state: SyncState?, workInfoList: List&lt;WorkInfo&gt;?) {
+<span class="fc" id="L105">        if (BuildConfig.LOG_DEBUG) {</span>
+            // LogUtils.d(TAG, &quot;-&gt; ($tag) Workers changed state to $state &lt;- $workInfoList&quot;)
+<span class="fc" id="L107">            LogUtils.d(</span>
+<span class="fc" id="L108">                TAG,</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">                &quot;-&gt; ($tag) Workers changed state to $state &lt;- ${workInfoList?.map { it.state }}&quot;</span>
+            )
+        }
+<span class="fc" id="L112">    }</span>
+
+    private fun onAllWorkInfo(): LiveData&lt;List&lt;WorkInfo&gt;&gt; {
+<span class="fc" id="L115">        return WorkManager.getInstance(App.getAppContext())</span>
+<span class="fc" id="L116">            .getWorkInfosForUniqueWorkLiveData(UNIQUE_WORK_NAME)</span>
+    }
+
+    private fun syncStateFromWorkInfoList(workInfoList: List&lt;WorkInfo&gt;): SyncState? {
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">        if (workInfoList.isEmpty()) {</span>
+<span class="fc" id="L121">            return null</span>
+        }
+
+<span class="nc" id="L124">        val oneAndOnlyWorker = workInfoList.first()</span>
+
+<span class="nc" id="L126">        oneAndOnlyWorker.run {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (state == WorkInfo.State.CANCELLED) {</span>
+<span class="nc" id="L128">                return SyncState.getInstance(SyncState.Type.CANCELED)</span>
+
+<span class="nc bnc" id="L130" title="All 4 branches missed.">            } else if (state == WorkInfo.State.RUNNING || state == WorkInfo.State.ENQUEUED) {</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                return SyncState.fromData(progress)</span>
+<span class="nc" id="L132">                    ?: SyncState.getInstance(SyncState.Type.STARTING)</span>
+
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            } else if (state.isFinished) {</span>
+<span class="nc" id="L135">                return SyncState.fromData(outputData)</span>
+            }
+<span class="nc" id="L137">        }</span>
+
+<span class="nc" id="L139">        return null</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

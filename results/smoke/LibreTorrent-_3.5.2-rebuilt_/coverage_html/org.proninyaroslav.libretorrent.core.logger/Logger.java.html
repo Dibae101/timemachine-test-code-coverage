@@ -1,0 +1,539 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Logger.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE LibreTorrent</a> &gt; <a href="index.source.html" class="el_package">org.proninyaroslav.libretorrent.core.logger</a> &gt; <span class="el_source">Logger.java</span></div><h1>Logger.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2020 Yaroslav Pronin &lt;proninyaroslav@mail.ru&gt;
+ *
+ * This file is part of LibreTorrent.
+ *
+ * LibreTorrent is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * LibreTorrent is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with LibreTorrent.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package org.proninyaroslav.libretorrent.core.logger;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import org.proninyaroslav.libretorrent.core.collections.FixedRingBuffer;
+
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.locks.ReentrantLock;
+
+import io.reactivex.Observable;
+import io.reactivex.subjects.PublishSubject;
+
+public class Logger
+{
+    protected static final long POLL_TIME_INTERVAL = 250; /* ms */
+
+    protected FixedRingBuffer&lt;LogEntry&gt; inputBuf;
+    protected  FixedRingBuffer&lt;LogEntry&gt; outputBuf;
+    /* `numPendingLogs` &lt;= `maxStoredLogs` */
+    protected int numPendingLogs;
+<span class="fc" id="L47">    protected HashMap&lt;String, LogFilter&gt; filters = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L48">    protected ReentrantLock logLock = new ReentrantLock();</span>
+    protected int maxStoredLogs;
+<span class="fc" id="L50">    protected PublishSubject&lt;DataSetChange&gt; dataSetChangedPublish = PublishSubject.create();</span>
+<span class="fc" id="L51">    protected ExecutorService sender = Executors.newSingleThreadExecutor();</span>
+    protected Thread pendingThread;
+    protected boolean paused;
+    protected boolean recording;
+<span class="fc" id="L55">    protected int recordStartIndex = -1;</span>
+
+    public Logger(int maxStoredLogs)
+<span class="fc" id="L58">    {</span>
+<span class="pc bpc" id="L59" title="1 of 2 branches missed.">        if (maxStoredLogs &lt;= 0)</span>
+<span class="nc" id="L60">            throw new IllegalArgumentException(&quot;Maximum stored logs must be greater than 0&quot;);</span>
+
+<span class="fc" id="L62">        this.maxStoredLogs = maxStoredLogs;</span>
+<span class="fc" id="L63">    }</span>
+
+    private FixedRingBuffer&lt;LogEntry&gt; lazyGetInputBuf()
+    {
+<span class="fc bfc" id="L67" title="All 2 branches covered.">        if (inputBuf == null)</span>
+<span class="fc" id="L68">            inputBuf = new FixedRingBuffer&lt;&gt;(calcInitBufCapacity(maxStoredLogs), maxStoredLogs);</span>
+
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        if (pendingThread == null) {</span>
+<span class="fc" id="L71">            pendingThread = new Thread(this::periodicSwapBuffers);</span>
+<span class="fc" id="L72">            pendingThread.start();</span>
+
+<span class="pc bpc" id="L74" title="1 of 2 branches missed.">        } else if (!pendingThread.isAlive()) {</span>
+            try {
+<span class="nc" id="L76">                pendingThread.start();</span>
+
+<span class="nc" id="L78">            } catch (IllegalThreadStateException e) {</span>
+                /* Already started, ignore */
+<span class="nc" id="L80">            }</span>
+        }
+
+<span class="fc" id="L83">        return inputBuf;</span>
+    }
+
+    private FixedRingBuffer&lt;LogEntry&gt; lazyGetOutputBuf()
+    {
+<span class="fc bfc" id="L88" title="All 2 branches covered.">        if (outputBuf == null)</span>
+<span class="fc" id="L89">            outputBuf = new FixedRingBuffer&lt;&gt;(calcInitBufCapacity(maxStoredLogs), maxStoredLogs);</span>
+
+<span class="fc" id="L91">        return outputBuf;</span>
+    }
+
+    private int calcInitBufCapacity(int capacity)
+    {
+<span class="fc" id="L96">        return (int) Math.floor(capacity / 2.0);</span>
+    }
+
+    protected void send(@NonNull LogEntry entry)
+    {
+<span class="fc" id="L101">        logLock.lock();</span>
+
+        try {
+<span class="fc" id="L104">            lazyGetInputBuf().add(entry);</span>
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">            if (numPendingLogs &lt; maxStoredLogs)</span>
+<span class="fc" id="L106">                numPendingLogs++;</span>
+
+        } finally {
+<span class="fc" id="L109">            logLock.unlock();</span>
+        }
+<span class="fc" id="L111">    }</span>
+
+    private void periodicSwapBuffers()
+    {
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">        while (!Thread.interrupted()) {</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">            if (!paused) {</span>
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">                if (logLock.tryLock()) {</span>
+                    try {
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">                        if (Thread.interrupted())</span>
+                            break;
+
+<span class="fc" id="L122">                        swapBuffers();</span>
+
+                    } finally {
+<span class="fc" id="L125">                        logLock.unlock();</span>
+                    }
+                }
+            }
+
+            try {
+<span class="fc" id="L131">                Thread.sleep(POLL_TIME_INTERVAL);</span>
+
+<span class="nc" id="L133">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L134">                break;</span>
+<span class="fc" id="L135">            }</span>
+        }
+<span class="nc" id="L137">    }</span>
+
+    private void swapBuffers()
+    {
+<span class="fc bfc" id="L141" title="All 2 branches covered.">        if (numPendingLogs == 0)</span>
+<span class="fc" id="L142">            return;</span>
+
+<span class="fc" id="L144">        FixedRingBuffer&lt;LogEntry&gt; inputBuf = lazyGetInputBuf();</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">        if (inputBuf.isEmpty())</span>
+<span class="nc" id="L146">            return;</span>
+<span class="fc" id="L147">        FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+
+<span class="fc" id="L149">        ArrayList&lt;LogEntry&gt; newEntries = new ArrayList&lt;&gt;(numPendingLogs);</span>
+<span class="fc" id="L150">        int size = inputBuf.size();</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        for (int i = size - numPendingLogs; i &lt; size; i++) {</span>
+<span class="fc" id="L152">            LogEntry entry = applyFilters(inputBuf.get(i));</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">            if (entry != null) {</span>
+<span class="fc" id="L154">                outputBuf.add(entry);</span>
+<span class="fc" id="L155">                newEntries.add(entry);</span>
+
+                /* Move old position back */
+<span class="pc bpc" id="L158" title="3 of 4 branches missed.">                if (recording &amp;&amp; recordStartIndex &gt; 0)</span>
+<span class="nc" id="L159">                    recordStartIndex--;</span>
+            }
+        }
+<span class="fc" id="L162">        numPendingLogs = 0;</span>
+
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (!newEntries.isEmpty())</span>
+<span class="fc" id="L165">            submitDataSetChanged(new DataSetChange(DataSetChange.Reason.NEW_ENTRIES, newEntries));</span>
+<span class="fc" id="L166">    }</span>
+
+    private void submitDataSetChanged(DataSetChange change)
+    {
+<span class="fc" id="L170">        sender.submit(() -&gt; dataSetChangedPublish.onNext(change));</span>
+<span class="fc" id="L171">    }</span>
+
+    /*
+     * Set the maximum number of stored log entries in memory
+     */
+
+    public void setMaxStoredLogs(int max)
+    {
+<span class="fc" id="L179">        logLock.lock();</span>
+
+        try {
+<span class="fc" id="L182">            doClean();</span>
+<span class="fc" id="L183">            maxStoredLogs = max;</span>
+
+        } finally {
+<span class="fc" id="L186">            logLock.unlock();</span>
+        }
+<span class="fc" id="L188">    }</span>
+
+    public int getMaxStoredLogs()
+    {
+<span class="fc" id="L192">        logLock.lock();</span>
+
+        try {
+<span class="fc" id="L195">            return maxStoredLogs;</span>
+
+        } finally {
+<span class="fc" id="L198">            logLock.unlock();</span>
+        }
+    }
+
+    public void addFilter(@NonNull NewFilter... filters)
+    {
+<span class="fc" id="L204">        logLock.lock();</span>
+
+        try {
+<span class="fc" id="L207">            int addedFilters = 0;</span>
+<span class="fc bfc" id="L208" title="All 2 branches covered.">            for (NewFilter filter : filters) {</span>
+<span class="fc bfc" id="L209" title="All 2 branches covered.">                if (filter == null)</span>
+<span class="fc" id="L210">                    continue;</span>
+
+<span class="fc" id="L212">                this.filters.put(filter.name, filter.filter);</span>
+<span class="fc" id="L213">                addedFilters++;</span>
+            }
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">            if (addedFilters &gt; 0)</span>
+<span class="fc" id="L216">                forceFilterBuf();</span>
+
+        } finally {
+<span class="fc" id="L219">            logLock.unlock();</span>
+        }
+<span class="fc" id="L221">    }</span>
+
+    public void removeFilter(@NonNull String... filterNames)
+    {
+<span class="fc" id="L225">        logLock.lock();</span>
+
+        try {
+<span class="fc" id="L228">            int removedFilters = 0;</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">            for (String name : filterNames) {</span>
+<span class="fc bfc" id="L230" title="All 2 branches covered.">                if (name == null)</span>
+<span class="fc" id="L231">                    continue;</span>
+
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">                if (filters.remove(name) != null)</span>
+<span class="nc" id="L234">                    removedFilters++;</span>
+            }
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">            if (removedFilters &gt; 0)</span>
+<span class="nc" id="L237">                forceFilterBuf();</span>
+
+        } finally {
+<span class="fc" id="L240">            logLock.unlock();</span>
+        }
+<span class="fc" id="L242">    }</span>
+
+    private void forceFilterBuf()
+    {
+<span class="fc" id="L246">        FixedRingBuffer&lt;LogEntry&gt; inputBuf = lazyGetInputBuf();</span>
+<span class="fc" id="L247">        FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+
+<span class="fc" id="L249">        outputBuf.clear();</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">        for (LogEntry entry : inputBuf) {</span>
+<span class="nc" id="L251">            entry = applyFilters(entry);</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            if (entry != null)</span>
+<span class="nc" id="L253">                outputBuf.add(entry);</span>
+<span class="nc" id="L254">        }</span>
+
+<span class="fc" id="L256">        submitDataSetChanged(new DataSetChange(DataSetChange.Reason.FILTER));</span>
+<span class="fc" id="L257">    }</span>
+
+    public Observable&lt;DataSetChange&gt; observeDataSetChanged()
+    {
+<span class="fc" id="L261">        return dataSetChangedPublish;</span>
+    }
+
+    /*
+     * Returns a list of log entries for a given range.
+     * `startPos` must be less than number of maximum stored logs.
+     * There can be fewer entries than `maxSize`.
+     * Entries can be null.
+     */
+
+    public List&lt;LogEntry&gt; getEntries(int startPos, int maxSize)
+    {
+<span class="nc" id="L273">        logLock.lock();</span>
+
+        try {
+<span class="nc bnc" id="L276" title="All 4 branches missed.">            if (startPos &lt; 0 || startPos &gt;= maxStoredLogs)</span>
+<span class="nc" id="L277">                throw new IllegalArgumentException(&quot;Invalid start position = &quot; + startPos);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            if (maxSize &lt; 0)</span>
+<span class="nc" id="L279">                throw new IllegalArgumentException(&quot;Size must be greater than 0&quot;);</span>
+
+<span class="nc" id="L281">            FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+<span class="nc" id="L282">            swapBuffers();</span>
+
+<span class="nc" id="L284">            ArrayList&lt;LogEntry&gt; res = new ArrayList&lt;&gt;(maxSize);</span>
+<span class="nc" id="L285">            int endPos = startPos + maxSize;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">            for (int i = startPos; i &lt; endPos; i++) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                if (i &gt;= outputBuf.size())</span>
+<span class="nc" id="L288">                    continue;</span>
+
+<span class="nc" id="L290">                res.add(outputBuf.get(i));</span>
+            }
+
+<span class="nc" id="L293">            return res;</span>
+
+        } finally {
+<span class="nc" id="L296">            logLock.unlock();</span>
+        }
+    }
+
+    @Nullable
+    public LogEntry getEntry(int pos)
+    {
+<span class="nc" id="L303">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L306">            FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+<span class="nc" id="L307">            swapBuffers();</span>
+
+<span class="nc bnc" id="L309" title="All 4 branches missed.">            if (pos &lt; 0 || pos &gt;= outputBuf.size())</span>
+<span class="nc" id="L310">                throw new IllegalArgumentException(&quot;Invalid position = &quot; + pos);</span>
+
+<span class="nc" id="L312">            return outputBuf.get(pos);</span>
+
+        } finally {
+<span class="nc" id="L315">            logLock.unlock();</span>
+        }
+    }
+
+    private LogEntry applyFilters(LogEntry entry)
+    {
+<span class="fc bfc" id="L321" title="All 2 branches covered.">        for (LogFilter f : filters.values()) {</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">            if (!f.apply(entry))</span>
+<span class="fc" id="L323">                return null;</span>
+<span class="fc" id="L324">        }</span>
+
+<span class="fc" id="L326">        return entry;</span>
+    }
+
+    public void startRecording()
+    {
+<span class="nc" id="L331">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L334">            swapBuffers();</span>
+
+<span class="nc" id="L336">            recording = true;</span>
+<span class="nc" id="L337">            int size = lazyGetOutputBuf().size();</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">            recordStartIndex = (size &gt; 0 ? size - 1 : 0);</span>
+
+        } finally {
+<span class="nc" id="L341">            logLock.unlock();</span>
+        }
+<span class="nc" id="L343">    }</span>
+
+    public boolean isRecording()
+    {
+<span class="nc" id="L347">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L350">            return recording;</span>
+
+        } finally {
+<span class="nc" id="L353">            logLock.unlock();</span>
+        }
+    }
+
+    /*
+     * If `os` != null, writes entries from the recording start position to the last entry.
+     * Returns the number of written log entries
+     */
+
+    public int stopRecording()
+    {
+<span class="nc" id="L364">        return stopRecording(null, false);</span>
+    }
+
+    public int stopRecording(@Nullable OutputStream os)
+    {
+<span class="nc" id="L369">        return stopRecording(os, false);</span>
+    }
+
+    public int stopRecording(@Nullable OutputStream os, boolean timeStamp)
+    {
+<span class="nc" id="L374">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L377">            int count = 0;</span>
+
+<span class="nc bnc" id="L379" title="All 2 branches missed.">            if (os != null) {</span>
+<span class="nc" id="L380">                swapBuffers();</span>
+
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                if (recordStartIndex &lt; 0)</span>
+<span class="nc" id="L383">                    return count;</span>
+
+<span class="nc" id="L385">                FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+
+<span class="nc" id="L387">                return write(outputBuf, os, recordStartIndex, outputBuf.size() - 1, timeStamp);</span>
+            }
+
+<span class="nc" id="L390">            return count;</span>
+
+        } finally {
+<span class="nc" id="L393">            recording = false;</span>
+<span class="nc" id="L394">            recordStartIndex = -1;</span>
+
+<span class="nc" id="L396">            logLock.unlock();</span>
+        }
+    }
+
+    /*
+     * Writes all entries from the start position to the last entry.
+     * Returns the number of written log entries
+     */
+
+    public int write(@NonNull OutputStream os)
+    {
+<span class="nc" id="L407">        return write(os, false);</span>
+    }
+
+    public int write(@NonNull OutputStream os, boolean timeStamp)
+    {
+<span class="nc" id="L412">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L415">            swapBuffers();</span>
+<span class="nc" id="L416">            FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+
+<span class="nc" id="L418">            return write(outputBuf, os, 0, outputBuf.size() - 1, timeStamp);</span>
+
+        } finally {
+<span class="nc" id="L421">            logLock.unlock();</span>
+        }
+    }
+
+    private int write(FixedRingBuffer&lt;LogEntry&gt; buf, OutputStream os,
+                      int startPos, int endPos, boolean timeStamp)
+    {
+<span class="nc bnc" id="L428" title="All 2 branches missed.">        if (startPos &lt; 0)</span>
+<span class="nc" id="L429">            throw new IllegalArgumentException(&quot;startPos &lt; 0&quot;);</span>
+
+<span class="nc" id="L431">        int count = 0;</span>
+
+<span class="nc" id="L433">        PrintStream printStream = new PrintStream(os, true);</span>
+
+<span class="nc bnc" id="L435" title="All 2 branches missed.">        for (int i = startPos; i &lt;= endPos; i++) {</span>
+<span class="nc" id="L436">            LogEntry entry = buf.get(i);</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            printStream.println(timeStamp ? entry.toStringWithTimeStamp() : entry.toString());</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            if (!printStream.checkError())</span>
+<span class="nc" id="L439">                count++;</span>
+        }
+
+<span class="nc" id="L442">        return count;</span>
+    }
+
+    public int getNumEntries()
+    {
+<span class="nc" id="L447">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L450">            FixedRingBuffer&lt;LogEntry&gt; outputBuf = lazyGetOutputBuf();</span>
+<span class="nc" id="L451">            swapBuffers();</span>
+
+<span class="nc" id="L453">            return outputBuf.size();</span>
+
+        } finally {
+<span class="nc" id="L456">            logLock.unlock();</span>
+        }
+    }
+
+    public void pause()
+    {
+<span class="nc" id="L462">        paused = true;</span>
+<span class="nc" id="L463">    }</span>
+
+    public void resume()
+    {
+<span class="fc" id="L467">        paused = false;</span>
+<span class="fc" id="L468">    }</span>
+
+    public boolean isPaused()
+    {
+<span class="nc" id="L472">        return paused;</span>
+    }
+
+    public void clean()
+    {
+<span class="nc" id="L477">        logLock.lock();</span>
+
+        try {
+<span class="nc" id="L480">            doClean();</span>
+
+        } finally {
+<span class="nc" id="L483">            logLock.unlock();</span>
+        }
+<span class="nc" id="L485">    }</span>
+
+    private void doClean()
+    {
+<span class="pc bpc" id="L489" title="1 of 2 branches missed.">        if (pendingThread != null)</span>
+<span class="nc" id="L490">            pendingThread.interrupt();</span>
+<span class="fc" id="L491">        pendingThread = null;</span>
+<span class="fc" id="L492">        inputBuf = null;</span>
+<span class="fc" id="L493">        outputBuf = null;</span>
+<span class="fc" id="L494">        numPendingLogs = 0;</span>
+<span class="pc bpc" id="L495" title="1 of 2 branches missed.">        if (recording)</span>
+<span class="nc" id="L496">            recordStartIndex = 0;</span>
+
+<span class="fc" id="L498">        submitDataSetChanged(new DataSetChange(DataSetChange.Reason.NEW_ENTRIES));</span>
+<span class="fc" id="L499">    }</span>
+
+    public static class NewFilter
+    {
+        String name;
+        LogFilter filter;
+
+        public NewFilter(@NonNull String name, @NonNull LogFilter filter)
+<span class="fc" id="L507">        {</span>
+<span class="fc" id="L508">            this.name = name;</span>
+<span class="fc" id="L509">            this.filter = filter;</span>
+<span class="fc" id="L510">        }</span>
+    }
+
+    public static class DataSetChange
+    {
+<span class="fc" id="L515">        public enum Reason</span>
+        {
+<span class="fc" id="L517">            NEW_ENTRIES,</span>
+<span class="fc" id="L518">            CLEAN,</span>
+<span class="fc" id="L519">            FILTER,</span>
+        }
+
+        @Nullable
+        public final List&lt;LogEntry&gt; entries;
+        @NonNull
+        public final Reason reason;
+
+        DataSetChange(@NonNull Reason reason)
+        {
+<span class="fc" id="L529">            this(reason, null);</span>
+<span class="fc" id="L530">        }</span>
+
+        DataSetChange(@NonNull Reason reason, @Nullable List&lt;LogEntry&gt; entries)
+<span class="fc" id="L533">        {</span>
+<span class="fc" id="L534">            this.entries = entries;</span>
+<span class="fc" id="L535">            this.reason = reason;</span>
+<span class="fc" id="L536">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

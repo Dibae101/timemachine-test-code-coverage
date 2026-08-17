@@ -1,0 +1,1033 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HostConnection.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Kore</a> &gt; <a href="index.source.html" class="el_package">org.xbmc.kore.host</a> &gt; <span class="el_source">HostConnection.java</span></div><h1>HostConnection.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2015 Synced Synapse. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.xbmc.kore.host;
+
+import android.os.Handler;
+import android.os.Process;
+import android.text.TextUtils;
+
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.xbmc.kore.jsonrpc.ApiCallback;
+import org.xbmc.kore.jsonrpc.ApiException;
+import org.xbmc.kore.jsonrpc.ApiFuture;
+import org.xbmc.kore.jsonrpc.ApiMethod;
+import org.xbmc.kore.jsonrpc.ApiNotification;
+import org.xbmc.kore.jsonrpc.notification.Application;
+import org.xbmc.kore.jsonrpc.notification.Input;
+import org.xbmc.kore.jsonrpc.notification.Player;
+import org.xbmc.kore.jsonrpc.notification.Playlist;
+import org.xbmc.kore.jsonrpc.notification.System;
+import org.xbmc.kore.utils.LogUtils;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.net.ConnectException;
+import java.net.InetSocketAddress;
+import java.net.ProtocolException;
+import java.net.Socket;
+import java.util.HashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.Authenticator;
+import okhttp3.Credentials;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+
+/**
+ * Class responsible for communicating with the host.
+ */
+public class HostConnection {
+<span class="nc" id="L66">    public static final String TAG = LogUtils.makeLogTag(HostConnection.class);</span>
+
+    protected static final boolean LOG_REQUESTS = false;
+
+    /**
+     * Communicate via TCP
+     */
+    public static final int PROTOCOL_TCP = 0;
+    /**
+     * Communicate via HTTP
+     */
+    public static final int PROTOCOL_HTTP = 1;
+
+    /**
+     * Interface that an observer must implement to be notified of player notifications
+     */
+    public interface PlayerNotificationsObserver {
+        void onPropertyChanged(Player.OnPropertyChanged notification);
+        void onPlay(Player.OnPlay notification);
+        void onResume(Player.OnResume notification);
+        void onPause(Player.OnPause notification);
+        void onSpeedChanged(Player.OnSpeedChanged notification);
+        void onSeek(Player.OnSeek notification);
+        void onStop(Player.OnStop notification);
+        void onAVStart(Player.OnAVStart notification);
+        void onAVChange(Player.OnAVChange notification);
+    }
+
+    /**
+     * Interface that an observer must implement to be notified of System notifications
+     */
+    public interface SystemNotificationsObserver {
+        void onQuit(System.OnQuit notification);
+        void onRestart(System.OnRestart notification);
+        void onSleep(System.OnSleep notification);
+    }
+
+    /**
+     * Interface that an observer must implement to be notified of Input notifications
+     */
+    public interface InputNotificationsObserver {
+        void onInputRequested(Input.OnInputRequested notification);
+    }
+
+    public interface ApplicationNotificationsObserver {
+        void onVolumeChanged(Application.OnVolumeChanged notification);
+    }
+
+    public interface PlaylistNotificationsObserver {
+        void onPlaylistCleared(Playlist.OnClear notification);
+
+        void onPlaylistItemAdded(Playlist.OnAdd notification);
+
+        void onPlaylistItemRemoved(Playlist.OnRemove notification);
+    }
+
+    /**
+     * Host to connect too
+     */
+    private final HostInfo hostInfo;
+
+    /**
+     * The protocol to use: {@link #PROTOCOL_HTTP} or {@link #PROTOCOL_TCP}
+     * This is initially obtained from the {@link HostInfo}, but can be later changed through
+     * {@link #setProtocol(int)}
+     */
+    private int protocol;
+
+<span class="nc" id="L134">    private final ObjectMapper objectMapper = new ObjectMapper();</span>
+
+    /**
+     * Socket used to communicate through TCP
+     */
+<span class="nc" id="L139">    private Socket socket = null;</span>
+
+    /**
+     * Listener thread that will be listening on the TCP socket
+     */
+<span class="nc" id="L144">    private Thread tcpListenerThread = null;</span>
+
+    /**
+     * {@link HashMap} that will hold the {@link MethodCallInfo} with the information
+     * necessary to respond to clients (TCP only)
+     */
+<span class="nc" id="L150">    private final HashMap&lt;String, MethodCallInfo&lt;?&gt;&gt; clientCallbacks = new HashMap&lt;&gt;();</span>
+
+    /**
+     * The observers that will be notified of player notifications
+     */
+<span class="nc" id="L155">    private final HashMap&lt;PlayerNotificationsObserver, Handler&gt; playerNotificationsObservers = new HashMap&lt;&gt;();</span>
+
+    /**
+     * The observers that will be notified of system notifications
+     */
+<span class="nc" id="L160">    private final HashMap&lt;SystemNotificationsObserver, Handler&gt; systemNotificationsObservers = new HashMap&lt;&gt;();</span>
+
+    /**
+     * The observers that will be notified of input notifications
+     */
+<span class="nc" id="L165">    private final HashMap&lt;InputNotificationsObserver, Handler&gt; inputNotificationsObservers = new HashMap&lt;&gt;();</span>
+
+    /**
+     * The observers that will be notified of application notifications
+     */
+<span class="nc" id="L170">    private final HashMap&lt;ApplicationNotificationsObserver, Handler&gt; applicationNotificationsObservers = new HashMap&lt;&gt;();</span>
+
+    /**
+     * The observers that will be notified of playlist notifications
+     */
+<span class="nc" id="L175">    private final HashMap&lt;PlaylistNotificationsObserver, Handler&gt; playlistNotificationsObservers = new HashMap&lt;&gt;();</span>
+
+    private final ExecutorService executorService;
+
+    private final int connectTimeout;
+
+    private static final int DEFAULT_CONNECT_TIMEOUT = 5000; // ms
+
+    public static final int TCP_READ_TIMEOUT = 30000; // ms
+
+    private static final int CALLABLE_TIMEOUT = 30000; // ms
+
+    /**
+     * OkHttpClient. Make sure it is initialized, by calling {@link #getOkHttpClient()}
+     */
+<span class="nc" id="L190">    private OkHttpClient httpClient = null;</span>
+<span class="nc" id="L191">    private static final MediaType MEDIA_TYPE_JSON = MediaType.parse(&quot;application/json; charset=utf-8&quot;);</span>
+
+    /**
+     * Flag to indicate that the tcp response have to be ignored.
+     */
+<span class="nc" id="L196">    private boolean ignoreTcpResponse = false;</span>
+
+    public void setIgnoreTcpResponse(boolean ignoreTcpResponse) {
+<span class="nc" id="L199">        this.ignoreTcpResponse = ignoreTcpResponse;</span>
+<span class="nc" id="L200">    }</span>
+
+    /**
+     * Creates a new host connection
+     *
+     * @param hostInfo Host info object
+     */
+    public HostConnection(final HostInfo hostInfo) {
+<span class="nc" id="L208">        this(hostInfo, DEFAULT_CONNECT_TIMEOUT);</span>
+<span class="nc" id="L209">    }</span>
+
+    /**
+     * Creates a new host connection
+     *
+     * @param hostInfo       Host info object
+     * @param connectTimeout Connection timeout in ms
+     */
+<span class="nc" id="L217">    public HostConnection(final HostInfo hostInfo, int connectTimeout) {</span>
+<span class="nc" id="L218">        this.hostInfo = hostInfo;</span>
+        // Start with the default host protocol
+<span class="nc" id="L220">        this.protocol = hostInfo.getProtocol();</span>
+        // Create a single threaded executor
+<span class="nc" id="L222">        this.executorService = Executors.newCachedThreadPool();</span>
+        // Set timeout
+<span class="nc" id="L224">        this.connectTimeout = connectTimeout;</span>
+<span class="nc" id="L225">    }</span>
+
+    /**
+     * Returns this connection protocol
+     *
+     * @return {@link #PROTOCOL_HTTP} or {@link #PROTOCOL_TCP}
+     */
+    public int getProtocol() {
+<span class="nc" id="L233">        return protocol;</span>
+    }
+
+    /**
+     * Overrides the protocol for this connection
+     *
+     * @param protocol {@link #PROTOCOL_HTTP} or {@link #PROTOCOL_TCP}
+     */
+    public synchronized void setProtocol(int protocol) {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (!isValidProtocol(protocol)) {</span>
+<span class="nc" id="L243">            throw new IllegalArgumentException(&quot;Invalid protocol specified.&quot;);</span>
+        }
+<span class="nc" id="L245">        this.protocol = protocol;</span>
+<span class="nc" id="L246">    }</span>
+
+    public static boolean isValidProtocol(int protocol) {
+<span class="nc bnc" id="L249" title="All 4 branches missed.">        return ((protocol == PROTOCOL_TCP) || (protocol == PROTOCOL_HTTP));</span>
+    }
+
+    /**
+     * Returns this connection {@link HostInfo}
+     *
+     * @return This connection {@link HostInfo}
+     */
+    public HostInfo getHostInfo() {
+<span class="nc" id="L258">        return hostInfo;</span>
+    }
+
+    /**
+     * Returns this default connection timeout
+     *
+     * @return Connection timeout
+     */
+    public int getConnectTimeout() {
+<span class="nc" id="L267">        return connectTimeout;</span>
+    }
+
+    /**
+     * Returns the {@link ExecutorService} that is being used to send remote method calls
+     *
+     * @return The {@link ExecutorService} in use
+     */
+<span class="nc" id="L275">    public ExecutorService getExecutorService() { return executorService; }</span>
+
+    /**
+     * Registers an observer for player notifications
+     *
+     * @param observer The {@link PlayerNotificationsObserver}
+     */
+    public void registerPlayerNotificationsObserver(PlayerNotificationsObserver observer, Handler handler) {
+<span class="nc" id="L283">        playerNotificationsObservers.put(observer, handler);</span>
+<span class="nc" id="L284">    }</span>
+
+    /**
+     * Unregisters and observer from the player notifications
+     *
+     * @param observer The {@link PlayerNotificationsObserver} to unregister
+     */
+    public void unregisterPlayerNotificationsObserver(PlayerNotificationsObserver observer) {
+<span class="nc" id="L292">        playerNotificationsObservers.remove(observer);</span>
+<span class="nc" id="L293">    }</span>
+
+    /**
+     * Registers an observer for system notifications
+     *
+     * @param observer The {@link SystemNotificationsObserver}
+     */
+    public void registerSystemNotificationsObserver(SystemNotificationsObserver observer, Handler handler) {
+<span class="nc" id="L301">        systemNotificationsObservers.put(observer, handler);</span>
+<span class="nc" id="L302">    }</span>
+
+    /**
+     * Unregisters and observer from the system notifications
+     *
+     * @param observer The {@link SystemNotificationsObserver}
+     */
+    public void unregisterSystemNotificationsObserver(SystemNotificationsObserver observer) {
+<span class="nc" id="L310">        systemNotificationsObservers.remove(observer);</span>
+<span class="nc" id="L311">    }</span>
+
+    /**
+     * Registers an observer for input notifications
+     *
+     * @param observer The {@link InputNotificationsObserver}
+     */
+    public void registerInputNotificationsObserver(InputNotificationsObserver observer, Handler handler) {
+<span class="nc" id="L319">        inputNotificationsObservers.put(observer, handler);</span>
+<span class="nc" id="L320">    }</span>
+
+    /**
+     * Unregisters and observer from the input notifications
+     *
+     * @param observer The {@link InputNotificationsObserver}
+     */
+    public void unregisterInputNotificationsObserver(InputNotificationsObserver observer) {
+<span class="nc" id="L328">        inputNotificationsObservers.remove(observer);</span>
+<span class="nc" id="L329">    }</span>
+
+    /**
+     * Registers an observer for application notifications
+     *
+     * @param observer The {@link InputNotificationsObserver}
+     */
+    public void registerApplicationNotificationsObserver(ApplicationNotificationsObserver observer, Handler handler) {
+<span class="nc" id="L337">        applicationNotificationsObservers.put(observer, handler);</span>
+<span class="nc" id="L338">    }</span>
+
+    /**
+     * Unregisters and observer from the application notifications
+     *
+     * @param observer The {@link InputNotificationsObserver}
+     */
+    public void unregisterApplicationNotificationsObserver(ApplicationNotificationsObserver observer) {
+<span class="nc" id="L346">        applicationNotificationsObservers.remove(observer);</span>
+<span class="nc" id="L347">    }</span>
+
+    /**
+     * Registers an observer for playlist notifications
+     *
+     * @param observer The {@link InputNotificationsObserver}
+     */
+    public void registerPlaylistNotificationsObserver(PlaylistNotificationsObserver observer, Handler handler) {
+<span class="nc" id="L355">        playlistNotificationsObservers.put(observer, handler);</span>
+<span class="nc" id="L356">    }</span>
+
+    /**
+     * Unregisters and observer from the playlist notifications
+     *
+     * @param observer The {@link InputNotificationsObserver}
+     */
+    public void unregisterPlaylistNotificationsObserver(PlaylistNotificationsObserver observer) {
+<span class="nc" id="L364">        playlistNotificationsObservers.remove(observer);</span>
+<span class="nc" id="L365">    }</span>
+
+    /**
+     * Calls the remote method on the Kodi host asynchronously, using a background thread
+     * The result of the call will be posted in the {@link ApiCallback callback} parameter, on the specified
+     * {@link android.os.Handler}. If the results aren't needed, null can be passed for both parameters to ignore them
+     * If the connection is through TCP and there's a need to update the callback and handler (e.g. due to a device
+     * configuration change) use {@link #updateClientCallback(int, ApiCallback, Handler)}
+     *
+     * @param method   Method object that represents the method call
+     * @param callback {@link ApiCallback} to post the response to
+     * @param handler  {@link Handler} to invoke callbacks on.
+     *                 Note that, if this is null, the callbacks are invoked on the same background
+     *                 thread as the request, which isn't appropriate for UI manipulations
+     * @param &lt;T&gt;      Method return type
+     */
+    public &lt;T&gt; void execute(final ApiMethod&lt;T&gt; method, final ApiCallback&lt;T&gt; callback, final Handler handler) {
+//		LogUtils.LOGD(TAG, &quot;Starting method execute. Method: &quot; + method.getMethodName() + &quot; on : &quot; + hostInfo.getJsonRpcHttpEndpoint());
+
+        // Launch background thread
+<span class="nc" id="L385">        Runnable command = () -&gt; {</span>
+<span class="nc" id="L386">            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);</span>
+
+<span class="nc bnc" id="L388" title="All 2 branches missed.">            if (protocol == PROTOCOL_HTTP) {</span>
+<span class="nc" id="L389">                executeThroughOkHttp(method, callback, handler);</span>
+            } else {
+                // Save this method/callback for any later response
+<span class="nc" id="L392">                addClientCallback(method, callback, handler);</span>
+<span class="nc" id="L393">                executeThroughTcp(method);</span>
+            }
+<span class="nc" id="L395">        };</span>
+
+<span class="nc" id="L397">        executorService.execute(command);</span>
+<span class="nc" id="L398">    }</span>
+
+    /**
+     * Calls the remote method on the Kodi host asynchronously, using a background thread, and returns a future
+     * that can be awaited to transform the call into a synchronous one.
+     *
+     * Note that calls to the Kodi host are asynchronous by nature, which can lead to callback hell when there's a
+     * need to call several remote methods in sequence. This method allows for a sequential code pattern when
+     * calling several remote methods, by calling {@link Future#get()} on each one and globally managing exceptions.
+     * If the goal is simply to asynchronously execute a remote method the
+     * {@link HostConnection#execute(ApiMethod, ApiCallback, Handler)} is preferrable, as it is slightly more efficient.
+     *
+     * @param method The remote method to invoke
+     * @param &lt;T&gt;    The type of the return value of the method
+     * @return       The future result of the method call. API errors will be wrapped in
+     * an {@link ExecutionException} like regular futures.
+     */
+    public &lt;T&gt; Future&lt;T&gt; execute(ApiMethod&lt;T&gt; method) {
+<span class="nc" id="L416">        final ApiFuture&lt;T&gt; future = new ApiFuture&lt;&gt;();</span>
+<span class="nc" id="L417">        execute(method, new ApiCallback&lt;T&gt;() {</span>
+            @Override
+            public void onSuccess(T result) {
+<span class="nc" id="L420">                future.complete(result);</span>
+<span class="nc" id="L421">            }</span>
+
+            @Override
+            public void onError(int errorCode, String description) {
+<span class="nc" id="L425">                future.completeExceptionally(new ApiException(errorCode, description));</span>
+<span class="nc" id="L426">            }</span>
+        }, null);
+<span class="nc" id="L428">        return future;</span>
+    }
+
+    /**
+     * Updates the client callback for the given {@link ApiMethod} if it is still pending.
+     * This can be used when the activity or fragment has been destroyed and recreated and
+     * you are still interested in the result of any pending {@link ApiMethod}
+     *
+     * @param methodId for which a new callback needs to be attached
+     * @param callback new callback that needs to be called for the new activity or fragment
+     * @param handler  used to execute the callback on the UI thread
+     * @param &lt;T&gt;      result type
+     * @return true if the {@link ApiMethod} was still pending, false otherwise.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public &lt;T&gt; boolean updateClientCallback(final int methodId, final ApiCallback&lt;T&gt; callback, final Handler handler) {
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (getProtocol() == PROTOCOL_HTTP)</span>
+<span class="nc" id="L445">            return false;</span>
+
+<span class="nc" id="L447">        synchronized (clientCallbacks) {</span>
+<span class="nc" id="L448">            String id = String.valueOf(methodId);</span>
+<span class="nc" id="L449">            MethodCallInfo&lt;?&gt; methodCallInfo = clientCallbacks.get(id);</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            if (methodCallInfo != null) {</span>
+<span class="nc" id="L451">                clientCallbacks.put(id, new MethodCallInfo&lt;&gt;((ApiMethod&lt;T&gt;) methodCallInfo.method, callback, handler));</span>
+<span class="nc" id="L452">                return true;</span>
+            }
+<span class="nc" id="L454">            return false;</span>
+        }
+    }
+
+    /**
+     * Stores the method and callback to handle asynchronous responses.
+     * Note this is only needed for requests over TCP.
+     *
+     * @param method   Method
+     * @param callback Callback
+     * @param handler  Handler
+     * @param &lt;T&gt;      Method/Callback type
+     */
+    private &lt;T&gt; void addClientCallback(final ApiMethod&lt;T&gt; method, final ApiCallback&lt;T&gt; callback, final Handler handler) {
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        if (getProtocol() == PROTOCOL_HTTP)</span>
+<span class="nc" id="L469">            return;</span>
+
+<span class="nc" id="L471">        synchronized (clientCallbacks) {</span>
+<span class="nc" id="L472">            String methodId = String.valueOf(method.getId());</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            if (clientCallbacks.containsKey(methodId)) {</span>
+<span class="nc bnc" id="L474" title="All 4 branches missed.">                if ((handler != null) &amp;&amp; (callback != null)) {</span>
+<span class="nc" id="L475">                    handler.post(() -&gt; callback.onError(ApiException.API_METHOD_WITH_SAME_ID_ALREADY_EXECUTING,</span>
+                            &quot;A method with the same Id is already executing&quot;));
+                }
+<span class="nc" id="L478">                return;</span>
+            }
+<span class="nc" id="L480">            clientCallbacks.put(methodId, new MethodCallInfo&lt;&gt;(method, callback, handler));</span>
+<span class="nc" id="L481">        }</span>
+<span class="nc" id="L482">    }</span>
+
+    /**
+     * Sends the JSON RPC request through HTTP (using OkHttp library)
+     */
+    private &lt;T&gt; void executeThroughOkHttp(final ApiMethod&lt;T&gt; method, final ApiCallback&lt;T&gt; callback, final Handler handler) {
+<span class="nc" id="L488">        OkHttpClient client = getOkHttpClient();</span>
+<span class="nc" id="L489">        String jsonRequest = method.toJsonString();</span>
+
+        if (LOG_REQUESTS) LogUtils.LOGD(TAG, &quot;HTTP request: &quot; + jsonRequest);
+
+        try {
+<span class="nc" id="L494">            Request request = new Request.Builder()</span>
+<span class="nc" id="L495">                    .url(hostInfo.getJsonRpcHttpEndpoint())</span>
+<span class="nc" id="L496">                    .post(RequestBody.create(jsonRequest, MEDIA_TYPE_JSON))</span>
+<span class="nc" id="L497">                    .build();</span>
+<span class="nc" id="L498">            Response response = sendOkHttpRequest(client, request);</span>
+<span class="nc" id="L499">            final T result = method.resultFromJson(parseJsonResponse(handleOkHttpResponse(response)));</span>
+
+<span class="nc bnc" id="L501" title="All 2 branches missed.">            if (callback != null) {</span>
+<span class="nc" id="L502">                postOrRunNow(handler, () -&gt; callback.onSuccess(result));</span>
+            }
+<span class="nc" id="L504">        } catch (final ApiException e) {</span>
+            // Got an error, call error handler
+<span class="nc bnc" id="L506" title="All 2 branches missed.">            if (callback != null) {</span>
+<span class="nc" id="L507">                postOrRunNow(handler, () -&gt; callback.onError(e.getCode(), e.getMessage()));</span>
+            }
+<span class="nc" id="L509">        } catch (final IllegalArgumentException e) {</span>
+<span class="nc" id="L510">            LogUtils.LOGD(TAG, &quot;Illegal argument exception on sending HTTP request: &quot; + e);</span>
+            // This happens because the host URL isn't valid
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            if (callback != null) {</span>
+<span class="nc" id="L513">                String desc = &quot;Illegal argument exception on sending HTTP request.\n&quot; +</span>
+                              &quot;Please check the media center address on the configuration screen.&quot;;
+<span class="nc" id="L515">                postOrRunNow(handler, () -&gt; callback.onError(ApiException.HTTP_HOST_URL_INVALID, desc));</span>
+            }
+<span class="nc" id="L517">        }</span>
+<span class="nc" id="L518">    }</span>
+
+    /**
+     * Initializes this class OkHttpClient
+     */
+    public synchronized OkHttpClient getOkHttpClient() {
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        if (httpClient == null) {</span>
+<span class="nc" id="L525">            httpClient = new OkHttpClient.Builder()</span>
+<span class="nc" id="L526">                    .connectTimeout(connectTimeout, TimeUnit.MILLISECONDS)</span>
+<span class="nc" id="L527">                    .authenticator(getOkHttpAuthenticator())</span>
+<span class="nc" id="L528">                    .build();</span>
+        }
+<span class="nc" id="L530">        return httpClient;</span>
+    }
+
+    public Authenticator getOkHttpAuthenticator() {
+<span class="nc" id="L534">        return (route, response) -&gt; {</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">            if (TextUtils.isEmpty(hostInfo.getUsername()) ||</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                    (response.request().header(&quot;Authorization&quot;) != null)) {</span>
+<span class="nc" id="L537">                return null; // Give up, we've already attempted to authenticate.</span>
+            }
+
+<span class="nc" id="L540">            String credential = Credentials.basic(hostInfo.getUsername(), hostInfo.getPassword());</span>
+<span class="nc" id="L541">            return response.request().newBuilder()</span>
+<span class="nc" id="L542">                    .header(&quot;Authorization&quot;, credential)</span>
+<span class="nc" id="L543">                    .build();</span>
+        };
+    }
+
+    // Hack to circumvent a Protocol Exception that occurs when the server returns bogus Status Line
+    // http://forum.kodi.tv/showthread.php?tid=224288
+    private OkHttpClient getNewOkHttpClientNoKeepAlive() {
+<span class="nc" id="L550">        java.lang.System.setProperty(&quot;http.keepAlive&quot;, &quot;false&quot;);</span>
+<span class="nc" id="L551">        httpClient = null;</span>
+<span class="nc" id="L552">        return getOkHttpClient();</span>
+    }
+
+    /**
+     * Send an OkHttp POST request
+     *
+     * @param request Request to send
+     * @throws ApiException {@link ApiException} if request can't be sent
+     */
+    private Response sendOkHttpRequest(final OkHttpClient client, final Request request) throws ApiException {
+        try {
+<span class="nc" id="L563">            return client.newCall(request).execute();</span>
+<span class="nc" id="L564">        } catch (ProtocolException e) {</span>
+<span class="nc" id="L565">            LogUtils.LOGW(TAG, &quot;Got a Protocol Exception when trying to send OkHttp request. &quot; +</span>
+                    &quot;Trying again without connection pooling to try to circunvent this&quot;, e);
+            // Hack to circumvent a Protocol Exception that occurs when the server returns bogus Status Line
+            // http://forum.kodi.tv/showthread.php?tid=224288
+<span class="nc" id="L569">            httpClient = getNewOkHttpClientNoKeepAlive();</span>
+<span class="nc" id="L570">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_SENDING_REQUEST, e);</span>
+<span class="nc" id="L571">        } catch (ConnectException e) {</span>
+<span class="nc" id="L572">            LogUtils.LOGD(TAG, &quot;Failed to connect to kodi.&quot;);</span>
+<span class="nc" id="L573">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_SENDING_REQUEST, e);</span>
+<span class="nc" id="L574">        } catch (IOException e) {</span>
+<span class="nc" id="L575">            LogUtils.LOGW(TAG, &quot;Failed to send OkHttp request.&quot;, e);</span>
+<span class="nc" id="L576">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_SENDING_REQUEST, e);</span>
+<span class="nc" id="L577">        } catch (RuntimeException e) {</span>
+            // Seems like OkHttp throws a RuntimeException when it gets a malformed URL
+<span class="nc" id="L579">            LogUtils.LOGW(TAG, &quot;Got a Runtime exception when sending OkHttp request. Probably a malformed URL.&quot;, e);</span>
+<span class="nc" id="L580">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_SENDING_REQUEST, e);</span>
+        }
+    }
+
+    /**
+     * Reads the response from the server
+     *
+     * @param response Response from OkHttp
+     * @return Response body string
+     * @throws ApiException {@link ApiException} if response can't be read/processed
+     */
+    private String handleOkHttpResponse(Response response) throws ApiException {
+        try {
+<span class="nc" id="L593">            int responseCode = response.code();</span>
+
+<span class="nc bnc" id="L595" title="All 4 branches missed.">            switch (responseCode) {</span>
+                case 200:
+<span class="nc" id="L597">                    ResponseBody body = response.body();</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">                    if (body != null) {</span>
+                        // All ok, read response
+<span class="nc" id="L600">                        String res = body.string();</span>
+<span class="nc" id="L601">                        body.close();</span>
+                        if (LOG_REQUESTS) LogUtils.LOGD(TAG, &quot;HTTP response: &quot; + res);
+<span class="nc" id="L603">                        return res;</span>
+                    } else {
+<span class="nc" id="L605">                        LogUtils.LOGD(TAG, &quot;OkHTTP response body is null: &quot; + response);</span>
+<span class="nc" id="L606">                        throw new ApiException(ApiException.HTTP_RESPONSE_CODE_UNKNOWN,</span>
+                                &quot;Server returned response code: &quot; + response);
+                    }
+                case 401:
+<span class="nc" id="L610">                    LogUtils.LOGD(TAG, &quot;OkHTTP response read error. Got a 401: &quot; + response);</span>
+<span class="nc" id="L611">                    throw new ApiException(ApiException.HTTP_RESPONSE_CODE_UNAUTHORIZED,</span>
+                            &quot;Server returned response code: &quot; + response);
+                case 404:
+<span class="nc" id="L614">                    LogUtils.LOGD(TAG, &quot;OkHTTP response read error. Got a 404: &quot; + response);</span>
+<span class="nc" id="L615">                    throw new ApiException(ApiException.HTTP_RESPONSE_CODE_NOT_FOUND,</span>
+                            &quot;Server returned response code: &quot; + response);
+                default:
+<span class="nc" id="L618">                    LogUtils.LOGD(TAG, &quot;OkHTTP response read error. Got: &quot; + response);</span>
+<span class="nc" id="L619">                    throw new ApiException(ApiException.HTTP_RESPONSE_CODE_UNKNOWN,</span>
+                            &quot;Server returned response code: &quot; + response);
+            }
+<span class="nc" id="L622">        } catch (IOException e) {</span>
+<span class="nc" id="L623">            LogUtils.LOGW(TAG, &quot;Failed to read OkHTTP response.&quot;, e);</span>
+<span class="nc" id="L624">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_READING_RESPONSE, e);</span>
+        }
+    }
+
+    /**
+     * Parses the JSON response from the server.
+     * If it is a valid result returns the JSON {@link com.fasterxml.jackson.databind.node.ObjectNode} that represents it.
+     * If it is an error (contains the error tag), returns an {@link ApiException} with the info.
+     *
+     * @param response JSON response
+     * @return {@link com.fasterxml.jackson.databind.node.ObjectNode} constructed
+     * @throws ApiException Exception trown if we can't parse the response
+     */
+    private ObjectNode parseJsonResponse(String response) throws ApiException {
+//		LogUtils.LOGD(TAG, &quot;Parsing JSON response&quot;);
+        try {
+<span class="nc" id="L640">            ObjectNode jsonResponse = (ObjectNode) objectMapper.readTree(response);</span>
+
+<span class="nc bnc" id="L642" title="All 2 branches missed.">            if (jsonResponse.has(ApiMethod.ERROR_NODE)) {</span>
+<span class="nc" id="L643">                throw new ApiException(ApiException.API_ERROR, jsonResponse);</span>
+            }
+
+<span class="nc bnc" id="L646" title="All 2 branches missed.">            if (!jsonResponse.has(ApiMethod.RESULT_NODE)) {</span>
+                // Something strange is going on
+<span class="nc" id="L648">                throw new ApiException(ApiException.INVALID_JSON_RESPONSE_FROM_HOST,</span>
+                        &quot;Result doesn't contain a result node.&quot;);
+            }
+
+<span class="nc" id="L652">            return jsonResponse;</span>
+<span class="nc" id="L653">        } catch (IOException e) {</span>
+<span class="nc" id="L654">            LogUtils.LOGW(TAG, &quot;Got an exception while parsing JSON response.&quot;, e);</span>
+<span class="nc" id="L655">            throw new ApiException(ApiException.INVALID_JSON_RESPONSE_FROM_HOST, e);</span>
+        }
+    }
+
+    /**
+     * Sends the JSON RPC request through TCP
+     * Keeps a background thread running, listening on a socket
+     */
+    private &lt;T&gt; void executeThroughTcp(final ApiMethod&lt;T&gt; method) {
+<span class="nc" id="L664">        String methodId = String.valueOf(method.getId());</span>
+        try {
+<span class="nc" id="L666">            synchronized (this) {</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                if (socket == null) {</span>
+                    // Open connection to the server and setup reader thread
+<span class="nc" id="L669">                    socket = openTcpConnection(hostInfo);</span>
+<span class="nc" id="L670">                    startListenerThread(socket);</span>
+                }
+
+                // Write request
+<span class="nc" id="L674">                sendTcpRequest(socket, method.toJsonString());</span>
+<span class="nc" id="L675">            }</span>
+<span class="nc" id="L676">        } catch (final ApiException e) {</span>
+<span class="nc" id="L677">            callErrorCallback(methodId, e);</span>
+<span class="nc" id="L678">        }</span>
+<span class="nc" id="L679">    }</span>
+
+    /**
+     * Auxiliary method to open the TCP {@link Socket}.
+     * This method calls connect() so that any errors are cathced
+     *
+     * @param hostInfo Host info
+     * @return Connection set up
+     * @throws ApiException Exception if open is unsucessful
+     */
+    private Socket openTcpConnection(HostInfo hostInfo) throws ApiException {
+        try {
+<span class="nc" id="L691">            LogUtils.LOGD(TAG, &quot;Opening TCP connection on host: &quot; + hostInfo.getAddress());</span>
+
+<span class="nc" id="L693">            Socket socket = new Socket();</span>
+<span class="nc" id="L694">            final InetSocketAddress address = new InetSocketAddress(hostInfo.getAddress(), hostInfo.getTcpPort());</span>
+            // We're setting a read timeout on the socket, so no need to explicitly close it
+<span class="nc" id="L696">            socket.setSoTimeout(TCP_READ_TIMEOUT);</span>
+<span class="nc" id="L697">            socket.connect(address, connectTimeout);</span>
+
+<span class="nc" id="L699">            return socket;</span>
+<span class="nc" id="L700">        } catch (IOException e) {</span>
+<span class="nc" id="L701">            LogUtils.LOGW(TAG, &quot;Failed to open TCP connection to host: &quot; + hostInfo.getAddress());</span>
+<span class="nc" id="L702">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_CONNECTING, e);</span>
+        }
+    }
+
+    /**
+     * Send a TCP request
+     *
+     * @param socket  Socket to write to
+     * @param request Request to send
+     * @throws ApiException Exception if can't send
+     */
+    private void sendTcpRequest(Socket socket, String request) throws ApiException {
+        try {
+            if (LOG_REQUESTS) LogUtils.LOGD(TAG, &quot;TCP request: &quot; + request);
+<span class="nc" id="L716">            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));</span>
+<span class="nc" id="L717">            writer.write(request);</span>
+<span class="nc" id="L718">            writer.flush();</span>
+<span class="nc" id="L719">        } catch (Exception e) {</span>
+<span class="nc" id="L720">            LogUtils.LOGW(TAG, &quot;Failed to send TCP request: &quot; + request, e);</span>
+<span class="nc" id="L721">            disconnect();</span>
+<span class="nc" id="L722">            throw new ApiException(ApiException.IO_EXCEPTION_WHILE_SENDING_REQUEST, e);</span>
+<span class="nc" id="L723">        }</span>
+<span class="nc" id="L724">    }</span>
+
+    private void startListenerThread(final Socket socket) {
+<span class="nc" id="L727">        tcpListenerThread = new Thread(() -&gt; {</span>
+<span class="nc" id="L728">            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);</span>
+            try {
+<span class="nc" id="L730">                LogUtils.LOGD(TAG, &quot;Starting TCP socket listener thread from thread: &quot; + Thread.currentThread().getName());</span>
+                // We're going to read from the socket. This will be a blocking call and
+                // it will keep on going until disconnect() is called on this object.
+                // Note: Mind the objects used here: we use createParser because it doesn't
+                // close the socket after ObjectMapper.readTree.
+<span class="nc" id="L735">                JsonParser jsonParser = objectMapper.getFactory().createParser(socket.getInputStream());</span>
+                ObjectNode jsonResponse;
+<span class="nc bnc" id="L737" title="All 2 branches missed.">                while ((jsonResponse = objectMapper.readTree(jsonParser)) != null) {</span>
+                    if (LOG_REQUESTS) LogUtils.LOGD(TAG, &quot;TCP response: &quot; + jsonResponse);
+//                        LogUtils.LOGD_FULL(TAG, &quot;Read from socket: &quot; + jsonResponse.toString());
+<span class="nc" id="L740">                    handleTcpResponse(jsonResponse);</span>
+                }
+<span class="nc" id="L742">            } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L743">                LogUtils.LOGW(TAG, &quot;Got an exception while parsing JSON response.&quot;, e);</span>
+<span class="nc" id="L744">                callErrorCallback(null, new ApiException(ApiException.INVALID_JSON_RESPONSE_FROM_HOST, e));</span>
+<span class="nc" id="L745">            } catch (IOException e) {</span>
+<span class="nc" id="L746">                LogUtils.LOGW(TAG, &quot;Error reading from socket.&quot;, e);</span>
+<span class="nc" id="L747">                callErrorCallback(null, new ApiException(ApiException.IO_EXCEPTION_WHILE_READING_RESPONSE, e));</span>
+            } finally {
+<span class="nc" id="L749">                disconnect();</span>
+            }
+<span class="nc" id="L751">        });</span>
+<span class="nc" id="L752">        tcpListenerThread.start();</span>
+<span class="nc" id="L753">    }</span>
+
+    private boolean shouldIgnoreTcpResponse(ObjectNode jsonResponse) {
+<span class="nc" id="L756">        boolean ignore = false;</span>
+<span class="nc bnc" id="L757" title="All 4 branches missed.">        if (jsonResponse.has(ApiMethod.ID_NODE) &amp;&amp; ignoreTcpResponse) {</span>
+<span class="nc" id="L758">            ignoreTcpResponse = false;</span>
+<span class="nc" id="L759">            ignore = true;</span>
+        }
+        //LogUtils.LOGD(TAG, &quot;ignore tcp response - &quot; + ignore);
+<span class="nc" id="L762">        return ignore;</span>
+    }
+
+    private &lt;T&gt; void handleTcpResponse(ObjectNode jsonResponse) {
+<span class="nc bnc" id="L766" title="All 2 branches missed.">        if (shouldIgnoreTcpResponse(jsonResponse))</span>
+<span class="nc" id="L767">            return;</span>
+
+<span class="nc bnc" id="L769" title="All 2 branches missed.">        if (!jsonResponse.has(ApiMethod.ID_NODE)) {</span>
+            // It's a notification, notify observers
+<span class="nc" id="L771">            String notificationName = jsonResponse.get(ApiNotification.METHOD_NODE).asText();</span>
+<span class="nc" id="L772">            ObjectNode params = (ObjectNode) jsonResponse.get(ApiNotification.PARAMS_NODE);</span>
+
+<span class="nc bnc" id="L774" title="All 18 branches missed.">            switch (notificationName) {</span>
+                case Player.OnPause.NOTIFICATION_NAME: {
+<span class="nc" id="L776">                    final Player.OnPause apiNotification = new Player.OnPause(params);</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L778">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L779">                        postOrRunNow(handler, () -&gt; observer.onPause(apiNotification));</span>
+<span class="nc" id="L780">                    }</span>
+<span class="nc" id="L781">                    break;</span>
+                }
+                case Player.OnPlay.NOTIFICATION_NAME: {
+<span class="nc" id="L784">                    final Player.OnPlay apiNotification = new Player.OnPlay(params);</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L786">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L787">                        postOrRunNow(handler, () -&gt; observer.onPlay(apiNotification));</span>
+<span class="nc" id="L788">                    }</span>
+<span class="nc" id="L789">                    break;</span>
+                }
+                case Player.OnResume.NOTIFICATION_NAME: {
+<span class="nc" id="L792">                    final Player.OnResume apiNotification = new Player.OnResume(params);</span>
+<span class="nc bnc" id="L793" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L794">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L795">                        postOrRunNow(handler, () -&gt; observer.onResume(apiNotification));</span>
+<span class="nc" id="L796">                    }</span>
+<span class="nc" id="L797">                    break;</span>
+                }
+                case Player.OnSeek.NOTIFICATION_NAME: {
+<span class="nc" id="L800">                    final Player.OnSeek apiNotification = new Player.OnSeek(params);</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L802">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L803">                        postOrRunNow(handler, () -&gt; observer.onSeek(apiNotification));</span>
+<span class="nc" id="L804">                    }</span>
+<span class="nc" id="L805">                    break;</span>
+                }
+                case Player.OnSpeedChanged.NOTIFICATION_NAME: {
+<span class="nc" id="L808">                    final Player.OnSpeedChanged apiNotification = new Player.OnSpeedChanged(params);</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L810">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L811">                        postOrRunNow(handler, () -&gt; observer.onSpeedChanged(apiNotification));</span>
+<span class="nc" id="L812">                    }</span>
+<span class="nc" id="L813">                    break;</span>
+                }
+                case Player.OnStop.NOTIFICATION_NAME: {
+<span class="nc" id="L816">                    final Player.OnStop apiNotification = new Player.OnStop(params);</span>
+<span class="nc bnc" id="L817" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L818">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L819">                        postOrRunNow(handler, () -&gt; observer.onStop(apiNotification));</span>
+<span class="nc" id="L820">                    }</span>
+<span class="nc" id="L821">                    break;</span>
+                }
+                case Player.OnAVStart.NOTIFICATION_NAME: {
+<span class="nc" id="L824">                    final Player.OnAVStart apiNotification = new Player.OnAVStart(params);</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L826">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L827">                        postOrRunNow(handler, () -&gt; observer.onAVStart(apiNotification));</span>
+<span class="nc" id="L828">                    }</span>
+<span class="nc" id="L829">                    break;</span>
+                }
+                case Player.OnAVChange.NOTIFICATION_NAME: {
+<span class="nc" id="L832">                    final Player.OnAVChange apiNotification = new Player.OnAVChange(params);</span>
+<span class="nc bnc" id="L833" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L834">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L835">                        postOrRunNow(handler, () -&gt; observer.onAVChange(apiNotification));</span>
+<span class="nc" id="L836">                    }</span>
+<span class="nc" id="L837">                    break;</span>
+                }
+                case Player.OnPropertyChanged.NOTIFICATION_NAME: {
+<span class="nc" id="L840">                    final Player.OnPropertyChanged apiNotification = new Player.OnPropertyChanged(params);</span>
+<span class="nc bnc" id="L841" title="All 2 branches missed.">                    for (final PlayerNotificationsObserver observer : playerNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L842">                        Handler handler = playerNotificationsObservers.get(observer);</span>
+<span class="nc" id="L843">                        postOrRunNow(handler, () -&gt; observer.onPropertyChanged(apiNotification));</span>
+<span class="nc" id="L844">                    }</span>
+<span class="nc" id="L845">                    break;</span>
+                }
+                case System.OnQuit.NOTIFICATION_NAME: {
+<span class="nc" id="L848">                    final System.OnQuit apiNotification = new System.OnQuit(params);</span>
+<span class="nc bnc" id="L849" title="All 2 branches missed.">                    for (final SystemNotificationsObserver observer : systemNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L850">                        Handler handler = systemNotificationsObservers.get(observer);</span>
+<span class="nc" id="L851">                        postOrRunNow(handler, () -&gt; observer.onQuit(apiNotification));</span>
+<span class="nc" id="L852">                    }</span>
+<span class="nc" id="L853">                    break;</span>
+                }
+                case System.OnRestart.NOTIFICATION_NAME: {
+<span class="nc" id="L856">                    final System.OnRestart apiNotification = new System.OnRestart(params);</span>
+<span class="nc bnc" id="L857" title="All 2 branches missed.">                    for (final SystemNotificationsObserver observer : systemNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L858">                        Handler handler = systemNotificationsObservers.get(observer);</span>
+<span class="nc" id="L859">                        postOrRunNow(handler, () -&gt; observer.onRestart(apiNotification));</span>
+<span class="nc" id="L860">                    }</span>
+<span class="nc" id="L861">                    break;</span>
+                }
+                case System.OnSleep.NOTIFICATION_NAME: {
+<span class="nc" id="L864">                    final System.OnSleep apiNotification = new System.OnSleep(params);</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">                    for (final SystemNotificationsObserver observer : systemNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L866">                        Handler handler = systemNotificationsObservers.get(observer);</span>
+<span class="nc" id="L867">                        postOrRunNow(handler, () -&gt; observer.onSleep(apiNotification));</span>
+<span class="nc" id="L868">                    }</span>
+<span class="nc" id="L869">                    break;</span>
+                }
+                case Input.OnInputRequested.NOTIFICATION_NAME: {
+<span class="nc" id="L872">                    final Input.OnInputRequested apiNotification = new Input.OnInputRequested(params);</span>
+<span class="nc bnc" id="L873" title="All 2 branches missed.">                    for (final InputNotificationsObserver observer : inputNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L874">                        Handler handler = inputNotificationsObservers.get(observer);</span>
+<span class="nc" id="L875">                        postOrRunNow(handler, () -&gt; observer.onInputRequested(apiNotification));</span>
+<span class="nc" id="L876">                    }</span>
+<span class="nc" id="L877">                    break;</span>
+                }
+                case Application.OnVolumeChanged.NOTIFICATION_NAME: {
+<span class="nc" id="L880">                    final Application.OnVolumeChanged apiNotification = new Application.OnVolumeChanged(params);</span>
+<span class="nc bnc" id="L881" title="All 2 branches missed.">                    for (final ApplicationNotificationsObserver observer : applicationNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L882">                        Handler handler = applicationNotificationsObservers.get(observer);</span>
+<span class="nc" id="L883">                        postOrRunNow(handler, () -&gt; observer.onVolumeChanged(apiNotification));</span>
+<span class="nc" id="L884">                    }</span>
+<span class="nc" id="L885">                    break;</span>
+                }
+                case Playlist.OnClear.NOTIFICATION_NAME: {
+<span class="nc" id="L888">                    final Playlist.OnClear apiNotification =</span>
+                            new Playlist.OnClear(params);
+                    for (final PlaylistNotificationsObserver observer :
+<span class="nc bnc" id="L891" title="All 2 branches missed.">                            playlistNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L892">                        Handler handler = playlistNotificationsObservers.get(observer);</span>
+<span class="nc" id="L893">                        postOrRunNow(handler, () -&gt; observer.onPlaylistCleared(apiNotification));</span>
+<span class="nc" id="L894">                    }</span>
+<span class="nc" id="L895">                    break;</span>
+                }
+                case Playlist.OnAdd.NOTIFICATION_NAME: {
+<span class="nc" id="L898">                    final Playlist.OnAdd apiNotification =</span>
+                            new Playlist.OnAdd(params);
+                    for (final PlaylistNotificationsObserver observer :
+<span class="nc bnc" id="L901" title="All 2 branches missed.">                            playlistNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L902">                        Handler handler = playlistNotificationsObservers.get(observer);</span>
+<span class="nc" id="L903">                        postOrRunNow(handler, () -&gt; observer.onPlaylistItemAdded(apiNotification));</span>
+<span class="nc" id="L904">                    }</span>
+<span class="nc" id="L905">                    break;</span>
+                }
+                case Playlist.OnRemove.NOTIFICATION_NAME: {
+<span class="nc" id="L908">                    final Playlist.OnRemove apiNotification =</span>
+                            new Playlist.OnRemove(params);
+                    for (final PlaylistNotificationsObserver observer :
+<span class="nc bnc" id="L911" title="All 2 branches missed.">                            playlistNotificationsObservers.keySet()) {</span>
+<span class="nc" id="L912">                        Handler handler = playlistNotificationsObservers.get(observer);</span>
+<span class="nc" id="L913">                        postOrRunNow(handler, () -&gt; observer.onPlaylistItemRemoved(apiNotification));</span>
+<span class="nc" id="L914">                    }</span>
+<span class="nc" id="L915">                    break;</span>
+                }
+            }
+<span class="nc" id="L918">            LogUtils.LOGD(TAG, &quot;Got a notification: &quot; + jsonResponse.get(&quot;method&quot;).textValue());</span>
+<span class="nc" id="L919">        } else {</span>
+<span class="nc" id="L920">            String methodId = jsonResponse.get(ApiMethod.ID_NODE).asText();</span>
+
+<span class="nc bnc" id="L922" title="All 2 branches missed.">            if (jsonResponse.has(ApiMethod.ERROR_NODE)) {</span>
+                // Error response
+<span class="nc" id="L924">                callErrorCallback(methodId, new ApiException(ApiException.API_ERROR, jsonResponse));</span>
+            } else {
+                // Success response
+<span class="nc" id="L927">                final MethodCallInfo&lt;?&gt; methodCallInfo = clientCallbacks.get(methodId);</span>
+
+<span class="nc bnc" id="L929" title="All 2 branches missed.">                if (methodCallInfo != null) {</span>
+                    try {
+<span class="nc" id="L931">                        @SuppressWarnings(&quot;unchecked&quot;) final T result = (T) methodCallInfo.method.resultFromJson(jsonResponse);</span>
+<span class="nc" id="L932">                        @SuppressWarnings(&quot;unchecked&quot;) final ApiCallback&lt;T&gt; callback = (ApiCallback&lt;T&gt;) methodCallInfo.callback;</span>
+
+<span class="nc bnc" id="L934" title="All 2 branches missed.">                        if (callback != null) {</span>
+<span class="nc" id="L935">                            postOrRunNow(methodCallInfo.handler, () -&gt; callback.onSuccess(result));</span>
+                        }
+
+                        // We've replied, remove the client from the list
+<span class="nc" id="L939">                        synchronized (clientCallbacks) {</span>
+<span class="nc" id="L940">                            clientCallbacks.remove(methodId);</span>
+<span class="nc" id="L941">                        }</span>
+<span class="nc" id="L942">                    } catch (ApiException e) {</span>
+<span class="nc" id="L943">                        callErrorCallback(methodId, e);</span>
+<span class="nc" id="L944">                    }</span>
+                }
+            }
+        }
+<span class="nc" id="L948">    }</span>
+
+    private &lt;T&gt; void callErrorCallback(String methodId, final ApiException error) {
+<span class="nc" id="L951">        synchronized (clientCallbacks) {</span>
+<span class="nc bnc" id="L952" title="All 2 branches missed.">            if (methodId != null) {</span>
+                // Send error back to client
+<span class="nc" id="L954">                final MethodCallInfo&lt;?&gt; methodCallInfo = clientCallbacks.get(methodId);</span>
+<span class="nc bnc" id="L955" title="All 2 branches missed.">                if (methodCallInfo != null) {</span>
+<span class="nc" id="L956">                    @SuppressWarnings(&quot;unchecked&quot;) final ApiCallback&lt;T&gt; callback = (ApiCallback&lt;T&gt;) methodCallInfo.callback;</span>
+
+<span class="nc bnc" id="L958" title="All 2 branches missed.">                    if (callback != null) {</span>
+<span class="nc" id="L959">                        postOrRunNow(methodCallInfo.handler, () -&gt; callback.onError(error.getCode(), error.getMessage()));</span>
+                    }
+                }
+<span class="nc" id="L962">                clientCallbacks.remove(methodId);</span>
+<span class="nc" id="L963">            } else {</span>
+                // Notify all pending clients, it might be an error for them
+<span class="nc bnc" id="L965" title="All 2 branches missed.">                for (String id : clientCallbacks.keySet()) {</span>
+<span class="nc" id="L966">                    final MethodCallInfo&lt;?&gt; methodCallInfo = clientCallbacks.get(id);</span>
+<span class="nc bnc" id="L967" title="All 2 branches missed.">                    if (methodCallInfo == null) continue;</span>
+<span class="nc" id="L968">                    @SuppressWarnings(&quot;unchecked&quot;) final ApiCallback&lt;T&gt; callback = (ApiCallback&lt;T&gt;) methodCallInfo.callback;</span>
+
+<span class="nc bnc" id="L970" title="All 2 branches missed.">                    if (callback != null) {</span>
+<span class="nc" id="L971">                        postOrRunNow(methodCallInfo.handler, () -&gt; callback.onError(error.getCode(), error.getMessage()));</span>
+                    }
+<span class="nc" id="L973">                }</span>
+
+<span class="nc" id="L975">                clientCallbacks.clear();</span>
+            }
+<span class="nc" id="L977">        }</span>
+<span class="nc" id="L978">    }</span>
+
+    /**
+     * Cleans up used resources.
+     * This method should always be called if the protocol used is TCP, so we can shutdown gracefully
+     */
+    public void disconnect() {
+<span class="nc bnc" id="L985" title="All 2 branches missed.">        if (protocol == PROTOCOL_HTTP)</span>
+<span class="nc" id="L986">            return;</span>
+
+<span class="nc" id="L988">        Socket oldSocket = socket;</span>
+<span class="nc" id="L989">        socket = null;</span>
+        // Close socket asynchronously, in a synchronized block
+<span class="nc" id="L991">        executorService.execute(() -&gt; {</span>
+<span class="nc" id="L992">            synchronized (this) {</span>
+                try {
+<span class="nc bnc" id="L994" title="All 2 branches missed.">                    if (oldSocket != null) {</span>
+                        // Remove pending calls
+<span class="nc" id="L996">                        clientCallbacks.clear();</span>
+<span class="nc bnc" id="L997" title="All 2 branches missed.">                        if (!oldSocket.isClosed()) {</span>
+<span class="nc" id="L998">                            oldSocket.close();</span>
+                        }
+                    }
+<span class="nc" id="L1001">                } catch (IOException e) {</span>
+<span class="nc" id="L1002">                    LogUtils.LOGE(TAG, &quot;Error while closing socket&quot;, e);</span>
+<span class="nc" id="L1003">                }</span>
+<span class="nc" id="L1004">            }</span>
+<span class="nc" id="L1005">        });</span>
+<span class="nc" id="L1006">    }</span>
+
+    private static void postOrRunNow(Handler handler, Runnable r) {
+<span class="nc bnc" id="L1009" title="All 2 branches missed.">        if (handler != null) {</span>
+<span class="nc" id="L1010">            handler.post(r);</span>
+        } else {
+<span class="nc" id="L1012">            r.run();</span>
+        }
+<span class="nc" id="L1014">    }</span>
+
+    /**
+     * Helper class to aggregate a method, callback and handler
+     *
+     * @param &lt;T&gt;
+     */
+    private static class MethodCallInfo&lt;T&gt; {
+        public final ApiMethod&lt;T&gt; method;
+        public final ApiCallback&lt;T&gt; callback;
+        public final Handler handler;
+
+<span class="nc" id="L1026">        public MethodCallInfo(ApiMethod&lt;T&gt; method, ApiCallback&lt;T&gt; callback, Handler handler) {</span>
+<span class="nc" id="L1027">            this.method = method;</span>
+<span class="nc" id="L1028">            this.callback = callback;</span>
+<span class="nc" id="L1029">            this.handler = handler;</span>
+<span class="nc" id="L1030">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

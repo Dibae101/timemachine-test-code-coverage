@@ -1,0 +1,863 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SubscriptionsDb.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE SkyTube</a> &gt; <a href="index.source.html" class="el_package">free.rm.skytube.businessobjects.db</a> &gt; <span class="el_source">SubscriptionsDb.java</span></div><h1>SubscriptionsDb.java</h1><pre class="source lang-java linenums">/*
+ * SkyTube
+ * Copyright (C) 2016  Ramon Mifsud
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation (version 3 of the License).
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package free.rm.skytube.businessobjects.db;
+
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.database.SQLException;
+import android.database.sqlite.SQLiteDatabase;
+
+import com.github.skytube.components.utils.SQLiteHelper;
+import com.github.skytube.components.utils.Stopwatch;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonSerializer;
+
+import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import free.rm.skytube.app.SkyTubeApp;
+import free.rm.skytube.app.Utils;
+import free.rm.skytube.businessobjects.Logger;
+import free.rm.skytube.businessobjects.YouTube.POJOs.ChannelView;
+import free.rm.skytube.businessobjects.YouTube.POJOs.PersistentChannel;
+import free.rm.skytube.businessobjects.YouTube.POJOs.YouTubeChannel;
+import free.rm.skytube.businessobjects.YouTube.POJOs.YouTubeVideo;
+import free.rm.skytube.businessobjects.YouTube.newpipe.ChannelId;
+import free.rm.skytube.businessobjects.model.Status;
+import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.core.Single;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+
+/**
+ * A database (DB) that stores user subscriptions (with respect to YouTube channels).
+ */
+public class SubscriptionsDb extends SQLiteOpenHelperEx {
+<span class="fc" id="L67">    private static final String HAS_VIDEO_QUERY = String.format(&quot;SELECT COUNT(*) FROM %s WHERE %s = ?&quot;, SubscriptionsVideosTable.TABLE_NAME_V2, SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID);</span>
+<span class="fc" id="L68">    private static final String GET_VIDEO_IDS_BY_CHANNEL_TO_PUBLISH_TS = String.format(&quot;SELECT %s,%s FROM %s WHERE %s = ?&quot;,</span>
+<span class="fc" id="L69">            SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID, SubscriptionsVideosTable.COL_PUBLISH_TIME.name(), SubscriptionsVideosTable.TABLE_NAME_V2, SubscriptionsVideosTable.COL_CHANNEL_ID);</span>
+<span class="fc" id="L70">    private static final String GET_VIDEO_IDS_BY_CHANNEL = String.format(&quot;SELECT %s FROM %s WHERE %s = ?&quot;,</span>
+            SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID, SubscriptionsVideosTable.TABLE_NAME_V2, SubscriptionsVideosTable.COL_CHANNEL_ID);
+<span class="fc" id="L72">    private static final String FIND_EMPTY_RETRIEVAL_TS = String.format(&quot;SELECT %s,%s FROM %s WHERE %s IS NULL&quot;,</span>
+			SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID, SubscriptionsVideosTable.COL_YOUTUBE_VIDEO, SubscriptionsVideosTable.TABLE_NAME, SubscriptionsVideosTable.COL_RETRIEVAL_TS);
+
+    private static final String SUBSCRIBED_CHANNEL_INFO = &quot;SELECT c.Channel_Id,c.Title,c.Thumbnail_Normal_Url,s.Last_Visit_Time,c.Last_Video_TS as latest_video_ts,c.state FROM Subs s,Channel c where s.channel_pk = c._Id &quot;;
+	private static final String SUBSCRIBED_CHANNEL_INFO_ORDER_BY = &quot; ORDER BY LOWER(&quot; + LocalChannelTable.COL_TITLE + &quot;) ASC&quot;;
+	private static final String SUBSCRIBED_CHANNEL_LIMIT_BY_TITLE = &quot; and LOWER(c.&quot; +LocalChannelTable.COL_TITLE + &quot;) like ?&quot;;
+
+<span class="fc" id="L79">    private static final String GET_ALL_SUBSCRIBED_CHANNEL_ID = &quot;SELECT s.&quot; + SubscriptionsTable.COL_CHANNEL_ID + &quot; FROM &quot; + SubscriptionsTable.TABLE_NAME + &quot; s, &quot; + LocalChannelTable.TABLE_NAME + &quot; c where s.channel_pk = c._Id and c.&quot; + LocalChannelTable.COL_STATE.name() + &quot; = 0&quot;;</span>
+<span class="fc" id="L80">	private static final String IS_SUBSCRIBED_QUERY = String.format(&quot;SELECT EXISTS(SELECT %s FROM %s WHERE %s =?) AS VAL &quot;, SubscriptionsTable.COL_ID, SubscriptionsTable.TABLE_NAME, SubscriptionsTable.COL_CHANNEL_ID);</span>
+
+<span class="fc" id="L82">    private static final String GET_PK_FROM_CHANNEL_ID = &quot;SELECT &quot; + LocalChannelTable.COL_ID.name() + &quot; FROM &quot; + LocalChannelTable.TABLE_NAME + &quot; WHERE &quot; + LocalChannelTable.COL_CHANNEL_ID.name() + &quot; = ?&quot;;</span>
+
+<span class="fc" id="L84">	private static volatile SubscriptionsDb subscriptionsDb = null;</span>
+
+    private static final int DATABASE_VERSION = 18;
+
+    private static final String DATABASE_NAME = &quot;subs.db&quot;;
+
+    private SubscriptionsDb(Context context) {
+<span class="fc" id="L91">        super(context, DATABASE_NAME, null, DATABASE_VERSION);</span>
+<span class="fc" id="L92">    }</span>
+
+	public static synchronized SubscriptionsDb getSubscriptionsDb() {
+<span class="fc bfc" id="L95" title="All 2 branches covered.">		if (subscriptionsDb == null) {</span>
+<span class="fc" id="L96">			subscriptionsDb = new SubscriptionsDb(SkyTubeApp.getContext());</span>
+		}
+
+<span class="fc" id="L99">		return subscriptionsDb;</span>
+	}
+
+    @Override
+    public void onCreate(SQLiteDatabase db) {
+<span class="fc" id="L104">        db.execSQL(SubscriptionsTable.getCreateStatement());</span>
+<span class="fc" id="L105">        SubscriptionsVideosTable.addNewFlatTable(db, false);</span>
+<span class="fc" id="L106">        SubscriptionsVideosTable.addPublishTimeIndex(db);</span>
+<span class="fc" id="L107">        db.execSQL(LocalChannelTable.getCreateStatement(true));</span>
+<span class="fc" id="L108">        LocalChannelTable.addChannelIdIndex(db);</span>
+<span class="fc" id="L109">        db.execSQL(CategoriesTable.getCreateStatement());</span>
+<span class="fc" id="L110">        new CategoryManagement(db).setupDefaultCategories();</span>
+<span class="fc" id="L111">    }</span>
+
+	@Override
+	public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+<span class="nc" id="L115">        VersionUpgrade upgrade = new VersionUpgrade(oldVersion, newVersion);</span>
+        // Version 2 of the database introduces the SubscriptionsVideosTable, which stores videos found in each subscribed channel
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (upgrade.executeStep(2)) {</span>
+<span class="nc" id="L118">            db.execSQL(SubscriptionsVideosTable.getCreateStatement());</span>
+        }
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        if (upgrade.executeStep(3)) {</span>
+<span class="nc" id="L121">            SQLiteHelper.execSQLUpdates(db, SubscriptionsTable.getAddColumns());</span>
+        }
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (upgrade.executeStep(4)) {</span>
+<span class="nc" id="L124">            SQLiteHelper.execSQLUpdates(db, SubscriptionsVideosTable.getAddTimestampColumns());</span>
+<span class="nc" id="L125">            setupRetrievalTimestamp(db);</span>
+        }
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (upgrade.executeStep(5)) {</span>
+<span class="nc" id="L128">            SQLiteHelper.execSQLUpdates(db, SubscriptionsTable.getLastCheckTimeColumn());</span>
+<span class="nc" id="L129">			db.execSQL(LocalChannelTable.getCreateStatement(false));</span>
+			try {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">				for (YouTubeChannel channel : getSubscribedChannels(db)) {</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">					if (!Utils.isEmpty(channel.getId()) &amp;&amp;</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">							!Utils.isEmpty(channel.getTitle()) &amp;&amp;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">							!Utils.isEmpty(channel.getBannerUrl()) &amp;&amp;</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">							!Utils.isEmpty(channel.getThumbnailUrl()) &amp;&amp;</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">							!Utils.isEmpty(channel.getDescription())) {</span>
+<span class="nc" id="L137">						cacheChannel(db, null, channel);</span>
+					}
+<span class="nc" id="L139">				}</span>
+<span class="nc" id="L140">			} catch (IOException ex) {</span>
+<span class="nc" id="L141">				Logger.e(this, &quot;Unable to load subscribed channels to populate cache:&quot; + ex.getMessage(), ex);</span>
+<span class="nc" id="L142">			}</span>
+		}
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (upgrade.executeStep(7)) {</span>
+<span class="nc" id="L145">            db.execSQL(SubscriptionsVideosTable.getIndexOnVideos());</span>
+        }
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (upgrade.executeStep(8)) {</span>
+<span class="nc" id="L148">            SQLiteHelper.continueOnError(db, CategoriesTable.getCreateStatement());</span>
+<span class="nc" id="L149">            new CategoryManagement(db).setupDefaultCategories();</span>
+<span class="nc" id="L150">            SubscriptionsTable.addCategoryColumn(db);</span>
+        }
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (upgrade.executeStep(9)) {</span>
+<span class="nc" id="L153">            SubscriptionsVideosTable.addNewFlatTable(db, true);</span>
+<span class="nc" id="L154">            migrateFromJsonColumn(db);</span>
+        }
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (upgrade.executeStep(10)) {</span>
+<span class="nc" id="L157">            fixChannelIds(db);</span>
+        }
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        if (upgrade.executeStep(11)) {</span>
+<span class="nc" id="L160">            dropOldSubsVideosTable(db);</span>
+        }
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (upgrade.executeStep(12)) {</span>
+<span class="nc" id="L163">            normalizeSubscriptionVideosTable(db);</span>
+        }
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (upgrade.executeStep(13)) {</span>
+<span class="nc" id="L166">            LocalChannelTable.addIdColumn(db);</span>
+        }
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (upgrade.executeStep(14)) {</span>
+<span class="nc" id="L169">            normalizeSubscriptionVideosTableSecondStep(db);</span>
+        }
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (upgrade.executeStep(15)) {</span>
+<span class="nc" id="L172">            SubscriptionsTable.cleanupTable(db);</span>
+        }
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (upgrade.executeStep(17)) {</span>
+<span class="nc" id="L175">            Logger.w(this, &quot;Remove channel title from subscription_videos table&quot;);</span>
+<span class="nc" id="L176">            SubscriptionsVideosTable.removeChannelTitle(db);</span>
+<span class="nc" id="L177">            SubscriptionsVideosTable.addPublishTimeIndex(db);</span>
+        }
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (upgrade.executeStep(18)) {</span>
+<span class="nc" id="L180">            Logger.w(this, &quot;Optimize Channel table&quot;);</span>
+<span class="nc" id="L181">            LocalChannelTable.addChannelIdIndex(db);</span>
+<span class="nc" id="L182">            SubscriptionsTable.addChannelIdColumn(db);</span>
+<span class="nc" id="L183">            LocalChannelTable.addStateColumn(db);</span>
+        }
+<span class="nc" id="L185">    }</span>
+
+    private void normalizeSubscriptionVideosTable(final SQLiteDatabase db) {
+<span class="nc" id="L188">        Logger.w(this, &quot;Normalizing subscription_videos table&quot;);</span>
+<span class="nc" id="L189">        SubscriptionsVideosTable.addSubsIdColumn(db);</span>
+<span class="nc" id="L190">        Map&lt;ChannelId, Long&gt; channelIdLongMap = getChannelIdLongMap(db, SubscriptionsTable.GET_ID_AND_CHANNEL_ID);</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        for (Map.Entry&lt;ChannelId, Long&gt; entry : channelIdLongMap.entrySet()) {</span>
+<span class="nc" id="L192">            db.execSQL(&quot;update subscription_videos set subs_id = ? where Channel_Id = ?&quot;,new Object[] {</span>
+<span class="nc" id="L193">                    entry.getValue(), entry.getKey().getRawId() });</span>
+<span class="nc" id="L194">        }</span>
+<span class="nc" id="L195">    }</span>
+
+    private void normalizeSubscriptionVideosTableSecondStep(final SQLiteDatabase db) {
+<span class="nc" id="L198">        Logger.w(this, &quot;Normalizing subscription_videos table - 2nd step&quot;);</span>
+<span class="nc" id="L199">        SubscriptionsVideosTable.addChannelPkColumn(db);</span>
+<span class="nc" id="L200">        Map&lt;ChannelId, Long&gt; channelIdLongMap = getChannelIdLongMap(db, LocalChannelTable.GET_ID_AND_CHANNEL_ID);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        for (Map.Entry&lt;ChannelId, Long&gt; entry : channelIdLongMap.entrySet()) {</span>
+<span class="nc" id="L202">            db.execSQL(&quot;update subscription_videos set channel_pk = ? where Channel_Id = ?&quot;,new Object[] {</span>
+<span class="nc" id="L203">                    entry.getValue(), entry.getKey().getRawId() });</span>
+<span class="nc" id="L204">        }</span>
+<span class="nc" id="L205">    }</span>
+
+    private static Map&lt;ChannelId, Long&gt; getChannelIdLongMap(final SQLiteDatabase db, final String query) {
+<span class="nc" id="L208">        Map&lt;ChannelId, Long&gt; channelIdLongMap = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L209">        try (Cursor cursor = db.rawQuery(query, null)) {</span>
+<span class="nc" id="L210">            final int _idIdx = cursor.getColumnIndex(SubscriptionsTable.COL_ID);</span>
+<span class="nc" id="L211">            final int channelIdx = cursor.getColumnIndex(SubscriptionsTable.COL_CHANNEL_ID);</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            while (cursor.moveToNext()) {</span>
+<span class="nc" id="L213">                Long id = Objects.requireNonNull(cursor.getLong(_idIdx), &quot;missing _id column&quot;);</span>
+<span class="nc" id="L214">                String channelIds = Objects.requireNonNull(cursor.getString(channelIdx), &quot;missing channelIdx column&quot;);</span>
+<span class="nc" id="L215">                channelIdLongMap.put(new ChannelId(channelIds), id);</span>
+<span class="nc" id="L216">            }</span>
+        }
+<span class="nc" id="L218">        return channelIdLongMap;</span>
+    }
+
+    private void dropOldSubsVideosTable(final SQLiteDatabase db) {
+<span class="nc" id="L222">        Logger.w(this, &quot;Dropping old Subs table&quot;);</span>
+<span class="nc" id="L223">        SQLiteHelper.continueOnError(db, SubscriptionsVideosTable.getDropTableStatement());</span>
+<span class="nc" id="L224">    }</span>
+
+    private void fixChannelIds(final SQLiteDatabase db) {
+<span class="nc" id="L227">        Logger.w(this, &quot;Fixing channel_id in the subscription_videos table&quot;);</span>
+<span class="nc" id="L228">        db.execSQL(&quot;update subscription_videos set channel_id = substr(channel_id, 33) where channel_id like \&quot;https://www.youtube.com/channel/%\&quot;&quot;);</span>
+<span class="nc" id="L229">    }</span>
+
+    private void migrateFromJsonColumn(final SQLiteDatabase db) {
+<span class="nc" id="L232">        int fullCount = 0;</span>
+<span class="nc" id="L233">        Gson gson = new GsonBuilder().registerTypeAdapter(YouTubeChannel.class, (JsonSerializer&lt;YouTubeChannel&gt;) (src, typeOfSrc, context) -&gt; {</span>
+<span class="nc" id="L234">            JsonObject obj = new JsonObject();</span>
+<span class="nc" id="L235">            obj.addProperty(&quot;id&quot;, src.getId());</span>
+<span class="nc" id="L236">            obj.addProperty(&quot;title&quot;, src.getTitle());</span>
+<span class="nc" id="L237">            obj.addProperty(&quot;description&quot;, src.getDescription());</span>
+<span class="nc" id="L238">            obj.addProperty(&quot;thumbnailNormalUrl&quot;, src.getThumbnailUrl());</span>
+<span class="nc" id="L239">            obj.addProperty(&quot;bannerUrl&quot;, src.getBannerUrl());</span>
+<span class="nc" id="L240">            return obj;</span>
+<span class="nc" id="L241">        }).create();</span>
+        while (true) {
+<span class="nc" id="L243">            int success = migrateFromJsonColumnBlock(db, gson);</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">            if (success &gt; 0) {</span>
+<span class="nc" id="L245">                fullCount += success;</span>
+            } else {
+<span class="nc" id="L247">                Logger.w(this, &quot;Migrated &quot; + fullCount + &quot; videos&quot;);</span>
+<span class="nc" id="L248">                return;</span>
+            }
+<span class="nc" id="L250">        }</span>
+    }
+
+    private int migrateFromJsonColumnBlock(final SQLiteDatabase db, Gson gson) {
+<span class="nc" id="L254">        int counter = 0;</span>
+<span class="nc" id="L255">        int success = 0;</span>
+<span class="nc" id="L256">        try (Cursor cursor = db.query(SubscriptionsVideosTable.TABLE_NAME,</span>
+                new String[] { SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID, SubscriptionsVideosTable.COL_YOUTUBE_VIDEO},
+                null,
+                null,null, null, null, &quot;100&quot;)) {
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            while (cursor.moveToNext()) {</span>
+<span class="nc" id="L261">                counter ++;</span>
+<span class="nc" id="L262">                String id = cursor.getString(0);</span>
+<span class="nc" id="L263">                final byte[] blob = cursor.getBlob(1);</span>
+<span class="nc" id="L264">                final String videoJson = new String(blob);</span>
+
+                // convert JSON into YouTubeVideo
+<span class="nc" id="L267">                YouTubeVideo video = gson.fromJson(videoJson, YouTubeVideo.class);</span>
+<span class="nc" id="L268">                ContentValues values = convertToContentValues(video, null);</span>
+<span class="nc" id="L269">                long rowId = db.insert(SubscriptionsVideosTable.TABLE_NAME_V2, null, values);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                if (rowId &gt; 0) {</span>
+<span class="nc" id="L271">                    success ++;</span>
+                }
+<span class="nc" id="L273">            }</span>
+        }
+<span class="nc" id="L275">        Logger.w(this, &quot;Loaded &quot; + counter + &quot; videos, updated &quot; + success + &quot; videos successfully&quot;);</span>
+<span class="nc" id="L276">        return success;</span>
+    }
+
+	private void setupRetrievalTimestamp(SQLiteDatabase db) {
+<span class="nc" id="L280">        List&lt;YouTubeVideo&gt; videos = extractVideos(db.rawQuery(FIND_EMPTY_RETRIEVAL_TS, null), false);</span>
+<span class="nc" id="L281">        int count = 0;</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        for (YouTubeVideo video : videos) {</span>
+<span class="nc" id="L283">            final Long publishTimestamp = video.getPublishTimestamp();</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            if (publishTimestamp != null) {</span>
+<span class="nc" id="L285">                ContentValues values = new ContentValues();</span>
+<span class="nc" id="L286">                values.put(SubscriptionsVideosTable.COL_PUBLISH_TS, publishTimestamp);</span>
+<span class="nc" id="L287">                values.put(SubscriptionsVideosTable.COL_RETRIEVAL_TS, publishTimestamp);</span>
+<span class="nc" id="L288">                int updateCount = db.update(</span>
+                        SubscriptionsVideosTable.TABLE_NAME,
+                        values,
+                        SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID_EQUALS_TO,
+<span class="nc" id="L292">                        new String[]{video.getId()});</span>
+<span class="nc" id="L293">                Logger.i(this,&quot;updating &quot; + video.getId() + &quot; with publish date:&quot; + ZonedDateTime.ofInstant(Instant.ofEpochMilli(publishTimestamp), ZoneId.systemDefault()) + &quot; -&gt; &quot; + updateCount);</span>
+<span class="nc" id="L294">                count += updateCount;</span>
+            }
+<span class="nc" id="L296">        }</span>
+<span class="nc" id="L297">        Logger.i(this, &quot;From &quot; + videos.size() + &quot;, retrieval timestamp filled for &quot; + count);</span>
+<span class="nc" id="L298">    }</span>
+
+	/**
+	 * Saves the given channel into the subscriptions DB.
+	 *
+	 * @param persistentChannel Channel the user wants to subscribe to.
+	 * @param videos the channel videos, which needs to be added to the database.
+     *
+	 * @return DatabaseResult.SUCCESS if the operation was successful; NOT_MODIFIED or ERROR otherwise.
+	 */
+	public DatabaseResult subscribe(PersistentChannel persistentChannel, Collection&lt;YouTubeVideo&gt; videos) {
+<span class="nc" id="L309">		SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L310">		saveChannelVideos(videos, persistentChannel, false);</span>
+
+<span class="nc" id="L312">		return saveSubscription(persistentChannel.channelPk(), persistentChannel.getChannelId());</span>
+	}
+
+	/**
+	 * Saves the given channel into the subscriptions DB.
+	 *
+	 * @param channelId The id of the channel the user wants to subscribe to.
+	 *
+	 * @return True if the operation was successful; false otherwise.
+	 */
+	private DatabaseResult saveSubscription(long channelPk, ChannelId channelId) {
+<span class="nc" id="L323">		SkyTubeApp.nonUiThread();</span>
+
+<span class="nc" id="L325">		ContentValues values = new ContentValues();</span>
+<span class="nc" id="L326">		values.put(SubscriptionsTable.COL_CHANNEL_ID, channelId.getRawId());</span>
+<span class="nc" id="L327">        values.put(SubscriptionsTable.COL_CHANNEL_PK.name(), channelPk);</span>
+
+<span class="nc" id="L329">		SQLiteDatabase db = getWritableDatabase();</span>
+		try {
+<span class="nc" id="L331">			long result = db.insertWithOnConflict(SubscriptionsTable.TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_IGNORE);</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">			if (result &gt; 0) {</span>
+
+<span class="nc" id="L334">				return DatabaseResult.SUCCESS;</span>
+			}
+<span class="nc bnc" id="L336" title="All 2 branches missed.">			if (isUserSubscribedToChannel(channelId)) {</span>
+<span class="nc" id="L337">				Logger.i(this, &quot;Already subscribed to &quot; + channelId);</span>
+<span class="nc" id="L338">				return DatabaseResult.NOT_MODIFIED;</span>
+			}
+<span class="nc" id="L340">			Logger.i(this, &quot;Unable to subscribe to &quot; + channelId);</span>
+<span class="nc" id="L341">			return DatabaseResult.ERROR;</span>
+<span class="nc" id="L342">		} catch (SQLException e) {</span>
+<span class="nc" id="L343">			Logger.e(this, &quot;Error during subscribing: &quot; + e.getMessage(), e);</span>
+<span class="nc" id="L344">			return DatabaseResult.ERROR;</span>
+		}
+	}
+
+	/**
+	 * Removes the given channel from the subscriptions DB.
+	 *
+	 * @param channel  the channel the user wants to unsubscribe from.
+	 *
+	 * @return True if the operation was successful; false otherwise.
+	 */
+	public DatabaseResult unsubscribe(PersistentChannel channel) {
+<span class="nc" id="L356">		SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L357">        Logger.i(this, &quot;unsubscribing subs_id= %s, channel_id = %s, channel_pk = %s&quot;, channel.subscriptionPk(), channel.getChannelId(), channel.channelPk());</span>
+        // delete any feed videos pertaining to this channel
+<span class="nc" id="L359">        getWritableDatabase().delete(SubscriptionsVideosTable.TABLE_NAME_V2,</span>
+<span class="nc" id="L360">                SubscriptionsVideosTable.COL_SUBS_ID.name() + &quot; = ?&quot;,</span>
+<span class="nc" id="L361">                toArray(channel.subscriptionPk()));</span>
+
+        // remove this channel from the subscriptions DB
+<span class="nc" id="L364">        int rowsDeleted = getWritableDatabase().delete(SubscriptionsTable.TABLE_NAME,</span>
+                SubscriptionsTable.COL_CHANNEL_ID + &quot; = ?&quot;,
+<span class="nc" id="L366">                toArray(channel.channel().getId()));</span>
+
+		// Need to make sure when we come back to MainActivity, that we refresh the Feed tab so it hides videos from the newly unsubscribed
+<span class="nc" id="L369">		SkyTubeApp.getSettings().setRefreshSubsFeedFromCache(true);</span>
+
+<span class="nc bnc" id="L371" title="All 2 branches missed.">		return (rowsDeleted &gt;= 0) ? DatabaseResult.SUCCESS : DatabaseResult.NOT_MODIFIED;</span>
+	}
+
+	public void unsubscribeFromAllChannels() {
+<span class="nc" id="L375">		getWritableDatabase().delete(SubscriptionsVideosTable.TABLE_NAME_V2,null,null);</span>
+<span class="nc" id="L376">		getWritableDatabase().delete(SubscriptionsTable.TABLE_NAME,null,null);</span>
+<span class="nc" id="L377">	}</span>
+
+	/**
+	 * @param channelId the id of the channel
+	 * @return all the video ids for the subscribed channels from the database.
+	 */
+	public Set&lt;String&gt; getSubscribedChannelVideosByChannel(ChannelId channelId) {
+<span class="nc" id="L384">		SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L385">        try (Cursor cursor = getReadableDatabase().rawQuery(GET_VIDEO_IDS_BY_CHANNEL, toArrayParam(channelId))) {</span>
+<span class="nc" id="L386">			Set&lt;String&gt; result = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">			while(cursor.moveToNext()) {</span>
+<span class="nc" id="L388">				result.add(cursor.getString(0));</span>
+			}
+<span class="nc" id="L390">			return result;</span>
+		}
+	}
+
+    /**
+     * @param channelId the id of the channel
+     * @return all the video ids for the subscribed channels from the database, mapped to publication times
+     */
+    public Map&lt;String, Long&gt; getSubscribedChannelVideosByChannelToTimestamp(ChannelId channelId) {
+<span class="nc" id="L399">        SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L400">        try(Cursor cursor = getReadableDatabase().rawQuery(GET_VIDEO_IDS_BY_CHANNEL_TO_PUBLISH_TS, toArrayParam(channelId))) {</span>
+<span class="nc" id="L401">            Map&lt;String, Long&gt; result = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            while(cursor.moveToNext()) {</span>
+<span class="nc" id="L403">                result.put(cursor.getString(0), cursor.getLong(1));</span>
+            }
+<span class="nc" id="L405">            return result;</span>
+        }
+    }
+
+    public void updateVideo(YouTubeVideo video) {
+<span class="nc" id="L410">        ContentValues values = convertToContentValues(video, null);</span>
+<span class="nc" id="L411">        getWritableDatabase().update(</span>
+                SubscriptionsVideosTable.TABLE_NAME_V2,
+                values,
+                SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID_EQUALS_TO,
+<span class="nc" id="L415">                new String[] { video.getId() });</span>
+<span class="nc" id="L416">    }</span>
+
+    private ContentValues convertToContentValues(final YouTubeVideo video, @Nullable PersistentChannel persistentChannel) {
+<span class="nc" id="L419">        ContentValues values = new ContentValues();</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">        if (persistentChannel != null) {</span>
+<span class="nc" id="L421">            ChannelId chId = persistentChannel.getChannelId();</span>
+<span class="nc" id="L422">            values.put(SubscriptionsVideosTable.COL_CHANNEL_ID_V2.name(), chId.getRawId());</span>
+<span class="nc" id="L423">            values.put(SubscriptionsVideosTable.COL_SUBS_ID.name(), persistentChannel.subscriptionPk());</span>
+<span class="nc" id="L424">            values.put(SubscriptionsVideosTable.COL_CHANNEL_PK.name(), persistentChannel.channelPk());</span>
+        }
+
+<span class="nc" id="L427">        values.put(SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID_V2.name(), video.getId());</span>
+<span class="nc" id="L428">        values.put(SubscriptionsVideosTable.COL_CATEGORY_ID.name(), video.getCategoryId());</span>
+<span class="nc" id="L429">        values.put(SubscriptionsVideosTable.COL_PUBLISH_TIME_EXACT.name(), video.getPublishTimestampExact());</span>
+<span class="nc" id="L430">        values.put(SubscriptionsVideosTable.COL_PUBLISH_TIME.name(), video.getPublishTimestamp());</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">        if (video.getLikeCountNumber() != null) {</span>
+<span class="nc" id="L432">            values.put(SubscriptionsVideosTable.COL_LIKES.name(), video.getLikeCountNumber());</span>
+        }
+<span class="nc bnc" id="L434" title="All 2 branches missed.">        if (video.getDislikeCountNumber() != null) {</span>
+<span class="nc" id="L435">            values.put(SubscriptionsVideosTable.COL_DISLIKES.name(), video.getDislikeCountNumber());</span>
+        }
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        if (video.getViewsCountInt() != null) {</span>
+<span class="nc" id="L438">            values.put(SubscriptionsVideosTable.COL_VIEWS.name(), video.getViewsCountInt().longValue());</span>
+        }
+<span class="nc bnc" id="L440" title="All 2 branches missed.">        if (video.getTitle() != null) {</span>
+<span class="nc" id="L441">            values.put(SubscriptionsVideosTable.COL_TITLE.name(), video.getTitle());</span>
+        }
+<span class="nc bnc" id="L443" title="All 2 branches missed.">        if (video.getDescription() != null) {</span>
+<span class="nc" id="L444">            values.put(SubscriptionsVideosTable.COL_DESCRIPTION.name(), video.getDescription());</span>
+        }
+<span class="nc" id="L446">        values.put(SubscriptionsVideosTable.COL_DURATION.name(), video.getDurationInSeconds());</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (video.getThumbnailUrl() != null) {</span>
+<span class="nc" id="L448">            values.put(SubscriptionsVideosTable.COL_THUMBNAIL_URL.name(), video.getThumbnailUrl());</span>
+        }
+<span class="nc" id="L450">        return values;</span>
+    }
+
+    public int setPublishTimestamp(YouTubeVideo video) {
+<span class="nc" id="L454">        ContentValues values = new ContentValues();</span>
+<span class="nc" id="L455">        values.put(SubscriptionsVideosTable.COL_PUBLISH_TIME.name(), video.getPublishTimestamp());</span>
+
+<span class="nc" id="L457">        return getWritableDatabase().update(</span>
+                SubscriptionsVideosTable.TABLE_NAME_V2,
+                values,
+                SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID_EQUALS_TO,
+<span class="nc" id="L461">                new String[] { video.getId() });</span>
+    }
+
+	private List&lt;ChannelId&gt; getSubscribedChannelIds() {
+<span class="fc" id="L465">		SkyTubeApp.nonUiThread();</span>
+<span class="fc" id="L466">		try (Cursor cursor = getReadableDatabase().rawQuery(GET_ALL_SUBSCRIBED_CHANNEL_ID,null)) {</span>
+<span class="fc" id="L467">			List&lt;ChannelId&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">			while(cursor.moveToNext()) {</span>
+<span class="nc" id="L469">				result.add(new ChannelId(cursor.getString(0)));</span>
+			}
+<span class="fc" id="L471">			return result;</span>
+		}
+	}
+
+	public Single&lt;List&lt;ChannelId&gt;&gt; getSubscribedChannelIdsAsync() {
+<span class="fc" id="L476">		return Single.fromCallable(() -&gt; getSubscribedChannelIds())</span>
+<span class="fc" id="L477">				.subscribeOn(Schedulers.io());</span>
+	}
+
+    public void setChannelState(@NonNull ChannelId channelId, @NonNull Status status) {
+<span class="nc" id="L481">        Logger.i(this, &quot;Set channel id=%s state to %s&quot;, channelId, status);</span>
+<span class="nc" id="L482">        SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L483">        LocalChannelTable.updateChannelStatus(getWritableDatabase(), channelId, status);</span>
+<span class="nc" id="L484">    }</span>
+
+    /**
+	 * Returns a list of channels that the user subscribed to, without accessing the network
+	 *
+	 *
+	 * @return A list of channels that the user subscribed to.
+	 * @throws IOException
+	 */
+	private List&lt;YouTubeChannel&gt; getSubscribedChannels(SQLiteDatabase db) throws IOException {
+<span class="nc" id="L494">		SkyTubeApp.nonUiThread();</span>
+
+<span class="nc" id="L496">		try (Cursor cursor = db.rawQuery(&quot;select s._id subs_id, s.category_id, s.Last_Visit_Time, c.* from Subs s join Channel c on s.channel_pk = c._Id&quot;, null)) {</span>
+
+<span class="nc" id="L498">			List&lt;YouTubeChannel&gt; subsChannels = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L500" title="All 2 branches missed.">			if (cursor.moveToNext()) {</span>
+<span class="nc" id="L501">				final int colChannelIdNum = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_CHANNEL_ID.name());</span>
+<span class="nc" id="L502">				final int colTitle = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_TITLE);</span>
+<span class="nc" id="L503">				final int colDescription = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_DESCRIPTION);</span>
+<span class="nc" id="L504">				final int colBanner = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_BANNER_URL);</span>
+<span class="nc" id="L505">				final int colThumbnail = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_THUMBNAIL_NORMAL_URL);</span>
+<span class="nc" id="L506">				final int colSubscribers = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_SUBSCRIBER_COUNT);</span>
+<span class="nc" id="L507">				final int colLastCheck = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_LAST_CHECK_TS);</span>
+<span class="nc" id="L508">                final int colLastVisit = cursor.getColumnIndexOrThrow(SubscriptionsTable.COL_LAST_VISIT_TIME);</span>
+<span class="nc" id="L509">				final int colCategoryId = cursor.getColumnIndexOrThrow(SubscriptionsTable.COL_CATEGORY_ID.name());</span>
+
+				do {
+<span class="nc" id="L512">					final String id = cursor.getString(colChannelIdNum);</span>
+<span class="nc" id="L513">					Integer categoryId = getInteger(cursor, colCategoryId);</span>
+<span class="nc" id="L514">					subsChannels.add(new YouTubeChannel(id, cursor.getString(colTitle),</span>
+<span class="nc" id="L515">							cursor.getString(colDescription), cursor.getString(colThumbnail),</span>
+<span class="nc" id="L516">							cursor.getString(colBanner), cursor.getLong(colSubscribers), true, cursor.getLong(colLastVisit),</span>
+<span class="nc" id="L517">							cursor.getLong(colLastCheck),</span>
+<span class="nc" id="L518">							categoryId, Collections.emptyList()));</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">				} while (cursor.moveToNext());</span>
+			}
+<span class="nc" id="L521">			return subsChannels;</span>
+		}
+	}
+
+	/**
+	 * Returns a list of channels that the user subscribed to, without accessing the network
+	 *
+	 * @return A list of channels that the user subscribed to.
+	 * @throws IOException
+	 */
+	public List&lt;YouTubeChannel&gt; getSubscribedChannels() throws IOException {
+<span class="nc" id="L532">		SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L533">		SQLiteDatabase db = getReadableDatabase();</span>
+<span class="nc" id="L534">		return getSubscribedChannels(db);</span>
+	}
+
+	private Integer getInteger(Cursor cursor, int colCategoryId) {
+<span class="nc bnc" id="L538" title="All 4 branches missed.">		return (colCategoryId &lt; 0 || cursor.isNull(colCategoryId)) ? null : cursor.getInt(colCategoryId);</span>
+	}
+
+	/**
+	 * Checks if the user is subscribed to the given channel.
+	 *
+	 * @param channelId	Channel ID
+	 * @return True if the user is subscribed; false otherwise.
+	 * @throws IOException
+	 */
+	public boolean isUserSubscribedToChannel(ChannelId channelId) {
+<span class="nc" id="L549">		SkyTubeApp.nonUiThread();</span>
+
+<span class="nc bnc" id="L551" title="All 2 branches missed.">        return SQLiteHelper.executeQueryForInteger(getReadableDatabase(), IS_SUBSCRIBED_QUERY, toArrayParam(channelId), 0) &gt; 0;</span>
+	}
+
+	public Single&lt;Boolean&gt; getUserSubscribedToChannel(ChannelId channelId) {
+<span class="nc" id="L555">		return Single.fromCallable(() -&gt; isUserSubscribedToChannel(channelId)).subscribeOn(Schedulers.io());</span>
+	}
+
+    /**
+     * Updates the given channel's last visit time.
+     *
+     * @param channelId	Channel ID
+     *
+     * @return	last visit time, if the update was successful;  -1 otherwise.
+     */
+    public Single&lt;Long&gt; updateLastVisitTimeAsync(ChannelId channelId) {
+<span class="nc" id="L566">        return Single.fromCallable(() -&gt; {</span>
+<span class="nc" id="L567">            SQLiteDatabase	db = getWritableDatabase();</span>
+<span class="nc" id="L568">            long			currentTime = System.currentTimeMillis();</span>
+
+<span class="nc" id="L570">            ContentValues values = new ContentValues();</span>
+<span class="nc" id="L571">            values.put(SubscriptionsTable.COL_LAST_VISIT_TIME, currentTime);</span>
+
+<span class="nc" id="L573">            int count = db.update(</span>
+                SubscriptionsTable.TABLE_NAME,
+                values,
+                SubscriptionsTable.COL_CHANNEL_ID + &quot; = ?&quot;,
+<span class="nc" id="L577">                toArrayParam(channelId));</span>
+
+<span class="nc bnc" id="L579" title="All 2 branches missed.">            return (count &gt; 0 ? currentTime : -1);</span>
+<span class="nc" id="L580">        }).subscribeOn(Schedulers.io());</span>
+    }
+    
+    private boolean hasVideo(YouTubeVideo video) {
+<span class="nc bnc" id="L584" title="All 2 branches missed.">        return SQLiteHelper.executeQueryForInteger(getReadableDatabase(), HAS_VIDEO_QUERY, new String[]{video.getId()}, 0) &gt; 0;</span>
+    }
+
+	/**
+	 * Loop through each video saved in the passed {@link YouTubeChannel} and insert it into the database, or update it.
+	 * @param videos the list of videos
+     * @param persistentChannel information about the persisted channel.
+	 */
+	public void saveChannelVideos(Collection&lt;YouTubeVideo&gt; videos, PersistentChannel persistentChannel, boolean doUpdate) {
+<span class="nc" id="L593">        SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L594">        SQLiteDatabase db = getWritableDatabase();</span>
+<span class="nc" id="L595">        long latestPublishTimestamp = 0;</span>
+
+<span class="nc bnc" id="L597" title="All 2 branches missed.">        for (YouTubeVideo video : videos) {</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">            if (video.getPublishTimestamp() != null) {</span>
+<span class="nc" id="L599">                latestPublishTimestamp = Math.max(latestPublishTimestamp, video.getPublishTimestamp());</span>
+<span class="nc" id="L600">                ContentValues values = createContentValues(video, persistentChannel);</span>
+<span class="nc bnc" id="L601" title="All 2 branches missed.">                if (hasVideo(video)) {</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">                    if (doUpdate) {</span>
+<span class="nc" id="L603">                        values.remove(SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID);</span>
+<span class="nc" id="L604">                        db.update(SubscriptionsVideosTable.TABLE_NAME_V2,</span>
+                                values,
+                                SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID_EQUALS_TO,
+<span class="nc" id="L607">                                new String[]{video.getId()});</span>
+                    }
+                } else {
+<span class="nc" id="L610">                    db.insert(SubscriptionsVideosTable.TABLE_NAME_V2, null, values);</span>
+                }
+            }
+<span class="nc" id="L613">        }</span>
+<span class="nc" id="L614">        SubscriptionsTable.updateLastVideoFetchTimestamps(db, persistentChannel);</span>
+<span class="nc" id="L615">        LocalChannelTable.updateLatestVideoTimestamp(db, persistentChannel, latestPublishTimestamp);</span>
+<span class="nc" id="L616">    }</span>
+
+    private ContentValues createContentValues(YouTubeVideo video, PersistentChannel persistentChannel) {
+<span class="nc" id="L619">        ContentValues values = convertToContentValues(video, persistentChannel);</span>
+<span class="nc" id="L620">        values.put(SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID, video.getId());</span>
+<span class="nc" id="L621">        final long publishInstant = video.getPublishTimestamp();</span>
+<span class="nc" id="L622">        values.put(SubscriptionsVideosTable.COL_PUBLISH_TIME.name(), publishInstant);</span>
+<span class="nc" id="L623">        values.put(SubscriptionsVideosTable.COL_CATEGORY_ID.name(), video.getCategoryId());</span>
+
+<span class="nc" id="L625">        return values;</span>
+    }
+
+    /**
+     * Query the database to retrieve number of videos for subscribed channels starting from the given video.
+     * @return a list of {@link YouTubeVideo}
+     */
+    public List&lt;YouTubeVideo&gt; getSubscriptionVideoPage(int limit, String videoId, long beforeTimestamp) {
+<span class="nc" id="L633">        SkyTubeApp.nonUiThread();</span>
+
+        final String selection;
+<span class="nc" id="L636">        final String sortingColumn = SubscriptionsVideosTable.COL_PUBLISH_TIME.name();</span>
+        final String[] selectionArguments;
+<span class="nc bnc" id="L638" title="All 2 branches missed.">        if (videoId != null) {</span>
+<span class="nc" id="L639">            selection = &quot;WHERE (&quot; + sortingColumn + &quot; &lt; ?) OR (&quot; + sortingColumn + &quot; = ? AND &quot; + SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID + &quot; &gt; ?)&quot;;</span>
+<span class="nc" id="L640">            String formatted = String.valueOf(beforeTimestamp);</span>
+<span class="nc" id="L641">            selectionArguments = new String[]{ formatted, formatted, videoId };</span>
+<span class="nc" id="L642">        } else {</span>
+<span class="nc" id="L643">            selection = &quot;&quot;;</span>
+<span class="nc" id="L644">            selectionArguments = null;</span>
+        }
+<span class="nc" id="L646">        final String sorting = &quot; ORDER BY &quot; + sortingColumn + &quot; DESC, &quot; + SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID + &quot; ASC limit &quot;+ limit;</span>
+<span class="nc" id="L647">        String query = SubscriptionsVideosTable.BASE_QUERY + selection + sorting;</span>
+<span class="nc" id="L648">        try (Stopwatch s = new Stopwatch(&quot;getVideos &quot; + query + &quot;,limit=&quot; + limit + &quot;, beforeTimestamp=&quot; + beforeTimestamp+&quot; videoid=&quot;+videoId)) {</span>
+<span class="nc" id="L649">            Cursor cursor = getReadableDatabase().rawQuery(query, selectionArguments);</span>
+<span class="nc" id="L650">            return extractVideos(cursor, true);</span>
+        }
+    }
+
+    /**
+     * Load YouTubeVideo objects from a cursor, only SubscriptionsVideosTable.COL_YOUTUBE_VIDEO column is needed.
+     * @param cursor the cursor to process
+     * @param fullColumnList get all the columns, not just the JSON blob - set to false only for db
+     *                       maintenance queries!
+     */
+    private List&lt;YouTubeVideo&gt; extractVideos(Cursor cursor, boolean fullColumnList) {
+<span class="nc" id="L661">        SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L662">        List&lt;YouTubeVideo&gt; videos = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L663">        Set&lt;String&gt; invalidIds = new HashSet&lt;&gt;();</span>
+        try {
+
+<span class="nc bnc" id="L666" title="All 2 branches missed.">            if (cursor.moveToNext()) {</span>
+<span class="nc" id="L667">                final int idIdx = cursor.getColumnIndex(SubscriptionsVideosTable.COL_YOUTUBE_VIDEO_ID);</span>
+<span class="nc" id="L668">                final int categoryIdx = cursor.getColumnIndex(SubscriptionsVideosTable.COL_CATEGORY_ID.name());</span>
+<span class="nc bnc" id="L669" title="All 2 branches missed.">                final int publishTsIdx = fullColumnList ? SubscriptionsVideosTable.COL_PUBLISH_TIME.getColumn(cursor) : -1;</span>
+<span class="nc" id="L670">                final int publishTsExactIdx = SubscriptionsVideosTable.COL_PUBLISH_TIME_EXACT.getColumn(cursor);</span>
+<span class="nc" id="L671">                final int titleColumn = SubscriptionsVideosTable.COL_TITLE.getColumn(cursor);</span>
+<span class="nc" id="L672">                final int descriptionColumn = SubscriptionsVideosTable.COL_DESCRIPTION.getColumn(cursor);</span>
+<span class="nc" id="L673">                final int durationColumn = SubscriptionsVideosTable.COL_DURATION.getColumn(cursor);</span>
+<span class="nc" id="L674">                final int viewsColumn = SubscriptionsVideosTable.COL_VIEWS.getColumn(cursor);</span>
+<span class="nc" id="L675">                final int likesColumn = SubscriptionsVideosTable.COL_LIKES.getColumn(cursor);</span>
+<span class="nc" id="L676">                final int dislikesColumn = SubscriptionsVideosTable.COL_DISLIKES.getColumn(cursor);</span>
+<span class="nc" id="L677">                final int thumbnailUrlColumn = SubscriptionsVideosTable.COL_THUMBNAIL_URL.getColumn(cursor);</span>
+<span class="nc" id="L678">                final int channelTitleColumn = SubscriptionsVideosTable.COL_CHANNEL_TITLE.getColumn(cursor);</span>
+<span class="nc" id="L679">                final int channelIdColumn = SubscriptionsVideosTable.COL_CHANNEL_ID_V2.getColumn(cursor);</span>
+
+                do {
+<span class="nc" id="L682">                    final String id = cursor.getString(idIdx);</span>
+
+                    // String id, String title, String description, long durationInSeconds,
+                    //                            YouTubeChannel channel, long viewCount, Instant publishDate,
+                    //                            boolean publishDateExact, String thumbnailUrl
+<span class="nc" id="L687">                    YouTubeVideo video = new YouTubeVideo(id, cursor.getString(titleColumn), cursor.getString(descriptionColumn),</span>
+<span class="nc" id="L688">                            cursor.getLong(durationColumn),</span>
+<span class="nc" id="L689">                            new YouTubeChannel(cursor.getString(channelIdColumn), cursor.getString(channelTitleColumn)),</span>
+<span class="nc" id="L690">                            cursor.getLong(viewsColumn),  </span>
+<span class="nc" id="L691">                            Instant.ofEpochMilli(cursor.getLong(publishTsIdx)), </span>
+<span class="nc bnc" id="L692" title="All 2 branches missed.">                            cursor.getInt(publishTsExactIdx) &gt; 0,</span>
+<span class="nc" id="L693">                            cursor.getString(thumbnailUrlColumn));</span>
+<span class="nc" id="L694">                    video.setLikeDislikeCount(cursor.getLong(likesColumn), cursor.getLong(dislikesColumn));</span>
+<span class="nc" id="L695">                    video.setPublishTimestamp(cursor.getLong(publishTsIdx));</span>
+<span class="nc" id="L696">                    video.setCategoryId(getInteger(cursor, categoryIdx));</span>
+<span class="nc" id="L697">                    video.updatePublishTimestampFromDate();</span>
+
+                    // regenerate the video's PublishDatePretty (e.g. 5 hours ago)
+<span class="nc" id="L700">                    video.forceRefreshPublishDatePretty();</span>
+                    // add the video to the list
+<span class="nc" id="L702">                    videos.add(video);</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">                } while (cursor.moveToNext());</span>
+            }
+        } finally {
+<span class="nc" id="L706">            cursor.close();</span>
+        }
+<span class="nc bnc" id="L708" title="All 2 branches missed.">        if (!invalidIds.isEmpty()) {</span>
+<span class="nc" id="L709">            Logger.e(this, &quot;Found videos without channel: {}&quot;, invalidIds);</span>
+        }
+<span class="nc" id="L711">        return videos;</span>
+    }
+
+	/**
+	 *
+	 * @param channelId
+	 * @return all the information stored in the local cache about the channel.
+	 */
+	public PersistentChannel getCachedChannel(ChannelId channelId) {
+<span class="nc" id="L720">        SkyTubeApp.nonUiThread();</span>
+<span class="nc" id="L721">        try (Cursor cursor = getReadableDatabase().rawQuery(</span>
+                &quot;select s._id subs_id, c.* from  Channel c left outer Join Subs s on s.channel_pk = c._Id where c.Channel_Id = ?&quot;,
+<span class="nc" id="L723">                toArrayParam(channelId))) {</span>
+<span class="nc bnc" id="L724" title="All 2 branches missed.">            if (cursor.moveToNext()) {</span>
+<span class="nc" id="L725">                Long subscriptionPk = SQLiteHelper.getOptionalLong(cursor, &quot;subs_id&quot;);</span>
+<span class="nc" id="L726">                Long channelPk = SQLiteHelper.getLong(cursor, LocalChannelTable.COL_ID.name());</span>
+
+<span class="nc" id="L728">				String title = cursor.getString(cursor.getColumnIndexOrThrow(LocalChannelTable.COL_TITLE));</span>
+<span class="nc" id="L729">				String description = cursor.getString(cursor.getColumnIndexOrThrow(LocalChannelTable.COL_DESCRIPTION));</span>
+<span class="nc" id="L730">				String thumbnail = cursor.getString(cursor.getColumnIndexOrThrow(LocalChannelTable.COL_THUMBNAIL_NORMAL_URL));</span>
+<span class="nc" id="L731">				String banner = cursor.getString(cursor.getColumnIndexOrThrow(LocalChannelTable.COL_BANNER_URL));</span>
+<span class="nc" id="L732">                long subscriberCount = SQLiteHelper.getLong(cursor, LocalChannelTable.COL_SUBSCRIBER_COUNT);</span>
+<span class="nc" id="L733">                long lastCheckTs = SQLiteHelper.getLong(cursor, LocalChannelTable.COL_LAST_CHECK_TS);</span>
+<span class="nc" id="L734">                Status statusCode = getStatusCode(cursor);</span>
+                // TODO: use
+<span class="nc" id="L736">                Long lastVideoTs = SQLiteHelper.getOptionalLong(cursor, LocalChannelTable.COL_LAST_VIDEO_TS);</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">                YouTubeChannel channel = new YouTubeChannel(channelId.getRawId(), title, description, thumbnail, banner, subscriberCount, subscriptionPk != null, -1, lastCheckTs, null, Collections.emptyList());</span>
+<span class="nc" id="L738">                return new PersistentChannel(channel, channelPk, subscriptionPk, statusCode);</span>
+            }
+<span class="nc bnc" id="L740" title="All 2 branches missed.">		}</span>
+<span class="nc" id="L741">		return null;</span>
+	}
+
+    /**
+     * Save channel information in the database from the Object.
+     *
+     * @param channel which contains all the recent information.
+     * @return true, if the channel was inside the database.
+     */
+    public PersistentChannel cacheChannel(@Nullable PersistentChannel persistentChannel, YouTubeChannel channel) {
+<span class="nc" id="L751">        SQLiteDatabase db = getWritableDatabase();</span>
+<span class="nc" id="L752">        return cacheChannel(db, persistentChannel, channel);</span>
+    }
+
+    private Status getStatusCode(Cursor cursor) {
+<span class="nc" id="L756">        return Status.lookup(SQLiteHelper.getLong(cursor, LocalChannelTable.COL_STATE.name()));</span>
+    }
+
+    private String[] toArray(Object obj) {
+<span class="nc" id="L760">        return new String[] { String.valueOf(obj)};</span>
+    }
+
+    private String[] toArrayParam(ChannelId channelId) {
+<span class="nc" id="L764">        return new String[] { channelId.getRawId() };</span>
+    }
+
+    private @Nullable Long getChannelPk(SQLiteDatabase db, ChannelId channelId){
+<span class="nc" id="L768">        try (Cursor cursor = db.rawQuery(GET_PK_FROM_CHANNEL_ID, toArrayParam(channelId))) {</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">            if (cursor.moveToNext()) {</span>
+<span class="nc" id="L770">                return cursor.getLong(0);</span>
+            }
+<span class="nc bnc" id="L772" title="All 2 branches missed.">        }</span>
+<span class="nc" id="L773">        return null;</span>
+    }
+
+    private PersistentChannel cacheChannel(SQLiteDatabase db, @Nullable PersistentChannel persistentChannel, YouTubeChannel channel) {
+<span class="nc" id="L777">        ContentValues values = toContentValues(channel);</span>
+
+        final Long channelPk;
+        final Status status;
+<span class="nc bnc" id="L781" title="All 2 branches missed.">        if (persistentChannel != null) {</span>
+<span class="nc" id="L782">            channelPk = persistentChannel.channelPk();</span>
+<span class="nc" id="L783">            status = persistentChannel.status();</span>
+        } else {
+<span class="nc" id="L785">            channelPk = getChannelPk(db, channel.getChannelId());</span>
+<span class="nc" id="L786">            status = Status.OK;</span>
+        }
+<span class="nc bnc" id="L788" title="All 2 branches missed.">        Long subPk = persistentChannel != null ? persistentChannel.subscriptionPk() : null;</span>
+
+        // If there is a persistentChannel info, we already have the channel in the db
+<span class="nc bnc" id="L791" title="All 2 branches missed.">        if (channelPk != null) {</span>
+            // Try to update it ...
+<span class="nc" id="L793">            int count = db.update(</span>
+                    LocalChannelTable.TABLE_NAME,
+                    values,
+<span class="nc" id="L796">                    LocalChannelTable.COL_ID.name() + &quot; = ?&quot;,</span>
+<span class="nc" id="L797">                    toArray(channelPk));</span>
+<span class="nc bnc" id="L798" title="All 2 branches missed.">            if (count != 1) {</span>
+<span class="nc" id="L799">                throw new IllegalStateException(&quot;Unable to update channel &quot; + channel + &quot;, with pk= &quot; + channelPk);</span>
+            }
+<span class="nc" id="L801">            return new PersistentChannel(channel, channelPk, subPk, status);</span>
+        }
+<span class="nc" id="L803">        values.put(LocalChannelTable.COL_CHANNEL_ID.name(), channel.getChannelId().getRawId());</span>
+<span class="nc" id="L804">        long newPk = db.insert(LocalChannelTable.TABLE_NAME, null, values);</span>
+<span class="nc" id="L805">        return new PersistentChannel(channel, newPk, subPk, status);</span>
+    }
+
+    private static ContentValues toContentValues(YouTubeChannel channel) {
+<span class="nc" id="L809">        ContentValues values = new ContentValues();</span>
+<span class="nc" id="L810">        values.put(LocalChannelTable.COL_TITLE, channel.getTitle());</span>
+<span class="nc bnc" id="L811" title="All 2 branches missed.">        if (!Utils.isEmpty(channel.getDescription())) {</span>
+<span class="nc" id="L812">            values.put(LocalChannelTable.COL_DESCRIPTION, channel.getDescription());</span>
+        }
+<span class="nc bnc" id="L814" title="All 2 branches missed.">        if (!Utils.isEmpty(channel.getBannerUrl())) {</span>
+<span class="nc" id="L815">            values.put(LocalChannelTable.COL_BANNER_URL, channel.getBannerUrl());</span>
+        }
+<span class="nc bnc" id="L817" title="All 2 branches missed.">        if (!Utils.isEmpty(channel.getThumbnailUrl())) {</span>
+<span class="nc" id="L818">            values.put(LocalChannelTable.COL_THUMBNAIL_NORMAL_URL, channel.getThumbnailUrl());</span>
+        }
+<span class="nc bnc" id="L820" title="All 2 branches missed.">        if (channel.getSubscriberCount() &gt; 0) {</span>
+<span class="nc" id="L821">            values.put(LocalChannelTable.COL_SUBSCRIBER_COUNT, channel.getSubscriberCount());</span>
+        }
+<span class="nc bnc" id="L823" title="All 2 branches missed.">        if(channel.getLastVideoTime() &gt; 0) {</span>
+<span class="nc" id="L824">            values.put(LocalChannelTable.COL_LAST_VIDEO_TS, channel.getLastVideoTime());</span>
+        }
+<span class="nc bnc" id="L826" title="All 2 branches missed.">        if (channel.getLastCheckTime() &gt; 0) {</span>
+<span class="nc" id="L827">            values.put(LocalChannelTable.COL_LAST_CHECK_TS, channel.getLastCheckTime());</span>
+        }
+<span class="nc" id="L829">        return values;</span>
+    }
+
+    public List&lt;ChannelView&gt; getSubscribedChannelsByText(String searchText, boolean sortChannelsAlphabetically) {
+<span class="fc" id="L833">		List&lt;ChannelView&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L834">		try (Cursor cursor = createSubscriptionCursor(searchText, sortChannelsAlphabetically); Stopwatch s = new Stopwatch(&quot;search for &quot;+searchText)) {</span>
+<span class="fc" id="L835">			final int channelId = cursor.getColumnIndexOrThrow(SubscriptionsTable.COL_CHANNEL_ID);</span>
+<span class="fc" id="L836">			final int title = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_TITLE);</span>
+<span class="fc" id="L837">			final int thumbnail = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_THUMBNAIL_NORMAL_URL);</span>
+<span class="fc" id="L838">			final int colLastVisit = cursor.getColumnIndexOrThrow(SubscriptionsTable.COL_LAST_VISIT_TIME);</span>
+<span class="fc" id="L839">			final int colLatestVideoTs = cursor.getColumnIndexOrThrow(&quot;latest_video_ts&quot;);</span>
+<span class="fc" id="L840">            final int colStatus = cursor.getColumnIndexOrThrow(LocalChannelTable.COL_STATE.name());</span>
+<span class="pc bpc" id="L841" title="1 of 2 branches missed.">			while(cursor.moveToNext()) {</span>
+<span class="nc" id="L842">				Long lastVisit = cursor.getLong(colLastVisit);</span>
+<span class="nc" id="L843">				Long latestVideoTs = cursor.getLong(colLatestVideoTs);</span>
+<span class="nc bnc" id="L844" title="All 6 branches missed.">				boolean hasNew = (latestVideoTs != null &amp;&amp; (lastVisit == null || latestVideoTs &gt; lastVisit));</span>
+<span class="nc" id="L845">                Status status = Status.lookup(cursor.getInt(colStatus));</span>
+<span class="nc" id="L846">				result.add(new ChannelView(new ChannelId(cursor.getString(channelId)), cursor.getString(title), cursor.getString(thumbnail), hasNew, status));</span>
+<span class="nc" id="L847">			}</span>
+<span class="fc" id="L848">			return result;</span>
+		}
+	}
+
+    private Cursor createSubscriptionCursor(String searchText, boolean sortChannelsAlphabetically) {
+<span class="pc bpc" id="L853" title="1 of 2 branches missed.">        if (Utils.isEmpty(searchText)) {</span>
+<span class="fc" id="L854">            return getReadableDatabase().rawQuery(SUBSCRIBED_CHANNEL_INFO +</span>
+<span class="pc bpc" id="L855" title="1 of 2 branches missed.">                    (sortChannelsAlphabetically ? SUBSCRIBED_CHANNEL_INFO_ORDER_BY : &quot;&quot;), null);</span>
+        } else {
+<span class="nc" id="L857">            return getReadableDatabase().rawQuery(SUBSCRIBED_CHANNEL_INFO + SUBSCRIBED_CHANNEL_LIMIT_BY_TITLE +</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">                            (sortChannelsAlphabetically ? SUBSCRIBED_CHANNEL_INFO_ORDER_BY : &quot;&quot;),</span>
+<span class="nc" id="L859">                    new String[]{&quot;%&quot; + searchText.toLowerCase() + &quot;%&quot;});</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

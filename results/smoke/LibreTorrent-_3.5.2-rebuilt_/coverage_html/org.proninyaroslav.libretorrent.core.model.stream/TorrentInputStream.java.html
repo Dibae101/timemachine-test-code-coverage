@@ -1,0 +1,472 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TorrentInputStream.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE LibreTorrent</a> &gt; <a href="index.source.html" class="el_package">org.proninyaroslav.libretorrent.core.model.stream</a> &gt; <span class="el_source">TorrentInputStream.java</span></div><h1>TorrentInputStream.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2015-2018 Sébastiaan (github.com/se-bastiaan),
+ *                         Yaroslav Pronin &lt;proninyaroslav@mail.ru&gt;
+ *
+ * This file is part of LibreTorrent.
+ *
+ * LibreTorrent is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * LibreTorrent is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with LibreTorrent.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package org.proninyaroslav.libretorrent.core.model.stream;
+
+import androidx.annotation.NonNull;
+
+import com.sun.jna.Pointer;
+
+import org.proninyaroslav.libretorrent.core.model.TorrentEngineListener;
+import org.proninyaroslav.libretorrent.core.model.data.ReadPieceInfo;
+import org.proninyaroslav.libretorrent.core.model.session.TorrentDownload;
+import org.proninyaroslav.libretorrent.core.model.session.TorrentSession;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.concurrent.locks.ReentrantLock;
+
+/*
+ * Represent InputStream for a particular file in the torrent.
+ * Abstraction implemented on top of the piece reading mechanism,
+ * as if you reading a file on the disk.
+ *
+ * Schematic representation of a possible file:
+ *
+ *           ...   file0   |           file1           | file2 ...
+ *                 _ _ _ _ | _ _ _ _ _ _ _ _ _ _ _ _ _ | _ _
+ * pieces:   ...  |_ _ _|_ _ _|_ _ _|_ _ _|_ _ _|_ _ _|_ _ _|  ...
+ * (e.g 3 bytes            *         *                 *
+ *  per piece)             |         |                 |
+ *                     fileStart  filePos             EOF
+ */
+
+public class TorrentInputStream extends InputStream
+{
+    public static final int EOF = -1;
+
+    private TorrentSession session;
+    private TorrentStream stream;
+    private ReadSession readSession;
+    private long filePos, fileStart, eof;
+    private byte[] cacheBuf;
+<span class="nc" id="L60">    private int cachePieceIndex = -1;</span>
+    private boolean stopped;
+<span class="nc" id="L62">    private static ReentrantLock lock = new ReentrantLock();</span>
+
+<span class="nc" id="L64">    private class ReadSession</span>
+    {
+        private int countLatch;
+        private Piece[] piecesForReading;
+        private byte[] buf;
+    }
+
+    private static class Piece
+    {
+        int index;
+        int readLength;
+        int readOffset;
+        int bufIndex;
+<span class="nc" id="L77">        boolean cache = false;</span>
+
+        Piece(int index)
+<span class="nc" id="L80">        {</span>
+<span class="nc" id="L81">            this.index = index;</span>
+<span class="nc" id="L82">        }</span>
+
+        @Override
+        public int hashCode()
+        {
+<span class="nc" id="L87">            return index;</span>
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+<span class="nc bnc" id="L93" title="All 6 branches missed.">            return o instanceof Piece &amp;&amp; (o == this || index == ((Piece)o).index);</span>
+        }
+    }
+
+    public TorrentInputStream(@NonNull TorrentSession session, @NonNull TorrentStream stream)
+<span class="nc" id="L98">    {</span>
+<span class="nc" id="L99">        this.session = session;</span>
+<span class="nc" id="L100">        this.stream = stream;</span>
+<span class="nc" id="L101">        TorrentDownload task = session.getTask(stream.torrentId);</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if (task == null)</span>
+<span class="nc" id="L103">            throw new NullPointerException(&quot;task &quot; + stream.torrentId + &quot; is null&quot;);</span>
+
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        int firstPieceSize = (stream.firstFilePiece == stream.lastFilePiece ?</span>
+<span class="nc" id="L106">                              stream.lastFilePieceSize :</span>
+<span class="nc" id="L107">                              stream.pieceLength);</span>
+<span class="nc" id="L108">        long firstPieceEnd = (long)stream.firstFilePiece * stream.pieceLength + firstPieceSize;</span>
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (stream.fileOffset &gt; firstPieceEnd)</span>
+<span class="nc" id="L111">            throw new IllegalArgumentException();</span>
+
+<span class="nc" id="L113">        filePos = firstPieceSize - (firstPieceEnd - stream.fileOffset);</span>
+<span class="nc" id="L114">        fileStart = filePos + 1;</span>
+<span class="nc" id="L115">        eof = filePos + stream.fileSize;</span>
+
+<span class="nc" id="L117">        session.addListener(listener);</span>
+<span class="nc" id="L118">        task.setInterestedPieces(stream, stream.firstFilePiece, 1);</span>
+<span class="nc" id="L119">    }</span>
+
+    @Override
+    protected void finalize() throws Throwable
+    {
+<span class="nc" id="L124">        synchronized (this) {</span>
+<span class="nc" id="L125">            stopped = true;</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (session != null)</span>
+<span class="nc" id="L127">                session.removeListener(listener);</span>
+<span class="nc" id="L128">            session = null;</span>
+<span class="nc" id="L129">            notifyAll();</span>
+<span class="nc" id="L130">        }</span>
+
+<span class="nc" id="L132">        super.finalize();</span>
+<span class="nc" id="L133">    }</span>
+
+    private synchronized boolean waitForPiece(TorrentDownload task, int pieceIndex)
+    {
+<span class="nc bnc" id="L137" title="All 4 branches missed.">        while (!Thread.currentThread().isInterrupted() &amp;&amp; !stopped) {</span>
+            try {
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                if (task.havePiece(pieceIndex))</span>
+<span class="nc" id="L140">                    return true;</span>
+<span class="nc" id="L141">                wait();</span>
+<span class="nc" id="L142">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L143">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L144">            }</span>
+        }
+
+<span class="nc" id="L147">        return false;</span>
+    }
+
+    private synchronized boolean waitForReadPieces()
+    {
+<span class="nc bnc" id="L152" title="All 4 branches missed.">        while (!Thread.currentThread().isInterrupted() &amp;&amp; !stopped) {</span>
+            try {
+<span class="nc bnc" id="L154" title="All 4 branches missed.">                if (readSession != null &amp;&amp; readSession.countLatch &lt;= 0)</span>
+<span class="nc" id="L155">                    return true;</span>
+<span class="nc" id="L156">                wait();</span>
+<span class="nc" id="L157">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L158">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L159">            }</span>
+        }
+
+<span class="nc" id="L162">        return false;</span>
+    }
+
+    /*
+     * Calculate global file offset to local offset inside piece
+     */
+
+    private int filePosToPiecePos(int piece, long pos)
+    {
+<span class="nc" id="L171">        int pieceLocalIndex = piece - stream.firstFilePiece;</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        int pieceSize = (piece == stream.lastFilePiece ?</span>
+<span class="nc" id="L173">                         stream.lastFilePieceSize :</span>
+<span class="nc" id="L174">                         stream.pieceLength);</span>
+<span class="nc" id="L175">        long pieceEnd = (long)pieceLocalIndex * stream.pieceLength + pieceSize;</span>
+
+<span class="nc" id="L177">        return pieceSize - (int)(pieceEnd - pos);</span>
+    }
+
+    private void readFromCache(Piece piece, byte[] b)
+    {
+<span class="nc" id="L182">        System.arraycopy(cacheBuf, piece.readOffset, b,</span>
+                         piece.bufIndex, piece.readLength);
+<span class="nc" id="L184">    }</span>
+
+    /*
+     * Returns byte as an int in the range 0 to 255
+     */
+
+    private int toUnsignedByte(byte b)
+    {
+<span class="nc" id="L192">        return 0x00 &lt;&lt; 24 | b &amp; 0xff;</span>
+    }
+
+    @Override
+    public int read() throws IOException
+    {
+<span class="nc" id="L198">        lock.lock();</span>
+
+        try {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (session == null)</span>
+<span class="nc" id="L202">                throw new IOException(&quot;Torrent session is null&quot;);</span>
+
+<span class="nc" id="L204">            TorrentDownload task = session.getTask(stream.torrentId);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">            if (task == null)</span>
+<span class="nc" id="L206">                throw new IOException(&quot;task &quot; + stream.torrentId + &quot; is null&quot;);</span>
+
+            /* EOF check */
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (filePos == eof) {</span>
+<span class="nc" id="L210">                cacheBuf = null;</span>
+<span class="nc" id="L211">                return EOF;</span>
+            }
+
+            /* Pieces definition that need to be read */
+<span class="nc" id="L215">            int p = stream.bytesToPieceIndex(filePos + 1);</span>
+
+<span class="nc" id="L217">            task.setInterestedPieces(stream, p, 1);</span>
+
+<span class="nc" id="L219">            readSession = new ReadSession();</span>
+<span class="nc" id="L220">            readSession.piecesForReading = new Piece[1];</span>
+<span class="nc" id="L221">            readSession.buf = new byte[1];</span>
+<span class="nc" id="L222">            readSession.countLatch = 1;</span>
+
+<span class="nc" id="L224">            Piece piece = new Piece(p);</span>
+<span class="nc" id="L225">            piece.readOffset = filePosToPiecePos(p, filePos);</span>
+<span class="nc" id="L226">            piece.readLength = 1;</span>
+<span class="nc" id="L227">            piece.bufIndex = 0;</span>
+
+            /* Check cache */
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (p == cachePieceIndex) {</span>
+<span class="nc" id="L231">                readFromCache(piece, readSession.buf);</span>
+<span class="nc" id="L232">                filePos++;</span>
+
+<span class="nc" id="L234">                return toUnsignedByte(readSession.buf[0]);</span>
+            }
+<span class="nc" id="L236">            piece.cache = true;</span>
+<span class="nc" id="L237">            readSession.piecesForReading[0] = piece;</span>
+
+<span class="nc bnc" id="L239" title="All 2 branches missed.">            if (!waitForPiece(task, p))</span>
+<span class="nc" id="L240">                return EOF;</span>
+            /* Async piece reading */
+<span class="nc" id="L242">            task.readPiece(p);</span>
+
+<span class="nc bnc" id="L244" title="All 2 branches missed.">            if (!waitForReadPieces())</span>
+<span class="nc" id="L245">                return EOF;</span>
+<span class="nc" id="L246">            filePos++;</span>
+
+<span class="nc" id="L248">            return toUnsignedByte(readSession.buf[0]);</span>
+
+        } finally {
+<span class="nc" id="L251">            readSession = null;</span>
+<span class="nc" id="L252">            lock.unlock();</span>
+        }
+    }
+
+    @Override
+    public int read(@NonNull byte[] b, int off, int len) throws IOException
+    {
+<span class="nc" id="L259">        lock.lock();</span>
+
+        try {
+<span class="nc bnc" id="L262" title="All 6 branches missed.">            if (off &lt; 0 || len &lt; 0 || len &gt; b.length - off)</span>
+<span class="nc" id="L263">                throw new IndexOutOfBoundsException();</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            else if (len == 0)</span>
+<span class="nc" id="L265">                return 0;</span>
+
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            if (session == null)</span>
+<span class="nc" id="L268">                throw new IOException(&quot;Torrent session is null&quot;);</span>
+
+<span class="nc" id="L270">            TorrentDownload task = session.getTask(stream.torrentId);</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            if (task == null)</span>
+<span class="nc" id="L272">                throw new IOException(&quot;Task &quot; + stream.torrentId + &quot; is null&quot;);</span>
+
+            /* EOF check */
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            if (filePos == eof) {</span>
+<span class="nc" id="L276">                cacheBuf = null;</span>
+<span class="nc" id="L277">                return EOF;</span>
+            }
+<span class="nc bnc" id="L279" title="All 2 branches missed.">            if (filePos + len &gt; eof)</span>
+<span class="nc" id="L280">                len = (int)(eof - filePos);</span>
+
+
+            /* Pieces definition that need to be read */
+<span class="nc" id="L284">            int firstPiece = stream.bytesToPieceIndex(filePos + 1);</span>
+<span class="nc" id="L285">            int lastPiece = stream.bytesToPieceIndex(filePos + len);</span>
+<span class="nc" id="L286">            int numPieces = lastPiece - firstPiece + 1;</span>
+
+<span class="nc" id="L288">            task.setInterestedPieces(stream, firstPiece, numPieces);</span>
+
+<span class="nc" id="L290">            readSession = new ReadSession();</span>
+<span class="nc" id="L291">            readSession.piecesForReading = new Piece[numPieces];</span>
+<span class="nc" id="L292">            readSession.buf = b;</span>
+<span class="nc" id="L293">            readSession.countLatch = numPieces;</span>
+
+<span class="nc" id="L295">            int bufIndex = off;</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            for (int p = firstPiece, i = 0; p &lt;= lastPiece; p++, i++) {</span>
+                int pieceSize;
+<span class="nc bnc" id="L298" title="All 2 branches missed.">                if (p == stream.lastFilePiece)</span>
+<span class="nc" id="L299">                    pieceSize = stream.lastFilePieceSize;</span>
+                else
+<span class="nc" id="L301">                    pieceSize = stream.pieceLength;</span>
+
+<span class="nc" id="L303">                Piece piece = new Piece(p);</span>
+<span class="nc" id="L304">                piece.bufIndex = bufIndex;</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                piece.cache = p == lastPiece;</span>
+
+<span class="nc bnc" id="L307" title="All 2 branches missed.">                if (p == firstPiece)</span>
+<span class="nc" id="L308">                    piece.readOffset = filePosToPiecePos(firstPiece, filePos);</span>
+                else
+<span class="nc" id="L310">                    piece.readOffset = 0;</span>
+
+<span class="nc bnc" id="L312" title="All 4 branches missed.">                if (p == lastPiece &amp;&amp; firstPiece != lastPiece) {</span>
+<span class="nc" id="L313">                    piece.readLength = filePosToPiecePos(lastPiece, filePos + len);</span>
+                } else {
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                    if (piece.readOffset + len &gt; pieceSize)</span>
+<span class="nc" id="L316">                        piece.readLength = pieceSize - piece.readOffset;</span>
+                    else
+<span class="nc" id="L318">                        piece.readLength = len;</span>
+                }
+<span class="nc" id="L320">                bufIndex += piece.readLength;</span>
+
+                /* Check cache */
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                if (p == cachePieceIndex) {</span>
+<span class="nc" id="L324">                    readFromCache(piece, b);</span>
+                    /* Exit if there are no other pieces except cached */
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                    if (numPieces == 1) {</span>
+<span class="nc" id="L327">                        filePos += len;</span>
+
+<span class="nc" id="L329">                        return len;</span>
+                    }
+                }
+
+<span class="nc" id="L333">                readSession.piecesForReading[i] = piece;</span>
+
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                if (!waitForPiece(task, p))</span>
+<span class="nc" id="L336">                    return EOF;</span>
+                /* Async pieces reading */
+<span class="nc" id="L338">                task.readPiece(p);</span>
+            }
+
+            /* Wait for pieces reading */
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            if (!waitForReadPieces())</span>
+<span class="nc" id="L343">                return EOF;</span>
+<span class="nc" id="L344">            filePos += len;</span>
+
+<span class="nc" id="L346">            return len;</span>
+
+        } finally {
+<span class="nc" id="L349">            readSession = null;</span>
+<span class="nc" id="L350">            lock.unlock();</span>
+        }
+    }
+
+    @Override
+    public int read(@NonNull byte[] b) throws IOException
+    {
+<span class="nc" id="L357">        return read(b, 0, b.length);</span>
+    }
+
+    @Override
+    public void close() throws IOException
+    {
+<span class="nc" id="L363">        synchronized (this) {</span>
+<span class="nc" id="L364">            stopped = true;</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if (session != null)</span>
+<span class="nc" id="L366">                session.removeListener(listener);</span>
+<span class="nc" id="L367">            session = null;</span>
+<span class="nc" id="L368">            notifyAll();</span>
+<span class="nc" id="L369">        }</span>
+
+<span class="nc" id="L371">        super.close();</span>
+<span class="nc" id="L372">    }</span>
+
+    @Override
+    public long skip(long n)
+    {
+<span class="nc" id="L377">        lock.lock();</span>
+
+        try {
+<span class="nc bnc" id="L380" title="All 2 branches missed.">            if (n &lt;= 0)</span>
+<span class="nc" id="L381">                return 0;</span>
+
+            /* EOF check */
+<span class="nc bnc" id="L384" title="All 2 branches missed.">            if (filePos == eof)</span>
+<span class="nc" id="L385">                return 0;</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            if (filePos + n &gt; eof)</span>
+<span class="nc" id="L387">                n = (int)(eof - filePos);</span>
+
+<span class="nc" id="L389">            filePos += n;</span>
+
+<span class="nc bnc" id="L391" title="All 2 branches missed.">            if (session != null) {</span>
+<span class="nc" id="L392">                TorrentDownload task = session.getTask(stream.torrentId);</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                if (task != null)</span>
+<span class="nc" id="L394">                    task.setInterestedPieces(stream, stream.bytesToPieceIndex(filePos + 1), 1);</span>
+            }
+
+<span class="nc" id="L397">            return n;</span>
+
+        } finally {
+<span class="nc" id="L400">            lock.unlock();</span>
+        }
+    }
+
+    @Override
+    public boolean markSupported()
+    {
+<span class="nc" id="L407">        return false;</span>
+    }
+
+<span class="nc" id="L410">    private TorrentEngineListener listener = new TorrentEngineListener()</span>
+<span class="nc" id="L411">    {</span>
+        @Override
+        public void onReadPiece(@NonNull String id, ReadPieceInfo info)
+        {
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            if (!stream.torrentId.equals(id))</span>
+<span class="nc" id="L416">                return;</span>
+
+<span class="nc" id="L418">            readPiece(info);</span>
+<span class="nc" id="L419">        }</span>
+
+        @Override
+        public void onPieceFinished(@NonNull String id, int piece)
+        {
+<span class="nc bnc" id="L424" title="All 2 branches missed.">            if (!stream.torrentId.equals(id))</span>
+<span class="nc" id="L425">                return;</span>
+
+<span class="nc" id="L427">            pieceFinished();</span>
+<span class="nc" id="L428">        }</span>
+    };
+
+    private synchronized void pieceFinished()
+    {
+<span class="nc" id="L433">        notifyAll();</span>
+<span class="nc" id="L434">    }</span>
+
+    private synchronized void readPiece(ReadPieceInfo info)
+    {
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (readSession == null)</span>
+<span class="nc" id="L439">            return;</span>
+
+<span class="nc" id="L441">        Piece piece = null;</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        for (Piece p : readSession.piecesForReading) {</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            if (p.index == info.piece) {</span>
+<span class="nc" id="L444">                piece = p;</span>
+<span class="nc" id="L445">                break;</span>
+            }
+        }
+<span class="nc bnc" id="L448" title="All 6 branches missed.">        if (readSession.countLatch &gt; 0 &amp;&amp; piece != null &amp;&amp; readSession.buf != null) {</span>
+            try {
+<span class="nc bnc" id="L450" title="All 2 branches missed.">                if (info.err != null) {</span>
+<span class="nc" id="L451">                    TorrentDownload task = session.getTask(stream.torrentId);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                    if (task != null)</span>
+<span class="nc" id="L453">                        task.resume();</span>
+<span class="nc" id="L454">                    return;</span>
+                }
+<span class="nc" id="L456">                Pointer ptr = new Pointer(info.bufferPtr);</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">                if (piece.cache) {</span>
+<span class="nc" id="L458">                    cacheBuf = new byte[info.size];</span>
+<span class="nc" id="L459">                    ptr.read(0, cacheBuf, 0, info.size);</span>
+<span class="nc" id="L460">                    cachePieceIndex = piece.index;</span>
+<span class="nc" id="L461">                    readFromCache(piece, readSession.buf);</span>
+                } else {
+<span class="nc" id="L463">                    ptr.read(piece.readOffset, readSession.buf, piece.bufIndex, piece.readLength);</span>
+                }
+            } finally {
+<span class="nc" id="L466">                --readSession.countLatch;</span>
+<span class="nc" id="L467">                notifyAll();</span>
+            }
+        }
+<span class="nc" id="L470">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

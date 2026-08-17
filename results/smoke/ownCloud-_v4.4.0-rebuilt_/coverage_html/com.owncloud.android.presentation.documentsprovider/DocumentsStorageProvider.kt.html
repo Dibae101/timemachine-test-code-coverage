@@ -1,0 +1,586 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentsStorageProvider.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ownCloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.presentation.documentsprovider</a> &gt; <span class="el_source">DocumentsStorageProvider.kt</span></div><h1>DocumentsStorageProvider.kt</h1><pre class="source lang-java linenums">/**
+ * ownCloud Android client application
+ *
+ * @author Bartosz Przybylski
+ * @author Christian Schabesberger
+ * @author David González Verdugo
+ * @author Abel García de Prada
+ * @author Shashvat Kedia
+ * @author Juan Carlos Garrote Gascón
+ *
+ * Copyright (C) 2015  Bartosz Przybylski
+ * Copyright (C) 2023 ownCloud GmbH.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2,
+ * as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.presentation.documentsprovider
+
+import android.content.res.AssetFileDescriptor
+import android.database.Cursor
+import android.database.MatrixCursor
+import android.graphics.Point
+import android.net.Uri
+import android.os.CancellationSignal
+import android.os.Handler
+import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
+import android.provider.DocumentsProvider
+import com.owncloud.android.MainApp
+import com.owncloud.android.R
+import com.owncloud.android.data.providers.SharedPreferencesProvider
+import com.owncloud.android.domain.UseCaseResult
+import com.owncloud.android.domain.capabilities.usecases.GetStoredCapabilitiesUseCase
+import com.owncloud.android.domain.exceptions.NoConnectionWithServerException
+import com.owncloud.android.domain.exceptions.validation.FileNameException
+import com.owncloud.android.domain.files.model.OCFile
+import com.owncloud.android.domain.files.model.OCFile.Companion.PATH_SEPARATOR
+import com.owncloud.android.domain.files.model.OCFile.Companion.ROOT_PATH
+import com.owncloud.android.domain.files.usecases.CopyFileUseCase
+import com.owncloud.android.domain.files.usecases.CreateFolderAsyncUseCase
+import com.owncloud.android.domain.files.usecases.GetFileByIdUseCase
+import com.owncloud.android.domain.files.usecases.GetFileByRemotePathUseCase
+import com.owncloud.android.domain.files.usecases.GetFolderContentUseCase
+import com.owncloud.android.domain.files.usecases.MoveFileUseCase
+import com.owncloud.android.domain.files.usecases.RemoveFileUseCase
+import com.owncloud.android.domain.files.usecases.RenameFileUseCase
+import com.owncloud.android.domain.spaces.usecases.GetPersonalAndProjectSpacesForAccountUseCase
+import com.owncloud.android.domain.spaces.usecases.RefreshSpacesFromServerAsyncUseCase
+import com.owncloud.android.presentation.authentication.AccountUtils
+import com.owncloud.android.presentation.documentsprovider.cursors.FileCursor
+import com.owncloud.android.presentation.documentsprovider.cursors.RootCursor
+import com.owncloud.android.presentation.documentsprovider.cursors.SpaceCursor
+import com.owncloud.android.presentation.settings.security.SettingsSecurityFragment.Companion.PREFERENCE_LOCK_ACCESS_FROM_DOCUMENT_PROVIDER
+import com.owncloud.android.usecases.synchronization.SynchronizeFileUseCase
+import com.owncloud.android.usecases.synchronization.SynchronizeFolderUseCase
+import com.owncloud.android.usecases.transfers.downloads.DownloadFileUseCase
+import com.owncloud.android.usecases.transfers.uploads.UploadFilesFromSystemUseCase
+import com.owncloud.android.utils.FileStorageUtils
+import com.owncloud.android.utils.NotificationUtils
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
+import timber.log.Timber
+import java.io.File
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.util.Vector
+
+<span class="fc" id="L80">class DocumentsStorageProvider : DocumentsProvider() {</span>
+    /**
+     * If a directory requires to sync, it will write the id of the directory into this variable.
+     * After the sync function gets triggered again over the same directory, it will see that a sync got already
+     * triggered, and does not need to be triggered again. This way a endless loop is prevented.
+     */
+<span class="fc" id="L86">    private var requestedFolderIdForSync: Long = -1</span>
+<span class="fc" id="L87">    private var syncRequired = true</span>
+
+<span class="fc" id="L89">    private var spacesSyncRequired = true</span>
+
+    private lateinit var fileToUpload: OCFile
+
+    override fun openDocument(
+        documentId: String,
+        mode: String,
+        signal: CancellationSignal?,
+    ): ParcelFileDescriptor? {
+<span class="nc" id="L98">        Timber.d(&quot;Trying to open $documentId in mode $mode&quot;)</span>
+
+        // If documentId == NONEXISTENT_DOCUMENT_ID only Upload is needed because file does not exist in our database yet.
+<span class="nc" id="L101">        var ocFile: OCFile</span>
+<span class="nc bnc" id="L102" title="All 4 branches missed.">        val uploadOnly: Boolean = documentId == NONEXISTENT_DOCUMENT_ID || documentId == &quot;null&quot;</span>
+
+<span class="nc" id="L104">        var accessMode: Int = ParcelFileDescriptor.parseMode(mode)</span>
+<span class="nc" id="L105">        val isWrite: Boolean = mode.contains(&quot;w&quot;)</span>
+
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (!uploadOnly) {</span>
+<span class="nc" id="L108">            ocFile = getFileByIdOrException(documentId.toInt())</span>
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            if (!ocFile.isAvailableLocally) {</span>
+<span class="nc" id="L111">                val downloadFileUseCase: DownloadFileUseCase by inject()</span>
+
+<span class="nc" id="L113">                downloadFileUseCase(DownloadFileUseCase.Params(accountName = ocFile.owner, file = ocFile))</span>
+
+                do {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                    if (!waitOrGetCancelled(signal)) {</span>
+<span class="nc" id="L117">                        return null</span>
+                    }
+<span class="nc" id="L119">                    ocFile = getFileByIdOrException(documentId.toInt())</span>
+
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                } while (!ocFile.isAvailableLocally)</span>
+            }
+        } else {
+<span class="nc" id="L124">            ocFile = fileToUpload</span>
+<span class="nc" id="L125">            accessMode = accessMode or ParcelFileDescriptor.MODE_CREATE</span>
+        }
+
+<span class="nc" id="L128">        val fileToOpen = File(ocFile.storagePath)</span>
+
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        if (!isWrite) return ParcelFileDescriptor.open(fileToOpen, accessMode)</span>
+
+<span class="nc" id="L132">        val handler = Handler(MainApp.appContext.mainLooper)</span>
+        // Attach a close listener if the document is opened in write mode.
+<span class="nc" id="L134">        try {</span>
+<span class="nc" id="L135">            return ParcelFileDescriptor.open(fileToOpen, accessMode, handler) {</span>
+                // Update the file with the cloud server. The client is done writing.
+<span class="nc" id="L137">                Timber.d(&quot;A file with id $documentId has been closed! Time to synchronize it with server.&quot;)</span>
+                // If only needs to upload that file
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                if (uploadOnly) {</span>
+<span class="nc" id="L140">                    ocFile.length = fileToOpen.length()</span>
+<span class="nc" id="L141">                    val uploadFilesUseCase: UploadFilesFromSystemUseCase by inject()</span>
+<span class="nc" id="L142">                    val uploadFilesUseCaseParams = UploadFilesFromSystemUseCase.Params(</span>
+<span class="nc" id="L143">                        accountName = ocFile.owner,</span>
+<span class="nc" id="L144">                        listOfLocalPaths = listOf(fileToOpen.path),</span>
+<span class="nc" id="L145">                        uploadFolderPath = ocFile.remotePath.substringBeforeLast(PATH_SEPARATOR).plus(PATH_SEPARATOR),</span>
+<span class="nc" id="L146">                        spaceId = ocFile.spaceId,</span>
+                    )
+<span class="nc" id="L148">                    CoroutineScope(Dispatchers.IO).launch {</span>
+<span class="nc" id="L149">                        uploadFilesUseCase(uploadFilesUseCaseParams)</span>
+<span class="nc" id="L150">                    }</span>
+                } else {
+<span class="nc" id="L152">                    Thread {</span>
+<span class="nc" id="L153">                        val synchronizeFileUseCase: SynchronizeFileUseCase by inject()</span>
+<span class="nc" id="L154">                        val result = synchronizeFileUseCase(</span>
+<span class="nc" id="L155">                            SynchronizeFileUseCase.Params(</span>
+<span class="nc" id="L156">                                fileToSynchronize = ocFile,</span>
+                            )
+                        )
+<span class="nc" id="L159">                        Timber.d(&quot;Synced ${ocFile.remotePath} from ${ocFile.owner} with result: $result&quot;)</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                        if (result.getDataOrNull() is SynchronizeFileUseCase.SyncType.ConflictDetected) {</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                            context?.let {</span>
+<span class="nc" id="L162">                                NotificationUtils.notifyConflict(</span>
+<span class="nc" id="L163">                                    fileInConflict = ocFile,</span>
+<span class="nc" id="L164">                                    account = AccountUtils.getOwnCloudAccountByName(it, ocFile.owner),</span>
+<span class="nc" id="L165">                                    context = it</span>
+                                )
+<span class="nc" id="L167">                            }</span>
+                        }
+<span class="nc" id="L169">                    }.start()</span>
+                }
+<span class="nc" id="L171">            }</span>
+<span class="nc" id="L172">        } catch (e: IOException) {</span>
+<span class="nc" id="L173">            throw FileNotFoundException(&quot;Failed to open document with id $documentId and mode $mode&quot;)</span>
+        }
+    }
+
+    override fun queryChildDocuments(
+        parentDocumentId: String,
+        projection: Array&lt;String&gt;?,
+        sortOrder: String?,
+    ): Cursor {
+<span class="nc" id="L182">        val resultCursor: MatrixCursor</span>
+
+<span class="nc" id="L184">        val folderId = try {</span>
+<span class="nc" id="L185">            parentDocumentId.toLong()</span>
+<span class="nc" id="L186">        } catch (numberFormatException: NumberFormatException) {</span>
+<span class="nc" id="L187">            null</span>
+        }
+
+        // Folder id is null, so at this point we need to list the spaces for the account.
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        if (folderId == null) {</span>
+<span class="nc" id="L192">            resultCursor = SpaceCursor(projection)</span>
+
+<span class="nc" id="L194">            val getPersonalAndProjectSpacesForAccountUseCase: GetPersonalAndProjectSpacesForAccountUseCase by inject()</span>
+<span class="nc" id="L195">            val getFileByRemotePathUseCase: GetFileByRemotePathUseCase by inject()</span>
+
+<span class="nc" id="L197">            getPersonalAndProjectSpacesForAccountUseCase(</span>
+<span class="nc" id="L198">                GetPersonalAndProjectSpacesForAccountUseCase.Params(</span>
+<span class="nc" id="L199">                    accountName = parentDocumentId,</span>
+                )
+<span class="nc" id="L201">            ).forEach { space -&gt;</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                if (!space.isDisabled) {</span>
+<span class="nc" id="L203">                    getFileByRemotePathUseCase(</span>
+<span class="nc" id="L204">                        GetFileByRemotePathUseCase.Params(</span>
+<span class="nc" id="L205">                            owner = space.accountName,</span>
+<span class="nc" id="L206">                            remotePath = ROOT_PATH,</span>
+<span class="nc" id="L207">                            spaceId = space.id,</span>
+                        )
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                    ).getDataOrNull()?.let { rootFolder -&gt;</span>
+<span class="nc" id="L210">                        resultCursor.addSpace(space, rootFolder, context)</span>
+<span class="nc" id="L211">                    }</span>
+                }
+<span class="nc" id="L213">            }</span>
+
+            /**
+             * This will start syncing the spaces. User will only see this after updating his view with a
+             * pull down, or by accessing the spaces folder.
+             */
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (spacesSyncRequired) {</span>
+<span class="nc" id="L220">                syncSpacesWithServer(parentDocumentId)</span>
+<span class="nc" id="L221">                resultCursor.setMoreToSync(true)</span>
+            }
+
+<span class="nc" id="L224">            spacesSyncRequired = true</span>
+        } else {
+            // Folder id is not null, so this is a regular folder
+<span class="nc" id="L227">            resultCursor = FileCursor(projection)</span>
+
+            // Create result cursor before syncing folder again, in order to enable faster loading
+<span class="nc" id="L230">            getFolderContent(folderId.toInt()).forEach { file -&gt; resultCursor.addFile(file) }</span>
+
+            /**
+             * This will start syncing the current folder. User will only see this after updating his view with a
+             * pull down, or by accessing the folder again.
+             */
+<span class="nc bnc" id="L236" title="All 4 branches missed.">            if (requestedFolderIdForSync != folderId &amp;&amp; syncRequired) {</span>
+                // register for sync
+<span class="nc" id="L238">                syncDirectoryWithServer(parentDocumentId)</span>
+<span class="nc" id="L239">                requestedFolderIdForSync = folderId</span>
+<span class="nc" id="L240">                resultCursor.setMoreToSync(true)</span>
+            } else {
+<span class="nc" id="L242">                requestedFolderIdForSync = -1</span>
+            }
+
+<span class="nc" id="L245">            syncRequired = true</span>
+        }
+
+        // Create notification listener
+<span class="nc" id="L249">        val notifyUri: Uri = toNotifyUri(toUri(parentDocumentId))</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        resultCursor.setNotificationUri(context?.contentResolver, notifyUri)</span>
+
+<span class="nc" id="L252">        return resultCursor</span>
+
+    }
+
+    override fun queryDocument(documentId: String, projection: Array&lt;String&gt;?): Cursor {
+<span class="nc" id="L257">        Timber.d(&quot;Query Document: $documentId&quot;)</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        if (documentId == NONEXISTENT_DOCUMENT_ID) return FileCursor(projection).apply {</span>
+<span class="nc" id="L259">            addFile(fileToUpload)</span>
+<span class="nc" id="L260">        }</span>
+
+<span class="nc" id="L262">        val fileId = try {</span>
+<span class="nc" id="L263">            documentId.toInt()</span>
+<span class="nc" id="L264">        } catch (numberFormatException: NumberFormatException) {</span>
+<span class="nc" id="L265">            null</span>
+        }
+
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        return if (fileId != null) {</span>
+            // file id is not null, this is a regular file.
+<span class="nc" id="L270">            FileCursor(projection).apply {</span>
+<span class="nc" id="L271">                addFile(getFileByIdOrException(fileId))</span>
+<span class="nc" id="L272">            }</span>
+        } else {
+            // file id is null, so at this point this is the root folder for spaces supported account.
+<span class="nc" id="L275">            SpaceCursor(projection).apply {</span>
+<span class="nc" id="L276">                addRootForSpaces(context = context, accountName = documentId)</span>
+<span class="nc" id="L277">            }</span>
+        }
+    }
+
+<span class="fc" id="L281">    override fun onCreate(): Boolean = true</span>
+
+    override fun queryRoots(projection: Array&lt;String&gt;?): Cursor {
+<span class="fc" id="L284">        val result = RootCursor(projection)</span>
+<span class="pc bpc" id="L285" title="1 of 2 branches missed.">        val contextApp = context ?: return result</span>
+<span class="fc" id="L286">        val accounts = AccountUtils.getAccounts(contextApp)</span>
+
+        // If access from document provider is not allowed, return empty cursor
+<span class="fc" id="L289">        val preferences: SharedPreferencesProvider by inject()</span>
+<span class="fc" id="L290">        val lockAccessFromDocumentProvider = preferences.getBoolean(PREFERENCE_LOCK_ACCESS_FROM_DOCUMENT_PROVIDER, false)</span>
+<span class="pc bpc" id="L291" title="7 of 8 branches missed.">        if (lockAccessFromDocumentProvider &amp;&amp; accounts.isNotEmpty()) {</span>
+<span class="nc" id="L292">            return result.apply { addProtectedRoot(contextApp) }</span>
+        }
+
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">        for (account in accounts) {</span>
+<span class="nc" id="L296">            val getStoredCapabilitiesUseCase: GetStoredCapabilitiesUseCase by inject()</span>
+<span class="nc" id="L297">            val capabilities = getStoredCapabilitiesUseCase(</span>
+<span class="nc" id="L298">                GetStoredCapabilitiesUseCase.Params(</span>
+<span class="nc" id="L299">                    accountName = account.name</span>
+                )
+            )
+<span class="nc" id="L302">            val spacesFeatureAllowedForAccount = AccountUtils.isSpacesFeatureAllowedForAccount(contextApp, account, capabilities)</span>
+
+<span class="nc" id="L304">            result.addRoot(account, contextApp, spacesFeatureAllowedForAccount)</span>
+        }
+<span class="fc" id="L306">        return result</span>
+    }
+
+    override fun openDocumentThumbnail(
+        documentId: String,
+        sizeHint: Point?,
+        signal: CancellationSignal?
+    ): AssetFileDescriptor {
+        // TODO: Show thumbnail for spaces
+<span class="nc" id="L315">        val file = getFileByIdOrException(documentId.toInt())</span>
+
+<span class="nc" id="L317">        val realFile = File(file.storagePath)</span>
+
+<span class="nc" id="L319">        return AssetFileDescriptor(</span>
+<span class="nc" id="L320">            ParcelFileDescriptor.open(realFile, ParcelFileDescriptor.MODE_READ_ONLY), 0, AssetFileDescriptor.UNKNOWN_LENGTH</span>
+        )
+    }
+
+    override fun querySearchDocuments(
+        rootId: String,
+        query: String,
+        projection: Array&lt;String&gt;?
+    ): Cursor {
+<span class="nc" id="L329">        val result = FileCursor(projection)</span>
+
+<span class="nc" id="L331">        val root = getFileByPathOrException(ROOT_PATH, AccountUtils.getCurrentOwnCloudAccount(context).name)</span>
+
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        for (f in findFiles(root, query)) {</span>
+<span class="nc" id="L334">            result.addFile(f)</span>
+        }
+
+<span class="nc" id="L337">        return result</span>
+    }
+
+    override fun createDocument(
+        parentDocumentId: String,
+        mimeType: String,
+        displayName: String,
+    ): String {
+<span class="nc" id="L345">        Timber.d(&quot;Create Document ParentID $parentDocumentId Type $mimeType DisplayName $displayName&quot;)</span>
+<span class="nc" id="L346">        val parentDocument = getFileByIdOrException(parentDocumentId.toInt())</span>
+
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        return if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {</span>
+<span class="nc" id="L349">            createFolder(parentDocument, displayName)</span>
+        } else {
+<span class="nc" id="L351">            createFile(parentDocument, mimeType, displayName)</span>
+        }
+    }
+
+    override fun renameDocument(documentId: String, displayName: String): String? {
+<span class="nc" id="L356">        Timber.d(&quot;Trying to rename $documentId to $displayName&quot;)</span>
+
+<span class="nc" id="L358">        val file = getFileByIdOrException(documentId.toInt())</span>
+
+<span class="nc" id="L360">        val renameFileUseCase: RenameFileUseCase by inject()</span>
+<span class="nc" id="L361">        renameFileUseCase(RenameFileUseCase.Params(file, displayName)).also {</span>
+<span class="nc" id="L362">            checkUseCaseResult(</span>
+<span class="nc" id="L363">                it, file.parentId.toString()</span>
+            )
+<span class="nc" id="L365">        }</span>
+
+<span class="nc" id="L367">        return null</span>
+    }
+
+    override fun deleteDocument(documentId: String) {
+<span class="nc" id="L371">        Timber.d(&quot;Trying to delete $documentId&quot;)</span>
+<span class="nc" id="L372">        val file = getFileByIdOrException(documentId.toInt())</span>
+
+<span class="nc" id="L374">        val removeFileUseCase: RemoveFileUseCase by inject()</span>
+<span class="nc" id="L375">        removeFileUseCase(RemoveFileUseCase.Params(listOf(file), false)).also {</span>
+<span class="nc" id="L376">            checkUseCaseResult(</span>
+<span class="nc" id="L377">                it, file.parentId.toString()</span>
+            )
+<span class="nc" id="L379">        }</span>
+<span class="nc" id="L380">    }</span>
+
+    override fun copyDocument(sourceDocumentId: String, targetParentDocumentId: String): String {
+<span class="nc" id="L383">        Timber.d(&quot;Trying to copy $sourceDocumentId to $targetParentDocumentId&quot;)</span>
+
+<span class="nc" id="L385">        val sourceFile = getFileByIdOrException(sourceDocumentId.toInt())</span>
+<span class="nc" id="L386">        val targetParentFile = getFileByIdOrException(targetParentDocumentId.toInt())</span>
+
+<span class="nc" id="L388">        val copyFileUseCase: CopyFileUseCase by inject()</span>
+
+<span class="nc" id="L390">        copyFileUseCase(</span>
+<span class="nc" id="L391">            CopyFileUseCase.Params(</span>
+<span class="nc" id="L392">                listOfFilesToCopy = listOf(sourceFile),</span>
+<span class="nc" id="L393">                targetFolder = targetParentFile,</span>
+<span class="nc" id="L394">                replace = listOf(false),</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                isUserLogged = AccountUtils.getCurrentOwnCloudAccount(context) != null,</span>
+            )
+<span class="nc" id="L397">        ).also { result -&gt;</span>
+<span class="nc" id="L398">            syncRequired = false</span>
+<span class="nc" id="L399">            checkUseCaseResult(result, targetParentFile.id.toString())</span>
+            // Returns the document id of the document copied at the target destination
+<span class="nc" id="L401">            var newPath = targetParentFile.remotePath + sourceFile.fileName</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            if (sourceFile.isFolder) newPath += File.separator</span>
+<span class="nc" id="L403">            val newFile = getFileByPathOrException(newPath, targetParentFile.owner)</span>
+<span class="nc" id="L404">            return newFile.id.toString()</span>
+        }
+    }
+
+    override fun moveDocument(
+        sourceDocumentId: String,
+        sourceParentDocumentId: String,
+        targetParentDocumentId: String,
+    ): String {
+<span class="nc" id="L413">        Timber.d(&quot;Trying to move $sourceDocumentId to $targetParentDocumentId&quot;)</span>
+
+<span class="nc" id="L415">        val sourceFile = getFileByIdOrException(sourceDocumentId.toInt())</span>
+<span class="nc" id="L416">        val targetParentFile = getFileByIdOrException(targetParentDocumentId.toInt())</span>
+
+<span class="nc" id="L418">        val moveFileUseCase: MoveFileUseCase by inject()</span>
+
+<span class="nc" id="L420">        moveFileUseCase(</span>
+<span class="nc" id="L421">            MoveFileUseCase.Params(</span>
+<span class="nc" id="L422">                listOfFilesToMove = listOf(sourceFile),</span>
+<span class="nc" id="L423">                targetFolder = targetParentFile,</span>
+<span class="nc" id="L424">                replace = listOf(false),</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                isUserLogged = AccountUtils.getCurrentOwnCloudAccount(context) != null,</span>
+            )
+<span class="nc" id="L427">        ).also { result -&gt;</span>
+<span class="nc" id="L428">            syncRequired = false</span>
+<span class="nc" id="L429">            checkUseCaseResult(result, targetParentFile.id.toString())</span>
+            // Returns the document id of the document moved to the target destination
+<span class="nc" id="L431">            var newPath = targetParentFile.remotePath + sourceFile.fileName</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (sourceFile.isFolder) newPath += File.separator</span>
+<span class="nc" id="L433">            val newFile = getFileByPathOrException(newPath, targetParentFile.owner)</span>
+<span class="nc" id="L434">            return newFile.id.toString()</span>
+        }
+    }
+
+    private fun checkUseCaseResult(result: UseCaseResult&lt;Any&gt;, folderToNotify: String) {
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        if (!result.isSuccess) {</span>
+<span class="nc" id="L440">            Timber.e(result.getThrowableOrNull()!!)</span>
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            if (result.getThrowableOrNull() is FileNameException) {</span>
+<span class="nc" id="L442">                throw UnsupportedOperationException(&quot;Operation contains at least one invalid character&quot;)</span>
+            }
+<span class="nc bnc" id="L444" title="All 2 branches missed.">            if (result.getThrowableOrNull() !is NoConnectionWithServerException) {</span>
+<span class="nc" id="L445">                notifyChangeInFolder(folderToNotify)</span>
+            }
+<span class="nc" id="L447">            throw FileNotFoundException(&quot;Remote Operation failed&quot;)</span>
+        }
+<span class="nc" id="L449">        syncRequired = false</span>
+<span class="nc" id="L450">        notifyChangeInFolder(folderToNotify)</span>
+<span class="nc" id="L451">    }</span>
+
+    private fun createFolder(parentDocument: OCFile, displayName: String): String {
+<span class="nc" id="L454">        Timber.d(&quot;Trying to create a new folder with name $displayName and parent ${parentDocument.remotePath}&quot;)</span>
+
+<span class="nc" id="L456">        val createFolderAsyncUseCase: CreateFolderAsyncUseCase by inject()</span>
+
+<span class="nc" id="L458">        createFolderAsyncUseCase(CreateFolderAsyncUseCase.Params(displayName, parentDocument)).run {</span>
+<span class="nc" id="L459">            checkUseCaseResult(this, parentDocument.id.toString())</span>
+<span class="nc" id="L460">            val newPath = parentDocument.remotePath + displayName + File.separator</span>
+<span class="nc" id="L461">            val newFolder = getFileByPathOrException(newPath, parentDocument.owner, parentDocument.spaceId)</span>
+<span class="nc" id="L462">            return newFolder.id.toString()</span>
+        }
+    }
+
+    private fun createFile(
+        parentDocument: OCFile,
+        mimeType: String,
+        displayName: String,
+    ): String {
+        // We just need to return a Document ID, so we'll return an empty one. File does not exist in our db yet.
+        // File will be created at [openDocument] method.
+<span class="nc" id="L473">        val tempDir = File(FileStorageUtils.getTemporalPath(parentDocument.owner, parentDocument.spaceId))</span>
+<span class="nc" id="L474">        val newFile = File(tempDir, displayName)</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        newFile.parentFile?.mkdirs()</span>
+<span class="nc" id="L476">        fileToUpload = OCFile(</span>
+<span class="nc" id="L477">            remotePath = parentDocument.remotePath + displayName,</span>
+<span class="nc" id="L478">            mimeType = mimeType,</span>
+<span class="nc" id="L479">            parentId = parentDocument.id,</span>
+<span class="nc" id="L480">            owner = parentDocument.owner,</span>
+<span class="nc" id="L481">            spaceId = parentDocument.spaceId</span>
+<span class="nc" id="L482">        ).apply {</span>
+<span class="nc" id="L483">            storagePath = newFile.path</span>
+<span class="nc" id="L484">        }</span>
+
+<span class="nc" id="L486">        return NONEXISTENT_DOCUMENT_ID</span>
+    }
+
+    private fun syncDirectoryWithServer(parentDocumentId: String) {
+<span class="nc" id="L490">        Timber.d(&quot;Trying to sync $parentDocumentId with server&quot;)</span>
+<span class="nc" id="L491">        val folderToSync = getFileByIdOrException(parentDocumentId.toInt())</span>
+
+<span class="nc" id="L493">        val synchronizeFolderUseCase: SynchronizeFolderUseCase by inject()</span>
+<span class="nc" id="L494">        val synchronizeFolderUseCaseParams = SynchronizeFolderUseCase.Params(</span>
+<span class="nc" id="L495">            remotePath = folderToSync.remotePath,</span>
+<span class="nc" id="L496">            accountName = folderToSync.owner,</span>
+<span class="nc" id="L497">            spaceId = folderToSync.spaceId,</span>
+<span class="nc" id="L498">            syncMode = SynchronizeFolderUseCase.SyncFolderMode.REFRESH_FOLDER,</span>
+        )
+
+<span class="nc" id="L501">        CoroutineScope(Dispatchers.IO).launch {</span>
+<span class="nc" id="L502">            val useCaseResult = synchronizeFolderUseCase(synchronizeFolderUseCaseParams)</span>
+<span class="nc" id="L503">            Timber.d(&quot;${folderToSync.remotePath} from ${folderToSync.owner} was synced with server with result: $useCaseResult&quot;)</span>
+
+<span class="nc bnc" id="L505" title="All 2 branches missed.">            if (useCaseResult.isSuccess) {</span>
+<span class="nc" id="L506">                notifyChangeInFolder(parentDocumentId)</span>
+            }
+<span class="nc" id="L508">        }</span>
+<span class="nc" id="L509">    }</span>
+
+    private fun syncSpacesWithServer(parentDocumentId: String) {
+<span class="nc" id="L512">        Timber.d(&quot;Trying to sync spaces from account $parentDocumentId with server&quot;)</span>
+
+<span class="nc" id="L514">        val refreshSpacesFromServerAsyncUseCase: RefreshSpacesFromServerAsyncUseCase by inject()</span>
+<span class="nc" id="L515">        val refreshSpacesFromServerAsyncUseCaseParams = RefreshSpacesFromServerAsyncUseCase.Params(</span>
+<span class="nc" id="L516">            accountName = parentDocumentId,</span>
+        )
+
+<span class="nc" id="L519">        CoroutineScope(Dispatchers.IO).launch {</span>
+<span class="nc" id="L520">            val useCaseResult = refreshSpacesFromServerAsyncUseCase(refreshSpacesFromServerAsyncUseCaseParams)</span>
+<span class="nc" id="L521">            Timber.d(&quot;Spaces from account were synced with server with result: $useCaseResult&quot;)</span>
+
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            if (useCaseResult.isSuccess) {</span>
+<span class="nc" id="L524">                notifyChangeInFolder(parentDocumentId)</span>
+            }
+<span class="nc" id="L526">            spacesSyncRequired = false</span>
+<span class="nc" id="L527">        }</span>
+<span class="nc" id="L528">    }</span>
+
+    private fun waitOrGetCancelled(cancellationSignal: CancellationSignal?): Boolean {
+<span class="nc" id="L531">        try {</span>
+<span class="nc" id="L532">            Thread.sleep(1000)</span>
+<span class="nc" id="L533">        } catch (e: InterruptedException) {</span>
+<span class="nc" id="L534">            return false</span>
+        }
+
+<span class="nc bnc" id="L537" title="All 4 branches missed.">        return cancellationSignal == null || !cancellationSignal.isCanceled</span>
+    }
+
+    private fun findFiles(root: OCFile, query: String): Vector&lt;OCFile&gt; {
+<span class="nc" id="L541">        val result = Vector&lt;OCFile&gt;()</span>
+
+<span class="nc" id="L543">        val folderContent = getFolderContent(root.id!!.toInt())</span>
+<span class="nc" id="L544">        folderContent.forEach {</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">            if (it.fileName.contains(query)) {</span>
+<span class="nc" id="L546">                result.add(it)</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                if (it.isFolder) result.addAll(findFiles(it, query))</span>
+            }
+<span class="nc" id="L549">        }</span>
+<span class="nc" id="L550">        return result</span>
+    }
+
+    private fun notifyChangeInFolder(folderToNotify: String) {
+<span class="nc bnc" id="L554" title="All 4 branches missed.">        context?.contentResolver?.notifyChange(toNotifyUri(toUri(folderToNotify)), null)</span>
+<span class="nc" id="L555">    }</span>
+
+<span class="nc" id="L557">    private fun toNotifyUri(uri: Uri): Uri = DocumentsContract.buildDocumentUri(</span>
+<span class="nc bnc" id="L558" title="All 4 branches missed.">        context?.resources?.getString(R.string.document_provider_authority), uri.toString()</span>
+<span class="nc" id="L559">    )</span>
+
+<span class="nc" id="L561">    private fun toUri(documentId: String): Uri = Uri.parse(documentId)</span>
+
+    private fun getFileByIdOrException(id: Int): OCFile {
+<span class="nc" id="L564">        val getFileByIdUseCase: GetFileByIdUseCase by inject()</span>
+<span class="nc" id="L565">        val result = getFileByIdUseCase(GetFileByIdUseCase.Params(id.toLong()))</span>
+<span class="nc bnc" id="L566" title="All 2 branches missed.">        return result.getDataOrNull() ?: throw FileNotFoundException(&quot;File $id not found&quot;)</span>
+    }
+
+<span class="nc" id="L569">    private fun getFileByPathOrException(remotePath: String, accountName: String, spaceId: String? = null): OCFile {</span>
+<span class="nc" id="L570">        val getFileByRemotePathUseCase: GetFileByRemotePathUseCase by inject()</span>
+<span class="nc" id="L571">        val result =</span>
+<span class="nc" id="L572">            getFileByRemotePathUseCase(GetFileByRemotePathUseCase.Params(owner = accountName, remotePath = remotePath, spaceId = spaceId))</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        return result.getDataOrNull() ?: throw FileNotFoundException(&quot;File $remotePath not found&quot;)</span>
+    }
+
+    private fun getFolderContent(id: Int): List&lt;OCFile&gt; {
+<span class="nc" id="L577">        val getFolderContentUseCase: GetFolderContentUseCase by inject()</span>
+<span class="nc" id="L578">        val result = getFolderContentUseCase(GetFolderContentUseCase.Params(id.toLong()))</span>
+<span class="nc bnc" id="L579" title="All 2 branches missed.">        return result.getDataOrNull() ?: throw FileNotFoundException(&quot;Folder $id not found&quot;)</span>
+    }
+
+    companion object {
+        const val NONEXISTENT_DOCUMENT_ID = &quot;-1&quot;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

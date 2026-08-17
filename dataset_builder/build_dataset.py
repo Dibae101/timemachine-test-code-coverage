@@ -556,9 +556,12 @@ def build_subject(subject, status_rows):
         # being too new for JDK 8. Six subjects failed on exactly that.
         ladder = [j for j in ("11", "17", "8") if j != str(jdk)]
         for other in ladder:
+            # Gradle 8 with AGP 8 needs JDK 17: retrying it on 8 or 11 cannot
+            # succeed, wastes a build each, and buries the real error at the end
+            # of the log, which is how GPSLogger's true failure was masked.
             runnable = (
-                (other == "8" and (gv is None or gv <= 8)) or
-                (other == "11" and (gv is None or gv >= 5)) or
+                (other == "8" and (gv is None or gv <= 6)) or
+                (other == "11" and (gv is None or gv <= 7)) or
                 (other == "17" and (gv is None or gv >= 6))
             )
             if not runnable:
