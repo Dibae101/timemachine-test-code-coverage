@@ -38,6 +38,9 @@ The Themis branches already carry the Jacoco harness. The other 26 do not, so
 ## Running it
 
 ```bash
+# stage only the app directories that are complete datasets
+python3 publish.py
+
 # one pass over the Themis/DDroid subjects
 python3 build_dataset.py
 
@@ -123,3 +126,13 @@ Note before pushing: LFS storage on the free GitHub tier is 1 GB. The APK set is
 several hundred MB, so check the account's LFS quota, or keep APKs out of the
 repository and publish them alongside a manifest of SHA-256 sums, which is what
 the research repo already does.
+
+**Always stage with `publish.py`, never with `git add instrumented_apps`.** A
+subject that has been cloned but not yet built still contains its own `.git`, and
+git then records a gitlink instead of the files: the directory renders on GitHub
+as a submodule that cannot be opened, and none of its contents are uploaded. This
+happened once and cost a follow-up commit to undo. `publish.py` stages only apps
+whose entries validate in `MANIFEST.tsv`, strips stray `.git` directories first,
+and removes any gitlink a previous `git add` recorded. The builder now also
+deletes a checkout's `.git` immediately after cloning, so the situation cannot
+recur.
