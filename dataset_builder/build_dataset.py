@@ -333,7 +333,8 @@ def wrapper_gradle_major(tree):
     return int(m.group(1)) if m else None
 
 
-JDKS = {"8": JDK8, "11": "/usr/lib/jvm/java-11-openjdk-amd64", "17": JDK17}
+JDKS = {"8": JDK8, "11": "/usr/lib/jvm/java-11-openjdk-amd64", "17": JDK17,
+        "21": "/usr/lib/jvm/java-21-openjdk-amd64"}
 
 
 def gradle_env(jdk):
@@ -515,6 +516,14 @@ def build_subject(subject, status_rows):
             return row
     log("  %s: cloned %s" % (name, subject["ref"]))
 
+    # Some projects read local.properties during configuration and fail outright
+    # when it is absent, since it is gitignored and never checked in. Muzei fails
+    # evaluating :legacy-standalone with a FileNotFoundException for it.
+    local_props = os.path.join(tree, "local.properties")
+    if not os.path.isfile(local_props):
+        with open(local_props, "w") as fh:
+            fh.write("sdk.dir=%s\n" % SDK)
+
     # ---- instrument (upstream checkouts carry no harness; Themis branches do)
     if not already_instrumented(tree):
         if subject.get("instrument"):
@@ -554,7 +563,10 @@ def build_subject(subject, status_rows):
         # JDK 11 matters on its own: a Gradle 7 project with an older Kotlin
         # plugin rejects JDK 17 ("Unsupported class file major version") while
         # being too new for JDK 8. Six subjects failed on exactly that.
-        ladder = [j for j in ("11", "17", "8") if j != str(jdk)]
+        # JDK 21 is in the ladder because some 2024-2025 projects request a 21
+        # toolchain outright: Wallabag failed with "Cannot find a Java
+        # installation ... languageVersion=21" until it was installed.
+        ladder = [j for j in ("17", "21", "11", "8") if j != str(jdk)]
         for other in ladder:
             # Gradle 8 with AGP 8 needs JDK 17: retrying it on 8 or 11 cannot
             # succeed, wastes a build each, and buries the real error at the end
@@ -562,7 +574,8 @@ def build_subject(subject, status_rows):
             runnable = (
                 (other == "8" and (gv is None or gv <= 6)) or
                 (other == "11" and (gv is None or gv <= 7)) or
-                (other == "17" and (gv is None or gv >= 6))
+                (other == "17" and (gv is None or gv >= 6)) or
+                (other == "21" and (gv is None or gv >= 8))
             )
             if not runnable:
                 log("  %s: skipping JDK %s (gradle %s cannot run on it)"

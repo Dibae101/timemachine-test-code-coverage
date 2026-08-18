@@ -1,0 +1,473 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OfflineChangesSynchronizer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wallabag</a> &gt; <a href="index.source.html" class="el_package">fr.gaulupeau.apps.Poche.service.workers</a> &gt; <span class="el_source">OfflineChangesSynchronizer.java</span></div><h1>OfflineChangesSynchronizer.java</h1><pre class="source lang-java linenums">package fr.gaulupeau.apps.Poche.service.workers;
+
+import android.content.Context;
+import android.text.TextUtils;
+import android.util.Log;
+import android.util.Pair;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+
+import fr.gaulupeau.apps.Poche.data.DbUtils;
+import fr.gaulupeau.apps.Poche.data.QueueHelper;
+import fr.gaulupeau.apps.Poche.data.dao.AnnotationDao;
+import fr.gaulupeau.apps.Poche.data.dao.ArticleDao;
+import fr.gaulupeau.apps.Poche.data.dao.ArticleTagsJoinDao;
+import fr.gaulupeau.apps.Poche.data.dao.DaoSession;
+import fr.gaulupeau.apps.Poche.data.dao.entities.AddLinkItem;
+import fr.gaulupeau.apps.Poche.data.dao.entities.AddOrUpdateAnnotationItem;
+import fr.gaulupeau.apps.Poche.data.dao.entities.Annotation;
+import fr.gaulupeau.apps.Poche.data.dao.entities.AnnotationRange;
+import fr.gaulupeau.apps.Poche.data.dao.entities.Article;
+import fr.gaulupeau.apps.Poche.data.dao.entities.ArticleChangeItem;
+import fr.gaulupeau.apps.Poche.data.dao.entities.ArticleTagsDeleteItem;
+import fr.gaulupeau.apps.Poche.data.dao.entities.ArticleTagsJoin;
+import fr.gaulupeau.apps.Poche.data.dao.entities.DeleteAnnotationItem;
+import fr.gaulupeau.apps.Poche.data.dao.entities.QueueItem;
+import fr.gaulupeau.apps.Poche.data.dao.entities.Tag;
+import fr.gaulupeau.apps.Poche.events.ArticlesChangedEvent;
+import fr.gaulupeau.apps.Poche.events.LocalArticleReplacedEvent;
+import fr.gaulupeau.apps.Poche.events.OfflineQueueChangedEvent;
+import fr.gaulupeau.apps.Poche.events.SyncQueueFinishedEvent;
+import fr.gaulupeau.apps.Poche.events.SyncQueueProgressEvent;
+import fr.gaulupeau.apps.Poche.events.SyncQueueStartedEvent;
+import fr.gaulupeau.apps.Poche.network.WallabagConnection;
+import fr.gaulupeau.apps.Poche.network.exceptions.IncorrectConfigurationException;
+import fr.gaulupeau.apps.Poche.service.ActionRequest;
+import fr.gaulupeau.apps.Poche.service.ActionResult;
+import wallabag.apiwrapper.AddArticleBuilder;
+import wallabag.apiwrapper.ModifyArticleBuilder;
+import wallabag.apiwrapper.WallabagService;
+import wallabag.apiwrapper.exceptions.UnsuccessfulResponseException;
+
+import static fr.gaulupeau.apps.Poche.events.EventHelper.postEvent;
+import static fr.gaulupeau.apps.Poche.events.EventHelper.postStickyEvent;
+import static fr.gaulupeau.apps.Poche.events.EventHelper.removeStickyEvent;
+
+public class OfflineChangesSynchronizer extends BaseNetworkWorker {
+
+<span class="nc" id="L52">    private static final String TAG = OfflineChangesSynchronizer.class.getSimpleName();</span>
+
+    public OfflineChangesSynchronizer(Context context) {
+<span class="nc" id="L55">        super(context);</span>
+<span class="nc" id="L56">    }</span>
+
+    public ActionResult synchronize(ActionRequest actionRequest) {
+<span class="nc" id="L59">        Log.d(TAG, &quot;synchronizeOfflineChanges() started&quot;);</span>
+
+<span class="nc" id="L61">        ActionResult result = null;</span>
+
+<span class="nc" id="L63">        SyncQueueStartedEvent startEvent = new SyncQueueStartedEvent(actionRequest);</span>
+<span class="nc" id="L64">        postStickyEvent(startEvent);</span>
+
+<span class="nc" id="L66">        Pair&lt;ActionResult, Long&gt; syncResult = null;</span>
+        try {
+<span class="nc" id="L68">            syncResult = syncOfflineQueue(actionRequest);</span>
+<span class="nc" id="L69">            result = syncResult.first;</span>
+        } finally {
+<span class="nc" id="L71">            removeStickyEvent(startEvent);</span>
+
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            if (result == null) result = new ActionResult(ActionResult.ErrorType.UNKNOWN);</span>
+<span class="nc" id="L74">            postEvent(new SyncQueueFinishedEvent(actionRequest, result,</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">                    syncResult != null ? syncResult.second : null));</span>
+        }
+
+<span class="nc" id="L78">        Log.d(TAG, &quot;synchronizeOfflineChanges() finished&quot;);</span>
+<span class="nc" id="L79">        return result;</span>
+    }
+
+    private Pair&lt;ActionResult, Long&gt; syncOfflineQueue(ActionRequest actionRequest) {
+<span class="nc" id="L83">        Log.d(TAG, &quot;syncOfflineQueue() started&quot;);</span>
+
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (!WallabagConnection.isNetworkAvailable()) {</span>
+<span class="nc" id="L86">            Log.i(TAG, &quot;syncOfflineQueue() not on-line; exiting&quot;);</span>
+<span class="nc" id="L87">            return new Pair&lt;&gt;(new ActionResult(ActionResult.ErrorType.NO_NETWORK), null);</span>
+        }
+
+<span class="nc" id="L90">        ActionResult result = new ActionResult();</span>
+
+<span class="nc" id="L92">        DaoSession daoSession = getDaoSession();</span>
+<span class="nc" id="L93">        QueueHelper queueHelper = new QueueHelper(daoSession);</span>
+
+<span class="nc" id="L95">        QueueHelper.QueueState queueState = queueHelper.getQueueState();</span>
+
+<span class="nc" id="L97">        List&lt;QueueItem&gt; queueItems = queueState.getQueueItems();</span>
+
+<span class="nc" id="L99">        int counter = 0, totalNumber = queueItems.size();</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        for (QueueItem item : queueItems) {</span>
+<span class="nc" id="L101">            Log.d(TAG, &quot;syncOfflineQueue() current QueueItem(&quot; + (counter + 1) + &quot; out of &quot; + totalNumber + &quot;): &quot; + item);</span>
+<span class="nc" id="L102">            postEvent(new SyncQueueProgressEvent(actionRequest, counter, totalNumber));</span>
+
+<span class="nc" id="L104">            Integer articleIdInteger = item.getArticleId();</span>
+
+<span class="nc" id="L106">            Log.d(TAG, String.format(</span>
+                    &quot;syncOfflineQueue() processing: queue item ID: %d, article ID: \&quot;%s\&quot;&quot;,
+<span class="nc" id="L108">                    item.getId(), articleIdInteger));</span>
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            int articleId = articleIdInteger != null ? articleIdInteger : -1;</span>
+
+<span class="nc" id="L112">            boolean canTolerateNotFound = true;</span>
+
+<span class="nc" id="L114">            ActionResult itemResult = null;</span>
+            try {
+<span class="nc bnc" id="L116" title="All 8 branches missed.">                switch (item.getAction()) {</span>
+                    case ARTICLE_CHANGE:
+<span class="nc" id="L118">                        itemResult = syncArticleChange(item.asSpecificItem(), articleId);</span>
+<span class="nc" id="L119">                        break;</span>
+
+                    case ARTICLE_TAGS_DELETE:
+<span class="nc" id="L122">                        itemResult = syncDeleteTagsFromArticle(item.asSpecificItem(), articleId);</span>
+<span class="nc" id="L123">                        break;</span>
+
+                    case ANNOTATION_ADD:
+<span class="nc" id="L126">                        itemResult = syncAddAnnotationToArticle(item.asSpecificItem(), articleId);</span>
+<span class="nc" id="L127">                        break;</span>
+
+                    case ANNOTATION_UPDATE:
+<span class="nc" id="L130">                        itemResult = syncUpdateAnnotationOnArticle(item.asSpecificItem(), articleId);</span>
+<span class="nc" id="L131">                        break;</span>
+
+                    case ANNOTATION_DELETE:
+<span class="nc" id="L134">                        itemResult = syncDeleteAnnotationFromArticle(item.asSpecificItem(), articleId);</span>
+<span class="nc" id="L135">                        break;</span>
+
+                    case ARTICLE_DELETE:
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                        if (!getWallabagService().deleteArticle(articleId)) {</span>
+<span class="nc" id="L139">                            itemResult = new ActionResult(ActionResult.ErrorType.NOT_FOUND);</span>
+                        }
+                        break;
+
+                    case ADD_LINK: {
+<span class="nc" id="L144">                        canTolerateNotFound = false;</span>
+
+<span class="nc" id="L146">                        addLink(item.asSpecificItem());</span>
+<span class="nc" id="L147">                        break;</span>
+                    }
+
+                    default:
+<span class="nc" id="L151">                        throw new IllegalArgumentException(&quot;Unknown action: &quot; + item.getAction());</span>
+                }
+<span class="nc" id="L153">            } catch (IncorrectConfigurationException | UnsuccessfulResponseException</span>
+                    | IOException | IllegalArgumentException e) {
+<span class="nc" id="L155">                ActionResult r = processException(e, &quot;syncOfflineQueue()&quot;);</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                if (!r.isSuccess()) itemResult = r;</span>
+<span class="nc" id="L157">            } catch (Exception e) {</span>
+<span class="nc" id="L158">                Log.e(TAG, &quot;syncOfflineQueue() item processing exception&quot;, e);</span>
+
+<span class="nc" id="L160">                itemResult = new ActionResult(ActionResult.ErrorType.UNKNOWN, e);</span>
+<span class="nc" id="L161">            }</span>
+
+<span class="nc bnc" id="L163" title="All 6 branches missed.">            if (itemResult != null &amp;&amp; !itemResult.isSuccess() &amp;&amp; canTolerateNotFound</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                    &amp;&amp; itemResult.getErrorType() == ActionResult.ErrorType.NOT_FOUND) {</span>
+<span class="nc" id="L165">                Log.i(TAG, &quot;syncOfflineQueue() ignoring NOT_FOUND&quot;);</span>
+<span class="nc" id="L166">                itemResult = null;</span>
+            }
+
+<span class="nc bnc" id="L169" title="All 4 branches missed.">            if (itemResult == null || itemResult.isSuccess()) {</span>
+<span class="nc" id="L170">                queueState.completed(item);</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            } else if (itemResult.getErrorType() != null) {</span>
+<span class="nc" id="L172">                ActionResult.ErrorType itemError = itemResult.getErrorType();</span>
+
+<span class="nc" id="L174">                Log.i(TAG, &quot;syncOfflineQueue() itemError: &quot; + itemError);</span>
+
+<span class="nc" id="L176">                boolean stop = true;</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                switch (itemError) {</span>
+                    case NOT_FOUND_LOCALLY:
+                    case NEGATIVE_RESPONSE:
+<span class="nc" id="L180">                        stop = false;</span>
+                        break;
+                }
+
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                if (stop) {</span>
+<span class="nc" id="L185">                    result.updateWith(itemResult);</span>
+<span class="nc" id="L186">                    Log.i(TAG, &quot;syncOfflineQueue() the itemError is a showstopper; breaking&quot;);</span>
+<span class="nc" id="L187">                    break;</span>
+                }
+<span class="nc" id="L189">            } else { // should not happen</span>
+<span class="nc" id="L190">                Log.w(TAG, &quot;syncOfflineQueue() errorType is not present in itemResult&quot;);</span>
+            }
+
+<span class="nc" id="L193">            Log.d(TAG, &quot;syncOfflineQueue() finished processing queue item&quot;);</span>
+<span class="nc" id="L194">        }</span>
+
+<span class="nc" id="L196">        Long queueLength = null;</span>
+
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (queueState.hasChanges()) {</span>
+<span class="nc" id="L199">            queueLength = DbUtils.callInNonExclusiveTx(daoSession, (s) -&gt; {</span>
+<span class="nc" id="L200">                queueHelper.save(queueState);</span>
+
+<span class="nc" id="L202">                return queueHelper.getQueueLength();</span>
+            });
+        }
+
+<span class="nc bnc" id="L206" title="All 2 branches missed.">        if (queueLength != null) {</span>
+<span class="nc" id="L207">            postEvent(new OfflineQueueChangedEvent(queueLength));</span>
+        } else {
+<span class="nc" id="L209">            queueLength = (long) queueState.itemsLeft();</span>
+        }
+
+<span class="nc" id="L212">        Log.d(TAG, &quot;syncOfflineQueue() finished&quot;);</span>
+<span class="nc" id="L213">        return new Pair&lt;&gt;(result, queueLength);</span>
+    }
+
+    private void addLink(AddLinkItem item) throws IncorrectConfigurationException,
+            UnsuccessfulResponseException, IOException {
+<span class="nc" id="L218">        String link = item.getUrl();</span>
+<span class="nc" id="L219">        String origin = item.getOrigin();</span>
+<span class="nc" id="L220">        Log.d(TAG, &quot;addLink() link=&quot; + link + &quot;, origin=&quot; + origin);</span>
+
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (TextUtils.isEmpty(link)) {</span>
+<span class="nc" id="L223">            Log.w(TAG, &quot;addLink() action has no link; skipping&quot;);</span>
+<span class="nc" id="L224">            return;</span>
+        }
+
+<span class="nc" id="L227">        ArticleDao articleDao = getDaoSession().getArticleDao();</span>
+
+<span class="nc" id="L229">        Article local = null;</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (item.getLocalArticleId() != null) {</span>
+<span class="nc" id="L231">            local = articleDao.queryBuilder()</span>
+<span class="nc" id="L232">                    .where(ArticleDao.Properties.Id.eq(item.getLocalArticleId()))</span>
+<span class="nc" id="L233">                    .unique();</span>
+        }
+
+<span class="nc" id="L236">        WallabagService wallabagService = getWallabagService();</span>
+
+<span class="nc" id="L238">        AddArticleBuilder addArticleBuilder = wallabagService</span>
+<span class="nc" id="L239">                .addArticleBuilder(link)</span>
+<span class="nc" id="L240">                .originUrl(origin);</span>
+
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (local != null) {</span>
+<span class="nc" id="L243">            addArticleBuilder</span>
+<span class="nc" id="L244">                    .archive(local.getArchive())</span>
+<span class="nc" id="L245">                    .starred(local.getFavorite());</span>
+
+<span class="nc bnc" id="L247" title="All 2 branches missed.">            for (Tag tag : local.getTags()) {</span>
+<span class="nc" id="L248">                addArticleBuilder.tag(tag.getLabel());</span>
+<span class="nc" id="L249">            }</span>
+        }
+
+<span class="nc" id="L252">        wallabag.apiwrapper.models.Article article = addArticleBuilder.execute();</span>
+
+<span class="nc" id="L254">        LocalArticleReplacedEvent articleReplacedEvent = null;</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (local != null) {</span>
+<span class="nc" id="L256">            articleReplacedEvent = new LocalArticleReplacedEvent(</span>
+<span class="nc" id="L257">                    local.getId(), article.id, local.getGivenUrl());</span>
+        }
+
+<span class="nc" id="L260">        Article existing = articleDao.queryBuilder()</span>
+<span class="nc" id="L261">                .where(ArticleDao.Properties.ArticleId.eq(article.id))</span>
+<span class="nc" id="L262">                .unique();</span>
+
+<span class="nc bnc" id="L264" title="All 2 branches missed.">        if (existing != null) {</span>
+<span class="nc" id="L265">            Log.i(TAG, &quot;addLink() the article was already bagged as &quot; + article.id);</span>
+
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            if (local != null) {</span>
+<span class="nc" id="L268">                updateGivenUrl(existing, local.getGivenUrl());</span>
+            }
+
+            // don't store the received article due to the risk of overwriting local changes
+            // (that may be further in the queue)
+<span class="nc" id="L273">            article = null;</span>
+        }
+
+<span class="nc" id="L276">        ArticlesChangedEvent event = new ArticlesChangedEvent();</span>
+
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        if (article != null) {</span>
+<span class="nc" id="L279">            new ArticleUpdater(getDaoSession(), wallabagService)</span>
+<span class="nc" id="L280">                    .updateArticles(event, Collections.singleton(article));</span>
+
+<span class="nc bnc" id="L282" title="All 2 branches missed.">            if (local != null) {</span>
+<span class="nc" id="L283">                Article newArticle = articleDao.queryBuilder()</span>
+<span class="nc" id="L284">                        .where(ArticleDao.Properties.ArticleId.eq(article.id))</span>
+<span class="nc" id="L285">                        .unique();</span>
+
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                if (newArticle != null) {</span>
+<span class="nc" id="L288">                    updateGivenUrl(newArticle, local.getGivenUrl());</span>
+                }
+            }
+        }
+
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (local != null) {</span>
+<span class="nc" id="L294">            articleDao.delete(local);</span>
+
+<span class="nc" id="L296">            ArticleTagsJoinDao articleTagsJoinDao = getDaoSession().getArticleTagsJoinDao();</span>
+
+<span class="nc" id="L298">            List&lt;ArticleTagsJoin&gt; joins = articleTagsJoinDao.queryBuilder()</span>
+<span class="nc" id="L299">                    .where(ArticleTagsJoinDao.Properties.ArticleId.eq(local.getId()))</span>
+<span class="nc" id="L300">                    .list();</span>
+
+<span class="nc" id="L302">            articleTagsJoinDao.deleteInTx(joins);</span>
+        }
+
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (event.isAnythingChanged()) postEvent(event);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if (articleReplacedEvent != null) postEvent(articleReplacedEvent);</span>
+<span class="nc" id="L307">    }</span>
+
+    private void updateGivenUrl(Article article, String givenUrl) {
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        if (!Objects.equals(article.getGivenUrl(), givenUrl)) {</span>
+<span class="nc" id="L311">            article.setGivenUrl(givenUrl);</span>
+<span class="nc" id="L312">            article.update();</span>
+        }
+<span class="nc" id="L314">    }</span>
+
+    private ActionResult syncArticleChange(ArticleChangeItem item, int articleID)
+            throws IncorrectConfigurationException, UnsuccessfulResponseException, IOException {
+<span class="nc" id="L318">        Article article = getDaoSession().getArticleDao().queryBuilder()</span>
+<span class="nc" id="L319">                .where(ArticleDao.Properties.ArticleId.eq(articleID)).unique();</span>
+
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (article == null) {</span>
+<span class="nc" id="L322">            return new ActionResult(ActionResult.ErrorType.NOT_FOUND_LOCALLY,</span>
+                    &quot;Article is not found locally&quot;);
+        }
+
+<span class="nc" id="L326">        ModifyArticleBuilder builder = getWallabagService()</span>
+<span class="nc" id="L327">                .modifyArticleBuilder(articleID);</span>
+
+<span class="nc" id="L329">        boolean changed = false;</span>
+
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        for (QueueItem.ArticleChangeType changeType : item.getArticleChanges()) {</span>
+<span class="nc bnc" id="L332" title="All 5 branches missed.">            switch (changeType) {</span>
+                case ARCHIVE:
+<span class="nc" id="L334">                    builder.archive(Boolean.TRUE.equals(article.getArchive()));</span>
+<span class="nc" id="L335">                    changed = true;</span>
+<span class="nc" id="L336">                    break;</span>
+
+                case FAVORITE:
+<span class="nc" id="L339">                    builder.starred(Boolean.TRUE.equals(article.getFavorite()));</span>
+<span class="nc" id="L340">                    changed = true;</span>
+<span class="nc" id="L341">                    break;</span>
+
+                case TITLE:
+<span class="nc" id="L344">                    builder.title(article.getTitle());</span>
+<span class="nc" id="L345">                    changed = true;</span>
+<span class="nc" id="L346">                    break;</span>
+
+                case TAGS:
+                    // all tags are pushed
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                    for (Tag tag : article.getTags()) {</span>
+<span class="nc" id="L351">                        builder.tag(tag.getLabel());</span>
+<span class="nc" id="L352">                        changed = true;</span>
+<span class="nc" id="L353">                    }</span>
+<span class="nc" id="L354">                    break;</span>
+
+                default:
+<span class="nc" id="L357">                    throw new IllegalStateException(&quot;Change type is not implemented: &quot; + changeType);</span>
+            }
+<span class="nc" id="L359">        }</span>
+
+<span class="nc" id="L361">        ActionResult itemResult = null;</span>
+
+<span class="nc bnc" id="L363" title="All 2 branches missed.">        if (!changed) {</span>
+<span class="nc" id="L364">            Log.w(TAG, &quot;syncArticleChange() no changes to send is item &quot;</span>
+<span class="nc" id="L365">                    + item.genericItem().toString());</span>
+        }
+
+<span class="nc bnc" id="L368" title="All 4 branches missed.">        if (changed &amp;&amp; builder.execute() == null) {</span>
+<span class="nc" id="L369">            itemResult = new ActionResult(ActionResult.ErrorType.NOT_FOUND);</span>
+        }
+
+<span class="nc" id="L372">        return itemResult;</span>
+    }
+
+    private ActionResult syncDeleteTagsFromArticle(ArticleTagsDeleteItem item, int articleID)
+            throws IncorrectConfigurationException, UnsuccessfulResponseException, IOException {
+<span class="nc" id="L377">        WallabagService wallabagService = getWallabagService();</span>
+
+<span class="nc" id="L379">        ActionResult itemResult = null;</span>
+
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        for (String tag : item.getTagIds()) {</span>
+<span class="nc bnc" id="L382" title="All 4 branches missed.">            if (wallabagService.deleteTag(articleID, Integer.parseInt(tag)) == null</span>
+                    &amp;&amp; itemResult == null) {
+<span class="nc" id="L384">                itemResult = new ActionResult(ActionResult.ErrorType.NOT_FOUND);</span>
+            }
+<span class="nc" id="L386">        }</span>
+
+<span class="nc" id="L388">        return itemResult;</span>
+    }
+
+    private ActionResult syncAddAnnotationToArticle(AddOrUpdateAnnotationItem item, int articleId)
+            throws IncorrectConfigurationException, UnsuccessfulResponseException, IOException {
+<span class="nc" id="L393">        AnnotationDao annotationDao = getDaoSession().getAnnotationDao();</span>
+<span class="nc" id="L394">        Annotation annotation = annotationDao.queryBuilder()</span>
+<span class="nc" id="L395">                .where(AnnotationDao.Properties.Id.eq(item.getLocalAnnotationId())).unique();</span>
+
+<span class="nc bnc" id="L397" title="All 2 branches missed.">        if (annotation == null) {</span>
+<span class="nc" id="L398">            return new ActionResult(ActionResult.ErrorType.NOT_FOUND_LOCALLY,</span>
+                    &quot;Annotation wasn't found locally&quot;);
+        }
+
+<span class="nc" id="L402">        List&lt;wallabag.apiwrapper.models.Annotation.Range&gt; ranges</span>
+<span class="nc" id="L403">                = new ArrayList&lt;&gt;(annotation.getRanges().size());</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">        for (AnnotationRange range : annotation.getRanges()) {</span>
+<span class="nc" id="L405">            wallabag.apiwrapper.models.Annotation.Range apiRange</span>
+                    = new wallabag.apiwrapper.models.Annotation.Range();
+
+<span class="nc" id="L408">            apiRange.start = range.getStart();</span>
+<span class="nc" id="L409">            apiRange.end = range.getEnd();</span>
+<span class="nc" id="L410">            apiRange.startOffset = range.getStartOffset();</span>
+<span class="nc" id="L411">            apiRange.endOffset = range.getEndOffset();</span>
+
+<span class="nc" id="L413">            ranges.add(apiRange);</span>
+<span class="nc" id="L414">        }</span>
+
+<span class="nc" id="L416">        wallabag.apiwrapper.models.Annotation remoteAnnotation = getWallabagService()</span>
+<span class="nc" id="L417">                .addAnnotation(articleId, ranges, annotation.getText(), annotation.getQuote());</span>
+
+<span class="nc bnc" id="L419" title="All 2 branches missed.">        if (remoteAnnotation == null) {</span>
+<span class="nc" id="L420">            Log.w(TAG, String.format(&quot;Couldn't add annotation %s to article %d&quot; +</span>
+                            &quot;: article wasn't found on server&quot;,
+<span class="nc" id="L422">                    annotation, articleId));</span>
+<span class="nc" id="L423">            return new ActionResult(ActionResult.ErrorType.NOT_FOUND);</span>
+        }
+
+<span class="nc" id="L426">        annotation.setAnnotationId(remoteAnnotation.id);</span>
+
+<span class="nc" id="L428">        Log.d(TAG, &quot;syncAddAnnotationToArticle() updating annotation with remote ID: &quot;</span>
+<span class="nc" id="L429">                + annotation.getAnnotationId());</span>
+<span class="nc" id="L430">        annotationDao.update(annotation);</span>
+<span class="nc" id="L431">        Log.d(TAG, &quot;syncAddAnnotationToArticle() updated annotation with remote ID&quot;);</span>
+
+<span class="nc" id="L433">        return null;</span>
+    }
+
+    private ActionResult syncUpdateAnnotationOnArticle(AddOrUpdateAnnotationItem item, int articleId)
+            throws IncorrectConfigurationException, UnsuccessfulResponseException, IOException {
+<span class="nc" id="L438">        Annotation annotation = getDaoSession().getAnnotationDao().queryBuilder()</span>
+<span class="nc" id="L439">                .where(AnnotationDao.Properties.Id.eq(item.getLocalAnnotationId())).unique();</span>
+
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (annotation == null) {</span>
+<span class="nc" id="L442">            return new ActionResult(ActionResult.ErrorType.NOT_FOUND_LOCALLY,</span>
+                    &quot;Annotation wasn't found locally&quot;);
+        }
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        if (annotation.getAnnotationId() == null) {</span>
+<span class="nc" id="L446">            Log.w(TAG, &quot;syncUpdateAnnotationOnArticle() annotation ID is null!&quot;);</span>
+<span class="nc" id="L447">            return null;</span>
+        }
+
+<span class="nc" id="L450">        if (getWallabagService()</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                .updateAnnotation(annotation.getAnnotationId(), annotation.getText()) == null) {</span>
+<span class="nc" id="L452">            Log.w(TAG, String.format(&quot;Couldn't update annotation %s on article %d&quot; +</span>
+                            &quot;: not found remotely&quot;,
+<span class="nc" id="L454">                    annotation, articleId));</span>
+<span class="nc" id="L455">            return new ActionResult(ActionResult.ErrorType.NOT_FOUND);</span>
+        }
+
+<span class="nc" id="L458">        return null;</span>
+    }
+
+    private ActionResult syncDeleteAnnotationFromArticle(DeleteAnnotationItem item, int articleId)
+            throws IncorrectConfigurationException, UnsuccessfulResponseException, IOException {
+<span class="nc bnc" id="L463" title="All 2 branches missed.">        if (getWallabagService().deleteAnnotation(item.getRemoteAnnotationId()) == null) {</span>
+<span class="nc" id="L464">            Log.w(TAG, String.format(&quot;Couldn't remove annotationId %d from article %d&quot;,</span>
+<span class="nc" id="L465">                    item.getRemoteAnnotationId(), articleId));</span>
+<span class="nc" id="L466">            return new ActionResult(ActionResult.ErrorType.NOT_FOUND);</span>
+        }
+
+<span class="nc" id="L469">        return null;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

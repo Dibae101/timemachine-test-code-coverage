@@ -180,22 +180,75 @@ def harness_package(module_dir, gradle_file):
 
 
 # -------------------------------------------------------------- brace helpers
+def code_mask(text):
+    """True for characters that are real code, False inside comments/strings.
+
+    Brace counting must ignore comments and string literals. Trackbook has a
+    commented-out proguardFiles block whose braces were counted, so the android
+    block appeared to close early and the coverage flag was inserted into the
+    middle of the comment - leaving a stray brace and a build that failed with
+    "No signature of method: android()".
+    """
+    mask = [True] * len(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        two = text[i:i + 2]
+        if two == "//":
+            while i < n and text[i] != "\n":
+                mask[i] = False
+                i += 1
+        elif two == "/*":
+            while i < n and text[i:i + 2] != "*/":
+                mask[i] = False
+                i += 1
+            for k in range(i, min(i + 2, n)):
+                mask[k] = False
+            i += 2
+        elif c in "'\"":
+            quote = c
+            triple = text[i:i + 3] == quote * 3
+            end = quote * 3 if triple else quote
+            mask[i] = False
+            i += 3 if triple else 1
+            while i < n:
+                if text[i] == "\\":
+                    mask[i] = False
+                    if i + 1 < n:
+                        mask[i + 1] = False
+                    i += 2
+                    continue
+                if text[i:i + len(end)] == end:
+                    for k in range(i, min(i + len(end), n)):
+                        mask[k] = False
+                    i += len(end)
+                    break
+                mask[i] = False
+                i += 1
+        else:
+            i += 1
+    return mask
+
+
 def find_block(text, header_regex):
     """Locate a `header {` block; return (open_brace_idx, close_brace_idx)."""
-    m = re.search(header_regex, text)
-    if not m:
-        return None
-    i = text.find("{", m.end() - 1)
-    if i < 0:
-        return None
-    depth = 0
-    for j in range(i, len(text)):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return i, j
+    mask = code_mask(text)
+    for m in re.finditer(header_regex, text):
+        if not mask[m.start()]:
+            continue  # the header itself is commented out
+        i = text.find("{", m.end() - 1)
+        if i < 0 or not mask[i]:
+            continue
+        depth = 0
+        for j in range(i, len(text)):
+            if not mask[j]:
+                continue
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return i, j
     return None
 
 
