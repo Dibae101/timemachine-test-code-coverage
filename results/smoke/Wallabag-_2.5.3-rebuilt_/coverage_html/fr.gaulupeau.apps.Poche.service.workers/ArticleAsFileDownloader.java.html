@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ArticleAsFileDownloader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wallabag</a> &gt; <a href="index.source.html" class="el_package">fr.gaulupeau.apps.Poche.service.workers</a> &gt; <span class="el_source">ArticleAsFileDownloader.java</span></div><h1>ArticleAsFileDownloader.java</h1><pre class="source lang-java linenums">package fr.gaulupeau.apps.Poche.service.workers;
+
+import android.content.Context;
+import android.util.Log;
+import android.util.Pair;
+
+import org.greenrobot.greendao.DaoException;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.Locale;
+
+import fr.gaulupeau.apps.Poche.data.Settings;
+import fr.gaulupeau.apps.Poche.data.StorageHelper;
+import fr.gaulupeau.apps.Poche.data.dao.ArticleDao;
+import fr.gaulupeau.apps.Poche.data.dao.entities.Article;
+import fr.gaulupeau.apps.Poche.events.DownloadFileFinishedEvent;
+import fr.gaulupeau.apps.Poche.events.DownloadFileStartedEvent;
+import fr.gaulupeau.apps.Poche.network.WallabagConnection;
+import fr.gaulupeau.apps.Poche.network.WallabagWebService;
+import fr.gaulupeau.apps.Poche.network.exceptions.IncorrectConfigurationException;
+import fr.gaulupeau.apps.Poche.service.ActionRequest;
+import fr.gaulupeau.apps.Poche.service.ActionResult;
+import okhttp3.Request;
+import okhttp3.Response;
+import okio.BufferedSink;
+import okio.BufferedSource;
+import okio.Okio;
+import wallabag.apiwrapper.CompatibilityHelper;
+import wallabag.apiwrapper.NotFoundPolicy;
+import wallabag.apiwrapper.exceptions.UnsuccessfulResponseException;
+
+import static fr.gaulupeau.apps.Poche.events.EventHelper.postEvent;
+import static fr.gaulupeau.apps.Poche.events.EventHelper.postStickyEvent;
+import static fr.gaulupeau.apps.Poche.events.EventHelper.removeStickyEvent;
+
+public class ArticleAsFileDownloader extends BaseNetworkWorker {
+
+<span class="nc" id="L39">    private static final String TAG = ArticleAsFileDownloader.class.getSimpleName();</span>
+
+    public ArticleAsFileDownloader(Context context) {
+<span class="nc" id="L42">        super(context);</span>
+<span class="nc" id="L43">    }</span>
+
+    public ActionResult download(ActionRequest actionRequest) {
+<span class="nc" id="L46">        return downloadAsFile(actionRequest);</span>
+    }
+
+    private ActionResult downloadAsFile(ActionRequest actionRequest) {
+<span class="nc" id="L50">        Article article = null;</span>
+        try {
+<span class="nc" id="L52">            article = getDaoSession().getArticleDao().queryBuilder()</span>
+<span class="nc" id="L53">                    .where(ArticleDao.Properties.ArticleId.eq(actionRequest.getArticleID()))</span>
+<span class="nc" id="L54">                    .build().unique();</span>
+<span class="nc" id="L55">        } catch (DaoException e) {</span>
+<span class="nc" id="L56">            Log.w(TAG, &quot;onHandleIntent()&quot;, e);</span>
+<span class="nc" id="L57">        }</span>
+
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (article == null) {</span>
+<span class="nc" id="L60">            return new ActionResult(ActionResult.ErrorType.UNKNOWN, &quot;Couldn't find the article&quot;); // TODO: string</span>
+        }
+
+<span class="nc" id="L63">        ActionResult result = null;</span>
+
+<span class="nc" id="L65">        DownloadFileStartedEvent startEvent = new DownloadFileStartedEvent(actionRequest, article);</span>
+<span class="nc" id="L66">        postStickyEvent(startEvent);</span>
+
+<span class="nc" id="L68">        Pair&lt;ActionResult, File&gt; downloadResult = null;</span>
+        try {
+<span class="nc" id="L70">            downloadResult = downloadAsFile(actionRequest, article);</span>
+<span class="nc" id="L71">            result = downloadResult.first;</span>
+        } finally {
+<span class="nc" id="L73">            removeStickyEvent(startEvent);</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            if (result == null) result = new ActionResult(ActionResult.ErrorType.UNKNOWN);</span>
+
+<span class="nc" id="L77">            postEvent(new DownloadFileFinishedEvent(actionRequest, result, article,</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                    downloadResult != null ? downloadResult.second : null));</span>
+        }
+
+<span class="nc" id="L81">        return result;</span>
+    }
+
+    private Pair&lt;ActionResult, File&gt; downloadAsFile(ActionRequest actionRequest, Article article) {
+<span class="nc" id="L85">        Log.d(TAG, String.format(&quot;downloadAsFile() started; action: %s, articleID: %s&quot;,</span>
+<span class="nc" id="L86">                actionRequest.getAction(), actionRequest.getArticleID()));</span>
+
+<span class="nc" id="L88">        int articleID = actionRequest.getArticleID();</span>
+
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (!WallabagConnection.isNetworkAvailable()) {</span>
+<span class="nc" id="L91">            Log.i(TAG, &quot;downloadAsFile() not on-line; exiting&quot;);</span>
+<span class="nc" id="L92">            return new Pair&lt;&gt;(new ActionResult(ActionResult.ErrorType.NO_NETWORK), null);</span>
+        }
+
+<span class="nc" id="L95">        BufferedSource source = null;</span>
+<span class="nc" id="L96">        File resultFile = null;</span>
+        try {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            if (CompatibilityHelper.isExportArticleSupported(getWallabagService())) {</span>
+<span class="nc" id="L99">                source = getWallabagService().exportArticle(</span>
+<span class="nc" id="L100">                        articleID, actionRequest.getDownloadFormat(), NotFoundPolicy.THROW)</span>
+<span class="nc" id="L101">                        .source();</span>
+            } else {
+<span class="nc" id="L103">                Log.d(TAG, &quot;downloadAsFile() downloading via API is not supported&quot;);</span>
+            }
+
+<span class="nc" id="L106">            String fileExt = actionRequest.getDownloadFormat().toString().toLowerCase(Locale.US);</span>
+
+            // TODO: remove fallback
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (source == null) {</span>
+<span class="nc" id="L110">                Log.i(TAG, &quot;Failed to get article via API, falling back to plain URL&quot;);</span>
+
+<span class="nc" id="L112">                WallabagWebService service = getWallabagWebService();</span>
+<span class="nc" id="L113">                WallabagWebService.ConnectionTestResult connectionTestResult</span>
+<span class="nc" id="L114">                        = service.testConnection();</span>
+<span class="nc" id="L115">                Log.d(TAG, &quot;downloadAsFile() connectionTestResult: &quot; + connectionTestResult);</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                if (connectionTestResult != WallabagWebService.ConnectionTestResult.OK) {</span>
+<span class="nc" id="L117">                    Log.w(TAG, &quot;downloadAsFile() testing connection failed with value &quot;</span>
+                            + connectionTestResult);
+
+                    ActionResult.ErrorType errorType;
+<span class="nc bnc" id="L121" title="All 3 branches missed.">                    switch (connectionTestResult) {</span>
+                        case INCORRECT_URL:
+                        case UNSUPPORTED_SERVER_VERSION:
+                        case WALLABAG_NOT_FOUND:
+<span class="nc" id="L125">                            errorType = ActionResult.ErrorType.INCORRECT_CONFIGURATION;</span>
+<span class="nc" id="L126">                            break;</span>
+
+                        case AUTH_PROBLEM:
+                        case HTTP_AUTH:
+                        case INCORRECT_CREDENTIALS:
+<span class="nc" id="L131">                            errorType = ActionResult.ErrorType.INCORRECT_CREDENTIALS;</span>
+<span class="nc" id="L132">                            break;</span>
+
+                        default:
+<span class="nc" id="L135">                            errorType = ActionResult.ErrorType.UNKNOWN;</span>
+                            break;
+                    }
+
+<span class="nc" id="L139">                    return new Pair&lt;&gt;(new ActionResult(errorType), null);</span>
+                }
+
+<span class="nc" id="L142">                String exportUrl = getSettings().getUrl() + &quot;/export/&quot; + articleID + &quot;.&quot; + fileExt;</span>
+<span class="nc" id="L143">                Log.d(TAG, &quot;downloadAsFile() exportUrl=&quot; + exportUrl);</span>
+<span class="nc" id="L144">                Request request = new Request.Builder()</span>
+<span class="nc" id="L145">                        .url(exportUrl)</span>
+<span class="nc" id="L146">                        .build();</span>
+
+<span class="nc" id="L148">                Response response = service.getClient().newCall(request).execute();</span>
+
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                if (!response.isSuccessful()) {</span>
+<span class="nc" id="L151">                    return new Pair&lt;&gt;(new ActionResult(ActionResult.ErrorType.UNKNOWN,</span>
+<span class="nc" id="L152">                            &quot;Response code: &quot; + response.code()</span>
+<span class="nc" id="L153">                                    + &quot;, response message: &quot; + response.message()), null);</span>
+                }
+
+<span class="nc" id="L156">                source = response.body().source();</span>
+            }
+
+<span class="nc" id="L159">            String articleTitle = article.getTitle().replaceAll(&quot;[^a-zA-Z0-9.-]&quot;, &quot;_&quot;);</span>
+<span class="nc" id="L160">            String exportFileName = articleTitle + &quot;.&quot; + fileExt;</span>
+
+<span class="nc" id="L162">            String exportDir = StorageHelper.getExternalStoragePath();</span>
+<span class="nc" id="L163">            File file = new File(exportDir, exportFileName);</span>
+<span class="nc" id="L164">            Log.d(TAG, &quot;Saving file &quot; + file.getAbsolutePath());</span>
+
+<span class="nc" id="L166">            BufferedSink sink = null;</span>
+            try {
+<span class="nc" id="L168">                sink = Okio.buffer(Okio.sink(file));</span>
+<span class="nc" id="L169">                sink.writeAll(source);</span>
+            } finally {
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                if (sink != null) {</span>
+                    try {
+<span class="nc" id="L173">                        sink.close();</span>
+<span class="nc" id="L174">                    } catch (IOException e) {</span>
+<span class="nc" id="L175">                        Log.w(TAG, &quot;downloadAsFile() IOException while closing sink&quot;, e);</span>
+<span class="nc" id="L176">                    }</span>
+                }
+            }
+
+<span class="nc" id="L180">            resultFile = file;</span>
+<span class="nc" id="L181">        } catch (IncorrectConfigurationException | UnsuccessfulResponseException | IOException e) {</span>
+<span class="nc" id="L182">            ActionResult r = processException(e, &quot;downloadAsFile()&quot;);</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            if (!r.isSuccess()) return new Pair&lt;&gt;(r, null);</span>
+        } finally {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">            if (source != null) {</span>
+                try {
+<span class="nc" id="L187">                    source.close();</span>
+<span class="nc" id="L188">                } catch (IOException ignored) {}</span>
+            }
+        }
+
+<span class="nc" id="L192">        return new Pair&lt;&gt;(new ActionResult(), resultFile);</span>
+    }
+
+    protected WallabagWebService getWallabagWebService() {
+<span class="nc" id="L196">        Settings settings = getSettings();</span>
+<span class="nc" id="L197">        return WallabagWebService.fromSettings(settings);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>
