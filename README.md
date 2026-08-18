@@ -1,194 +1,186 @@
-# TimeMachine <img align="right" src="https://zenodo.org/badge/DOI/10.5281/zenodo.3672076.svg">
+# TimeMachine coverage datasets
 
-TimeMachine is an automated testing tool for Android apps, which can automatically jump to the most progressive state observed in the past when progress is slow. 
+A collection of **26 Android apps** packaged so a GUI testing tool can measure
+Jacoco code coverage on them, plus the harness that proves each one works.
 
-<p align="center">
-<img src="https://github.com/DroidTest/TimeMachine/blob/master/illustration.jpg" width="600">
-</p>
+This is not a fork of TimeMachine with new features. It is a dataset collection:
+finding apps that can report coverage, building them, and shipping the pieces a
+coverage report needs. [TimeMachine](https://github.com/DroidTest/TimeMachine)
+itself is included as the tool these datasets are built for.
 
-TimeMachine leverages virtualization technology such as emulator to save an app state and restore it when needed. TimeMachine identifies an app state with GUI layout and memories all discovered states. When a state is considered interesting, e.g., new code is covered, TimeMachine saves the state. Meanwhile, TimeMachine observes most-recently-visited states to check whether progress is slow, e.g., being stuck in a state loop. Once progress is considered slow, TimeMachine restores the most progressive one from saved states for further exploration so that more program behavior is exercised in a short time. 
+- **[dataset.md](dataset.md)** - what a dataset contains, the list of 26, per-app
+  sources, links to every smoke test result
+- **[HANDOVER.md](HANDOVER.md)** - running this on another machine
+- **[dataset_builder/README.md](dataset_builder/README.md)** - the build pipeline
+  and every upstream breakage it works around
 
-    
+## What problem this solves
 
+Measuring code coverage on an Android app needs three things that must agree with
+each other:
 
-<!---
-The figure above demonstrates how it works. When execution keeps going through a loop state S2 -- S3 -- S4 -- S2 (see Figure (a)), TimeMachine terminates the current execution due to lack of progress, resumes the most progressive state S1 (assuming that S1 is the most progressive state among all discovered states),  and launches a new execution from state S1. When reaching state S6 via S5 (see Figure(b)), the execution gets stuck, i.e., unable to exit the state after executing a fixed amount of events. TimeMachine terminates current execution again and resumes the most progressive state S5 to launch a new execution. The whole process is automatically triggered during testing.
---->
+1. an APK with the Jacoco agent compiled in,
+2. the **compiled classes** from that exact build, to map coverage probes onto,
+3. the **sources**, to render an annotated report.
 
-## Publication ##
-The paper PDF can be found at https://zhendong2050.github.io/res/time-travel-testing-21-01-2020.pdf
-```
-@InProceedings{zhendong:icse:2020,
-author = {Dong, Zhen and B{\"o}hme, Marcel and Cojocaru, Lucia and Roychoudhury, Abhik},
-title = {Time-travel Testing of Android Apps},
-booktitle = {Proceedings of the 42nd International Conference on Software Engineering},
-series = {ICSE '20},
-year = {2020},
-pages={1-12}}
+Get any of them from a different build and the report silently comes out empty or
+excludes classes as "does not match". Most published benchmarks ship only the APK,
+which is why the original dataset here could not produce line coverage for 5 of
+its 8 apps. Each dataset in this repository carries all three, verified together.
 
-```
+## The 26 apps
 
-## What is new? ##
-For easy-to-use, we upgrade TimeMachine with following features:
+| app | coverage | | app | coverage | | app | coverage |
+|---|--:|---|---|--:|---|---|--:|
+| Binary-Eye | 47.17% | | LibreTorrent | 9.37% | | Wikipedia | 3.41% |
+| MaterialFBook | 19.24% | | nextcloud | 8.63% | | Infinity-For-Reddit | 3.16% |
+| Kiwix | 19.19% | | Open-Food-Facts | 8.43% | | Twire | 2.67% |
+| geohashdroid | 17.78% | | Wallabag | 7.82% | | openlauncher | 2.35% |
+| SkyTube | 16.41% | | newpipe | 7.57% | | Kore | 1.72% |
+| StreetComplete | 15.20% | | commons | 7.57% | | Jellyfin-Android | 1.25% |
+| FirefoxLite | 13.72% | | ownCloud | 6.56% | | Fedilab | 0.52% |
+| AmazeFileManager | 13.08% | | Breezy-Weather | 6.22% | | | |
+| Omni-Notes | 10.58% | | AnkiDroid | 4.11% | | | |
+| Orgzly-Revived | 10.50% | | | | | | |
 
-* Using the Android Emulator instead of Virtualbox 
-* Using Jacoco for instrumenting apps instead of EMMA
-* Solving other issues such as adb connection issues during fuzzing  
+**These percentages are not test results.** See
+[the smoke test](#the-smoke-test-is-not-a-coverage-run) below.
 
+## Where the apps came from
 
-## Prerequisites ##
-* Ububntu 18.04 64-bit or Mac-OSX 10.15 
-* Android SDK with API 25 (ensuring adb, aapt, avdmanager, emulator correctly configured) 
-* Python 2.7 (ensuring enum and uiautomator packages are installed)
+Three sources, all open source:
 
-<!--
-adb, aapt, avdmanager, emulator 
-enum, uiautomator
+| source | apps | how |
+|---|--:|---|
+| [Themis benchmark](https://github.com/the-themis-benchmarks/home) branches | 8 | already instrumented on a per-bug branch; built from that branch |
+| upstream release tags and commits | 18 | cloned at an exact ref, then instrumented here |
 
-Check commands "adb", "aapt", "avdmanager", "emulator" in your terminal to make sure you have correctly configured environment variables.
-Package "enum" and "uiautomator" are needed in python2.7.
--->
+The 8 Themis-derived apps are AmazeFileManager, AnkiDroid, FirefoxLite,
+Omni-Notes, commons, geohashdroid, nextcloud and openlauncher. MaterialFBook is a
+special case among the other 18: its instrumented branch was lost with a deleted
+GitHub account, so its tree comes from the original dataset in this repository
+while its fork points at the upstream tag.
 
+44 apps were attempted in total. 26 produce a clean report. The rest either fail
+to build, or install and run but emit no coverage data - all listed with reasons in
+[dataset.md](dataset.md#not-included).
 
+Candidate apps came from the Themis benchmark and from a set of 50 apps already
+known to report coverage, which supplied the exact `source_commit` each tested APK
+was built from. Exact refs mattered: guessing version tags was the single largest
+cause of build failures.
 
-## Run TimeMachine ##
-### 1. Clone Repos ###
-*  Clone TimeMachine
-```
-# creating workspace
-mkdir workspace
-cd workspace
-
-git clone https://github.com/DroidTest/TimeMachine.git
-```
-
-*  Clone an example app [AmazeFileManager v3.4.2](https://github.com/TeamAmaze/AmazeFileManager/releases/tag/v3.4.2)
-```
-# creating dir for AUT
-mkdir appTest
-cd appTest
-
-git clone --branch v3.4.2 https://github.com/TeamAmaze/AmazeFileManager.git
-```
-
-### 2. Instrument the app with [Jacoco](https://www.jacoco.org/jacoco/) ###
-*  Build an instrumented apk
-```
-# Add the jacoco plugin
-echo -e "\napply plugin: 'jacoco'" >> AmazeFileManager/app/build.gradle
-sed -i "`sed -n -e "/debug {/=" AmazeFileManager/app/build.gradle` a testCoverageEnabled true" AmazeFileManager/app/build.gradle
-
-cp -r ../TimeMachine/JacocoIntegration/JacocoInstrument AmazeFileManager/app/src/main/java/com/amaze/filemanager
-
-# Add package names
-sed -i '1i package com.amaze.filemanager.JacocoInstrument;' AmazeFileManager/app/src/main/java/com/amaze/filemanager/JacocoInstrument/FinishListener.java
-sed -i '1i package com.amaze.filemanager.JacocoInstrument;' AmazeFileManager/app/src/main/java/com/amaze/filemanager/JacocoInstrument/JacocoInstrumentation.java
-sed -i '1i package com.amaze.filemanager.JacocoInstrument;' AmazeFileManager/app/src/main/java/com/amaze/filemanager/JacocoInstrument/SMSInstrumentedReceiver.java
-
-# Register the BroadcastReceiver in AndroidManifest.xml
-sed -i "`sed -n -e "/<\/application>/=" AmazeFileManager/app/src/main/AndroidManifest.xml` i <receiver android:name=\".JacocoInstrument.SMSInstrumentedReceiver\"><intent-filter><action android:name=\"edu.gatech.m3.emma.COLLECT_COVERAGE\"/></intent-filter></receiver>" AmazeFileManager/app/src/main/AndroidManifest.xml
-
-# Build app with gradle
-cd AmazeFileManager
-
-./gradlew clean
-./gradlew --no-daemon assembleDebug
-```
-
-*  Setup the apk in the test folder
+## What a dataset contains
 
 ```
-cp app/build/outputs/apk/fdroid/debug/app-fdroid-debug.apk ../AmazeFileManager.apk
-
-# Generate a class_files.json to describe the built directory
-echo "{\"AmazeFileManager.apk\": {\"classfiles\": [\"AmazeFileManager/app/build/intermediates/javac/fdroidDebug/classes/\",\"AmazeFileManager/commons_compress_7z/build/intermediates/javac/debug/classes/\"]}}" > ../class_files.json
+instrumented_apps/geohashdroid/
+├── geohashdroid-0.9.4-#73-rebuilt.apk    the APK, Jacoco agent compiled in
+├── geohashdroid-#73/                     compiled classes + sources
+├── class_files.json                      maps the APK to those two
+└── upstream/                             optional submodule, provenance only
 ```
 
+Four changes are made to every app before building: the `jacoco` plugin, coverage
+enabled on the `debug` build type, three harness classes under the app's package,
+and a receiver for `edu.gatech.m3.emma.COLLECT_COVERAGE` so `adb` can make the
+running app dump its data. Full detail in
+[dataset.md](dataset.md#what-we-changed-in-each-app).
 
+## What was removed before publishing
 
-### 3. Check if the instrumented app works ###
+The build tree is pruned to what a coverage report actually needs. A full Gradle
+build tree is 80 MB to 1.5 GB per app; pruning took the whole collection from
+6.0 GB to 2.2 GB.
+
+| removed | why |
+|---|---|
+| Gradle caches, merged resources, dex output, native libs | regenerable, and not read by a coverage report |
+| each checkout's own `.git` | otherwise git records a submodule reference instead of the files, and the contents never upload |
+| upstream `.gitignore` files | they list `build/`, which is exactly where the compiled classes live - they were silently excluding the payload |
+| `google-services.json`, `*.keystore`, `*.jks` | third-party credentials that ship with upstream sources; verified to sit outside every declared classfiles/sourcefiles path, so nothing needs them |
+| CI workflow definitions | only in the forks, not here; pushing them needs a token scope this pipeline does not use |
+
+Kept: compiled classes, Java/Kotlin sources, the APK, `class_files.json`, and the
+smoke test evidence.
+
+## The smoke test is not a coverage run
+
+`smoke_test_dataset.sh` answers one question per app: *does this dataset work?*
+It installs the APK, launches it, fires a **40-event monkey burst of about 90
+seconds**, broadcasts the coverage dump, pulls the `.ec` file and builds a report.
+
+That is all. It is not a testing session, and the percentages it produces are a
+floor that proves the plumbing works. A real TimeMachine run reaches far higher.
+
+Do not compare apps against each other on these numbers either. A large app
+touched briefly scores low; a small one scores high. Binary-Eye leads at 47%
+because the burst happened to reach 4 of its 370 classes and cover most lines in
+them.
+
+A dataset counts as working only when the report generates with **zero mismatched
+classes** - meaning the APK and the declared classes are provably the same build.
+
+## Running it
+
+Needs Git LFS **before** cloning, or the APKs arrive as 130-byte text pointers:
+
+```bash
+git lfs install
+git clone https://github.com/Dibae101/timemachine-test-code-coverage.git
+cd timemachine-test-code-coverage
+find instrumented_apps -name '*.apk' -size -1k   # must print nothing
 ```
-# Launch emulator
+
+Emulator must be **API 25, `google_apis`, x86** - every app was verified on it,
+and `adb root` (needed to pull coverage) is unavailable on Play Store images:
+
+```bash
 sdkmanager "system-images;android-25;google_apis;x86"
-avdmanager create avd -n avd0 -k "system-images;android-25;google_apis;x86" -d pixel_2_xl -c 1000M -f
-nohup emulator -avd avd0 -writable-system &
-adb devices
-adb wait-for-device
-adb root
-
-# Run the apk on emulator 
-adb install -g ../AmazeFileManager.apk
-adb shell am start com.amaze.filemanager.debug/com.amaze.filemanager.activities.MainActivity
-
-# Check if the coverage.ec file is generated. If so, the apk works well. 
-adb shell am broadcast -a edu.gatech.m3.emma.COLLECT_COVERAGE
-adb shell "cat /data/data/com.amaze.filemanager.debug/files/coverage.ec" 
-adb emu kill
+avdmanager create avd -n avd0 -k "system-images;android-25;google_apis;x86" \
+    -d pixel_2_xl -c 1000M -f
+nohup emulator -avd avd0 -port 5554 -no-window -no-audio -no-boot-anim \
+      -accel off -gpu guest > /tmp/emulator.log 2>&1 &
+adb wait-for-device && adb root
 ```
 
+Then:
 
-### 4. Test the apk with TimeMachine ###
-* Launch TimeMachine
-```  
-cd ../../TimeMachine/fuzzingandroid
-
-python2.7 main.py --avd avd0 --apk ../../appTest/AmazeFileManager.apk --time 1h -o ../../appTest/timemachine-results --no-headless
-```   
-* Check testing results
-
-```  
-ls ../../appTest/timemachine-results/[output_dir_name]
-
-# Expected results:
-├── coverage.xml                current jacoco coverage report in xml
-├── crashes.log                 crash logs in testing
-├── data.csv                    coverage data in csv
-├── ec_files                    dirs of *.ec generated by jacoco-agent
-│   └── *.ec         
-├── run_time.log                time of starting test
-└── timemachine-run.log         runtime log of timemachine
-```  
-
-<!--
-## Usage of TimeMachine ##
+```bash
+./smoke_test_dataset.sh                 # all 26, about 90 s each
+./smoke_test_dataset.sh Kiwix Twire     # by name
+python3 dataset_builder/make_manifest.py  # validate without an emulator
 ```
 
-python2.7 main.py [-h] [--avd AVD_NAME] [--apk APK] [-n NUMBER_OF_DEVICES]
-                                [--apk-list APK_LIST] -o O [--time TIME] [--repeat REPEAT]
-                                [--no-headless] [--offset OFFSET]
+Results land in `results/smoke/<apk>/` as `coverage.ec`, `coverage.xml`,
+`coverage_html/` and `smoke.log`, with the verdict table in
+`results/smoke/smoke_summary.csv`.
 
+A real run against one app:
 
-  -h, --help                    show this help message and exit
-  --avd AVD_NAME                the device name
-  --apk APK                     the path of apk under test
-  -n NUMBER_OF_DEVICES          number of emulators created for testing, default: 1
-  --apk-list APK_LIST           list of apks under test
-  -o O                          output dir
-  --time TIME                   the fuzzing time in hours (e.g., 6h), minutes (e.g.,
-                                6m), or seconds (e.g., 6s), default: 6h
-  --repeat REPEAT               the repeated number of runs, default: 1
-  --no-headless                 show gui or not
-  --offset OFFSET               device offset number w.r.t emulator-5554
-```  
-
-
-Useful scripts:
-```
-#check current jacoco line coverage
-python2.7 compute_coverage.py ../../appTest/timemachine-results/[output_dir_name]
-
-#Check crashes
-cat ../../appTest/timemachine-results/[output_dir_name]/crashes.log
-
-#Check logs
-cat ../../appTest/timemachine-results/[output_dir_name]/timemachine-run.log
+```bash
+cd fuzzingandroid
+python2.7 main.py --avd avd0 \
+  --apk ../instrumented_apps/geohashdroid/geohashdroid-0.9.4-#73-rebuilt.apk \
+  --time 1h -o ../results/timemachine --no-headless
 ```
 
-### Changes from TimeMachine 1.0
-* remove Virtualbox from architecture to perform better
-* replace coverage collection tool from Emma to Jacoco
-* testing of closed source projects instrumented by ella is no longer supported
--->
+## Where this was built
 
+A single AWS instance: **t2.xlarge, 4 vCPU, 15 GB RAM, 48 GB
+disk, us-east-1**, Ubuntu, **no KVM**. The emulator therefore runs in software
+emulation, which is why a smoke test takes 90 seconds per app rather than a few
+seconds, and why the first emulator boot takes about 5 minutes.
 
+Disk was the binding constraint throughout: 48 GB total, with Gradle caches
+reaching 24 GB during builds and needing repeated trimming. Anyone reproducing the
+build side should expect to want more.
 
+JDK 8, 11, 17 and 21 are all needed - different apps refuse different versions -
+along with Android SDK platforms 25 through 34 and JaCoCo 0.8.13 (0.8.6, which
+ships with TimeMachine, cannot parse Java 17 bytecode).
+
+## Licence
+
+Each app keeps its own upstream licence; see its directory. The tooling in
+`dataset_builder/` follows this repository's [LICENSE](LICENSE), and TimeMachine
+remains under its original terms.
