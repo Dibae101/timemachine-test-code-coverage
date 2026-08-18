@@ -48,7 +48,9 @@ R_CLASS = re.compile(r"(^|/)R(\$[\w$]+)?\.class$")
 
 
 def report_ok(dirs, exec_file, srcs=()):
-    """Try a real report. This is the only check that detects duplicates.
+    """Try a real report. Returns (ok, line_pct, mismatched_or_error).
+
+    This is the only check that detects duplicates.
 
     `classinfo` walks classes independently and never builds the single coverage
     bundle that `report` does, so it accepts a directory set that `report` then
@@ -70,6 +72,14 @@ def report_ok(dirs, exec_file, srcs=()):
         msg = next((l for l in err if "Can't add" in l or "Caused by" in l),
                    err[-1] if err else "unknown")
         return False, 0.0, msg[:150]
+
+    # A report that merely runs is not good enough. JaCoCo warns "does not
+    # match" for each class whose bytecode differs from the one the execution
+    # data was recorded against, and silently excludes it. Counting those is the
+    # only way to tell a correct directory set from one that merely does not
+    # crash, and it is why five apps kept reporting MISMATCH after selection.
+    mismatches = sum(1 for l in (r.stdout + r.stderr).splitlines()
+                     if "does not match" in l)
     pct = 0.0
     try:
         import xml.dom.minidom as m
@@ -85,7 +95,7 @@ def report_ok(dirs, exec_file, srcs=()):
     finally:
         if os.path.exists(out):
             os.remove(out)
-    return True, pct, ""
+    return True, pct, mismatches
 
 
 def classinfo(dirs):
@@ -191,9 +201,10 @@ def resolve(tree, app, apply):
         return (dirs if ok else []), ("%d classes, no .ec to verify against" % n
                                       if ok else "unresolved: %s" % err)
 
-    ok, pct, err = report_ok(dirs, exec_file, srcs)
-    if ok:
-        return dirs, "%d dirs, %d R dropped, report %.2f%%" % (len(dirs), removed, pct)
+    ok, pct, info = report_ok(dirs, exec_file, srcs)
+    if ok and info == 0:
+        return dirs, "%d dirs, %d R dropped, report %.2f%%, 0 mismatched" % (
+            len(dirs), removed, pct)
 
     # Duplicates across build variants. Add directories one at a time, keeping
     # only those that do not break the report, which converges on a single
@@ -211,17 +222,21 @@ def resolve(tree, app, apply):
         return (0 if variant and variant in low else 1, -count_classes(d))
 
     ranked = sorted(dirs, key=rank)
-    keep = []
+    # Add a directory only when it neither breaks the report nor introduces a
+    # mismatched class. A directory holding another variant's build of the same
+    # class is worse than leaving it out: those classes are excluded anyway and
+    # the entry is reported as MISMATCH.
+    keep, best_pct = [], -1.0
     for d in ranked:
         cand = keep + [d]
-        good, _, _ = report_ok(cand, exec_file, srcs)
-        if good:
-            keep = cand
+        good, pct, info = report_ok(cand, exec_file, srcs)
+        if good and info == 0 and pct >= best_pct:
+            keep, best_pct = cand, pct
     if not keep:
-        return [], "unresolved: %s" % err
-    ok, pct, err = report_ok(keep, exec_file, srcs)
-    return keep, ("%d of %d dirs, %d R dropped, report %.2f%%"
-                  % (len(keep), len(dirs), removed, pct))
+        return [], "unresolved: %s" % info
+    ok, pct, info = report_ok(keep, exec_file, srcs)
+    return keep, ("%d of %d dirs, %d R dropped, report %.2f%%, %s mismatched"
+                  % (len(keep), len(dirs), removed, pct, info))
 
 
 def main():
