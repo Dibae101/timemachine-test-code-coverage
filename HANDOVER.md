@@ -15,22 +15,38 @@ Yes, it moves to another computer. Two things will bite you if you skip them:
 
 ## What you are getting
 
-8 apps, 10 APK entries. Every entry installs, runs, dumps JaCoCo execution data,
+26 apps, one APK each. Every one installs, runs, dumps JaCoCo execution data,
 and produces an annotated HTML coverage report. These are measured results from
 the run in `results/smoke/`:
 
-| app | APK | line coverage | HTML pages | seconds |
-|---|---|--:|--:|--:|
-| MaterialFBook | `MaterialFBook4.0.2-debug-#224.apk` | 19.24% | 28 | 98 |
-| geohashdroid | `geohashdroid-0.9.4-#73-rebuilt.apk` | 17.78% | 53 | 84 |
-| geohashdroid | `geohashdroid-0.9.4-#73.apk` | 17.78% | 53 | 79 |
-| FirefoxLite | `FirefoxLite-2.1.20-#5085-rebuilt.apk` | 13.72% | 400 | 97 |
-| AmazeFileManager | `AmazeFileManager-3.4.2-#1837-rebuilt.apk` | 13.08% | 253 | 91 |
-| Omni-Notes | `Omni-Notes-6.1.0-#745-rebuilt.apk` | 10.58% | 152 | 69 |
-| nextcloud | `nextcloud-#4792-rebuilt.apk` | 8.63% | 328 | 82 |
-| Twire | `Twire-#v2.10.7-rebuilt.apk` | 2.67% | 117 | 74 |
-| openlauncher | `openlauncher-0.3.1-#67-rebuilt.apk` | 2.35% | 50 | 60 |
-| openlauncher | `openlauncher-0.3.1-#67.apk` | 2.35% | 50 | 56 |
+| app | APK | line coverage | HTML pages |
+|---|---|--:|--:|
+| Binary-Eye | `Binary-Eye-#1.63.12-rebuilt.apk` | 47.17% | 2 |
+| MaterialFBook | `MaterialFBook4.0.2-debug-#224.apk` | 19.24% | 28 |
+| Kiwix | `Kiwix-#3.11.1-rebuilt.apk` | 19.19% | 2 |
+| geohashdroid | `geohashdroid-0.9.4-#73-rebuilt.apk` | 17.78% | 53 |
+| SkyTube | `SkyTube-#v2.999-rebuilt.apk` | 16.41% | 179 |
+| StreetComplete | `StreetComplete-#v53.2-rebuilt.apk` | 15.20% | 2 |
+| FirefoxLite | `FirefoxLite-2.1.20-#5085-rebuilt.apk` | 13.72% | 400 |
+| AmazeFileManager | `AmazeFileManager-3.4.2-#1837-rebuilt.apk` | 13.08% | 253 |
+| Omni-Notes | `Omni-Notes-6.1.0-#745-rebuilt.apk` | 10.58% | 152 |
+| Orgzly-Revived | `Orgzly-Revived-#v1.8.27beta.2-rebuilt.apk` | 10.50% | 56 |
+| LibreTorrent | `LibreTorrent-#3.5.2-rebuilt.apk` | 9.37% | 258 |
+| nextcloud | `nextcloud-#4792-rebuilt.apk` | 8.63% | 328 |
+| Open-Food-Facts | `Open-Food-Facts-#v3.10.2-rebuilt.apk` | 8.43% | 33 |
+| Wallabag | `Wallabag-#2.5.3-rebuilt.apk` | 7.82% | 159 |
+| newpipe | `newpipe-#v0.25.1-rebuilt.apk` | 7.57% | 302 |
+| commons | `commons-2.7.1-#1581-rebuilt.apk` | 7.57% | 130 |
+| ownCloud | `ownCloud-#v4.4.0-rebuilt.apk` | 6.56% | 65 |
+| Breezy-Weather | `Breezy-Weather-#v5.2.8-rebuilt.apk` | 6.22% | 2 |
+| AnkiDroid | `AnkiDroid-debug-2.6beta6-#4200-rebuilt.apk` | 4.11% | 243 |
+| Wikipedia | `Wikipedia-#beta2.7.50447beta2023062-rebuilt.apk` | 3.41% | 6 |
+| Infinity-For-Reddit | `Infinity-For-Reddit-#v7.3.4-rebuilt.apk` | 3.16% | 563 |
+| Twire | `Twire-#v2.10.7-rebuilt.apk` | 2.67% | 117 |
+| openlauncher | `openlauncher-0.3.1-#67-rebuilt.apk` | 2.35% | 50 |
+| Kore | `Kore-#v3.1.0-rebuilt.apk` | 1.72% | 208 |
+| Jellyfin-Android | `Jellyfin-Android-#v2.6.2-rebuilt.apk` | 1.25% | 6 |
+| Fedilab | `Fedilab-#3.28.0-rebuilt.apk` | 0.52% | 544 |
 
 Those coverage numbers come from a 40-event monkey burst, not a real testing
 session. They are a smoke-test floor: proof the plumbing works end to end. A real
@@ -73,14 +89,14 @@ SHA-256, class count and provenance.
 | Android SDK platform-tools | any recent | `adb` |
 | Android SDK build-tools | 28.0.3 | `aapt` for reading package names |
 | Android emulator + system image | **android-25, google_apis, x86** | what the entries were tested on |
-| JDK | 8, 11 or 17 | any of them runs `jacococli.jar` 0.8.6 |
+| JDK | 8, 11, 17 and 21 | 17 covers most builds; 8 and 11 for old Gradle, 21 for a few 2024+ projects |
 | Python | 2.7 with `enum` and `uiautomator` | TimeMachine's own runner |
 | Python | 3 | the dataset tooling in `dataset_builder/` |
 
-The bundled `jacococli.jar` is JaCoCo 0.8.6 (`0.8.6.201911080117`) and was checked
-under JDK 8, 11 and 17 - it runs on all three. Its limitation is different: it
-cannot *analyse* class files compiled to Java 17 bytecode, which is what removed
-the AGP 8 subjects from this set. None of the ten entries here is affected.
+Reports are generated with `fuzzingandroid/libs/jacococli-0.8.13.jar`. The
+originally bundled `jacococli.jar` is JaCoCo 0.8.6, which cannot analyse Java 17
+bytecode and fails with "Unsupported class file major version 61" on the newer
+apps. 0.8.13 is the default in `smoke_test_dataset.sh`; override with `JACOCO=`.
 
 ## Clone
 
@@ -166,7 +182,7 @@ boot of about 5 minutes without KVM.
 
 ```bash
 export SDK=$HOME/Android/Sdk          # wherever your SDK lives
-./smoke_test_dataset.sh               # all 10 entries
+./smoke_test_dataset.sh               # all 26 apps
 ./smoke_test_dataset.sh geohash amaze # substring filter
 EVENTS=200 ./smoke_test_dataset.sh    # exercise the apps harder
 ```
@@ -207,7 +223,7 @@ CAP_MINUTES=20 ./run_coverage.sh geohashdroid
 
 ```bash
 APP=instrumented_apps/geohashdroid
-java -jar fuzzingandroid/libs/jacococli.jar report coverage.ec \
+java -jar fuzzingandroid/libs/jacococli-0.8.13.jar report coverage.ec \
   --classfiles  $APP/geohashdroid-#73/app/build/intermediates/javac/debug/classes/ \
   --sourcefiles $APP/geohashdroid-#73/app/src/main/java/ \
   --html coverage_html --xml coverage.xml
@@ -236,7 +252,7 @@ resolves, and every class directory is non-empty. Exit status is non-zero if
 anything is broken, so it works as a pre-run gate. Expect:
 
 ```
-apps: 8    apk entries: 10    fully valid entries: 10
+apps: 26   apk entries: 26   fully valid entries: 26
 ```
 
 ## Rebuilding an app from source
@@ -260,17 +276,12 @@ documents every upstream breakage encountered and how it is handled.
 
 ## Known limits
 
-* **10 entries, not 40.** 44 apps were attempted. 18 produced complete datasets;
-  10 of those failed at report generation and were removed, leaving these 10
-  verified entries. `dataset_builder/subjects.json` and `modern_subjects.json`
-  still describe all 44, and `dataset_builder/supervise.sh` can retry the rest.
-* **Two known reporting bugs blocked the 10 that were dropped**, and neither
-  needs a rebuild to fix: the bundled `jacococli.jar` (0.8.6) cannot parse Java
-  17 bytecode, reporting `Unsupported class file major version 61`, which stops
-  the AGP 8 subjects such as Wikipedia; and some entries declared two build
-  variants at once, so JaCoCo rejected duplicate class names (AnkiDroid,
-  commons). Upgrading the CLI jar and narrowing class directories to one variant
-  should recover most of them.
+* **26 apps, not 44.** 44 were attempted. Six build but produce no usable
+  coverage, and the rest fail to build; all are named with their reason in
+  [dataset.md](dataset.md#not-included). `dataset_builder/supervise.sh` can retry
+  any of them without redoing the rest.
+* **Coverage figures are smoke-test floors** from a 40-event monkey burst of
+  about 90 seconds, not results from a real testing session.
 * **Coverage figures here are smoke-test floors** from 40 monkey events, not
   results from a real testing session.
 * **Nothing was tested on arm64 or on API levels other than 25.**
