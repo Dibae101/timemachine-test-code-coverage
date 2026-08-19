@@ -169,7 +169,8 @@ generated with **zero** mismatched classes.
 ## Running it
 
 Git LFS must be installed **before** cloning or the APKs arrive as text pointers.
-Emulator must be API 25, `google_apis`, x86. See [HANDOVER.md](HANDOVER.md).
+Emulator must be API 25, `google_apis`, x86. Setup commands are in the
+[README](README.md#running-it).
 
 ```bash
 ./smoke_test_dataset.sh              # all 26
