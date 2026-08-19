@@ -10,7 +10,6 @@ TimeMachine does.
 
 * **[dataset.md](dataset.md)** - what a dataset contains, what was changed in each
   app, the list of 26, and a link to each app's smoke test
-* **[HANDOVER.md](HANDOVER.md)** - how to run this on another machine
 * **[dataset_builder/README.md](dataset_builder/README.md)** - how the datasets are
   built and every upstream breakage that had to be worked around
 
@@ -130,6 +129,25 @@ Two prerequisites catch people out:
   on. Newer images change permission and storage behaviour and several apps will
   not start.
 
+Create the emulator these were tested on:
+
+```bash
+sdkmanager "system-images;android-25;google_apis;x86"
+avdmanager create avd -n avd0 -k "system-images;android-25;google_apis;x86" \
+    -d pixel_2_xl -c 1000M -f
+
+# drop -accel off -gpu guest if the host has KVM
+nohup emulator -avd avd0 -port 5554 -no-window -no-audio -no-boot-anim \
+      -accel off -gpu guest > /tmp/emulator.log 2>&1 &
+adb wait-for-device && adb root
+```
+
+Use a `google_apis` image, not `google_apis_playstore`: `adb root` is unavailable
+on Play images and the coverage pull needs it. On API 29+ the scoped-storage and
+permission-review changes stop several of these apps launching at all.
+
+Then:
+
 ```bash
 git lfs install
 git clone https://github.com/Dibae101/timemachine-test-code-coverage.git
@@ -156,8 +174,9 @@ python2.7 main.py --avd avd0 \
 ```
 
 `--time` is not a wall-clock limit; the engine only checks its deadline between
-fuzz cycles. `run_coverage.sh` wraps it with a hard timeout. Full instructions in
-[HANDOVER.md](HANDOVER.md).
+fuzz cycles, and one cycle takes 18-28 minutes on a host without KVM, so
+`--time 1m` and `--time 15m` both run about 35 minutes. `run_coverage.sh` wraps it
+with a hard `timeout` and generates the report afterwards.
 
 ## Where this was built
 
