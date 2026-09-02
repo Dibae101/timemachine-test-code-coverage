@@ -18,8 +18,8 @@ scoring set. An app whose correct directory was pruned away is reported as needi
 a rebuild instead.
 
 Usage
-    python3 repair_declarations.py results/smoke-redroid-api31
-    python3 repair_declarations.py results/smoke-redroid-api31 Markor Aegis
+    python3 repair_declarations.py results/smoke_test
+    python3 repair_declarations.py results/smoke_test Markor Aegis
 """
 
 import json

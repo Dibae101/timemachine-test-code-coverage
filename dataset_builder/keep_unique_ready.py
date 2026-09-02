@@ -31,7 +31,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(HERE)
 APPS = os.path.join(PROJECT, "instrumented_apps")
-SMOKE = os.path.join(PROJECT, "results", "smoke")
+SMOKE = os.path.join(PROJECT, "results", "smoke_test")
 SUMMARY = os.path.join(SMOKE, "smoke_summary.csv")
 
 
@@ -144,7 +144,7 @@ def main():
             continue
         print("drop smoke %s" % d)
         if apply:
-            rel = "results/smoke/" + d
+            rel = "results/smoke_test/" + d
             git("rm", "-q", "-rf", "--cached", "--ignore-unmatch", "--", rel)
             shutil.rmtree(os.path.join(PROJECT, rel), ignore_errors=True)
 

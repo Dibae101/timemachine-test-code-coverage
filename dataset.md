@@ -2,7 +2,7 @@
 
 59 Android apps, each packaged so TimeMachine can measure code coverage on it.
 
-Every one has a matching coverage run measured on a device, in `results/smoke/`,
+Every one has a matching coverage run measured on a device, in `results/smoke_test/`,
 and every one reports with zero mismatched classes. See
 [the results](README.md#the-results).
 
@@ -95,34 +95,34 @@ Two build-time changes are applied but **not** committed into the app source:
 `coverage` is a floor from a 40-event monkey burst - proof the dataset works, not a
 test result. Do not compare apps on it: a large app touched briefly scores low, a
 small one scores high. The table below is from the original API 25 run; the current
-figures for all 59 apps are in `results/smoke/smoke_summary.csv`.
+figures for all 59 apps are in `results/smoke_test/smoke_summary.csv`.
 
 | app | coverage | APK | smoke test | fork |
 |---|--:|---|---|:--:|
-| Binary-Eye | 47.17% | `Binary-Eye-#1.63.12-rebuilt.apk` | [results](results/smoke/Binary-Eye-_1.63.12-rebuilt_) | |
-| MaterialFBook | 19.24% | `MaterialFBook4.0.2-debug-#224.apk` | [results](results/smoke/MaterialFBook4.0.2-debug-_224_) | yes |
-| geohashdroid | 17.78% | `geohashdroid-0.9.4-#73-rebuilt.apk` | [results](results/smoke/geohashdroid-0.9.4-_73-rebuilt_) | yes |
-| SkyTube | 16.41% | `SkyTube-#v2.999-rebuilt.apk` | [results](results/smoke/SkyTube-_v2.999-rebuilt_) | |
-| StreetComplete | 15.20% | `StreetComplete-#v53.2-rebuilt.apk` | [results](results/smoke/StreetComplete-_v53.2-rebuilt_) | yes |
-| FirefoxLite | 13.72% | `FirefoxLite-2.1.20-#5085-rebuilt.apk` | [results](results/smoke/FirefoxLite-2.1.20-_5085-rebuilt_) | yes |
-| AmazeFileManager | 13.08% | `AmazeFileManager-3.4.2-#1837-rebuilt.apk` | [results](results/smoke/AmazeFileManager-3.4.2-_1837-rebuilt_) | yes |
-| Omni-Notes | 10.58% | `Omni-Notes-6.1.0-#745-rebuilt.apk` | [results](results/smoke/Omni-Notes-6.1.0-_745-rebuilt_) | yes |
-| Orgzly-Revived | 10.50% | `Orgzly-Revived-#v1.8.27beta.2-rebuilt.apk` | [results](results/smoke/Orgzly-Revived-_v1.8.27beta.2-rebuilt_) | |
-| LibreTorrent | 9.37% | `LibreTorrent-#3.5.2-rebuilt.apk` | [results](results/smoke/LibreTorrent-_3.5.2-rebuilt_) | |
-| nextcloud | 8.63% | `nextcloud-#4792-rebuilt.apk` | [results](results/smoke/nextcloud-_4792-rebuilt_) | yes |
-| Wallabag | 7.82% | `Wallabag-#2.5.3-rebuilt.apk` | [results](results/smoke/Wallabag-_2.5.3-rebuilt_) | |
-| newpipe | 7.57% | `newpipe-#v0.25.1-rebuilt.apk` | [results](results/smoke/newpipe-_v0.25.1-rebuilt_) | yes |
-| commons | 7.57% | `commons-2.7.1-#1581-rebuilt.apk` | [results](results/smoke/commons-2.7.1-_1581-rebuilt_) | yes |
-| ownCloud | 6.56% | `ownCloud-#v4.4.0-rebuilt.apk` | [results](results/smoke/ownCloud-_v4.4.0-rebuilt_) | |
-| Breezy-Weather | 6.22% | `Breezy-Weather-#v5.2.8-rebuilt.apk` | [results](results/smoke/Breezy-Weather-_v5.2.8-rebuilt_) | |
-| AnkiDroid | 4.11% | `AnkiDroid-debug-2.6beta6-#4200-rebuilt.apk` | [results](results/smoke/AnkiDroid-debug-2.6beta6-_4200-rebuilt_) | yes |
-| Wikipedia | 3.41% | `Wikipedia-#beta2.7.50447beta2023062-rebuilt.apk` | [results](results/smoke/Wikipedia-_beta2.7.50447beta2023062-rebuilt_) | yes |
-| Infinity-For-Reddit | 3.16% | `Infinity-For-Reddit-#v7.3.4-rebuilt.apk` | [results](results/smoke/Infinity-For-Reddit-_v7.3.4-rebuilt_) | |
-| Twire | 2.67% | `Twire-#v2.10.7-rebuilt.apk` | [results](results/smoke/Twire-_v2.10.7-rebuilt_) | yes |
-| openlauncher | 2.35% | `openlauncher-0.3.1-#67-rebuilt.apk` | [results](results/smoke/openlauncher-0.3.1-_67-rebuilt_) | yes |
-| Kore | 1.72% | `Kore-#v3.1.0-rebuilt.apk` | [results](results/smoke/Kore-_v3.1.0-rebuilt_) | |
-| Jellyfin-Android | 1.25% | `Jellyfin-Android-#v2.6.2-rebuilt.apk` | [results](results/smoke/Jellyfin-Android-_v2.6.2-rebuilt_) | |
-| Fedilab | 0.52% | `Fedilab-#3.28.0-rebuilt.apk` | [results](results/smoke/Fedilab-_3.28.0-rebuilt_) | |
+| Binary-Eye | 47.17% | `Binary-Eye-#1.63.12-rebuilt.apk` | [results](results/smoke_test/Binary-Eye-_1.63.12-rebuilt_) | |
+| MaterialFBook | 19.24% | `MaterialFBook4.0.2-debug-#224.apk` | [results](results/smoke_test/MaterialFBook4.0.2-debug-_224_) | yes |
+| geohashdroid | 17.78% | `geohashdroid-0.9.4-#73-rebuilt.apk` | [results](results/smoke_test/geohashdroid-0.9.4-_73-rebuilt_) | yes |
+| SkyTube | 16.41% | `SkyTube-#v2.999-rebuilt.apk` | [results](results/smoke_test/SkyTube-_v2.999-rebuilt_) | |
+| StreetComplete | 15.20% | `StreetComplete-#v53.2-rebuilt.apk` | [results](results/smoke_test/StreetComplete-_v53.2-rebuilt_) | yes |
+| FirefoxLite | 13.72% | `FirefoxLite-2.1.20-#5085-rebuilt.apk` | [results](results/smoke_test/FirefoxLite-2.1.20-_5085-rebuilt_) | yes |
+| AmazeFileManager | 13.08% | `AmazeFileManager-3.4.2-#1837-rebuilt.apk` | [results](results/smoke_test/AmazeFileManager-3.4.2-_1837-rebuilt_) | yes |
+| Omni-Notes | 10.58% | `Omni-Notes-6.1.0-#745-rebuilt.apk` | [results](results/smoke_test/Omni-Notes-6.1.0-_745-rebuilt_) | yes |
+| Orgzly-Revived | 10.50% | `Orgzly-Revived-#v1.8.27beta.2-rebuilt.apk` | [results](results/smoke_test/Orgzly-Revived-_v1.8.27beta.2-rebuilt_) | |
+| LibreTorrent | 9.37% | `LibreTorrent-#3.5.2-rebuilt.apk` | [results](results/smoke_test/LibreTorrent-_3.5.2-rebuilt_) | |
+| nextcloud | 8.63% | `nextcloud-#4792-rebuilt.apk` | [results](results/smoke_test/nextcloud-_4792-rebuilt_) | yes |
+| Wallabag | 7.82% | `Wallabag-#2.5.3-rebuilt.apk` | [results](results/smoke_test/Wallabag-_2.5.3-rebuilt_) | |
+| newpipe | 7.57% | `newpipe-#v0.25.1-rebuilt.apk` | [results](results/smoke_test/newpipe-_v0.25.1-rebuilt_) | yes |
+| commons | 7.57% | `commons-2.7.1-#1581-rebuilt.apk` | [results](results/smoke_test/commons-2.7.1-_1581-rebuilt_) | yes |
+| ownCloud | 6.56% | `ownCloud-#v4.4.0-rebuilt.apk` | [results](results/smoke_test/ownCloud-_v4.4.0-rebuilt_) | |
+| Breezy-Weather | 6.22% | `Breezy-Weather-#v5.2.8-rebuilt.apk` | [results](results/smoke_test/Breezy-Weather-_v5.2.8-rebuilt_) | |
+| AnkiDroid | 4.11% | `AnkiDroid-debug-2.6beta6-#4200-rebuilt.apk` | [results](results/smoke_test/AnkiDroid-debug-2.6beta6-_4200-rebuilt_) | yes |
+| Wikipedia | 3.41% | `Wikipedia-#beta2.7.50447beta2023062-rebuilt.apk` | [results](results/smoke_test/Wikipedia-_beta2.7.50447beta2023062-rebuilt_) | yes |
+| Infinity-For-Reddit | 3.16% | `Infinity-For-Reddit-#v7.3.4-rebuilt.apk` | [results](results/smoke_test/Infinity-For-Reddit-_v7.3.4-rebuilt_) | |
+| Twire | 2.67% | `Twire-#v2.10.7-rebuilt.apk` | [results](results/smoke_test/Twire-_v2.10.7-rebuilt_) | yes |
+| openlauncher | 2.35% | `openlauncher-0.3.1-#67-rebuilt.apk` | [results](results/smoke_test/openlauncher-0.3.1-_67-rebuilt_) | yes |
+| Kore | 1.72% | `Kore-#v3.1.0-rebuilt.apk` | [results](results/smoke_test/Kore-_v3.1.0-rebuilt_) | |
+| Jellyfin-Android | 1.25% | `Jellyfin-Android-#v2.6.2-rebuilt.apk` | [results](results/smoke_test/Jellyfin-Android-_v2.6.2-rebuilt_) | |
+| Fedilab | 0.52% | `Fedilab-#3.28.0-rebuilt.apk` | [results](results/smoke_test/Fedilab-_3.28.0-rebuilt_) | |
 
 Every APK is named `-rebuilt` except MaterialFBook. `-rebuilt` means the APK was
 built here from the source in the same folder, so its classes are byte-for-byte
@@ -133,7 +133,7 @@ source branch was lost with a deleted GitHub account, and it happens to match.
 ## The 35 datasets added in the expansion
 
 All of these now have device-measured coverage too, via redroid; see
-`results/smoke/smoke_summary.csv`. `classes` is what the entry declares.
+`results/smoke_test/smoke_summary.csv`. `classes` is what the entry declares.
 
 | app | ref | source repo | classes | lines | pages |
 |---|---|---|--:|--:|--:|
@@ -214,7 +214,7 @@ instrumented here.
 ## What is in a smoke test folder
 
 ```
-results/smoke/<apk-slug>/
+results/smoke_test/<apk-slug>/
 ├── coverage.ec         raw execution data pulled off the device
 ├── coverage.xml        the JaCoCo report
 ├── coverage_html/      annotated source - open index.html
@@ -222,7 +222,7 @@ results/smoke/<apk-slug>/
 └── probe_report.txt    per-class probe counts
 ```
 
-`results/smoke/smoke_summary.csv` is the verdict table for all 26.
+`results/smoke_test/smoke_summary.csv` is the verdict table for all 26.
 `PASS` means: installed, launched, produced execution data, and the report
 generated with **zero** mismatched classes.
 

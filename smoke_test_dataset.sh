@@ -10,12 +10,12 @@
 # per app does: install -> launch -> short event burst -> COLLECT_COVERAGE
 # broadcast -> pull .ec -> jacococli report. About 60-90s per app.
 #
-# Artifacts land in results/smoke/<app>/ :
+# Artifacts land in results/smoke_test/<app>/ :
 #     coverage.ec      raw execution data
 #     coverage.xml     jacoco report
 #     coverage_html/   annotated source report (when sources are declared)
 #     smoke.log        adb transcript for that app
-# plus results/smoke/smoke_summary.csv with the verdict table.
+# plus results/smoke_test/smoke_summary.csv with the verdict table.
 #
 # Usage:
 #   ./smoke_test_dataset.sh                  # every apk present in the dataset
@@ -30,7 +30,7 @@ SDK="${SDK:-/home/ubuntu/android-sdk}"
 # apps in a directory that did not exist.
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 APPS_DIR="$PROJECT/instrumented_apps"
-OUT="${OUT:-$PROJECT/results/smoke}"
+OUT="${OUT:-$PROJECT/results/smoke_test}"
 JACOCO="${JACOCO:-$PROJECT/fuzzingandroid/libs/jacococli-0.8.13.jar}"
 AVD="${AVD:-avd0}"
 SERIAL="${SERIAL:-emulator-5554}"

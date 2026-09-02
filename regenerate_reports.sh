@@ -9,14 +9,14 @@
 # committed, and this script rebuilds the rest.
 #
 # Usage:
-#   ./regenerate_reports.sh                                  # results/smoke-redroid-api31
-#   ./regenerate_reports.sh results/smoke                     # any results tree
-#   ./regenerate_reports.sh results/smoke Kiwix Twire         # filter by substring
+#   ./regenerate_reports.sh                                  # results/smoke_test
+#   ./regenerate_reports.sh results/smoke_test                     # any results tree
+#   ./regenerate_reports.sh results/smoke_test Twire Markor         # filter by substring
 #
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 
-OUT="${1:-results/smoke-redroid-api31}"
+OUT="${1:-results/smoke_test}"
 shift || true
 JACOCO="${JACOCO:-fuzzingandroid/libs/jacococli-0.8.13.jar}"
 APPS_DIR=instrumented_apps

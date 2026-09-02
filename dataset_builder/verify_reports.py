@@ -50,7 +50,7 @@ JACOCOCLI = os.path.join(PROJECT, "fuzzingandroid", "libs", "jacococli-0.8.13.ja
 JAVA = os.environ.get("JAVA", "/usr/lib/jvm/java-17-openjdk-arm64/bin/java")
 FRACTION = os.environ.get("FRACTION", "0.55")
 
-# Same columns as results/smoke/smoke_summary.csv, in the same order, so both
+# Same columns as results/smoke_test/smoke_summary.csv, in the same order, so both
 # result sets can be read by one consumer. Two columns are added rather than
 # reused:
 #
@@ -320,7 +320,7 @@ def main():
                 w.writerow(r)
 
     # Same probe-level artefacts the smoke test produces, so a result directory
-    # here has the same file set as one under results/smoke/.
+    # here has the same file set as one under results/smoke_test/.
     probe = os.path.join(PROJECT, "probe_report.py")
     if os.path.isfile(probe):
         print()

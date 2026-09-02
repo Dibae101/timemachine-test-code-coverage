@@ -19,7 +19,7 @@ IMPORTANT interpretation note:
     coverage data exists, and as a measure of how much loaded code was executed.
 
 Usage:
-    python3 probe_report.py [results/smoke]
+    python3 probe_report.py [results/smoke_test]
 """
 import csv
 import os
