@@ -1,0 +1,1 @@
+-keep class de.salomax.currencies.R$array { public *** changelog_*; }

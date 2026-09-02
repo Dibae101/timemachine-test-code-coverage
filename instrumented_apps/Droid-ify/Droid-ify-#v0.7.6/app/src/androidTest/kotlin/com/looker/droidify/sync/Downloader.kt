@@ -1,0 +1,63 @@
+package com.looker.droidify.sync
+
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.NetworkResponse
+import com.looker.droidify.network.ProgressListener
+import okhttp3.Headers
+import com.looker.droidify.sync.common.assets
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.InputStream
+
+val FakeDownloader = object : Downloader {
+
+    override suspend fun headCall(
+        url: String,
+        headers: Headers.Builder.() -> Unit,
+    ): NetworkResponse {
+        TODO("Not yet implemented")
+    }
+
+    override suspend fun downloadToFile(
+        url: String,
+        target: File,
+        headers: Headers.Builder.() -> Unit,
+        block: ProgressListener?,
+    ): NetworkResponse {
+        return if (url.endsWith("fail")) {
+            NetworkResponse.Error.Unknown(Exception("You asked for it"))
+        } else {
+            val index = when {
+                url.endsWith("fdroid-index-v1.jar") -> assets("fdroid_index_v1.jar")
+                url.endsWith("fdroid-index-v1.json") -> assets("fdroid_index_v1.json")
+                url.endsWith("fdroid-index-v2.json") -> assets("fdroid_index_v2.json")
+                url.endsWith("index-v1.jar") -> assets("izzy_index_v1.jar")
+                url.endsWith("index-v2.json") -> assets("izzy_index_v2.json")
+                url.endsWith("index-v2-updated.json") -> assets("izzy_index_v2_updated.json")
+                url.endsWith("entry.jar") -> assets("izzy_entry.jar")
+                url.endsWith("/diff/1725731263000.json") -> assets("izzy_diff.json")
+                // Just in case we try these in future
+                url.endsWith("index-v1.json") -> assets("izzy_index_v1.json")
+                url.endsWith("entry.json") -> assets("izzy_entry.json")
+                else -> error("Unknown URL: $url")
+            }
+            index.writeTo(target)
+            NetworkResponse.Success(200, null, null)
+        }
+    }
+
+    suspend infix fun InputStream.writeTo(file: File) = withContext(Dispatchers.IO) {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var bytesRead = read(buffer)
+        file.outputStream().use { output ->
+            while (bytesRead != -1) {
+                ensureActive()
+                output.write(buffer, 0, bytesRead)
+                bytesRead = read(buffer)
+            }
+            output.flush()
+        }
+    }
+}

@@ -1,0 +1,1 @@
+-keep,allowobfuscation,allowshrinking class com.looker.droidify.ui.favourites.FavouritesViewModel

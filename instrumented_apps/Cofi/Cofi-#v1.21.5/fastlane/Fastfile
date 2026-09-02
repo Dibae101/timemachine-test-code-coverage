@@ -1,0 +1,181 @@
+# This file contains the fastlane.tools configuration
+# You can find the documentation at https://docs.fastlane.tools
+#
+# For a list of all available actions, check out
+#
+#     https://docs.fastlane.tools/actions
+#
+# For a list of all available plugins, check out
+#
+#     https://docs.fastlane.tools/plugins/available-plugins
+#
+
+# Uncomment the line if you want fastlane to automatically update itself
+# update_fastlane
+
+default_platform(:android)
+
+platform :android do
+  desc "Runs all the tests"
+  lane :test do
+    gradle(task: "test")
+  end
+
+  desc "Bump version codes and name"
+  lane :bump_version do |options|
+    codes = %w{production beta alpha internal}
+    .map { |track| google_play_track_version_codes(
+      # json_key_data: get_play_store_json_key,
+      track: track,
+      package_name: 'com.omelan.cofi',
+    ) }
+    .flatten
+    newest_code = codes.map { |c| c % 10000 }.max
+    version_code = newest_code + 3
+    set_value_in_build(
+      key: 'versionCode',
+      value: version_code.to_s,
+      app_project_dir: '**/app',
+    )
+    set_value_in_build(
+      key: 'versionCode',
+      value: (newest_code + 1).to_s,
+      app_project_dir: '**/wearOS',
+    )
+    if options[:bump_type] != "don't"
+        increment_version_name(
+          app_project_dir: '**/app',
+          bump_type: options[:bump_type],
+        )
+         increment_version_name(
+          app_project_dir: '**/wearOS',
+          bump_type: options[:bump_type],
+        )
+    end
+  end
+
+  desc "Prepare changelog"
+  lane :prepare_changelog do
+    changelog_md_file = File.open("../docs/Changelog.md")
+    unreleased_changelog = changelog_md_file.read.split("\n## ")[1].lines[2..-1].join
+    sections = unreleased_changelog.split(/(###.*)/)
+    if sections[6].nil? || sections[6].strip == ""
+    	sections = sections[0,5] + sections[7..-1]
+    end
+    if sections[4].nil? || sections[4].strip == ""
+    	sections = sections[0,3] + sections[5..-1]
+    end
+    if sections[2].nil? || sections[2].strip == ""
+    	sections = sections[0,1] + sections[3..-1]
+    end
+    unreleased_changelog = sections.join("\n")
+    UI.important unreleased_changelog
+    Dir.mkdir("metadata/android/en-US/changelogs") unless Dir.exist?("metadata/android/en-US/changelogs")
+    File.open("metadata/android/en-US/changelogs/default.txt", "w") { |f| f.write unreleased_changelog }
+
+    changelog_md_file = File.open("../docs/Changelog.md")
+    new_changelog = changelog_md_file.read
+    changelog_md_file.close
+    unreleased = " [Unreleased]
+
+### Added
+
+### Changed
+
+### Removed
+
+"
+    date = Time.now.strftime("%F")
+    versionAndroid = get_version_name(
+      app_project_dir: '**/app',
+    )
+    versionWearOS = get_version_name(
+      app_project_dir: '**/wearOS',
+    )
+    new_changelog["\n## [Unreleased]\n"] = "\n## [#{versionAndroid}|#{versionWearOS}] - #{date}\n"
+    File.open("../docs/Changelog.md", "w") { |f| f.write new_changelog.split("\n##").insert(1, unreleased).join("\n##") }
+  end
+
+  desc "Deploy a new version to the Google Play Store"
+  lane :deploy_gps do |options|
+    gradle(task: "app:licensePlayStoreRelease app:bundlePlayStoreRelease wearOS:licenseRelease wearOS:bundleRelease app:bundleInstantRelease")
+    upload_to_play_store(
+      track: options[:prerelease] ? 'internal' : 'production',
+      skip_upload_apk: true,
+      aab_paths: ["app/build/outputs/bundle/playStoreRelease/app-playStore-release.aab"]
+    )
+#    upload_to_play_store(
+#       track: options[:prerelease] ? 'wear:internal' : 'wear:production',
+#       skip_upload_apk: true,
+#       skip_upload_screenshots: true,
+#       aab_paths: ["wearOS/build/outputs/bundle/release/wearOS-release.aab"]
+#     )
+#     upload_to_play_store(
+#       track: options[:prerelease] ? 'instant:internal' : 'instant:production',
+#       skip_upload_apk: true,
+#       skip_upload_screenshots: true,
+#       aab_paths: ["app/build/outputs/bundle/instantRelease/app-instant-release.aab"]
+#     )
+  end
+
+  desc "Upload metadata to Google Play Store"
+  lane :meta_gps do
+    upload_to_play_store(
+      track: 'internal',
+      skip_upload_apk: true,
+      skip_upload_changelogs: false,
+      skip_upload_aab: true,
+    )
+  end
+
+  desc "Deploy a new version to Github Releases"
+  lane :deploy_github do |options|
+    gradle(task: "app:licenseFullRelease app:assembleFullRelease app:licensePlayStoreRelease app:assemblePlayStoreRelease wearOS:licenseRelease wearOS:assembleRelease")
+    versionName = get_version_name(
+      app_project_dir: '**/app',
+    )
+    set_github_release(
+      repository_name: "rozPierog/Cofi",
+      api_token: ENV["GITHUB_TOKEN_COFI"],
+      name: "Cofi " + versionName,
+      tag_name: "v" + versionName,
+      is_prerelease: options[:prerelease],
+      description: (File.read("metadata/android/en-US/changelogs/default.txt") rescue "No changelog provided"),
+      # commitish: "master",
+      upload_assets: ["app/build/outputs/apk/full/release/app-full-release.apk",
+       "app/build/outputs/apk/playStore/release/app-playStore-release.apk",
+       "wearOS/build/outputs/apk/release/wearOS-release.apk"]
+    )
+  end
+
+  lane :create_screenshots do
+      `cd .. && ./bin/createScreenshots.sh`
+  end
+
+  desc "Removes default.txt changelog"
+  lane :clean_changelog do
+    sh("rm", "-rf", "metadata/android/en-US/changelogs/default.txt")
+  end
+
+  desc "Perform deploy for all"
+  lane :deploy do
+    bump_type = UI.select "How to bump version:", %w{major minor patch don't}
+    prerelease = prompt(
+      text: "is this a prerelease: ",
+      boolean: true
+    )
+#     test
+#     create_screenshots
+    bump_version(bump_type: bump_type)
+    if bump_type != "don't"
+        prepare_changelog
+    end
+    git_commit(path: ["./*.gradle"], message: "Prepare for release", allow_nothing_to_commit: true)
+    gradle(task: "clean")
+    deploy_gps(prerelease: prerelease)
+    git_commit(path: [".*"], message: "Update files after release", allow_nothing_to_commit: true)
+    push_to_git_remote
+    deploy_github(prerelease: prerelease)
+    clean_changelog
+  end
+end

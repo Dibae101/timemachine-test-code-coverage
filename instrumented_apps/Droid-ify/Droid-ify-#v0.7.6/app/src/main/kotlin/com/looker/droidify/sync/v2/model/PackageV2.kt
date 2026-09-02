@@ -1,0 +1,105 @@
+package com.looker.droidify.sync.v2.model
+
+/*
+* PackageV2, MetadataV2, VersionV2, ManifestV2, UsesSdkV2, PermissionV2, FeatureV2, SignerV2
+* are licensed under the GPL 3.0 to FDroid Organization.
+* */
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class PackageV2(
+    val metadata: MetadataV2,
+    val versions: Map<String, VersionV2>,
+)
+
+@Serializable
+data class MetadataV2(
+    val name: LocalizedString? = null,
+    val summary: LocalizedString? = null,
+    val description: LocalizedString? = null,
+    val icon: LocalizedIcon? = null,
+    val added: Long,
+    val lastUpdated: Long = 0,
+    val authorEmail: String? = null,
+    val authorName: String? = null,
+    val authorPhone: String? = null,
+    val authorWebSite: String? = null,
+    val bitcoin: String? = null,
+    val categories: List<String> = emptyList(),
+    val changelog: String? = null,
+    val donate: List<String> = emptyList(),
+    val featureGraphic: LocalizedIcon? = null,
+    val issueTracker: String? = null,
+    val liberapay: String? = null,
+    val license: String? = null,
+    val litecoin: String? = null,
+    val openCollective: String? = null,
+    val preferredSigner: String? = null,
+    val promoGraphic: LocalizedIcon? = null,
+    val sourceCode: String? = null,
+    val screenshots: ScreenshotsV2? = null,
+    val tvBanner: LocalizedIcon? = null,
+    val translation: String? = null,
+    val video: LocalizedString? = null,
+    val webSite: String? = null,
+)
+
+@Serializable
+data class VersionV2(
+    val added: Long,
+    val file: ApkFileV2,
+    val src: FileV2? = null,
+    val whatsNew: LocalizedString = emptyMap(),
+    val manifest: ManifestV2,
+    val antiFeatures: Map<Tag, AntiFeatureReason> = emptyMap(),
+)
+
+@Serializable
+data class ManifestV2(
+    val versionName: String,
+    val versionCode: Long,
+    val signer: SignerV2? = null,
+    val usesSdk: UsesSdkV2? = null,
+    val maxSdkVersion: Int? = null,
+    val usesPermission: List<PermissionV2> = emptyList(),
+    val usesPermissionSdk23: List<PermissionV2> = emptyList(),
+    val features: List<FeatureV2> = emptyList(),
+    val nativecode: List<String> = emptyList(),
+)
+
+@Serializable
+data class UsesSdkV2(
+    val minSdkVersion: Int,
+    val targetSdkVersion: Int,
+)
+
+@Serializable
+data class PermissionV2(
+    val name: String,
+    val maxSdkVersion: Int? = null,
+)
+
+@Serializable
+data class FeatureV2(
+    val name: String,
+)
+
+@Serializable
+data class SignerV2(
+    val sha256: List<String>,
+    val hasMultipleSigners: Boolean = false,
+)
+
+@Serializable
+data class ScreenshotsV2(
+    val phone: LocalizedFiles? = null,
+    val sevenInch: LocalizedFiles? = null,
+    val tenInch: LocalizedFiles? = null,
+    val wear: LocalizedFiles? = null,
+    val tv: LocalizedFiles? = null,
+) {
+
+    val isNull: Boolean =
+        phone == null && sevenInch == null && tenInch == null && wear == null && tv == null
+}
