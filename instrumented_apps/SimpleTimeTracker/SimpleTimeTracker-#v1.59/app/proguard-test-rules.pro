@@ -1,4 +1,0 @@
--dontobfuscate
-
--ignorewarnings
--dontwarn

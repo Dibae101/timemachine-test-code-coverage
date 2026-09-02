@@ -1,3 +1,0 @@
-package com.example.util.simpletimetracker.navigation.params.notification
-
-sealed interface NotificationParams
