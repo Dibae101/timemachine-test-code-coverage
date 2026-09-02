@@ -59,11 +59,21 @@ def count_classes(dirs):
     return n
 
 
+def subject_files():
+    """Every subject definition, so a new set does not silently lose provenance.
+
+    This used to name subjects.json and modern_subjects.json literally, which
+    meant apps from any later set were inventoried with an empty provenance
+    column.
+    """
+    import glob as _glob
+    return sorted(_glob.glob(os.path.join(HERE, "*subjects*.json")))
+
+
 def provenance():
     """name -> "repo@ref" from the subject definitions."""
     out = {}
-    for fname in ("subjects.json", "modern_subjects.json"):
-        p = os.path.join(HERE, fname)
+    for p in subject_files():
         if not os.path.isfile(p):
             continue
         for s in json.load(open(p)):

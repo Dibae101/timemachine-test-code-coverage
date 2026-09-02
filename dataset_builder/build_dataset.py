@@ -241,6 +241,39 @@ CLASS_DIR_GLOBS = [
 ]
 
 
+def is_instrumented_class(path):
+    """True when a .class file has already been through JaCoCo's instrumenter.
+
+    Offline-instrumented classes carry a synthetic $jacocoData field and a
+    $jacocoInit method. Reporting against them is not merely wrong, it aborts:
+    jacococli raises "Error while analyzing <class>" and produces no report at
+    all, because a class may not be instrumented twice.
+    """
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read()
+    except OSError:
+        return False
+    return b"$jacocoData" in blob or b"$jacocoInit" in blob
+
+
+def _sample_class_files(path, limit=5):
+    out = []
+    for root, _, files in os.walk(path):
+        for f in files:
+            if f.endswith(".class"):
+                out.append(os.path.join(root, f))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def holds_instrumented_output(path):
+    """True when a directory holds JaCoCo-instrumented copies of the classes."""
+    samples = _sample_class_files(path)
+    return bool(samples) and all(is_instrumented_class(p) for p in samples)
+
+
 def find_class_dirs(tree):
     """Compiled application classes, whatever AGP generation produced them.
 
@@ -249,6 +282,11 @@ def find_class_dirs(tree):
     the leaf, so matching on the leaf name alone finds nothing. Globbing the
     known layouts and then dropping ancestors handles every case, including
     Kotlin modules.
+
+    Turning coverage on adds a second copy of every class: AGP writes the
+    instrumented ones to intermediates/classes/<variant>/jacoco<Variant>/, which
+    the AGP 2.x glob also matches. Those are excluded here - they are what goes
+    into the APK, but a report has to be built from the original bytecode.
     """
     found = []
     for pattern in CLASS_DIR_GLOBS:
@@ -259,7 +297,43 @@ def find_class_dirs(tree):
     # keep the deepest match on each branch
     keep = [d for d in found
             if not any(other != d and other.startswith(d + os.sep) for other in found)]
-    return keep
+    clean = []
+    for d in keep:
+        segments = d.replace(os.sep, "/").split("/")
+        if any(s.lower().startswith("jacoco") for s in segments):
+            continue
+        if holds_instrumented_output(d):
+            continue
+        clean.append(d)
+    return clean
+
+
+def apk_variant(apk_path):
+    """Variant token for an APK, from .../outputs/apk/<flavour>/<type>/x.apk.
+
+    A project with product flavours builds every one of them under
+    assembleDebug, so the class directories found afterwards cover all flavours
+    while the APK is a single one. Declaring them all makes the same class
+    appear several times over and stops matching the APK under test. The APK's
+    own path says which variant it is, so that is what gets declared.
+    """
+    parts = apk_path.replace(os.sep, "/").split("/outputs/apk/")
+    if len(parts) < 2:
+        return None
+    segs = [s for s in parts[1].split("/")[:-1] if s]
+    if len(segs) < 2:
+        return None  # no flavour dimension, just a build type
+    flavour, build_type = segs[0], segs[-1]
+    return flavour + build_type[:1].upper() + build_type[1:]
+
+
+def filter_dirs_to_variant(dirs, variant):
+    """Keep only class directories belonging to one variant."""
+    if not variant:
+        return dirs
+    low = variant.lower()
+    hit = [d for d in dirs if low in d.replace(os.sep, "/").lower()]
+    return hit or dirs
 
 
 def count_classes(dirs):
@@ -684,6 +758,16 @@ def build_subject(subject, status_rows):
         if matching_apks:
             apks = matching_apks
     apk = pick_apk(apks)
+    # Even when assembleDebug succeeded for every flavour, only one APK is
+    # declared, so narrow the classes to that APK's variant.
+    if apk:
+        variant = apk_variant(apk)
+        if variant:
+            narrowed = filter_dirs_to_variant(class_dirs, variant)
+            if narrowed and narrowed != class_dirs:
+                log("  %s: narrowing classes to variant %s (%d of %d dirs)"
+                    % (name, variant, len(narrowed), len(class_dirs)))
+                class_dirs = narrowed
     source_dirs = find_source_dirs(tree)
     n_classes = count_classes(class_dirs)
 
