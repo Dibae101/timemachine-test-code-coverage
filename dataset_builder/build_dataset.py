@@ -230,13 +230,29 @@ def has_class_file(path):
 
 
 # Directories that hold classes belonging to tests rather than to the app.
+# Matched against a lowercased path segment, not the whole path. "testdebug" as a
+# substring anywhere also matched Markor's product flavour "flavorAtest", whose
+# variant directory is flavorAtestDebug, so the flavour the shipped APK was built
+# from was discarded as test output.
 TEST_OUTPUT_MARKERS = ("unittest", "androidtest", "unit_test", "android_test",
-                       "testdebug", "testfixtures")
+                       "testfixtures")
+
+
+def is_test_output(rel_path):
+    """True when a class root belongs to a test variant rather than the app."""
+    for seg in rel_path.lower().split("/"):
+        if any(m in seg for m in TEST_OUTPUT_MARKERS):
+            return True
+        # a test variant directory is named testDebug/testRelease, i.e. test is a
+        # prefix; flavorAtestDebug merely contains the letters
+        if seg.startswith("test") and seg != "test":
+            return True
+        if seg == "test":
+            return True
+    return False
 
 # Directories that hold something other than the app's primary class output.
 #
-#   transform*ClassesWithAsm  AGP's post-processed copy of every class, so each
-#                             one collides with the original
 #   kapt/ksp stub trees       source stubs compiled only so annotation
 #                             processors can read signatures; their method
 #                             bodies are empty and jacococli crashes on them
@@ -245,15 +261,26 @@ TEST_OUTPUT_MARKERS = ("unittest", "androidtest", "unit_test", "android_test",
 # Declaring any of these aborts the whole report, so they are dropped up front.
 #   buildSrc / build-logic    gradle build logic, compiled for the build itself
 #                             and never shipped in the APK
-DERIVED_OUTPUT_MARKERS = ("transformclasseswithasm", "classeswithasm",
-                          "kapt3", "kaptstubs", "kapt_stubs", "kaptgeneratestubs",
+DERIVED_OUTPUT_MARKERS = ("kapt3", "kaptstubs", "kapt_stubs", "kaptgeneratestubs",
                           "incrementaldata", "generatestubs",
                           "buildsrc/", "buildlogic/", "buildconventions/")
 
+# AGP's ASM transform output. This is the bytecode that is dexed into the APK and
+# therefore the bytecode the coverage agent recorded ids for, so where it exists it
+# supersedes the javac and Kotlin output rather than duplicating it.
+#
+# Excluding it was wrong. Hilt rewrites every @AndroidEntryPoint class after javac
+# has run, so the javac copy differs from what ran, and jacococli drops those
+# classes with "does not match": 3 classes for Aegis, 4 for Kiwix and ReadYou, 6
+# for Droid-ify. Droid-ify's ASM output holds 1695 classes matching the run with no
+# mismatch, against 252 in its javac output.
+TRANSFORMED_OUTPUT_MARKERS = ("transformclasseswithasm", "classeswithasm")
+
 # Primary class output locations, most trustworthy first. Used to decide which
 # directory keeps a class when two of them define the same name.
-PRIMARY_OUTPUT_MARKERS = ("/javac/", "/built_in_kotlinc/", "/tmp/kotlin-classes/",
-                          "/classes/java/", "/classes/kotlin/")
+PRIMARY_OUTPUT_MARKERS = TRANSFORMED_OUTPUT_MARKERS + (
+    "/javac/", "/built_in_kotlinc/", "/tmp/kotlin-classes/",
+    "/classes/java/", "/classes/kotlin/")
 
 
 def class_names_in(root):
@@ -285,8 +312,10 @@ def resolve_duplicate_roots(dirs, variant=None):
     def score(d):
         norm = d.replace(os.sep, "/").lower() + "/"
         on_variant = 0 if low_variant and low_variant in norm else 1
+        # transformed output first: it is what runs, so it wins any collision
+        transformed = 0 if any(m in norm for m in TRANSFORMED_OUTPUT_MARKERS) else 1
         primary = 0 if any(m in norm for m in PRIMARY_OUTPUT_MARKERS) else 1
-        return (on_variant, primary, -len(class_names_in(d)), d)
+        return (on_variant, transformed, primary, -len(class_names_in(d)), d)
 
     kept, seen = [], set()
     for d in sorted(dirs, key=score):
@@ -442,7 +471,7 @@ def find_class_dirs(tree):
         segments = rel.split("/")
         if any(s.startswith("jacoco") for s in segments):
             continue
-        if any(marker in rel for marker in TEST_OUTPUT_MARKERS):
+        if is_test_output(rel):
             continue
         if any(marker in rel.replace("-", "").replace("_", "")
                for marker in DERIVED_OUTPUT_MARKERS):
