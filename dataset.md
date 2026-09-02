@@ -1,10 +1,10 @@
 # Dataset
 
-61 Android apps, each packaged so TimeMachine can measure code coverage on it.
+59 Android apps, each packaged so TimeMachine can measure code coverage on it.
 
-26 of them have been run on an emulator and have measured coverage. All 61 have
-been checked to produce a JaCoCo report. Those are different claims; see
-[verification status](README.md#verification-status-per-app).
+Every one has a matching coverage run measured on a device, in `results/smoke/`,
+and every one reports with zero mismatched classes. See
+[the results](README.md#the-results).
 
 ## Answering the confusion first: what an APK needs
 
@@ -90,17 +90,17 @@ Two build-time changes are applied but **not** committed into the app source:
 * CI workflow files are deleted from the forks only, because pushing them needs a
   token scope this pipeline does not use.
 
-## The 26 device-tested datasets
+## Coverage measured per app
 
-`coverage` is a floor from a 90-second, 40-event monkey burst - proof the dataset
-works, not a test result. Do not compare apps on it: a large app touched briefly
-scores low, a small one scores high.
+`coverage` is a floor from a 40-event monkey burst - proof the dataset works, not a
+test result. Do not compare apps on it: a large app touched briefly scores low, a
+small one scores high. The table below is from the original API 25 run; the current
+figures for all 59 apps are in `results/smoke/smoke_summary.csv`.
 
 | app | coverage | APK | smoke test | fork |
 |---|--:|---|---|:--:|
 | Binary-Eye | 47.17% | `Binary-Eye-#1.63.12-rebuilt.apk` | [results](results/smoke/Binary-Eye-_1.63.12-rebuilt_) | |
 | MaterialFBook | 19.24% | `MaterialFBook4.0.2-debug-#224.apk` | [results](results/smoke/MaterialFBook4.0.2-debug-_224_) | yes |
-| Kiwix | 19.19% | `Kiwix-#3.11.1-rebuilt.apk` | [results](results/smoke/Kiwix-_3.11.1-rebuilt_) | |
 | geohashdroid | 17.78% | `geohashdroid-0.9.4-#73-rebuilt.apk` | [results](results/smoke/geohashdroid-0.9.4-_73-rebuilt_) | yes |
 | SkyTube | 16.41% | `SkyTube-#v2.999-rebuilt.apk` | [results](results/smoke/SkyTube-_v2.999-rebuilt_) | |
 | StreetComplete | 15.20% | `StreetComplete-#v53.2-rebuilt.apk` | [results](results/smoke/StreetComplete-_v53.2-rebuilt_) | yes |
@@ -110,7 +110,6 @@ scores low, a small one scores high.
 | Orgzly-Revived | 10.50% | `Orgzly-Revived-#v1.8.27beta.2-rebuilt.apk` | [results](results/smoke/Orgzly-Revived-_v1.8.27beta.2-rebuilt_) | |
 | LibreTorrent | 9.37% | `LibreTorrent-#3.5.2-rebuilt.apk` | [results](results/smoke/LibreTorrent-_3.5.2-rebuilt_) | |
 | nextcloud | 8.63% | `nextcloud-#4792-rebuilt.apk` | [results](results/smoke/nextcloud-_4792-rebuilt_) | yes |
-| Open-Food-Facts | 8.43% | `Open-Food-Facts-#v3.10.2-rebuilt.apk` | [results](results/smoke/Open-Food-Facts-_v3.10.2-rebuilt_) | |
 | Wallabag | 7.82% | `Wallabag-#2.5.3-rebuilt.apk` | [results](results/smoke/Wallabag-_2.5.3-rebuilt_) | |
 | newpipe | 7.57% | `newpipe-#v0.25.1-rebuilt.apk` | [results](results/smoke/newpipe-_v0.25.1-rebuilt_) | yes |
 | commons | 7.57% | `commons-2.7.1-#1581-rebuilt.apk` | [results](results/smoke/commons-2.7.1-_1581-rebuilt_) | yes |
@@ -133,10 +132,8 @@ source branch was lost with a deleted GitHub account, and it happens to match.
 
 ## The 35 datasets added in the expansion
 
-Built and report-validated, **not** yet run on a device: the host used for this
-pass is aarch64 with no `/dev/kvm`, so no emulator could run. `lines` and `pages`
-are from `results/report-validation/`, and are a property of the report, not a
-coverage measurement.
+All of these now have device-measured coverage too, via redroid; see
+`results/smoke/smoke_summary.csv`. `classes` is what the entry declares.
 
 | app | ref | source repo | classes | lines | pages |
 |---|---|---|--:|--:|--:|
@@ -193,12 +190,10 @@ and a Wear OS build respectively.
 | FirefoxLite | tingsu/FirefoxLite | `instrumented-version-2.1.20-#5085` |
 | Infinity-For-Reddit | Docile-Alligator/Infinity-For-Reddit | `v7.3.4` |
 | Jellyfin-Android | jellyfin/jellyfin-android | `v2.6.2` |
-| Kiwix | kiwix/kiwix-android | `3.11.1` |
 | Kore | xbmc/Kore | `v3.1.0` |
 | LibreTorrent | proninyaroslav/libretorrent | `3.5.2` |
 | MaterialFBook | ZeeRooo/MaterialFBook | `v4.0.2` |
 | Omni-Notes | tingsu/Omni-Notes | `instrumented-version-6.1.0` |
-| Open-Food-Facts | openfoodfacts/openfoodfacts-androidapp | `v3.10.2` |
 | Orgzly-Revived | orgzly-revived/orgzly-android-revived | `v1.8.27-beta.2` |
 | SkyTube | SkyTubeTeam/SkyTube | `v2.999` |
 | StreetComplete | streetcomplete/StreetComplete | `v53.2` |
@@ -239,7 +234,7 @@ Emulator must be API 25, `google_apis`, x86. Setup commands are in the
 
 ```bash
 ./smoke_test_dataset.sh              # all 26
-./smoke_test_dataset.sh Kiwix Twire  # by name
+./smoke_test_dataset.sh Twire Markor  # by name
 ```
 
 ## Not included

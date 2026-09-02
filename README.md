@@ -1,7 +1,10 @@
 # TimeMachine coverage datasets
 
-A collection of **61 Android apps packaged so a GUI testing tool can measure code
-coverage on them**, with a check per app that a report actually generates.
+A collection of **59 Android apps packaged so a GUI testing tool can measure code
+coverage on them**, each with a matching coverage run measured on a device.
+
+Every app in `instrumented_apps/` has exactly one result directory in
+`results/smoke/`, and every one of them reports with **zero mismatched classes**.
 
 This is a fork of [DroidTest/TimeMachine](https://github.com/DroidTest/TimeMachine)
 with the dataset work added. The original tool and paper are unchanged; see
@@ -13,43 +16,46 @@ TimeMachine does.
 * **[dataset_builder/README.md](dataset_builder/README.md)** - how the datasets are
   built and every upstream breakage that had to be worked around
 
-## Verification status, per app
+## The results
 
-| level | apps | what it proves |
-|---|--:|---|
-| **Device smoke test, redroid Android 12** | **61** | every APK installs, launches, and dumps a real `.ec`; 59 report with zero mismatched classes |
-| Device smoke test, API 25 emulator | 26 | the original run, kept for comparison |
-| Report validation | 61 | class directories parse and `jacococli` produces colour-coded HTML, on a host with no emulator |
+`results/smoke/` is the only results folder. It holds one directory per app, named
+after that app's APK, produced by installing the APK on redroid Android 12 (API 31),
+exercising it with a 40-event monkey burst, dumping a real `.ec` and building a
+report.
 
-**All 61 apps now have measured device coverage.** `results/smoke-redroid-api31/`
-holds the current run: 61 installed, 61 launched, 59 PASS, 2 with a small
-mismatched-class residue documented [below](#the-two-remaining-mismatches).
-Coverage ranges 0.51% to 31.66%, median 9.40%, from 5.6 MB of execution data.
-
-Report validation is no longer the only evidence for the newer apps; it remains
-useful on a host that cannot run a device at all.
-
-`results/smoke/` holds the device runs. `results/report-validation/` holds the
-report checks, and its execution data is **synthesized, not measured** - see
-[the note below](#report-validation-is-not-a-coverage-measurement).
-
-Both trees use the **same layout**, so one consumer can read either:
+| | |
+|---|--:|
+| apps | 59 |
+| installed and launched | 59 |
+| reporting with zero mismatched classes | 59 |
+| line coverage | 0.51% - 31.66%, median 9.40% |
+| device execution data | 5.4 MB |
 
 ```
-results/<smoke|report-validation>/<apk-slug>/
-├── coverage.ec        device execution data     (smoke only)
-├── synthetic.exec     synthesized               (report-validation only)
-├── coverage.xml       jacoco XML report
-├── coverage_html/     annotated, colour-coded HTML
-├── probe_report.txt   jacococli execinfo
-└── probe_summary.csv  per-class probe hits
-results/<...>/smoke_summary.csv | validation_summary.csv
+results/smoke/Twire-_v2.10.7-rebuilt_/
+├── coverage.ec         execution data pulled off the device
+├── coverage.xml        jacoco report
+├── coverage_html/      annotated, colour-coded source
+├── probe_report.txt    jacococli execinfo
+└── probe_summary.csv   per-class probe hits
+results/smoke/smoke_summary.csv   the verdict table for all 59
 ```
 
-Directory names are identical for the 26 apps present in both, and the summary
-CSVs share their first twelve columns. The execution-data filename differs on
-purpose, and `validation_summary.csv` carries a `coverage_source` column
-(`device` vs `synthetic`) so the two cannot be conflated.
+The correspondence is checked, not assumed: 59 datasets, 59 summary rows, 59 result
+directories, no orphans either way, and for every entry the class ids recorded in
+its `coverage.ec` resolve against its own declared class directories with no
+name-only mismatches.
+
+### Two apps were removed rather than shipped imperfect
+
+Kiwix and Open-Food-Facts each reported a handful of mismatched classes that could
+not be fixed by declaring a different directory. Both had classes rewritten by a
+bytecode transformer that writes no post-transform copy to disk - ObjectBox entity
+cursors for Kiwix, Hilt entry points (`SplashActivity`, `WelcomeActivity`,
+`OFFApplication`) for Open-Food-Facts - so the bytecode that ran exists only inside
+the APK's dex and no directory can reproduce its class ids. Rather than ship two
+entries that silently under-count, they are out. Their build recipes remain in
+`dataset_builder/` if someone wants to solve it.
 
 ### Running the device test without an emulator: redroid
 
@@ -98,32 +104,17 @@ API level at all, and they apply to any emulator newer than API 25:
   geohashdroid instead of 1600 - because none of the app's own code ever ran. The
   launcher activity is resolved and started directly now.
 
-### The two remaining mismatches
-
-Kiwix reports 4 mismatched classes of 1402, and Open-Food-Facts 3 of 1805. Both are
-classes rewritten by a bytecode transformer after `javac`:
-
-* Kiwix: `NotesEntityCursor`, `RecentSearchEntityCursor`, `BookmarkEntityCursor`,
-  `HistoryEntityCursor` - generated and transformed by ObjectBox.
-* Open-Food-Facts: `SplashActivity`, `WelcomeActivity`, `OFFApplication` - Hilt
-  `@AndroidEntryPoint` and `@HiltAndroidApp` classes.
-
-Unlike the five apps fixed by declaring AGP's `transformClassesWithAsm` output,
-these two write no post-transform copy to disk: the transformed bytecode exists
-only inside the APK's dex. No directory can match it, so `jacococli` drops those
-3-4 classes. It is 0.2-0.3% of each app's classes and it is not a fixable
-declaration problem.
-
 ### Which emulator an app needs
 
 `MANIFEST.tsv` records `min_sdk` per APK, because that decides where an app can be
 smoke tested:
 
-* **44 of 61** install on the API 25 image the original set was tested on.
+* **42 of 59** install on the API 25 image the original set was tested on.
 * **17 need something newer** - 13 at API 26, then Calculator-You (27), uhabits
   (28), Feeder (29) and FastNFitness (31).
 
-An API 31 image covers all 61. The original 26 were pinned to API 25 because newer
+An API 31 image covers all 59, which is what the committed run used. The original 26
+were pinned to API 25 because newer
 images change permission and storage behaviour and several of them stop launching,
 so two passes are more reliable than one: API 25 for the 44, a newer image for the
 rest.
@@ -137,8 +128,8 @@ DRY_RUN=1 API=31 ./smoke_test_dataset.sh     # against API 31
 
 `DRY_RUN` needs no emulator. It lists every discovered APK with its `min_sdk`,
 declared class count, resolved class/source directories, and flags LFS pointers or
-unresolved paths. It reports 61 discovered, 0 dataset problems, 17 too new for API
-25.
+unresolved paths. It reports 59 discovered, 0 dataset problems, and 17 too new for
+API 25.
 
 The 35 apps added most recently have not been run on a device, because the host
 they were built on cannot run one (aarch64, no `/dev/kvm`). Their datasets are
@@ -156,10 +147,15 @@ one compiled `.class` file. `MANIFEST.tsv` reported them as valid because it had
 been generated on the machine that still had the build output on disk.
 
 A coverage report needs the compiled classes, so those thirteen produced nothing.
-All have been rebuilt from the exact refs in
-`dataset_builder/research_subjects.json` and now carry their classes.
-`dataset_builder/verify_reports.py` is what catches this class of problem, and it
-is worth running after cloning.
+All were rebuilt from the exact refs in `dataset_builder/research_subjects.json`
+and now carry their classes; Kiwix and Open-Food-Facts were later dropped for the
+unrelated mismatch reason above.
+
+The guard against a repeat is `python3 dataset_builder/make_manifest.py`, which
+fails when a declared path does not resolve or holds no `.class` files. Worth
+running after cloning. The stronger check is that every entry here has a
+`coverage.ec` in `results/smoke/` whose class ids resolve against its own declared
+directories, which cannot be true of an entry with no classes.
 
 ## Why this exists
 
@@ -178,95 +174,17 @@ the effort here went into making those four things agree, for apps ranging from
 
 ## The apps
 
-61 apps, one APK each, all 61 entries validating in
+59 apps, one APK each, all 59 entries validating in
 [`instrumented_apps/MANIFEST.tsv`](instrumented_apps/MANIFEST.tsv) with per-entry
-package, SHA-256, class and source counts. Per-app report figures are in
-[`results/report-validation/report_validation.csv`](results/report-validation/report_validation.csv).
+package, minSdk, SHA-256, source commit, and class and source counts. Per-app
+coverage is in
+[`results/smoke/smoke_summary.csv`](results/smoke/smoke_summary.csv).
 
 The set spans file managers, RSS and Reddit clients, media players, note takers,
 calendars, launchers, trackers, calculators and games, built with AGP 2.3 through
 AGP 9 and mixing Java, Kotlin and Compose. That spread is deliberate: the older
 projects exercise the AGP 2.x/3.x class-output layouts, the newest exercise
 Compose and AGP's built-in Kotlin compilation.
-
-### Device-measured coverage, original 26 apps
-
-| app | coverage | app | coverage | app | coverage |
-|---|--:|---|--:|---|--:|
-| Binary-Eye | 47.17% | LibreTorrent | 9.37% | Wikipedia | 3.41% |
-| MaterialFBook | 19.24% | nextcloud | 8.63% | Infinity-For-Reddit | 3.16% |
-| Kiwix | 19.19% | Open-Food-Facts | 8.43% | Twire | 2.67% |
-| geohashdroid | 17.78% | Wallabag | 7.82% | openlauncher | 2.35% |
-| SkyTube | 16.41% | newpipe | 7.57% | Kore | 1.72% |
-| StreetComplete | 15.20% | commons | 7.57% | Jellyfin-Android | 1.25% |
-| FirefoxLite | 13.72% | ownCloud | 6.56% | Fedilab | 0.52% |
-| AmazeFileManager | 13.08% | Breezy-Weather | 6.22% | | |
-| Omni-Notes | 10.58% | AnkiDroid | 4.11% | | |
-| Orgzly-Revived | 10.50% | | | | |
-
-**Those percentages are not results.** Read the next section before using them.
-
-## The smoke test is not a coverage run
-
-The smoke test exists to answer one question per app: *does this dataset work?*
-
-It installs the APK, launches it, fires **40 monkey events over about 90 seconds**,
-broadcasts the coverage dump, pulls the `.ec` file, and builds a report. An app
-passes when the report generates with **zero mismatched classes**.
-
-Two caveats on the numbers in the committed smoke output:
-
-* **The `html_pages` column understated every Kotlin app.** It counted only
-  `*.java.html`, so StreetComplete was recorded as 2 pages when its report
-  actually contains 964 `*.kt.html`. Kiwix (322) and Breezy-Weather (424) were
-  affected the same way. The reports were always correct; the column was not.
-  Fixed, but the committed CSV still carries the old figures.
-* **Three apps were measured over a fraction of their code.** Binary-Eye's
-  headline 47.17% is 25 covered lines out of a 53-line denominator, because only
-  4 of its classes were declared at the time. Kiwix analysed 1,339 lines against
-  the 16,425 it has now, and Open-Food-Facts 9,861 against 24,198. Those three
-  percentages are not app-level coverage, which is why the class directories were
-  rebuilt.
-
-That is a plumbing check. The percentages it produces are a floor - what you get
-from a minute and a half of random tapping. A real TimeMachine run explores for an
-hour and reaches far higher. Do not quote these as coverage results, and do not
-compare apps against each other on them: a large app touched briefly scores low, a
-small one scores high. Binary-Eye leads at 47% because the burst happened to reach
-4 of its 370 classes and cover most lines inside them.
-
-## Report validation is not a coverage measurement
-
-`results/report-validation/` answers a narrower question than the smoke test, for
-all 61 apps: *given this entry, does `jacococli` produce a report?*
-
-It exists because the host these were built on is aarch64 with no `/dev/kvm`, so no
-emulator can run and no real `.ec` can be collected there. Instead
-`dataset_builder/tools/SynthExec.java` writes execution data over the declared
-class files, keyed by the same class ids the reporter computes (CRC64 of the class
-bytes) and sized by the same probe counts. That exercises the parts that actually
-break in practice: id matching, probe-count agreement, source resolution, and the
-green/yellow/red line markup.
-
-**The percentages in those reports are meaningless.** They follow the `--fraction`
-argument, not any test run, which is why they all sit near 60%. The verdict column
-is the output that matters. The directory is kept separate from `results/smoke/`
-precisely so synthesized and measured data cannot be mistaken for one another.
-
-```bash
-python3 dataset_builder/verify_reports.py            # all apps
-python3 dataset_builder/verify_reports.py Markor     # by name
-```
-
-What it catches, all of which occurred while building this set:
-
-* a declared directory holding JaCoCo-**instrumented** classes; `jacococli` aborts
-  on those rather than warning, and writes no report at all
-* the same class declared twice, from two product flavours or from a Hilt/ASM
-  post-processing copy - also fatal, not a warning
-* kapt stub trees, whose empty method bodies crash the analyzer
-* an entry whose class directories were never published, which is exactly the
-  13-app problem described above
 
 ## How the datasets were found and built
 
@@ -301,8 +219,8 @@ Three repositories still need a hand-pinned ref, recorded with the reason in
 highest-numbered tag is from 2012; KeePassDroid's newest tags are GitHub
 `untagged-<sha>` placeholders; and CPU-Info's highest tag is its Wear OS build.
 
-105 apps are defined across the subject sets. 61 produce a complete, reportable
-dataset. The rest fail to build or to instrument, and are named with their state in
+105 apps are defined across the subject sets. 59 produce a complete dataset that
+reports cleanly against a real device run. The rest fail to build or to instrument, and are named with their state in
 the `status-*.csv` files under `dataset_builder/`.
 
 ## Where each APK came from
@@ -370,16 +288,16 @@ The working tree during development is far larger than what is here:
 |---|---|
 | Most of each Gradle build tree | only compiled classes and sources are needed; this took the dataset from 6.0 GB to 1.2 GB |
 | Generated `R` / `R$*` classes | no meaningful coverage, and they collide across modules and flavours |
-| 18 apps that never produced a clean report | not usable datasets |
+| Apps that never produced a clean report | not usable datasets; Kiwix and Open-Food-Facts were dropped for this reason after real coverage exposed a few mismatched classes each |
 | Duplicate APKs per app | each app appears exactly once, with the APK whose classes are declared |
 | Nested `.git` directories | otherwise git records a submodule reference and uploads none of the contents |
 | CI workflow files, in the forks only | pushing them needs a token scope this pipeline does not use |
 
-Kept deliberately: the full smoke test output for the 26 device-tested apps,
-including raw execution data and annotated HTML, so the coverage claims can be
-checked rather than taken on trust. The synthesized `.exec` inputs under
-`results/report-validation/` are **not** kept - they are regenerable in seconds and
-keeping them invites confusion with the measured `.ec` files.
+Kept deliberately: the full smoke test output for all 59 apps, including raw
+execution data and annotated HTML, so the coverage claims can be checked rather
+than taken on trust. An earlier synthetic validation set was removed once every app
+had a real device run; `regenerate_reports.sh` rebuilds the derived XML and HTML
+from the committed `.ec` if the tree ever needs slimming.
 
 ## Running it
 
@@ -423,12 +341,9 @@ find instrumented_apps -name '*.apk' -size -1k     # must print nothing
 # inventory and validate every declared path, without an emulator
 python3 dataset_builder/make_manifest.py
 
-# stronger: prove each entry actually produces a report
-python3 dataset_builder/verify_reports.py
-
 # smoke test (needs a working emulator)
-./smoke_test_dataset.sh                  # every discoverable app
-./smoke_test_dataset.sh Kiwix Twire      # by name
+./smoke_test_dataset.sh                  # every app in the dataset
+./smoke_test_dataset.sh Twire Markor    # by name
 ```
 
 `smoke_test_dataset.sh` and `run_coverage.sh` default `PROJECT` to
@@ -457,7 +372,7 @@ shapes the device numbers throughout: the emulator takes about 5 minutes to boot
 smoke test is 60-150 seconds per app, and one TimeMachine fuzz cycle takes 18-28
 minutes.
 
-The expansion to 61 was built on a 16-core **aarch64** host with 61 GB RAM and no
+The expansion was built on a 16-core **aarch64** host with 61 GB RAM and no
 `/dev/kvm`. Two things follow from that, and both are worth knowing before
 reproducing this:
 
@@ -496,8 +411,7 @@ trees have their `.git` removed, so the task resolves to the parent repository, 
 hook lands in `.git/hooks/pre-commit`, and every later commit fails with
 `./gradlew: not found`. Delete it if commits suddenly start failing.
 
-Repository: 61 APKs in LFS, 86,612 compiled class files, 384 MB of smoke test
-output. The APK set alone is about 1.9 GB, which is over the 1 GB free GitHub LFS
+Repository: 59 APKs in LFS, ~95,000 compiled class files, and one results folder. The APK set alone is about 1.9 GB, which is over the 1 GB free GitHub LFS
 allowance; check the account's quota before pushing, or keep APKs out of git and
 publish them against the SHA-256 sums already recorded in `MANIFEST.tsv`.
 
