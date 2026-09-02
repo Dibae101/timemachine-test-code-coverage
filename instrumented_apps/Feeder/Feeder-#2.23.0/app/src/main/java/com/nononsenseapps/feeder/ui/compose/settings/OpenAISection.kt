@@ -1,0 +1,1307 @@
+package com.nononsenseapps.feeder.ui.compose.settings
+
+import android.content.Context
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.tooling.preview.Devices
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.aallam.openai.client.OpenAIHost
+import com.nononsenseapps.feeder.R
+import com.nononsenseapps.feeder.archmodel.OpenAISettings
+import com.nononsenseapps.feeder.openai.LOCAL_TRANSLATION_PROVIDER_URL
+import com.nononsenseapps.feeder.openai.canUseAsTranslationApi
+import com.nononsenseapps.feeder.openai.isBlankConfiguration
+import com.nononsenseapps.feeder.openai.isDeepL
+import com.nononsenseapps.feeder.openai.isLocalTranslation
+import com.nononsenseapps.feeder.ui.compose.theme.LocalDimens
+import kotlinx.coroutines.delay
+import java.util.Locale
+
+enum class OpenAISectionType {
+    Summary,
+    Translation,
+}
+
+@Composable
+fun OpenAISection(
+    title: String,
+    info: String,
+    state: OpenAISettingsState,
+    onEvent: (OpenAISettingsEvent) -> Unit,
+    section: OpenAISectionType,
+    modifier: Modifier = Modifier,
+    preferredTranslationLanguage: String = "",
+    onPreferredTranslationLanguageChange: (String) -> Unit = {},
+    localTranslationContent: @Composable () -> Unit = {},
+    onLocalTranslationContentSave: () -> Unit = {},
+    onLocalTranslationContentDismiss: () -> Unit = {},
+) {
+    val sanitizedSettings = remember(section, state.settings) { section.sanitizeSettings(state.settings) }
+
+    OpenAISectionItem(
+        title = title,
+        settings = sanitizedSettings,
+        onEvent = onEvent,
+        modifier = modifier,
+    )
+
+    if (state.isEditMode) {
+        var current by remember(section, state.settings) { mutableStateOf(sanitizedSettings) }
+        var currentPreferredTranslationLanguage by remember(preferredTranslationLanguage) { mutableStateOf(preferredTranslationLanguage) }
+        var provider by remember(section, state.settings) { mutableStateOf(AIProviderPreset.fromSettings(sanitizedSettings)) }
+        val context = LocalContext.current
+        val matchingModelsResult =
+            remember(current, state.modelsResult) {
+                state.modelsResult.takeIf { it.matches(current) } ?: OpenAIModelsState.None
+            }
+        val validationMessage =
+            remember(current, provider, matchingModelsResult, context) {
+                current.validationMessage(
+                    provider = provider,
+                    modelsResult = matchingModelsResult,
+                    context = context,
+                )
+            }
+        Dialog(
+            onDismissRequest = {
+                onLocalTranslationContentDismiss()
+                onEvent(OpenAISettingsEvent.SwitchEditMode(enabled = false))
+            },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.92f)
+                        .padding(24.dp)
+                        .imePadding(),
+                shape = MaterialTheme.shapes.extraLarge,
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Spacer(modifier = Modifier.size(16.dp))
+                    OpenAISectionEdit(
+                        info = info,
+                        modelsResult = matchingModelsResult,
+                        current = current,
+                        provider = provider,
+                        section = section,
+                        validationMessage = validationMessage,
+                        preferredTranslationLanguage = currentPreferredTranslationLanguage,
+                        showModelsError = state.showModelsError,
+                        onEvent = {
+                            if (it is OpenAISettingsEvent.UpdateSettings) {
+                                current = it.settings
+                            } else {
+                                onEvent(it)
+                            }
+                        },
+                        onProviderChange = { selected ->
+                            provider = selected
+                            current = selected.applyTo(current)
+                        },
+                        onPreferredTranslationLanguageChange = { currentPreferredTranslationLanguage = it },
+                        localTranslationContent = localTranslationContent,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = true),
+                    )
+                    Spacer(modifier = Modifier.size(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        Button(
+                            onClick = {
+                                onLocalTranslationContentDismiss()
+                                onEvent(OpenAISettingsEvent.SwitchEditMode(enabled = false))
+                            },
+                        ) {
+                            Text(text = stringResource(android.R.string.cancel))
+                        }
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Button(
+                            onClick = {
+                                onEvent(OpenAISettingsEvent.UpdateSettings(current))
+                                if (section == OpenAISectionType.Translation) {
+                                    onPreferredTranslationLanguageChange(currentPreferredTranslationLanguage)
+                                }
+                                onLocalTranslationContentSave()
+                                onEvent(OpenAISettingsEvent.SwitchEditMode(enabled = false))
+                            },
+                            enabled = validationMessage == null,
+                        ) {
+                            Text(text = stringResource(R.string.save))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TranslationApiSection(
+    title: String,
+    info: String,
+    state: TranslationApiSettingsState,
+    onEvent: (TranslationApiSettingsEvent) -> Unit,
+    modifier: Modifier = Modifier,
+    preferredTranslationLanguage: String = "",
+    onPreferredTranslationLanguageChange: (String) -> Unit = {},
+    localTranslationContent: @Composable () -> Unit = {},
+    onLocalTranslationContentSave: () -> Unit = {},
+    onLocalTranslationContentDismiss: () -> Unit = {},
+) {
+    OpenAISection(
+        title = title,
+        info = info,
+        state = state,
+        onEvent = onEvent,
+        section = OpenAISectionType.Translation,
+        preferredTranslationLanguage = preferredTranslationLanguage,
+        onPreferredTranslationLanguageChange = onPreferredTranslationLanguageChange,
+        modifier = modifier,
+        localTranslationContent = localTranslationContent,
+        onLocalTranslationContentSave = onLocalTranslationContentSave,
+        onLocalTranslationContentDismiss = onLocalTranslationContentDismiss,
+    )
+}
+
+@Composable
+private fun OpenAISectionItem(
+    title: String,
+    settings: OpenAISettings,
+    onEvent: (OpenAISettingsEvent) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val provider = remember(settings) { AIProviderPreset.fromSettings(settings) }
+    val configured = remember(settings) { settings.key.isNotBlank() || settings.canUseAsTranslationApi }
+
+    Row(
+        modifier =
+            modifier
+                .width(LocalDimens.current.maxContentWidth)
+                .clickable { onEvent(OpenAISettingsEvent.SwitchEditMode(enabled = true)) }
+                .semantics { role = Role.Button },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.size(64.dp),
+            contentAlignment = Alignment.Center,
+        ) { }
+
+        TitleAndSubtitle(
+            title = {
+                Text(text = title)
+            },
+            subtitle = {
+                Text(
+                    text =
+                        if (!configured) {
+                            stringResource(R.string.ai_not_configured)
+                        } else {
+                            stringResource(R.string.api_provider_summary, stringResource(provider.titleRes))
+                        },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+        )
+    }
+}
+
+private fun isTimeoutInputValid(input: String): Boolean = input.trim().isNotEmpty() && input.toIntOrNull()?.takeIf { it in 30..600 } != null
+
+@Composable
+private fun OpenAISectionEdit(
+    info: String,
+    modelsResult: OpenAIModelsState,
+    current: OpenAISettings,
+    provider: AIProviderPreset,
+    section: OpenAISectionType,
+    validationMessage: String?,
+    preferredTranslationLanguage: String,
+    showModelsError: Boolean,
+    onEvent: (OpenAISettingsEvent) -> Unit,
+    onProviderChange: (AIProviderPreset) -> Unit,
+    onPreferredTranslationLanguageChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    localTranslationContent: @Composable () -> Unit = {},
+) {
+    val latestOnEvent by rememberUpdatedState(onEvent)
+    val showAzureFields = provider == AIProviderPreset.AZURE_OPENAI
+    val hasProvider = provider != AIProviderPreset.NONE
+    val isTranslationOnlyProvider = provider.isTranslationOnly
+    val needsApiKey = provider.needsApiKey
+    val showsTranslationEndpoint = provider == AIProviderPreset.DEEPL
+
+    LaunchedEffect(current, provider) {
+        if (provider != AIProviderPreset.NONE && provider != AIProviderPreset.LOCAL_TRANSLATION) {
+            delay(750)
+            latestOnEvent(OpenAISettingsEvent.LoadModels(settings = current))
+        }
+    }
+
+    var modelsMenuExpanded by remember { mutableStateOf(false) }
+    var providerMenuExpanded by remember { mutableStateOf(false) }
+    var translationLanguageMenuExpanded by remember { mutableStateOf(false) }
+    var showOnlyBergamotLanguages by remember { mutableStateOf(false) }
+    var timeoutString by remember(current.timeoutSeconds) { mutableStateOf(current.timeoutSeconds.toString()) }
+    val isTimeoutInputValid =
+        remember(timeoutString) {
+            isTimeoutInputValid(timeoutString)
+        }
+    val scrollState = rememberScrollState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    Column(
+        modifier = modifier.verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = info,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+        )
+
+        validationMessage?.let { message ->
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Warning,
+                        contentDescription = null,
+                    )
+                    Text(
+                        text = message,
+                        modifier = Modifier.padding(start = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+
+        ProviderField(
+            section = section,
+            provider = provider,
+            expanded = providerMenuExpanded,
+            onExpandedChange = { providerMenuExpanded = it },
+            onSelect = { selected ->
+                providerMenuExpanded = false
+                onProviderChange(selected)
+            },
+        )
+
+        if (hasProvider && needsApiKey) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = current.key,
+                label = {
+                    Text(
+                        stringResource(
+                            if (provider.isDeepL) {
+                                R.string.deepl_api_key
+                            } else {
+                                R.string.api_key
+                            },
+                        ),
+                    )
+                },
+                keyboardOptions =
+                    KeyboardOptions.Default.copy(
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Next,
+                    ),
+                keyboardActions =
+                    KeyboardActions(
+                        onNext = {
+                            focusManager.moveFocus(focusDirection = FocusDirection.Down)
+                        },
+                    ),
+                onValueChange = {
+                    onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(key = it)))
+                },
+                visualTransformation = VisualTransformationApiKey(),
+            )
+        }
+
+        if (hasProvider && !isTranslationOnlyProvider) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = current.modelId,
+                label = {
+                    Text(stringResource(R.string.model_id))
+                },
+                keyboardOptions =
+                    KeyboardOptions.Default.copy(
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Next,
+                    ),
+                keyboardActions =
+                    KeyboardActions(
+                        onNext = {
+                            focusManager.moveFocus(focusDirection = FocusDirection.Down)
+                        },
+                    ),
+                onValueChange = {
+                    onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(modelId = it)))
+                },
+                trailingIcon = {
+                    IconButton(
+                        onClick = { modelsMenuExpanded = true },
+                        enabled = modelsResult is OpenAIModelsState.Success,
+                    ) {
+                        if (modelsResult is OpenAIModelsState.Loading) {
+                            CircularProgressIndicator()
+                        } else {
+                            Icon(Icons.Filled.ExpandMore, contentDescription = stringResource(R.string.list_of_available_models))
+                            if (modelsResult is OpenAIModelsState.Success) {
+                                OpenAIModelsDropdown(
+                                    menuExpanded = modelsMenuExpanded,
+                                    state = modelsResult,
+                                    onValueChange = {
+                                        onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(modelId = it)))
+                                    },
+                                    onDismissRequest = { modelsMenuExpanded = false },
+                                )
+                            }
+                        }
+                    }
+                },
+            )
+
+            OpenAIModelsStatus(
+                state = modelsResult,
+                showError = showModelsError,
+                onEvent = onEvent,
+            )
+        }
+
+        if (hasProvider && !isTranslationOnlyProvider) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = current.baseUrl,
+                placeholder = {
+                    Text(OpenAIHost.OpenAI.baseUrl)
+                },
+                label = {
+                    Text(stringResource(R.string.base_url_optional))
+                },
+                keyboardOptions =
+                    KeyboardOptions.Default.copy(
+                        keyboardType = KeyboardType.Uri,
+                        imeAction = ImeAction.Next,
+                    ),
+                keyboardActions =
+                    KeyboardActions(
+                        onNext = {
+                            focusManager.moveFocus(focusDirection = FocusDirection.Down)
+                        },
+                    ),
+                onValueChange = {
+                    onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(baseUrl = it)))
+                },
+            )
+        } else if (showsTranslationEndpoint) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = provider.endpoint,
+                label = {
+                    Text(stringResource(R.string.translation_endpoint))
+                },
+                readOnly = true,
+                enabled = false,
+                onValueChange = {},
+            )
+        }
+
+        if (section == OpenAISectionType.Translation && hasProvider) {
+            TranslationLanguageField(
+                provider = provider,
+                preferredTranslationLanguage = preferredTranslationLanguage,
+                showOnlyBergamotLanguages = showOnlyBergamotLanguages,
+                expanded = translationLanguageMenuExpanded,
+                onExpandedChange = { translationLanguageMenuExpanded = it },
+                onPreferredTranslationLanguageChange = onPreferredTranslationLanguageChange,
+            )
+
+            if (provider == AIProviderPreset.LOCAL_TRANSLATION) {
+                BergamotLanguagesOnlySwitch(
+                    checked = showOnlyBergamotLanguages,
+                    onCheckedChange = { showOnlyBergamotLanguages = it },
+                )
+
+                localTranslationContent()
+            }
+        }
+
+        if (hasProvider && provider != AIProviderPreset.LOCAL_TRANSLATION) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = timeoutString,
+                placeholder = { Text(text = stringResource(R.string.time_out_placeholder)) },
+                label = {
+                    Text(stringResource(R.string.time_out))
+                },
+                keyboardOptions =
+                    KeyboardOptions.Default.copy(
+                        keyboardType = KeyboardType.Number,
+                        imeAction =
+                            when {
+                                showAzureFields -> ImeAction.Next
+                                else -> ImeAction.Done
+                            },
+                    ),
+                keyboardActions =
+                    KeyboardActions(
+                        onNext = {
+                            focusManager.moveFocus(focusDirection = FocusDirection.Down)
+                        },
+                        onDone = {
+                            keyboardController?.hide()
+                        },
+                    ),
+                supportingText = {
+                    if (!isTimeoutInputValid) {
+                        Text(stringResource(R.string.time_out_validation_error))
+                    }
+                },
+                onValueChange = { input ->
+                    timeoutString = input
+                    if (isTimeoutInputValid(timeoutString)) {
+                        onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(timeoutSeconds = timeoutString.toInt())))
+                    }
+                },
+                isError = !isTimeoutInputValid,
+            )
+        }
+
+        if (hasProvider && showAzureFields) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = current.azureDeploymentId,
+                label = {
+                    Text(stringResource(R.string.azure_deployment_id))
+                },
+                keyboardOptions =
+                    KeyboardOptions.Default.copy(
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Next,
+                    ),
+                keyboardActions =
+                    KeyboardActions(
+                        onNext = {
+                            focusManager.moveFocus(focusDirection = FocusDirection.Down)
+                        },
+                    ),
+                onValueChange = {
+                    onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(azureDeploymentId = it)))
+                },
+            )
+
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = current.azureApiVersion,
+                placeholder = {
+                    Text("2024-02-15-preview")
+                },
+                label = {
+                    Text(stringResource(R.string.azure_api_version))
+                },
+                keyboardOptions =
+                    KeyboardOptions.Default.copy(
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Done,
+                    ),
+                keyboardActions =
+                    KeyboardActions(
+                        onDone = {
+                            keyboardController?.hide()
+                        },
+                    ),
+                onValueChange = {
+                    onEvent(OpenAISettingsEvent.UpdateSettings(current.copy(azureApiVersion = it)))
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun TranslationLanguageField(
+    provider: AIProviderPreset,
+    preferredTranslationLanguage: String,
+    showOnlyBergamotLanguages: Boolean,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onPreferredTranslationLanguageChange: (String) -> Unit,
+) {
+    val languageOptions =
+        remember(provider, showOnlyBergamotLanguages) {
+            translationLanguageOptions(
+                provider = provider,
+                showOnlyBergamotLanguages = showOnlyBergamotLanguages,
+            )
+        }
+    val selectedLanguage =
+        remember(provider, preferredTranslationLanguage) {
+            translationLanguageOption(
+                provider = provider,
+                language = preferredTranslationLanguage,
+            )
+        }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            TextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = selectedLanguage?.label ?: preferredTranslationLanguage,
+                placeholder = {
+                    Text(stringResource(R.string.translation_language_placeholder))
+                },
+                label = {
+                    Text(stringResource(R.string.preferred_translation_language))
+                },
+                readOnly = true,
+                onValueChange = {},
+                trailingIcon = {
+                    IconButton(onClick = { onExpandedChange(true) }) {
+                        Icon(Icons.Filled.ExpandMore, contentDescription = stringResource(R.string.preferred_translation_language))
+                    }
+                },
+            )
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { onExpandedChange(false) },
+            ) {
+                languageOptions.forEach { option ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(option.label)
+                        },
+                        onClick = {
+                            onPreferredTranslationLanguageChange(option.code)
+                            onExpandedChange(false)
+                        },
+                    )
+                }
+            }
+        }
+        Text(
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp),
+            text =
+                preferredTranslationLanguageDescription(
+                    provider = provider,
+                    selectedLanguage = selectedLanguage,
+                ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun BergamotLanguagesOnlySwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clickable { onCheckedChange(!checked) }
+                .semantics { role = Role.Switch }
+                .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.show_only_bergamot_languages),
+            modifier = Modifier.weight(1f),
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+        )
+    }
+}
+
+@Composable
+private fun preferredTranslationLanguageDescription(
+    provider: AIProviderPreset,
+    selectedLanguage: TranslationLanguageOption?,
+): String {
+    if (provider != AIProviderPreset.LOCAL_TRANSLATION) {
+        return stringResource(R.string.preferred_translation_language_description)
+    }
+
+    val systemSetup = stringResource(R.string.local_translation_setup_system)
+    val targetLanguage = selectedLanguage?.name ?: stringResource(R.string.preferred_translation_language_fallback)
+    val targetCode = selectedLanguage?.normalizedBergamotCode()
+
+    return if (targetCode != null && targetCode in BERGAMOT_TARGET_LANGUAGE_CODES) {
+        systemSetup + " " + stringResource(R.string.local_translation_setup_bergamot, targetLanguage)
+    } else {
+        systemSetup
+    }
+}
+
+private data class TranslationLanguageOption(
+    val code: String,
+    val name: String,
+) {
+    val label: String = "$name ($code)"
+
+    fun normalizedBergamotCode(): String =
+        when (code.lowercase(Locale.ROOT).substringBefore('-')) {
+            "nb", "nn" -> "nb"
+            else -> code.lowercase(Locale.ROOT).substringBefore('-')
+        }
+}
+
+private fun translationLanguageOptions(
+    provider: AIProviderPreset,
+    showOnlyBergamotLanguages: Boolean,
+): List<TranslationLanguageOption> {
+    val options =
+        if (provider == AIProviderPreset.DEEPL) {
+            deepLTargetLanguageOptions()
+        } else {
+            isoLanguageOptions()
+        }
+
+    return if (provider == AIProviderPreset.LOCAL_TRANSLATION && showOnlyBergamotLanguages) {
+        options.filter { it.normalizedBergamotCode() in BERGAMOT_TARGET_LANGUAGE_CODES }
+    } else {
+        options
+    }
+}
+
+private fun translationLanguageOption(
+    provider: AIProviderPreset,
+    language: String,
+): TranslationLanguageOption? {
+    val trimmed = language.trim().takeIf(String::isNotBlank) ?: return null
+    if (provider == AIProviderPreset.DEEPL) {
+        deepLTargetLanguageOptions()
+            .firstOrNull { option ->
+                option.code.equals(trimmed, ignoreCase = true) ||
+                    option.name.equals(trimmed, ignoreCase = true)
+            }?.let { return it }
+    }
+
+    isoLanguageOptions()
+        .firstOrNull { option ->
+            option.code.equals(trimmed, ignoreCase = true) ||
+                option.name.equals(trimmed, ignoreCase = true)
+        }?.let { return it }
+
+    val exactLocale = Locale.forLanguageTag(trimmed)
+    val exactLanguage = exactLocale.language.takeIf { it.isNotBlank() && it != "und" }
+    if (exactLanguage != null) {
+        return TranslationLanguageOption(
+            code = trimmed,
+            name = exactLocale.getDisplayLanguage(Locale.getDefault()).takeIf(String::isNotBlank) ?: trimmed,
+        )
+    }
+    return null
+}
+
+private fun isoLanguageOptions(): List<TranslationLanguageOption> =
+    Locale
+        .getISOLanguages()
+        .mapNotNull { code ->
+            val locale = Locale.forLanguageTag(code)
+            val name = locale.getDisplayLanguage(Locale.getDefault()).takeIf(String::isNotBlank) ?: return@mapNotNull null
+            TranslationLanguageOption(
+                code = code,
+                name = name,
+            )
+        }.distinctBy { it.code.lowercase(Locale.ROOT) }
+        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, TranslationLanguageOption::name))
+
+private fun deepLTargetLanguageOptions(): List<TranslationLanguageOption> =
+    listOf(
+        TranslationLanguageOption("ACE", "Acehnese"),
+        TranslationLanguageOption("AF", "Afrikaans"),
+        TranslationLanguageOption("AN", "Aragonese"),
+        TranslationLanguageOption("AR", "Arabic"),
+        TranslationLanguageOption("AS", "Assamese"),
+        TranslationLanguageOption("AY", "Aymara"),
+        TranslationLanguageOption("AZ", "Azerbaijani"),
+        TranslationLanguageOption("BA", "Bashkir"),
+        TranslationLanguageOption("BE", "Belarusian"),
+        TranslationLanguageOption("BG", "Bulgarian"),
+        TranslationLanguageOption("BHO", "Bhojpuri"),
+        TranslationLanguageOption("BN", "Bengali"),
+        TranslationLanguageOption("BR", "Breton"),
+        TranslationLanguageOption("BS", "Bosnian"),
+        TranslationLanguageOption("CA", "Catalan"),
+        TranslationLanguageOption("CEB", "Cebuano"),
+        TranslationLanguageOption("CKB", "Kurdish (Sorani)"),
+        TranslationLanguageOption("CS", "Czech"),
+        TranslationLanguageOption("CY", "Welsh"),
+        TranslationLanguageOption("DA", "Danish"),
+        TranslationLanguageOption("DE", "German"),
+        TranslationLanguageOption("EL", "Greek"),
+        TranslationLanguageOption("EN", "English"),
+        TranslationLanguageOption("EN-GB", "English (British)"),
+        TranslationLanguageOption("EN-US", "English (American)"),
+        TranslationLanguageOption("EO", "Esperanto"),
+        TranslationLanguageOption("ES", "Spanish"),
+        TranslationLanguageOption("ES-419", "Spanish (Latin American)"),
+        TranslationLanguageOption("ET", "Estonian"),
+        TranslationLanguageOption("EU", "Basque"),
+        TranslationLanguageOption("FA", "Persian"),
+        TranslationLanguageOption("FI", "Finnish"),
+        TranslationLanguageOption("FR", "French"),
+        TranslationLanguageOption("GA", "Irish"),
+        TranslationLanguageOption("GL", "Galician"),
+        TranslationLanguageOption("GN", "Guarani"),
+        TranslationLanguageOption("GOM", "Konkani"),
+        TranslationLanguageOption("GU", "Gujarati"),
+        TranslationLanguageOption("HA", "Hausa"),
+        TranslationLanguageOption("HE", "Hebrew"),
+        TranslationLanguageOption("HI", "Hindi"),
+        TranslationLanguageOption("HR", "Croatian"),
+        TranslationLanguageOption("HT", "Haitian Creole"),
+        TranslationLanguageOption("HU", "Hungarian"),
+        TranslationLanguageOption("HY", "Armenian"),
+        TranslationLanguageOption("ID", "Indonesian"),
+        TranslationLanguageOption("IG", "Igbo"),
+        TranslationLanguageOption("IS", "Icelandic"),
+        TranslationLanguageOption("IT", "Italian"),
+        TranslationLanguageOption("JA", "Japanese"),
+        TranslationLanguageOption("JV", "Javanese"),
+        TranslationLanguageOption("KA", "Georgian"),
+        TranslationLanguageOption("KK", "Kazakh"),
+        TranslationLanguageOption("KMR", "Kurdish (Kurmanji)"),
+        TranslationLanguageOption("KO", "Korean"),
+        TranslationLanguageOption("KY", "Kyrgyz"),
+        TranslationLanguageOption("LA", "Latin"),
+        TranslationLanguageOption("LB", "Luxembourgish"),
+        TranslationLanguageOption("LMO", "Lombard"),
+        TranslationLanguageOption("LN", "Lingala"),
+        TranslationLanguageOption("LT", "Lithuanian"),
+        TranslationLanguageOption("LV", "Latvian"),
+        TranslationLanguageOption("MAI", "Maithili"),
+        TranslationLanguageOption("MG", "Malagasy"),
+        TranslationLanguageOption("MI", "Maori"),
+        TranslationLanguageOption("MK", "Macedonian"),
+        TranslationLanguageOption("ML", "Malayalam"),
+        TranslationLanguageOption("MN", "Mongolian"),
+        TranslationLanguageOption("MR", "Marathi"),
+        TranslationLanguageOption("MS", "Malay"),
+        TranslationLanguageOption("MT", "Maltese"),
+        TranslationLanguageOption("MY", "Burmese"),
+        TranslationLanguageOption("NB", "Norwegian Bokmal"),
+        TranslationLanguageOption("NE", "Nepali"),
+        TranslationLanguageOption("NL", "Dutch"),
+        TranslationLanguageOption("OC", "Occitan"),
+        TranslationLanguageOption("OM", "Oromo"),
+        TranslationLanguageOption("PA", "Punjabi"),
+        TranslationLanguageOption("PAG", "Pangasinan"),
+        TranslationLanguageOption("PAM", "Kapampangan"),
+        TranslationLanguageOption("PL", "Polish"),
+        TranslationLanguageOption("PRS", "Dari"),
+        TranslationLanguageOption("PS", "Pashto"),
+        TranslationLanguageOption("PT", "Portuguese"),
+        TranslationLanguageOption("PT-BR", "Portuguese (Brazilian)"),
+        TranslationLanguageOption("PT-PT", "Portuguese (European)"),
+        TranslationLanguageOption("QU", "Quechua"),
+        TranslationLanguageOption("RO", "Romanian"),
+        TranslationLanguageOption("RU", "Russian"),
+        TranslationLanguageOption("SA", "Sanskrit"),
+        TranslationLanguageOption("SCN", "Sicilian"),
+        TranslationLanguageOption("SK", "Slovak"),
+        TranslationLanguageOption("SL", "Slovenian"),
+        TranslationLanguageOption("SQ", "Albanian"),
+        TranslationLanguageOption("SR", "Serbian"),
+        TranslationLanguageOption("ST", "Sesotho"),
+        TranslationLanguageOption("SU", "Sundanese"),
+        TranslationLanguageOption("SV", "Swedish"),
+        TranslationLanguageOption("SW", "Swahili"),
+        TranslationLanguageOption("TA", "Tamil"),
+        TranslationLanguageOption("TE", "Telugu"),
+        TranslationLanguageOption("TG", "Tajik"),
+        TranslationLanguageOption("TH", "Thai"),
+        TranslationLanguageOption("TK", "Turkmen"),
+        TranslationLanguageOption("TL", "Tagalog"),
+        TranslationLanguageOption("TN", "Tswana"),
+        TranslationLanguageOption("TR", "Turkish"),
+        TranslationLanguageOption("TS", "Tsonga"),
+        TranslationLanguageOption("TT", "Tatar"),
+        TranslationLanguageOption("UK", "Ukrainian"),
+        TranslationLanguageOption("UR", "Urdu"),
+        TranslationLanguageOption("UZ", "Uzbek"),
+        TranslationLanguageOption("VI", "Vietnamese"),
+        TranslationLanguageOption("WO", "Wolof"),
+        TranslationLanguageOption("XH", "Xhosa"),
+        TranslationLanguageOption("YI", "Yiddish"),
+        TranslationLanguageOption("YUE", "Cantonese"),
+        TranslationLanguageOption("ZH", "Chinese"),
+        TranslationLanguageOption("ZH-HANS", "Chinese (simplified)"),
+        TranslationLanguageOption("ZH-HANT", "Chinese (traditional)"),
+        TranslationLanguageOption("ZU", "Zulu"),
+    ).sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, TranslationLanguageOption::name))
+
+private val BERGAMOT_TARGET_LANGUAGE_CODES =
+    setOf(
+        "bg",
+        "cs",
+        "de",
+        "en",
+        "es",
+        "et",
+        "fr",
+        "it",
+        "pt",
+        "ru",
+        "uk",
+    )
+
+@Composable
+private fun ProviderField(
+    section: OpenAISectionType,
+    provider: AIProviderPreset,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onSelect: (AIProviderPreset) -> Unit,
+) {
+    val availableProviders = remember(section) { AIProviderPreset.availableFor(section) }
+
+    Box {
+        TextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = stringResource(provider.titleRes),
+            label = {
+                Text(stringResource(R.string.ai_provider))
+            },
+            readOnly = true,
+            onValueChange = {},
+            trailingIcon = {
+                IconButton(onClick = { onExpandedChange(true) }) {
+                    Icon(Icons.Filled.ExpandMore, contentDescription = stringResource(R.string.ai_provider))
+                }
+            },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { onExpandedChange(false) },
+        ) {
+            availableProviders.forEach { preset ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(preset.titleRes)) },
+                    onClick = {
+                        onSelect(preset)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OpenAIModelsDropdown(
+    menuExpanded: Boolean,
+    state: OpenAIModelsState.Success,
+    onValueChange: (String) -> Unit,
+    onDismissRequest: () -> Unit,
+) {
+    DropdownMenu(
+        expanded = menuExpanded,
+        onDismissRequest = onDismissRequest,
+    ) {
+        state.ids.forEach { id ->
+            DropdownMenuItem(
+                text = { Text(text = id) },
+                onClick = {
+                    onValueChange(id)
+                    onDismissRequest()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun OpenAIModelsStatus(
+    state: OpenAIModelsState,
+    showError: Boolean,
+    onEvent: (OpenAISettingsEvent) -> Unit,
+) {
+    when (state) {
+        is OpenAIModelsState.Success -> {
+            if (state.ids.isEmpty()) {
+                OutlinedCard {
+                    Text(
+                        text = stringResource(R.string.no_models_were_found),
+                        modifier = Modifier.padding(8.dp),
+                    )
+                }
+            }
+        }
+
+        is OpenAIModelsState.Error -> {
+            val hasError = state.message.isNotEmpty()
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = { onEvent(OpenAISettingsEvent.ShowModelsError(show = !showError)) },
+            ) {
+                Column(
+                    modifier = Modifier.padding(8.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Warning,
+                            contentDescription = null,
+                        )
+                        Text(
+                            text = stringResource(R.string.unable_to_load_models),
+                            modifier =
+                                Modifier
+                                    .padding(start = 4.dp)
+                                    .weight(1f),
+                        )
+                        if (hasError) {
+                            Icon(
+                                imageVector = if (showError) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                contentDescription = stringResource(R.string.show_message),
+                            )
+                        }
+                    }
+
+                    if (hasError && showError) {
+                        Text(
+                            text = state.message,
+                            modifier = Modifier.padding(8.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        is OpenAIModelsState.Loading -> {}
+        OpenAIModelsState.None -> {}
+    }
+}
+
+private enum class AIProviderPreset(
+    val titleRes: Int,
+    val supportsSummary: Boolean,
+    val supportsTranslation: Boolean,
+    val isDeepL: Boolean,
+    val isTranslationOnly: Boolean,
+    val needsApiKey: Boolean,
+    val endpoint: String,
+) {
+    NONE(
+        titleRes = R.string.provider_none,
+        supportsSummary = true,
+        supportsTranslation = true,
+        isDeepL = false,
+        isTranslationOnly = false,
+        needsApiKey = false,
+        endpoint = "",
+    ),
+    OPENAI_COMPATIBLE(
+        titleRes = R.string.provider_openai_compatible,
+        supportsSummary = true,
+        supportsTranslation = false,
+        isDeepL = false,
+        isTranslationOnly = false,
+        needsApiKey = true,
+        endpoint = "",
+    ),
+    AZURE_OPENAI(
+        titleRes = R.string.provider_azure_openai,
+        supportsSummary = true,
+        supportsTranslation = false,
+        isDeepL = false,
+        isTranslationOnly = false,
+        needsApiKey = true,
+        endpoint = "",
+    ),
+    DEEPL(
+        titleRes = R.string.provider_deepl,
+        supportsSummary = false,
+        supportsTranslation = true,
+        isDeepL = true,
+        isTranslationOnly = true,
+        needsApiKey = true,
+        endpoint = "https://api.deepl.com/v2/translate",
+    ),
+    LOCAL_TRANSLATION(
+        titleRes = R.string.provider_local_translation,
+        supportsSummary = false,
+        supportsTranslation = true,
+        isDeepL = false,
+        isTranslationOnly = true,
+        needsApiKey = false,
+        endpoint = "",
+    ),
+    ;
+
+    fun applyTo(settings: OpenAISettings): OpenAISettings =
+        when (this) {
+            NONE ->
+                settings.copy(
+                    key = "",
+                    modelId = "",
+                    baseUrl = "",
+                    azureApiVersion = "",
+                    azureDeploymentId = "",
+                )
+
+            OPENAI_COMPATIBLE ->
+                settings.copy(
+                    baseUrl = "",
+                    azureApiVersion = "",
+                    azureDeploymentId = "",
+                )
+
+            AZURE_OPENAI ->
+                settings.copy(
+                    baseUrl = inferAzureBaseUrl(settings),
+                )
+
+            DEEPL ->
+                settings.copy(
+                    baseUrl = inferDeepLBaseUrl(settings),
+                    azureApiVersion = "",
+                    azureDeploymentId = "",
+                    modelId = "",
+                )
+
+            LOCAL_TRANSLATION ->
+                settings.copy(
+                    key = "",
+                    modelId = "",
+                    baseUrl = LOCAL_TRANSLATION_PROVIDER_URL,
+                    azureApiVersion = "",
+                    azureDeploymentId = "",
+                )
+        }
+
+    companion object {
+        fun availableFor(section: OpenAISectionType): List<AIProviderPreset> =
+            entries.filter { preset ->
+                when (section) {
+                    OpenAISectionType.Summary -> preset.supportsSummary
+                    OpenAISectionType.Translation -> preset.supportsTranslation
+                }
+            }
+
+        fun fromSettings(settings: OpenAISettings): AIProviderPreset =
+            when {
+                settings.isBlankConfiguration -> NONE
+                settings.baseUrl.contains("openai.azure.com", ignoreCase = true) -> AZURE_OPENAI
+                settings.isLocalTranslation -> LOCAL_TRANSLATION
+                settings.isDeepL -> DEEPL
+                else -> OPENAI_COMPATIBLE
+            }
+
+        private fun inferAzureBaseUrl(settings: OpenAISettings): String = settings.baseUrl.takeIf { it.contains("openai.azure.com", ignoreCase = true) }.orEmpty()
+
+        private fun inferDeepLBaseUrl(settings: OpenAISettings): String =
+            when {
+                settings.baseUrl.contains("api-free.deepl.com", ignoreCase = true) -> "https://api-free.deepl.com"
+                settings.key.endsWith(":fx") -> "https://api-free.deepl.com"
+                else -> "https://api.deepl.com"
+            }
+    }
+}
+
+@Preview("tablet", device = Devices.PIXEL_C)
+@Preview("phone", device = Devices.PIXEL_7)
+@Composable
+private fun SummaryOpenAISectionReadPreview() {
+    Surface {
+        OpenAISection(
+            title = "Summary API",
+            info = "Used for summaries.",
+            state =
+                OpenAISettingsState(
+                    settings =
+                        OpenAISettings(
+                            key = "sk-test_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                            modelId = "gpt-4o-mini",
+                        ),
+                    modelsResult = OpenAIModelsState.None,
+                    isEditMode = false,
+                ),
+            onEvent = { },
+            section = OpenAISectionType.Summary,
+        )
+    }
+}
+
+@Preview("tablet", device = Devices.PIXEL_C)
+@Preview("phone", device = Devices.PIXEL_7)
+@Composable
+private fun TranslationApiSectionEditPreview() {
+    TranslationApiSection(
+        title = "Translation API",
+        info = "Used for translation.",
+        state =
+            TranslationApiSettingsState(
+                settings = OpenAISettings(),
+                modelsResult = OpenAIModelsState.None,
+                isEditMode = true,
+            ),
+        onEvent = { },
+        preferredTranslationLanguage = "English",
+    )
+}
+
+private fun OpenAISettings.validationMessage(
+    provider: AIProviderPreset,
+    modelsResult: OpenAIModelsState,
+    context: Context,
+): String? {
+    if (provider == AIProviderPreset.NONE) {
+        return null
+    }
+
+    if (provider.needsApiKey && key.isBlank()) {
+        return if (provider.isDeepL) {
+            context.getString(R.string.enter_deepl_api_key_before_saving)
+        } else {
+            context.getString(R.string.enter_api_key_before_saving)
+        }
+    }
+
+    val timeoutInput = timeoutSeconds.toString()
+    if (!isTimeoutInputValid(timeoutInput)) {
+        return context.getString(R.string.time_out_validation_error)
+    }
+
+    return when (provider) {
+        AIProviderPreset.NONE -> null
+        AIProviderPreset.OPENAI_COMPATIBLE -> {
+            when {
+                modelId.isBlank() -> context.getString(R.string.enter_model_id_before_saving)
+                modelsResult == OpenAIModelsState.None || modelsResult is OpenAIModelsState.Loading ->
+                    context.getString(R.string.verifying_api_settings)
+                modelsResult is OpenAIModelsState.Error -> {
+                    modelsResult.message.ifBlank { context.getString(R.string.api_settings_could_not_be_verified) }
+                }
+                else -> null
+            }
+        }
+
+        AIProviderPreset.AZURE_OPENAI -> {
+            when {
+                modelId.isBlank() -> context.getString(R.string.enter_model_id_before_saving)
+                baseUrl.isBlank() -> context.getString(R.string.enter_azure_endpoint_before_saving)
+                azureDeploymentId.isBlank() -> context.getString(R.string.enter_azure_deployment_id_before_saving)
+                azureApiVersion.isBlank() -> context.getString(R.string.enter_azure_api_version_before_saving)
+                modelsResult == OpenAIModelsState.None || modelsResult is OpenAIModelsState.Loading ->
+                    context.getString(R.string.verifying_azure_openai_settings)
+                modelsResult is OpenAIModelsState.Error -> {
+                    modelsResult.message.ifBlank { context.getString(R.string.azure_openai_settings_could_not_be_verified) }
+                }
+                else -> null
+            }
+        }
+
+        AIProviderPreset.DEEPL -> {
+            when (modelsResult) {
+                OpenAIModelsState.None, is OpenAIModelsState.Loading -> context.getString(R.string.verifying_deepl_key)
+                is OpenAIModelsState.Error -> modelsResult.message.ifBlank { context.getString(R.string.deepl_key_could_not_be_verified) }
+                else -> null
+            }
+        }
+
+        AIProviderPreset.LOCAL_TRANSLATION -> null
+    }
+}
+
+private fun OpenAIModelsState.matches(settings: OpenAISettings): Boolean =
+    when (this) {
+        is OpenAIModelsState.Error -> this.settings == settings
+        is OpenAIModelsState.Loading -> this.settings == settings
+        OpenAIModelsState.None -> false
+        is OpenAIModelsState.Success -> this.settings == settings
+    }
+
+private fun OpenAISectionType.sanitizeSettings(settings: OpenAISettings): OpenAISettings =
+    when (this) {
+        OpenAISectionType.Summary ->
+            when {
+                settings.isBlankConfiguration -> settings
+                settings.isDeepL || settings.isLocalTranslation -> OpenAISettings()
+                else -> settings
+            }
+
+        OpenAISectionType.Translation ->
+            when {
+                settings.isBlankConfiguration -> settings
+                settings.isDeepL || settings.isLocalTranslation -> settings
+                else -> OpenAISettings()
+            }
+    }
