@@ -1,0 +1,100 @@
+package com.futsch1.medtimer
+
+import android.app.AlarmManager
+import android.app.NotificationManager
+import android.os.LocaleList
+import com.futsch1.medtimer.core.datastore.PreferencesDataSource
+import com.futsch1.medtimer.core.domain.model.UserPreferences
+import com.futsch1.medtimer.core.ui.TimeFormatter
+import dagger.hilt.android.testing.BindValue
+import dagger.hilt.android.testing.HiltAndroidRule
+import dagger.hilt.android.testing.HiltAndroidTest
+import dagger.hilt.android.testing.HiltTestApplication
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.mockito.Mockito
+import org.mockito.Mockito.mock
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+import java.time.Instant
+import java.time.LocalDate
+import java.util.Locale
+import kotlin.test.assertEquals
+
+private const val englishDataSecondOfJan2023 = "1/2/23"
+
+private const val germanDateSecondOfJan2023 = "02.01.23"
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36], application = HiltTestApplication::class)
+@HiltAndroidTest
+class TimeHelperTest {
+    @get:Rule
+    val hiltRule = HiltAndroidRule(this)
+
+    @BindValue
+    val mockPreferenceDataSource: PreferencesDataSource = mock()
+
+    @BindValue
+    val boundAlarmManager: AlarmManager = mock()
+
+    @BindValue
+    val boundNotificationManager: NotificationManager = mock()
+
+    @Before
+    fun setUp() {
+        hiltRule.inject()
+    }
+
+    @Test
+    fun testLocaleHandling() {
+        val context = RuntimeEnvironment.getApplication()
+        context.resources.configuration.setLocales(LocaleList(Locale.US, Locale.GERMAN))
+        val preferences = MutableStateFlow(UserPreferences.default())
+        Mockito.`when`(mockPreferenceDataSource.preferences).thenReturn(preferences)
+
+        val timeFormatter =
+            TimeFormatter(context, mockPreferenceDataSource)
+
+        assertEquals(
+            englishDataSecondOfJan2023,
+            timeFormatter.localDateToString(LocalDate.of(2023, 1, 2))
+        )
+        assertEquals(
+            englishDataSecondOfJan2023,
+            timeFormatter.toDateString(Instant.parse("2023-01-02T12:00:00Z"))
+        )
+        assertEquals(
+            englishDataSecondOfJan2023,
+            timeFormatter.daysSinceEpochToDateString(LocalDate.of(2023, 1, 2).toEpochDay())
+        )
+
+        preferences.value = preferences.value.copy(systemLocale = true)
+        Mockito.`when`(mockPreferenceDataSource.preferences).thenReturn(preferences)
+        assertEquals(
+            germanDateSecondOfJan2023,
+            timeFormatter.localDateToString(LocalDate.of(2023, 1, 2))
+        )
+        assertEquals(
+            germanDateSecondOfJan2023,
+            timeFormatter.daysSinceEpochToDateString(LocalDate.of(2023, 1, 2).toEpochDay())
+        )
+    }
+
+    @Test
+    fun testLocaleDateRoundTrip() {
+        val context = RuntimeEnvironment.getApplication()
+        context.resources.configuration.setLocales(LocaleList(Locale.US, Locale.GERMAN))
+        val preferences = MutableStateFlow(UserPreferences.default().copy(systemLocale = true))
+        Mockito.`when`(mockPreferenceDataSource.preferences).thenReturn(preferences)
+
+        val timeFormatter = TimeFormatter(context, mockPreferenceDataSource)
+        val original = LocalDate.of(2023, 1, 2)
+        val formatted = timeFormatter.localDateToString(original)
+        assertEquals(original, timeFormatter.stringToLocalDate(formatted))
+    }
+}

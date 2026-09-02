@@ -1,0 +1,199 @@
+package com.futsch1.medtimer.feature.reminders.api.scheduling
+
+import com.futsch1.medtimer.core.common.helpers.MedicineHelper
+import com.futsch1.medtimer.core.common.helpers.TimeHelper
+import com.futsch1.medtimer.core.datastore.PreferencesDataSource
+import com.futsch1.medtimer.core.domain.model.Medicine
+import com.futsch1.medtimer.core.domain.model.Reminder
+import com.futsch1.medtimer.core.domain.model.ReminderEvent
+import com.futsch1.medtimer.core.domain.model.SimulatedReminder
+import com.futsch1.medtimer.core.domain.model.ScheduledReminder
+import com.futsch1.medtimer.core.common.time.TimeAccess
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+
+typealias ScheduledReminderConsumer = (SimulatedReminder, LocalDate) -> Boolean
+
+
+class LastEventsPerReminder(initialReminderEvents: List<ReminderEvent>) {
+    private val latestRemindedEvent = mutableMapOf<Int, ReminderEvent>()
+    private val initialEvents = initialReminderEvents.toMutableList()
+
+    // Remove events which are of a past day, but keep the latest reminded or processed events of that day.
+    // Reason is that the initial events might contain events for future days. They should only be considered
+    // when that day has been reached and not before.
+    fun advanceTo(endOfCurrentDay: Instant) {
+        val pastEvents = initialEvents.filter { it.remindedTimestamp < endOfCurrentDay }
+        for (event in pastEvents) {
+            add(event)
+        }
+        if (pastEvents.isNotEmpty()) {
+            initialEvents.removeAll(pastEvents)
+        }
+    }
+
+    private fun updateLatest(
+        event: ReminderEvent
+    ) {
+        val current = latestRemindedEvent[event.reminderId]
+        if (current == null || current.remindedTimestamp < event.remindedTimestamp) {
+            latestRemindedEvent[event.reminderId] = event
+        }
+    }
+
+    fun add(reminderEvent: ReminderEvent) {
+        if (reminderEvent.processedTimestamp == Instant.EPOCH) {
+            updateLatest(reminderEvent.copy(processedTimestamp = reminderEvent.remindedTimestamp))
+        } else {
+            updateLatest(reminderEvent)
+        }
+    }
+
+    fun get(): List<ReminderEvent> {
+        return latestRemindedEvent.values.toList()
+    }
+}
+
+class SchedulingSimulator(
+    medicines: List<Medicine>,
+    recentReminderEvents: List<ReminderEvent>,
+    timeAccess: TimeAccess,
+    private val dataSource: PreferencesDataSource
+) {
+    private val maxSimulationDays = 400
+    private val systemZone = timeAccess.systemZone()
+
+    private var totalEvents = LastEventsPerReminder(recentReminderEvents)
+    private val medicines =
+        medicines.associateBy(
+            { it.id },
+            { it.copy(reminders = it.reminders.filter { iter -> iter.active }) }).toMutableMap()
+
+    private val schedulingFactory = SchedulingFactory()
+    private var endOfCurrentDay: Instant = Instant.EPOCH
+    private var currentDay: LocalDate = timeAccess.localDate()
+        set(value) {
+            endOfCurrentDay =
+                TimeHelper.instantAtStartOfDay(value.plusDays(1), systemZone)
+            field = value
+        }
+    private val simulatorTimeAccess = object : TimeAccess {
+        override fun systemZone(): ZoneId = systemZone
+        override fun localDate(): LocalDate = currentDay
+        override fun now(): Instant = Instant.now()
+    }
+
+    init {
+        currentDay = timeAccess.localDate()
+    }
+
+    suspend fun simulate(scheduledReminderConsumer: ScheduledReminderConsumer) {
+        val context = currentCoroutineContext()
+        val maxSimulationDay = currentDay.plusDays(maxSimulationDays.toLong())
+        while (simulateDay(scheduledReminderConsumer) && currentDay < maxSimulationDay) {
+            currentDay = currentDay.plusDays(1)
+            context.ensureActive()
+        }
+    }
+
+    private fun simulateDay(scheduledReminderConsumer: ScheduledReminderConsumer): Boolean {
+        totalEvents.advanceTo(endOfCurrentDay)
+        for (medicine in medicines.values) {
+            var lastNextInstance: Pair<Int, Instant>? = null
+            do {
+                val eventsSnapshot = totalEvents.get()
+                var earliest: ScheduledReminder? = null
+                for (reminder in medicine.reminders) {
+                    val nextForReminder =
+                        getNextScheduledTime(medicine, reminder, eventsSnapshot) ?: continue
+                    if (earliest == null || nextForReminder < earliest.timestamp) {
+                        earliest = ScheduledReminder(medicine, reminder, nextForReminder)
+                    }
+                }
+                val next = earliest ?: break
+                // Safeguard: if the scheduler keeps returning the same reminder/timestamp pair,
+                // it means the newly generated event was not accepted into totalEvents (e.g. it was
+                // not strictly newer than an already recorded, out-of-order event). Without this
+                // check, the loop would spin forever on the same instant.
+                val nextInstance = next.reminder.id to next.timestamp
+                if (nextInstance == lastNextInstance) {
+                    break
+                }
+                lastNextInstance = nextInstance
+                if (!processScheduledReminder(next, scheduledReminderConsumer)) {
+                    return false
+                }
+            } while (true)
+        }
+        return true
+    }
+
+    private fun getNextScheduledTime(
+        medicine: Medicine,
+        reminder: Reminder,
+        eventsSnapshot: List<ReminderEvent>
+    ): Instant? {
+        val scheduler =
+            schedulingFactory.create(
+                reminder,
+                medicine,
+                eventsSnapshot,
+                simulatorTimeAccess,
+                dataSource
+            )
+        var nextScheduledTime = scheduler.getNextScheduledTime()
+        // Skip if not on current day
+        if ((nextScheduledTime ?: endOfCurrentDay) >= endOfCurrentDay) {
+            nextScheduledTime = null
+        }
+        return nextScheduledTime
+    }
+
+    private fun processScheduledReminder(
+        scheduledReminder: ScheduledReminder,
+        scheduledReminderConsumer: ScheduledReminderConsumer
+    ): Boolean {
+        val (stockBefore, stockAfter) = doStockHandling(scheduledReminder)
+        // Notify consumer
+        val continueSimulating =
+            scheduledReminderConsumer(
+                SimulatedReminder(scheduledReminder, stockBefore, stockAfter),
+                currentDay
+            )
+        // Add the simulated event to make sure it is considered in the next scheduling call
+        totalEvents.add(createReminderEvent(scheduledReminder))
+        return continueSimulating
+    }
+
+    private fun doStockHandling(scheduledReminder: ScheduledReminder): Pair<Double, Double> {
+        val stockBefore = medicines[scheduledReminder.medicine.id]?.amount ?: 0.0
+        return if (stockBefore > 0.0) {
+            val reminderAmount: Double =
+                MedicineHelper.parseAmount(scheduledReminder.reminder.amount) ?: 0.0
+            val stockAfter = (stockBefore - reminderAmount).coerceAtLeast(0.0)
+
+            medicines[scheduledReminder.medicine.id] = scheduledReminder.medicine.copy(
+                amount = stockAfter
+            )
+            stockBefore to stockAfter
+        } else {
+            0.0 to 0.0
+        }
+    }
+
+    private fun createReminderEvent(
+        scheduledReminder: ScheduledReminder
+    ): ReminderEvent {
+        val reminderEvent = ReminderEvent.default().copy(
+            remindedTimestamp = scheduledReminder.timestamp,
+            processedTimestamp = scheduledReminder.timestamp,
+            reminderId = scheduledReminder.reminder.id,
+            status = ReminderEvent.ReminderStatus.TAKEN
+        )
+        return reminderEvent
+    }
+
+}

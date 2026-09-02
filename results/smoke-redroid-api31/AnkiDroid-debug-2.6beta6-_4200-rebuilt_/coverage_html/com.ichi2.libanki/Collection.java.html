@@ -1,0 +1,1656 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Collection.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.libanki</a> &gt; <span class="el_source">Collection.java</span></div><h1>Collection.java</h1><pre class="source lang-java linenums">/****************************************************************************************
+ * Copyright (c) 2011 Norbert Nagold &lt;norbert.nagold@gmail.com&gt;                         *
+ * Copyright (c) 2012 Kostas Spyropoulos &lt;inigo.aldana@gmail.com&gt;                       *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General private License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General private License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General private License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.libanki;
+
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.text.TextUtils;
+import android.util.Pair;
+
+import com.ichi2.anki.AnkiDroidApp;
+import com.ichi2.anki.R;
+import com.ichi2.anki.UIUtils;
+import com.ichi2.anki.exception.ConfirmModSchemaException;
+import com.ichi2.compat.CompatHelper;
+import com.ichi2.libanki.hooks.Hooks;
+import com.ichi2.libanki.template.Template;
+import com.ichi2.utils.VersionUtils;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Random;
+import java.util.regex.Pattern;
+
+import timber.log.Timber;
+
+// Anki maintains a cache of used tags so it can quickly present a list of tags
+// for autocomplete and in the browser. For efficiency, deletions are not
+// tracked, so unused tags can only be removed from the list with a DB check.
+//
+// This module manages the tag cache and tags for notes.
+
+public class Collection {
+
+    private Context mContext;
+
+    private DB mDb;
+    private boolean mServer;
+    private double mLastSave;
+    private Media mMedia;
+    private Decks mDecks;
+    private Models mModels;
+    private Tags mTags;
+
+    private Sched mSched;
+
+    private double mStartTime;
+    private int mStartReps;
+
+    // BEGIN: SQL table columns
+    private long mCrt;
+    private long mMod;
+    private long mScm;
+    private boolean mDty;
+    private int mUsn;
+    private long mLs;
+    private JSONObject mConf;
+    // END: SQL table columns
+
+    private LinkedList&lt;Object[]&gt; mUndo;
+
+    private String mPath;
+    private boolean mDebugLog;
+    private PrintWriter mLogHnd;
+
+<span class="fc" id="L97">    private static final Pattern fClozePatternQ = Pattern.compile(&quot;\\{\\{(?!type:)(.*?)cloze:&quot;);</span>
+<span class="fc" id="L98">    private static final Pattern fClozePatternA = Pattern.compile(&quot;\\{\\{(.*?)cloze:&quot;);</span>
+<span class="fc" id="L99">    private static final Pattern fClozeTagStart = Pattern.compile(&quot;&lt;%cloze:&quot;);</span>
+
+    // other options
+    public static final String defaultConf = &quot;{&quot;
+            +
+            // review options
+            &quot;'activeDecks': [1], &quot; + &quot;'curDeck': 1, &quot; + &quot;'newSpread': &quot; + Consts.NEW_CARDS_DISTRIBUTE + &quot;, &quot;
+            + &quot;'collapseTime': 1200, &quot; + &quot;'timeLim': 0, &quot; + &quot;'estTimes': True, &quot; + &quot;'dueCounts': True, &quot;
+            +
+            // other config
+            &quot;'curModel': null, &quot; + &quot;'nextPos': 1, &quot; + &quot;'sortType': \&quot;noteFld\&quot;, &quot;
+            + &quot;'sortBackwards': False, 'addToCur': True }&quot;; // add new to currently selected deck?
+
+<span class="nc" id="L112">    public enum DismissType {</span>
+<span class="nc" id="L113">        REVIEW(R.string.undo_action_review),</span>
+<span class="nc" id="L114">        BURY_CARD(R.string.undo_action_bury_card),</span>
+<span class="nc" id="L115">        BURY_NOTE(R.string.undo_action_bury_note),</span>
+<span class="nc" id="L116">        SUSPEND_CARD(R.string.undo_action_suspend_card),</span>
+<span class="nc" id="L117">        SUSPEND_NOTE(R.string.undo_action_suspend_note),</span>
+<span class="nc" id="L118">        DELETE_NOTE(R.string.undo_action_delete);</span>
+
+        public int undoNameId;
+
+<span class="nc" id="L122">        DismissType(int undoNameId) {</span>
+<span class="nc" id="L123">            this.undoNameId = undoNameId;</span>
+<span class="nc" id="L124">        }</span>
+    }
+
+    private static final int UNDO_SIZE_MAX = 20;
+
+    public Collection(Context context, DB db, String path) {
+<span class="nc" id="L130">        this(context, db, path, false);</span>
+<span class="nc" id="L131">    }</span>
+
+    public Collection(Context context, DB db, String path, boolean server) {
+<span class="nc" id="L134">        this(context, db, path, false, false);</span>
+<span class="nc" id="L135">    }</span>
+
+<span class="fc" id="L137">    public Collection(Context context, DB db, String path, boolean server, boolean log) {</span>
+<span class="fc" id="L138">        mContext = context;</span>
+<span class="fc" id="L139">        mDebugLog = log;</span>
+<span class="fc" id="L140">        mDb = db;</span>
+<span class="fc" id="L141">        mPath = path;</span>
+<span class="fc" id="L142">        _openLog();</span>
+<span class="fc" id="L143">        log(path, VersionUtils.getPkgVersionName());</span>
+<span class="fc" id="L144">        mServer = server;</span>
+<span class="fc" id="L145">        mLastSave = Utils.now();</span>
+<span class="fc" id="L146">        clearUndo();</span>
+<span class="fc" id="L147">        mMedia = new Media(this, server);</span>
+<span class="fc" id="L148">        mModels = new Models(this);</span>
+<span class="fc" id="L149">        mDecks = new Decks(this);</span>
+<span class="fc" id="L150">        mTags = new Tags(this);</span>
+<span class="fc" id="L151">        load();</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">        if (mCrt == 0) {</span>
+<span class="fc" id="L153">            mCrt = UIUtils.getDayStart() / 1000;</span>
+        }
+<span class="fc" id="L155">        mStartReps = 0;</span>
+<span class="fc" id="L156">        mStartTime = 0;</span>
+<span class="fc" id="L157">        mSched = new Sched(this);</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">        if (!mConf.optBoolean(&quot;newBury&quot;, false)) {</span>
+            try {
+<span class="fc" id="L160">                mConf.put(&quot;newBury&quot;, true);</span>
+<span class="nc" id="L161">            } catch (JSONException e) {</span>
+<span class="nc" id="L162">                throw new RuntimeException(e);</span>
+<span class="fc" id="L163">            }</span>
+<span class="fc" id="L164">            setMod();</span>
+        }
+<span class="fc" id="L166">    }</span>
+
+
+    public String name() {
+<span class="nc" id="L170">        String n = (new File(mPath)).getName().replace(&quot;.anki2&quot;, &quot;&quot;);</span>
+        // TODO:
+<span class="nc" id="L172">        return n;</span>
+    }
+
+
+    /**
+     * DB-related *************************************************************** ********************************
+     */
+
+    public void load() {
+<span class="fc" id="L181">        Cursor cursor = null;</span>
+        try {
+            // Read in deck table columns
+<span class="fc" id="L184">            cursor = mDb.getDatabase().rawQuery(</span>
+                    &quot;SELECT crt, mod, scm, dty, usn, ls, &quot; +
+                    &quot;conf, models, decks, dconf, tags FROM col&quot;, null);
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">            if (!cursor.moveToFirst()) {</span>
+<span class="nc" id="L188">                return;</span>
+            }
+<span class="fc" id="L190">            mCrt = cursor.getLong(0);</span>
+<span class="fc" id="L191">            mMod = cursor.getLong(1);</span>
+<span class="fc" id="L192">            mScm = cursor.getLong(2);</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">            mDty = cursor.getInt(3) == 1; // No longer used</span>
+<span class="fc" id="L194">            mUsn = cursor.getInt(4);</span>
+<span class="fc" id="L195">            mLs = cursor.getLong(5);</span>
+            try {
+<span class="fc" id="L197">                mConf = new JSONObject(cursor.getString(6));</span>
+<span class="nc" id="L198">            } catch (JSONException e) {</span>
+<span class="nc" id="L199">                throw new RuntimeException(e);</span>
+<span class="fc" id="L200">            }</span>
+<span class="fc" id="L201">            mModels.load(cursor.getString(7));</span>
+<span class="fc" id="L202">            mDecks.load(cursor.getString(8), cursor.getString(9));</span>
+<span class="fc" id="L203">            mTags.load(cursor.getString(10));</span>
+        } finally {
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">            if (cursor != null) {</span>
+<span class="fc" id="L206">                cursor.close();</span>
+            }
+        }
+<span class="fc" id="L209">    }</span>
+
+
+    /**
+     * Mark DB modified. DB operations and the deck/tag/model managers do this automatically, so this is only necessary
+     * if you modify properties of this object or the conf dict.
+     */
+    public void setMod() {
+<span class="fc" id="L217">        mDb.setMod(true);</span>
+<span class="fc" id="L218">    }</span>
+
+
+    public void flush() {
+<span class="nc" id="L222">        flush(0);</span>
+<span class="nc" id="L223">    }</span>
+
+
+    /**
+     * Flush state to DB, updating mod time.
+     */
+    public void flush(long mod) {
+<span class="fc" id="L230">        Timber.i(&quot;flush - Saving information to DB...&quot;);</span>
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">        mMod = (mod == 0 ? Utils.intNow(1000) : mod);</span>
+<span class="fc" id="L232">        ContentValues values = new ContentValues();</span>
+<span class="fc" id="L233">        values.put(&quot;crt&quot;, mCrt);</span>
+<span class="fc" id="L234">        values.put(&quot;mod&quot;, mMod);</span>
+<span class="fc" id="L235">        values.put(&quot;scm&quot;, mScm);</span>
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">        values.put(&quot;dty&quot;, mDty ? 1 : 0);</span>
+<span class="fc" id="L237">        values.put(&quot;usn&quot;, mUsn);</span>
+<span class="fc" id="L238">        values.put(&quot;ls&quot;, mLs);</span>
+<span class="fc" id="L239">        values.put(&quot;conf&quot;, Utils.jsonToString(mConf));</span>
+<span class="fc" id="L240">        mDb.update(&quot;col&quot;, values);</span>
+<span class="fc" id="L241">    }</span>
+
+
+    /**
+     * Flush, commit DB, and take out another write lock.
+     */
+    public synchronized void save() {
+<span class="fc" id="L248">        save(null, 0);</span>
+<span class="fc" id="L249">    }</span>
+
+
+    public synchronized void save(long mod) {
+<span class="nc" id="L253">        save(null, mod);</span>
+<span class="nc" id="L254">    }</span>
+
+
+    public synchronized void save(String name, long mod) {
+        // let the managers conditionally flush
+<span class="fc" id="L259">        mModels.flush();</span>
+<span class="fc" id="L260">        mDecks.flush();</span>
+<span class="fc" id="L261">        mTags.flush();</span>
+        // and flush deck + bump mod if db has been changed
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">        if (mDb.getMod()) {</span>
+<span class="fc" id="L264">            flush(mod);</span>
+<span class="fc" id="L265">            mDb.commit();</span>
+<span class="fc" id="L266">            lock();</span>
+<span class="fc" id="L267">            mDb.setMod(false);</span>
+        }
+        // undoing non review operation is handled differently in ankidroid
+//        _markOp(name);
+<span class="fc" id="L271">        mLastSave = Utils.now();</span>
+<span class="fc" id="L272">    }</span>
+    
+
+    /** make sure we don't accidentally bump mod time */
+    public void lock() {
+        // make sure we don't accidentally bump mod time
+<span class="fc" id="L278">        boolean mod = mDb.getMod();</span>
+<span class="fc" id="L279">        mDb.execute(&quot;UPDATE col SET mod=mod&quot;);</span>
+<span class="fc" id="L280">        mDb.setMod(mod);</span>
+<span class="fc" id="L281">    }</span>
+
+
+    /**
+     * Disconnect from DB.
+     */
+    public synchronized void close() {
+<span class="nc" id="L288">        close(true);</span>
+<span class="nc" id="L289">    }</span>
+
+
+    public synchronized void close(boolean save) {
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (mDb != null) {</span>
+            try {
+<span class="nc" id="L295">                SQLiteDatabase db = mDb.getDatabase();</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">                if (save) {</span>
+<span class="nc" id="L297">                    db.beginTransaction();</span>
+                    try {
+<span class="nc" id="L299">                        save();</span>
+<span class="nc" id="L300">                        db.setTransactionSuccessful();</span>
+                    } finally {
+<span class="nc" id="L302">                        db.endTransaction();</span>
+<span class="nc" id="L303">                    }</span>
+                } else {
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                    if (db.inTransaction()) {</span>
+<span class="nc" id="L306">                        db.endTransaction();</span>
+                    }
+                }
+<span class="nc" id="L309">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L310">                AnkiDroidApp.sendExceptionReport(e, &quot;closeDB&quot;);</span>
+<span class="nc" id="L311">            }</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">            if (!mServer) {</span>
+<span class="nc" id="L313">                CompatHelper.getCompat().disableDatabaseWriteAheadLogging(mDb.getDatabase());</span>
+            }
+<span class="nc" id="L315">            mDb.close();</span>
+<span class="nc" id="L316">            mDb = null;</span>
+<span class="nc" id="L317">            mMedia.close();</span>
+<span class="nc" id="L318">            _closeLog();</span>
+<span class="nc" id="L319">            Timber.i(&quot;Collection closed&quot;);</span>
+        }
+<span class="nc" id="L321">    }</span>
+
+
+    public void reopen() {
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (mDb == null) {</span>
+<span class="nc" id="L326">            mDb = new DB(mPath);</span>
+<span class="nc" id="L327">            mMedia.connect();</span>
+<span class="nc" id="L328">            _openLog();</span>
+        }
+<span class="nc" id="L330">    }</span>
+
+
+    /** Note: not in libanki.
+     * Mark schema modified to force a full sync, but with the confirmation checking function disabled
+     * This is a convenience method which doesn't throw ConfirmModSchemaException
+     */
+    public void modSchemaNoCheck() {
+        try {
+<span class="nc" id="L339">            modSchema(false);</span>
+<span class="nc" id="L340">        } catch (ConfirmModSchemaException e) {</span>
+            // This will never be reached as we disable confirmation via the &quot;false&quot; argument
+<span class="nc" id="L342">            throw new RuntimeException(e);</span>
+<span class="nc" id="L343">        }</span>
+<span class="nc" id="L344">    }</span>
+
+    /** Mark schema modified to force a full sync.
+     * ConfirmModSchemaException will be thrown if the user needs to be prompted to confirm the action.
+     * If the user chooses to confirm then modSchema(false) should be called, after which the exception can
+     * be safely ignored, and the outer code called again.
+     *
+     * @throws ConfirmModSchemaException */
+    public void modSchema() throws ConfirmModSchemaException {
+<span class="nc" id="L353">        modSchema(true);</span>
+<span class="nc" id="L354">    }</span>
+
+    /** Mark schema modified to force a full sync.
+     * If check==true and the schema has not already been marked modified then ConfirmModSchemaException will be thrown.
+     * If the user chooses to confirm then modSchema(false) should be called, after which the exception can
+     * be safely ignored, and the outer code called again.
+     *
+     * @param check
+     * @throws ConfirmModSchemaException
+     */
+    public void modSchema(boolean check) throws ConfirmModSchemaException {
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">        if (!schemaChanged()) {</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">            if (check) {</span>
+                /* In Android we can't show a dialog which blocks the main UI thread
+                 Therefore we can't wait for the user to confirm if they want to do
+                 a full sync here, and we instead throw an exception asking the outer
+                 code to handle the user's choice */
+<span class="nc" id="L371">                throw new ConfirmModSchemaException();</span>
+            }
+        }
+<span class="fc" id="L374">        mScm = Utils.intNow(1000);</span>
+<span class="fc" id="L375">        setMod();</span>
+<span class="fc" id="L376">    }</span>
+
+
+    /** True if schema changed since last sync. */
+    public boolean schemaChanged() {
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">        return mScm &gt; mLs;</span>
+    }
+
+
+    public int usn() {
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">        if (mServer) {</span>
+<span class="nc" id="L387">            return mUsn;</span>
+        } else {
+<span class="fc" id="L389">            return -1;</span>
+        }
+    }
+
+
+    /** called before a full upload */
+    public void beforeUpload() {
+<span class="nc" id="L396">        String[] tables = new String[] { &quot;notes&quot;, &quot;cards&quot;, &quot;revlog&quot; };</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">        for (String t : tables) {</span>
+<span class="nc" id="L398">            mDb.execute(&quot;UPDATE &quot; + t + &quot; SET usn=0 WHERE usn=-1&quot;);</span>
+        }
+        // we can save space by removing the log of deletions
+<span class="nc" id="L401">        mDb.execute(&quot;delete from graves&quot;);</span>
+<span class="nc" id="L402">        mUsn += 1;</span>
+<span class="nc" id="L403">        mModels.beforeUpload();</span>
+<span class="nc" id="L404">        mTags.beforeUpload();</span>
+<span class="nc" id="L405">        mDecks.beforeUpload();</span>
+<span class="nc" id="L406">        modSchemaNoCheck();</span>
+<span class="nc" id="L407">        mLs = mScm;</span>
+        // ensure db is compacted before upload
+<span class="nc" id="L409">        mDb.execute(&quot;vacuum&quot;);</span>
+<span class="nc" id="L410">        mDb.execute(&quot;analyze&quot;);</span>
+<span class="nc" id="L411">        close();</span>
+<span class="nc" id="L412">    }</span>
+
+
+    /**
+     * Object creation helpers **************************************************
+     * *********************************************
+     */
+
+    public Card getCard(long id) {
+<span class="nc" id="L421">        return new Card(this, id);</span>
+    }
+
+
+    public Note getNote(long id) {
+<span class="nc" id="L426">        return new Note(this, id);</span>
+    }
+
+
+    /**
+     * Utils ******************************************************************** ***************************
+     */
+
+    public int nextID(String type) {
+<span class="nc" id="L435">        type = &quot;next&quot; + Character.toUpperCase(type.charAt(0)) + type.substring(1);</span>
+        int id;
+        try {
+<span class="nc" id="L438">            id = mConf.getInt(type);</span>
+<span class="nc" id="L439">        } catch (JSONException e) {</span>
+<span class="nc" id="L440">            id = 1;</span>
+<span class="nc" id="L441">        }</span>
+        try {
+<span class="nc" id="L443">            mConf.put(type, id + 1);</span>
+<span class="nc" id="L444">        } catch (JSONException e) {</span>
+<span class="nc" id="L445">            throw new RuntimeException(e);</span>
+<span class="nc" id="L446">        }</span>
+<span class="nc" id="L447">        return id;</span>
+    }
+
+
+    /**
+     * Rebuild the queue and reload data after DB modified.
+     */
+    public void reset() {
+<span class="nc" id="L455">        mSched.reset();</span>
+<span class="nc" id="L456">    }</span>
+
+
+    /**
+     * Deletion logging ********************************************************* **************************************
+     */
+
+    public void _logRem(long[] ids, int type) {
+<span class="nc bnc" id="L464" title="All 2 branches missed.">        for (long id : ids) {</span>
+<span class="nc" id="L465">            ContentValues values = new ContentValues();</span>
+<span class="nc" id="L466">            values.put(&quot;usn&quot;, usn());</span>
+<span class="nc" id="L467">            values.put(&quot;oid&quot;, id);</span>
+<span class="nc" id="L468">            values.put(&quot;type&quot;, type);</span>
+<span class="nc" id="L469">            mDb.insert(&quot;graves&quot;, null, values);</span>
+        }
+<span class="nc" id="L471">    }</span>
+
+
+    /**
+     * Notes ******************************************************************** ***************************
+     */
+
+    public int noteCount() {
+<span class="nc" id="L479">        return mDb.queryScalar(&quot;SELECT count() FROM notes&quot;);</span>
+    }
+
+    /**
+     * Return a new note with the default model from the deck
+     * @return The new note
+     */
+    public Note newNote() {
+<span class="nc" id="L487">        return newNote(true);</span>
+    }
+
+    /**
+     * Return a new note with the model derived from the deck or the configuration
+     * @param forDeck When true it uses the model specified in the deck (mid), otherwise it uses the model specified in
+     *                the configuration (curModel)
+     * @return The new note
+     */
+    public Note newNote(boolean forDeck) {
+<span class="nc" id="L497">        return newNote(mModels.current(forDeck));</span>
+    }
+
+    /**
+     * Return a new note with a specific model
+     * @param m The model to use for the new note
+     * @return The new note
+     */
+    public Note newNote(JSONObject m) {
+<span class="nc" id="L506">        return new Note(this, m);</span>
+    }
+
+
+    /**
+     * Add a note to the collection. Return number of new cards.
+     */
+    public int addNote(Note note) {
+        // check we have card models available, then save
+<span class="nc" id="L515">        ArrayList&lt;JSONObject&gt; cms = findTemplates(note);</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        if (cms.size() == 0) {</span>
+<span class="nc" id="L517">            return 0;</span>
+        }
+<span class="nc" id="L519">        note.flush();</span>
+        // deck conf governs which of these are used
+<span class="nc" id="L521">        int due = nextID(&quot;pos&quot;);</span>
+        // add cards
+<span class="nc" id="L523">        int ncards = 0;</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        for (JSONObject template : cms) {</span>
+<span class="nc" id="L525">            _newCard(note, template, due);</span>
+<span class="nc" id="L526">            ncards += 1;</span>
+<span class="nc" id="L527">        }</span>
+<span class="nc" id="L528">        return ncards;</span>
+    }
+
+
+    public void remNotes(long[] ids) {
+<span class="nc" id="L533">        ArrayList&lt;Long&gt; list = mDb</span>
+<span class="nc" id="L534">                .queryColumn(Long.class, &quot;SELECT id FROM cards WHERE nid IN &quot; + Utils.ids2str(ids), 0);</span>
+<span class="nc" id="L535">        long[] cids = new long[list.size()];</span>
+<span class="nc" id="L536">        int i = 0;</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">        for (long l : list) {</span>
+<span class="nc" id="L538">            cids[i++] = l;</span>
+<span class="nc" id="L539">        }</span>
+<span class="nc" id="L540">        remCards(cids);</span>
+<span class="nc" id="L541">    }</span>
+
+
+    /**
+     * Bulk delete facts by ID. Don't call this directly.
+     */
+    public void _remNotes(long[] ids) {
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (ids.length == 0) {</span>
+<span class="nc" id="L549">            return;</span>
+        }
+<span class="nc" id="L551">        String strids = Utils.ids2str(ids);</span>
+        // we need to log these independently of cards, as one side may have
+        // more card templates
+<span class="nc" id="L554">        _logRem(ids, Consts.REM_NOTE);</span>
+<span class="nc" id="L555">        mDb.execute(&quot;DELETE FROM notes WHERE id IN &quot; + strids);</span>
+<span class="nc" id="L556">    }</span>
+
+
+    /**
+     * Card creation ************************************************************ ***********************************
+     */
+
+    /**
+     * @return (active), non-empty templates.
+     */
+    public ArrayList&lt;JSONObject&gt; findTemplates(Note note) {
+<span class="nc" id="L567">        JSONObject model = note.model();</span>
+<span class="nc" id="L568">        ArrayList&lt;Integer&gt; avail = mModels.availOrds(model, Utils.joinFields(note.getFields()));</span>
+<span class="nc" id="L569">        return _tmplsFromOrds(model, avail);</span>
+    }
+
+
+    private ArrayList&lt;JSONObject&gt; _tmplsFromOrds(JSONObject model, ArrayList&lt;Integer&gt; avail) {
+<span class="nc" id="L574">        ArrayList&lt;JSONObject&gt; ok = new ArrayList&lt;&gt;();</span>
+        JSONArray tmpls;
+        try {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">            if (model.getInt(&quot;type&quot;) == Consts.MODEL_STD) {</span>
+<span class="nc" id="L578">                tmpls = model.getJSONArray(&quot;tmpls&quot;);</span>
+<span class="nc bnc" id="L579" title="All 2 branches missed.">                for (int i = 0; i &lt; tmpls.length(); i++) {</span>
+<span class="nc" id="L580">                    JSONObject t = tmpls.getJSONObject(i);</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">                    if (avail.contains(t.getInt(&quot;ord&quot;))) {</span>
+<span class="nc" id="L582">                        ok.add(t);</span>
+                    }
+                }
+            } else {
+                // cloze - generate temporary templates from first
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                for (int ord : avail) {</span>
+<span class="nc" id="L588">                    JSONObject t = new JSONObject(model.getJSONArray(&quot;tmpls&quot;).getString(0));</span>
+<span class="nc" id="L589">                    t.put(&quot;ord&quot;, ord);</span>
+<span class="nc" id="L590">                    ok.add(t);</span>
+<span class="nc" id="L591">                }</span>
+            }
+<span class="nc" id="L593">        } catch (JSONException e) {</span>
+<span class="nc" id="L594">            throw new RuntimeException(e);</span>
+<span class="nc" id="L595">        }</span>
+<span class="nc" id="L596">        return ok;</span>
+    }
+
+
+    /**
+     * Generate cards for non-empty templates, return ids to remove.
+     */
+	public ArrayList&lt;Long&gt; genCards(List&lt;Long&gt; nids) {
+<span class="nc" id="L604">	    return genCards(Utils.arrayList2array(nids));</span>
+	}
+    public ArrayList&lt;Long&gt; genCards(long[] nids) {
+        // build map of (nid,ord) so we don't create dupes
+<span class="nc" id="L608">        String snids = Utils.ids2str(nids);</span>
+<span class="nc" id="L609">        HashMap&lt;Long, HashMap&lt;Integer, Long&gt;&gt; have = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L610">        HashMap&lt;Long, Long&gt; dids = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L611">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L613">            cur = mDb.getDatabase().rawQuery(&quot;select id, nid, ord, did, odid from cards where nid in &quot; + snids, null);</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L615">                long nid = cur.getLong(1);</span>
+<span class="nc" id="L616">                long did = cur.getLong(3);</span>
+<span class="nc" id="L617">                long odid = cur.getLong(4);</span>
+
+                // existing cards
+<span class="nc bnc" id="L620" title="All 2 branches missed.">                if (!have.containsKey(nid)) {</span>
+<span class="nc" id="L621">                    have.put(nid, new HashMap&lt;Integer, Long&gt;());</span>
+                }
+<span class="nc" id="L623">                have.get(nid).put(cur.getInt(2), cur.getLong(0));</span>
+                // if in a filtered deck, add new cards to original deck
+<span class="nc bnc" id="L625" title="All 2 branches missed.">                if (odid != 0) {</span>
+<span class="nc" id="L626">                    did = odid;</span>
+                }
+                // and their dids
+<span class="nc bnc" id="L629" title="All 2 branches missed.">                if (dids.containsKey(nid)) {</span>
+<span class="nc bnc" id="L630" title="All 4 branches missed.">                    if (dids.get(nid) != 0 &amp;&amp; dids.get(nid) != did) {</span>
+                        // cards are in two or more different decks; revert to model default
+<span class="nc" id="L632">                        dids.put(nid, 0L);</span>
+                    }
+                } else {
+                    // first card or multiple cards in same deck
+<span class="nc" id="L636">                    dids.put(nid, did);</span>
+                }
+<span class="nc" id="L638">            }</span>
+        } finally {
+<span class="nc bnc" id="L640" title="All 4 branches missed.">            if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L641">                cur.close();</span>
+            }
+        }
+        // build cards for each note
+<span class="nc" id="L645">        ArrayList&lt;Object[]&gt; data = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L646">        long ts = Utils.maxID(mDb);</span>
+<span class="nc" id="L647">        long now = Utils.intNow();</span>
+<span class="nc" id="L648">        ArrayList&lt;Long&gt; rem = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L649">        int usn = usn();</span>
+<span class="nc" id="L650">        cur = null;</span>
+        try {
+<span class="nc" id="L652">            cur = mDb.getDatabase().rawQuery(&quot;SELECT id, mid, flds FROM notes WHERE id IN &quot; + snids, null);</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L654">                JSONObject model = mModels.get(cur.getLong(1));</span>
+<span class="nc" id="L655">                ArrayList&lt;Integer&gt; avail = mModels.availOrds(model, cur.getString(2));</span>
+<span class="nc" id="L656">                long nid = cur.getLong(0);</span>
+<span class="nc" id="L657">                long did = dids.get(nid);</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">                if (did == 0) {</span>
+<span class="nc" id="L659">                    did = model.getLong(&quot;did&quot;);</span>
+                }
+                // add any missing cards
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                for (JSONObject t : _tmplsFromOrds(model, avail)) {</span>
+<span class="nc" id="L663">                    int tord = t.getInt(&quot;ord&quot;);</span>
+<span class="nc bnc" id="L664" title="All 4 branches missed.">                    boolean doHave = have.containsKey(nid) &amp;&amp; have.get(nid).containsKey(tord);</span>
+<span class="nc bnc" id="L665" title="All 2 branches missed.">                    if (!doHave) {</span>
+                        // check deck is not a cram deck
+                        long ndid;
+                        try {
+<span class="nc" id="L669">                            ndid = t.getLong(&quot;did&quot;);</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">                            if (ndid != 0) {</span>
+<span class="nc" id="L671">                                did = ndid;</span>
+                            }
+<span class="nc" id="L673">                        } catch (JSONException e) {</span>
+                            // do nothing
+<span class="nc" id="L675">                        }</span>
+<span class="nc bnc" id="L676" title="All 2 branches missed.">                        if (getDecks().isDyn(did)) {</span>
+<span class="nc" id="L677">                            did = 1;</span>
+                        }
+                        // if the deck doesn't exist, use default instead
+<span class="nc" id="L680">                        did = mDecks.get(did).getLong(&quot;id&quot;);</span>
+                        // we'd like to use the same due# as sibling cards, but we can't retrieve that quickly, so we
+                        // give it a new id instead
+<span class="nc" id="L683">                        data.add(new Object[] { ts, nid, did, tord, now, usn, nextID(&quot;pos&quot;) });</span>
+<span class="nc" id="L684">                        ts += 1;</span>
+                    }
+<span class="nc" id="L686">                }</span>
+                // note any cards that need removing
+<span class="nc bnc" id="L688" title="All 2 branches missed.">                if (have.containsKey(nid)) {</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                    for (Map.Entry&lt;Integer, Long&gt; n : have.get(nid).entrySet()) {</span>
+<span class="nc bnc" id="L690" title="All 2 branches missed.">                        if (!avail.contains(n.getKey())) {</span>
+<span class="nc" id="L691">                            rem.add(n.getValue());</span>
+                        }
+<span class="nc" id="L693">                    }</span>
+                }
+<span class="nc" id="L695">            }</span>
+<span class="nc" id="L696">        } catch (JSONException e) {</span>
+<span class="nc" id="L697">            throw new RuntimeException(e);</span>
+        } finally {
+<span class="nc bnc" id="L699" title="All 4 branches missed.">            if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L700">                cur.close();</span>
+            }
+        }
+        // bulk update
+<span class="nc" id="L704">        mDb.executeMany(&quot;INSERT INTO cards VALUES (?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,\&quot;\&quot;)&quot;, data);</span>
+<span class="nc" id="L705">        return rem;</span>
+    }
+
+
+	/**
+	 * Return cards of a note, without saving them
+	 * @param note The note whose cards are going to be previewed
+     * @param type 0 - when previewing in add dialog, only non-empty
+     *             1 - when previewing edit, only existing
+     *             2 - when previewing in models dialog, all templates
+     * @return list of cards
+	 */
+	public List&lt;Card&gt; previewCards(Note note, int type) {
+<span class="nc" id="L718">	    ArrayList&lt;JSONObject&gt; cms = null;</span>
+<span class="nc bnc" id="L719" title="All 2 branches missed.">	    if (type == 0) {</span>
+<span class="nc" id="L720">	        cms = findTemplates(note);</span>
+<span class="nc bnc" id="L721" title="All 2 branches missed.">	    } else if (type == 1) {</span>
+<span class="nc" id="L722">	        cms = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">	        for (Card c : note.cards()) {</span>
+<span class="nc" id="L724">	            cms.add(c.template());</span>
+<span class="nc" id="L725">	        }</span>
+	    } else {
+<span class="nc" id="L727">	        cms = new ArrayList&lt;&gt;();</span>
+	        try {
+<span class="nc" id="L729">                JSONArray ja = note.model().getJSONArray(&quot;tmpls&quot;);</span>
+<span class="nc bnc" id="L730" title="All 2 branches missed.">                for (int i = 0; i &lt; ja.length(); ++i) {</span>
+<span class="nc" id="L731">                    cms.add(ja.getJSONObject(i));</span>
+                }
+<span class="nc" id="L733">            } catch (JSONException e) {</span>
+<span class="nc" id="L734">                throw new RuntimeException(e);</span>
+<span class="nc" id="L735">            }</span>
+	    }
+<span class="nc bnc" id="L737" title="All 2 branches missed.">	    if (cms.isEmpty()) {</span>
+<span class="nc" id="L738">	        return new ArrayList&lt;&gt;();</span>
+	    }
+<span class="nc" id="L740">	    List&lt;Card&gt; cards = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">	    for (JSONObject template : cms) {</span>
+<span class="nc" id="L742">	        cards.add(_newCard(note, template, 1, false));</span>
+<span class="nc" id="L743">	    }</span>
+<span class="nc" id="L744">	    return cards;</span>
+	}
+    public List&lt;Card&gt; previewCards(Note note) {
+<span class="nc" id="L747">        return previewCards(note, 0);</span>
+    }
+
+    /**
+     * Create a new card.
+     */
+    private Card _newCard(Note note, JSONObject template, int due) {
+<span class="nc" id="L754">        return _newCard(note, template, due, true);</span>
+    }
+
+
+    private Card _newCard(Note note, JSONObject template, int due, boolean flush) {
+<span class="nc" id="L759">        Card card = new Card(this);</span>
+<span class="nc" id="L760">        card.setNid(note.getId());</span>
+        try {
+<span class="nc" id="L762">            card.setOrd(template.getInt(&quot;ord&quot;));</span>
+<span class="nc" id="L763">        } catch (JSONException e) {</span>
+<span class="nc" id="L764">            new RuntimeException(e);</span>
+<span class="nc" id="L765">        }</span>
+        // Use template did (deck override) if valid, otherwise model did
+<span class="nc" id="L767">        long did = template.optLong(&quot;did&quot;, 0);</span>
+<span class="nc bnc" id="L768" title="All 4 branches missed.">        if (did &gt; 0 &amp;&amp; mDecks.getDecks().containsKey(did)) {</span>
+<span class="nc" id="L769">            card.setDid(did);</span>
+        } else {
+<span class="nc" id="L771">            card.setDid(note.model().optLong(&quot;did&quot;, 0));</span>
+        }
+        try {
+            // if invalid did, use default instead
+<span class="nc" id="L775">            JSONObject deck = mDecks.get(card.getDid());</span>
+<span class="nc bnc" id="L776" title="All 2 branches missed.">            if (deck.getInt(&quot;dyn&quot;) == 1) {</span>
+            	// must not be a filtered deck
+<span class="nc" id="L778">            	card.setDid(1);</span>
+            } else {
+<span class="nc" id="L780">                card.setDid(deck.getLong(&quot;id&quot;));</span>
+            }
+<span class="nc" id="L782">        } catch (JSONException e) {</span>
+<span class="nc" id="L783">            throw new RuntimeException(e);</span>
+<span class="nc" id="L784">        }</span>
+<span class="nc" id="L785">        card.setDue(_dueForDid(card.getDid(), due));</span>
+<span class="nc bnc" id="L786" title="All 2 branches missed.">        if (flush) {</span>
+<span class="nc" id="L787">            card.flush();</span>
+        }
+<span class="nc" id="L789">        return card;</span>
+    }
+
+
+    public int _dueForDid(long did, int due) {
+<span class="nc" id="L794">        JSONObject conf = mDecks.confForDid(did);</span>
+        // in order due?
+        try {
+<span class="nc bnc" id="L797" title="All 2 branches missed.">            if (conf.getJSONObject(&quot;new&quot;).getInt(&quot;order&quot;) == Consts.NEW_CARDS_DUE) {</span>
+<span class="nc" id="L798">                return due;</span>
+            } else {
+                // random mode; seed with note ts so all cards of this note get
+                // the same random number
+<span class="nc" id="L802">                Random r = new Random();</span>
+<span class="nc" id="L803">                r.setSeed(due);</span>
+<span class="nc" id="L804">                return r.nextInt(Math.max(due, 1000) - 1) + 1;</span>
+            }
+<span class="nc" id="L806">        } catch (JSONException e) {</span>
+<span class="nc" id="L807">            throw new RuntimeException(e);</span>
+        }
+    }
+
+
+    /**
+     * Cards ******************************************************************** ***************************
+     */
+
+    public boolean isEmpty() {
+<span class="nc bnc" id="L817" title="All 2 branches missed.">        return mDb.queryScalar(&quot;SELECT 1 FROM cards LIMIT 1&quot;) == 0;</span>
+    }
+
+
+    public int cardCount() {
+<span class="fc" id="L822">        return mDb.queryScalar(&quot;SELECT count() FROM cards&quot;);</span>
+    }
+
+
+    // NOT IN LIBANKI //
+    public int cardCount(Long[] ls) {
+<span class="nc" id="L828">        return mDb.queryScalar(&quot;SELECT count() FROM cards WHERE did IN &quot; + Utils.ids2str(ls));</span>
+    }
+
+
+    /**
+     * Bulk delete cards by ID.
+     */
+    public void remCards(long[] ids) {
+<span class="nc" id="L836">    	remCards(ids, true);</span>
+<span class="nc" id="L837">    }</span>
+    public void remCards(long[] ids, boolean notes) {
+<span class="nc bnc" id="L839" title="All 2 branches missed.">        if (ids.length == 0) {</span>
+<span class="nc" id="L840">            return;</span>
+        }
+<span class="nc" id="L842">        String sids = Utils.ids2str(ids);</span>
+<span class="nc" id="L843">        long[] nids = Utils</span>
+<span class="nc" id="L844">                .arrayList2array(mDb.queryColumn(Long.class, &quot;SELECT nid FROM cards WHERE id IN &quot; + sids, 0));</span>
+        // remove cards
+<span class="nc" id="L846">        _logRem(ids, Consts.REM_CARD);</span>
+<span class="nc" id="L847">        mDb.execute(&quot;DELETE FROM cards WHERE id IN &quot; + sids);</span>
+        // then notes
+<span class="nc bnc" id="L849" title="All 2 branches missed.">        if (!notes) {</span>
+<span class="nc" id="L850">        	return;</span>
+        }
+<span class="nc" id="L852">        nids = Utils</span>
+<span class="nc" id="L853">                .arrayList2array(mDb.queryColumn(Long.class, &quot;SELECT id FROM notes WHERE id IN &quot; + Utils.ids2str(nids)</span>
+                        + &quot; AND id NOT IN (SELECT nid FROM cards)&quot;, 0));
+<span class="nc" id="L855">        _remNotes(nids);</span>
+<span class="nc" id="L856">    }</span>
+
+
+    public List&lt;Long&gt; emptyCids() {
+<span class="nc" id="L860">        List&lt;Long&gt; rem = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">        for (JSONObject m : getModels().all()) {</span>
+<span class="nc" id="L862">            rem.addAll(genCards(getModels().nids(m)));</span>
+<span class="nc" id="L863">        }</span>
+<span class="nc" id="L864">        return rem;</span>
+    }
+
+
+    public String emptyCardReport(List&lt;Long&gt; cids) {
+<span class="nc" id="L869">        StringBuilder rep = new StringBuilder();</span>
+<span class="nc" id="L870">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L872">            cur = mDb.getDatabase().rawQuery(&quot;select group_concat(ord+1), count(), flds from cards c, notes n &quot;</span>
+<span class="nc" id="L873">                                           + &quot;where c.nid = n.id and c.id in &quot; + Utils.ids2str(cids) + &quot; group by nid&quot;, null);</span>
+<span class="nc bnc" id="L874" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L875">                String ords = cur.getString(0);</span>
+<span class="nc" id="L876">                int cnt = cur.getInt(1);</span>
+<span class="nc" id="L877">                String flds = cur.getString(2);</span>
+<span class="nc" id="L878">                rep.append(String.format(&quot;Empty card numbers: %s\nFields: %s\n\n&quot;, ords, flds.replace(&quot;\u001F&quot;, &quot; / &quot;)));</span>
+<span class="nc" id="L879">            }</span>
+        } finally {
+<span class="nc bnc" id="L881" title="All 4 branches missed.">            if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L882">                cur.close();</span>
+            }
+        }
+<span class="nc" id="L885">        return rep.toString();</span>
+    }
+
+    /**
+     * Field checksums and sorting fields ***************************************
+     * ********************************************************
+     */
+
+    private ArrayList&lt;Object[]&gt; _fieldData(String snids) {
+<span class="nc" id="L894">        ArrayList&lt;Object[]&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L895">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L897">            cur = mDb.getDatabase().rawQuery(&quot;SELECT id, mid, flds FROM notes WHERE id IN &quot; + snids, null);</span>
+<span class="nc bnc" id="L898" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L899">                result.add(new Object[] { cur.getLong(0), cur.getLong(1), cur.getString(2) });</span>
+            }
+        } finally {
+<span class="nc bnc" id="L902" title="All 4 branches missed.">            if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L903">                cur.close();</span>
+            }
+        }
+<span class="nc" id="L906">        return result;</span>
+    }
+
+
+    /** Update field checksums and sort cache, after find&amp;replace, etc. */
+    public void updateFieldCache(long[] nids) {
+<span class="nc" id="L912">        String snids = Utils.ids2str(nids);</span>
+<span class="nc" id="L913">        ArrayList&lt;Object[]&gt; r = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L914" title="All 2 branches missed.">        for (Object[] o : _fieldData(snids)) {</span>
+<span class="nc" id="L915">            String[] fields = Utils.splitFields((String) o[2]);</span>
+<span class="nc" id="L916">            JSONObject model = mModels.get((Long) o[1]);</span>
+<span class="nc bnc" id="L917" title="All 2 branches missed.">            if (model == null) {</span>
+                // note point to invalid model
+<span class="nc" id="L919">                continue;</span>
+            }
+<span class="nc" id="L921">            r.add(new Object[] { Utils.stripHTML(fields[mModels.sortIdx(model)]), Utils.fieldChecksum(fields[0]), o[0] });</span>
+<span class="nc" id="L922">        }</span>
+        // apply, relying on calling code to bump usn+mod
+<span class="nc" id="L924">        mDb.executeMany(&quot;UPDATE notes SET sfld=?, csum=? WHERE id=?&quot;, r);</span>
+<span class="nc" id="L925">    }</span>
+
+
+    /**
+     * Q/A generation *********************************************************** ************************************
+     */
+
+    public ArrayList&lt;HashMap&lt;String, String&gt;&gt; renderQA() {
+<span class="nc" id="L933">        return renderQA(null, &quot;card&quot;);</span>
+    }
+
+
+    public ArrayList&lt;HashMap&lt;String, String&gt;&gt; renderQA(int[] ids, String type) {
+        String where;
+<span class="nc bnc" id="L939" title="All 2 branches missed.">        if (type.equals(&quot;card&quot;)) {</span>
+<span class="nc" id="L940">            where = &quot;AND c.id IN &quot; + Utils.ids2str(ids);</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">        } else if (type.equals(&quot;fact&quot;)) {</span>
+<span class="nc" id="L942">            where = &quot;AND f.id IN &quot; + Utils.ids2str(ids);</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        } else if (type.equals(&quot;model&quot;)) {</span>
+<span class="nc" id="L944">            where = &quot;AND m.id IN &quot; + Utils.ids2str(ids);</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">        } else if (type.equals(&quot;all&quot;)) {</span>
+<span class="nc" id="L946">            where = &quot;&quot;;</span>
+        } else {
+<span class="nc" id="L948">            throw new RuntimeException();</span>
+        }
+<span class="nc" id="L950">        ArrayList&lt;HashMap&lt;String, String&gt;&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L951" title="All 2 branches missed.">        for (Object[] row : _qaData(where)) {</span>
+<span class="nc" id="L952">            result.add(_renderQA(row));</span>
+<span class="nc" id="L953">        }</span>
+<span class="nc" id="L954">        return result;</span>
+    }
+
+
+    /**
+     * Returns hash of id, question, answer.
+     */
+    public HashMap&lt;String, String&gt; _renderQA(Object[] data) {
+<span class="fc" id="L962">        return _renderQA(data, null, null);</span>
+    }
+
+
+    public HashMap&lt;String, String&gt; _renderQA(Object[] data, String qfmt, String afmt) {
+        // data is [cid, nid, mid, did, ord, tags, flds]
+        // unpack fields and create dict
+<span class="fc" id="L969">        String[] flist = Utils.splitFields((String) data[6]);</span>
+<span class="fc" id="L970">        Map&lt;String, String&gt; fields = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L971">        JSONObject model = mModels.get((Long) data[2]);</span>
+<span class="fc" id="L972">        Map&lt;String, Pair&lt;Integer, JSONObject&gt;&gt; fmap = mModels.fieldMap(model);</span>
+<span class="fc bfc" id="L973" title="All 2 branches covered.">        for (String name : fmap.keySet()) {</span>
+<span class="fc" id="L974">            fields.put(name, flist[fmap.get(name).first]);</span>
+<span class="fc" id="L975">        }</span>
+        try {
+<span class="fc" id="L977">            int cardNum = ((Integer) data[4]) + 1;</span>
+<span class="fc" id="L978">            fields.put(&quot;Tags&quot;, ((String) data[5]).trim());</span>
+<span class="fc" id="L979">            fields.put(&quot;Type&quot;, (String) model.get(&quot;name&quot;));</span>
+<span class="fc" id="L980">            fields.put(&quot;Deck&quot;, mDecks.name((Long) data[3]));</span>
+<span class="fc" id="L981">            String[] parents = fields.get(&quot;Deck&quot;).split(&quot;::&quot;, -1);</span>
+<span class="fc" id="L982">            fields.put(&quot;Subdeck&quot;, parents[parents.length-1]);</span>
+            JSONObject template;
+<span class="pc bpc" id="L984" title="1 of 2 branches missed.">            if (model.getInt(&quot;type&quot;) == Consts.MODEL_STD) {</span>
+<span class="fc" id="L985">                template = model.getJSONArray(&quot;tmpls&quot;).getJSONObject((Integer) data[4]);</span>
+            } else {
+<span class="nc" id="L987">                template = model.getJSONArray(&quot;tmpls&quot;).getJSONObject(0);</span>
+            }
+<span class="fc" id="L989">            fields.put(&quot;Card&quot;, template.getString(&quot;name&quot;));</span>
+<span class="fc" id="L990">            fields.put(String.format(Locale.US, &quot;c%d&quot;, cardNum), &quot;1&quot;);</span>
+            // render q &amp; a
+<span class="fc" id="L992">            HashMap&lt;String, String&gt; d = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L993">            d.put(&quot;id&quot;, Long.toString((Long) data[0]));</span>
+<span class="pc bpc" id="L994" title="1 of 2 branches missed.">            qfmt = TextUtils.isEmpty(qfmt) ? template.getString(&quot;qfmt&quot;) : qfmt;</span>
+<span class="pc bpc" id="L995" title="1 of 2 branches missed.">            afmt = TextUtils.isEmpty(afmt) ? template.getString(&quot;afmt&quot;) : afmt;</span>
+<span class="fc bfc" id="L996" title="All 2 branches covered.">            for (Pair&lt;String, String&gt; p : new Pair[]{new Pair&lt;&gt;(&quot;q&quot;, qfmt), new Pair&lt;&gt;(&quot;a&quot;, afmt)}) {</span>
+<span class="fc" id="L997">                String type = p.first;</span>
+<span class="fc" id="L998">                String format = p.second;</span>
+<span class="fc bfc" id="L999" title="All 2 branches covered.">                if (type.equals(&quot;q&quot;)) {</span>
+<span class="fc" id="L1000">                    format = fClozePatternQ.matcher(format).replaceAll(String.format(Locale.US, &quot;{{$1cq-%d:&quot;, cardNum));</span>
+<span class="fc" id="L1001">                    format = fClozeTagStart.matcher(format).replaceAll(String.format(Locale.US, &quot;&lt;%%cq:%d:&quot;, cardNum));</span>
+                } else {
+<span class="fc" id="L1003">                    format = fClozePatternA.matcher(format).replaceAll(String.format(Locale.US, &quot;{{$1ca-%d:&quot;, cardNum));</span>
+<span class="fc" id="L1004">                    format = fClozeTagStart.matcher(format).replaceAll(String.format(Locale.US, &quot;&lt;%%ca:%d:&quot;, cardNum));</span>
+                    // the following line differs from libanki // TODO: why?
+<span class="fc" id="L1006">                    fields.put(&quot;FrontSide&quot;, d.get(&quot;q&quot;)); // fields.put(&quot;FrontSide&quot;, mMedia.stripAudio(d.get(&quot;q&quot;)));</span>
+                }
+<span class="fc" id="L1008">                fields = (Map&lt;String, String&gt;) Hooks.runFilter(&quot;mungeFields&quot;, fields, model, data, this);</span>
+<span class="fc" id="L1009">                String html = new Template(format, fields).render();</span>
+<span class="fc" id="L1010">                d.put(type, (String) Hooks.runFilter(&quot;mungeQA&quot;, html, type, fields, model, data, this));</span>
+                // empty cloze?
+<span class="pc bpc" id="L1012" title="1 of 4 branches missed.">                if (type.equals(&quot;q&quot;) &amp;&amp; model.getInt(&quot;type&quot;) == Consts.MODEL_CLOZE) {</span>
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">                    if (getModels()._availClozeOrds(model, (String) data[6], false).size() == 0) {</span>
+<span class="nc" id="L1014">                        String link = String.format(&quot;&lt;a href=%s#cloze&gt;%s&lt;/a&gt;&quot;, Consts.HELP_SITE, &quot;help&quot;);</span>
+<span class="nc" id="L1015">                        d.put(&quot;q&quot;, String.format(&quot;Please edit this note and add some cloze deletions. (%s)&quot;, link));</span>
+                    }
+                }
+            }
+<span class="fc" id="L1019">            return d;</span>
+<span class="nc" id="L1020">        } catch (JSONException e) {</span>
+<span class="nc" id="L1021">            throw new RuntimeException(e);</span>
+        }
+    }
+
+
+    /**
+     * Return [cid, nid, mid, did, ord, tags, flds] db query
+     */
+    public ArrayList&lt;Object[]&gt; _qaData() {
+<span class="nc" id="L1030">        return _qaData(&quot;&quot;);</span>
+    }
+
+
+    public ArrayList&lt;Object[]&gt; _qaData(String where) {
+<span class="nc" id="L1035">        ArrayList&lt;Object[]&gt; data = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1036">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L1038">            cur = mDb.getDatabase().rawQuery(</span>
+                    &quot;SELECT c.id, n.id, n.mid, c.did, c.ord, &quot;
+                            + &quot;n.tags, n.flds FROM cards c, notes n WHERE c.nid == n.id &quot; + where, null);
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L1042">                data.add(new Object[] { cur.getLong(0), cur.getLong(1), cur.getLong(2), cur.getLong(3), cur.getInt(4),</span>
+<span class="nc" id="L1043">                        cur.getString(5), cur.getString(6) });</span>
+            }
+        } finally {
+<span class="nc bnc" id="L1046" title="All 4 branches missed.">            if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L1047">                cur.close();</span>
+            }
+        }
+<span class="nc" id="L1050">        return data;</span>
+    }
+
+
+    /**
+     * Finding cards ************************************************************ ***********************************
+     */
+
+    /** Return a list of card ids */
+    public List&lt;Long&gt; findCards(String search) {
+<span class="nc" id="L1060">        return new Finder(this).findCards(search, null);</span>
+    }
+
+
+    /** Return a list of card ids */
+    public List&lt;Long&gt; findCards(String search, String order) {
+<span class="nc" id="L1066">        return new Finder(this).findCards(search, order);</span>
+    }
+
+
+    public List&lt;Map&lt;String, String&gt;&gt; findCardsForCardBrowser(String search, boolean order, Map&lt;String, String&gt; deckNames) {
+<span class="nc" id="L1071">        return new Finder(this).findCardsForCardBrowser(search, order, deckNames);</span>
+    }
+
+
+    /** Return a list of note ids */
+    public List&lt;Long&gt; findNotes(String query) {
+<span class="nc" id="L1077">        return new Finder(this).findNotes(query);</span>
+    }
+
+
+    public int findReplace(List&lt;Long&gt; nids, String src, String dst) {
+<span class="nc" id="L1082">        return Finder.findReplace(this, nids, src, dst);</span>
+    }
+
+
+    public int findReplace(List&lt;Long&gt; nids, String src, String dst, boolean regex) {
+<span class="nc" id="L1087">        return Finder.findReplace(this, nids, src, dst, regex);</span>
+    }
+
+
+    public int findReplace(List&lt;Long&gt; nids, String src, String dst, String field) {
+<span class="nc" id="L1092">        return Finder.findReplace(this, nids, src, dst, field);</span>
+    }
+
+
+    public int findReplace(List&lt;Long&gt; nids, String src, String dst, boolean regex, String field, boolean fold) {
+<span class="nc" id="L1097">        return Finder.findReplace(this, nids, src, dst, regex, field, fold);</span>
+    }
+
+
+    public List&lt;Pair&lt;String, List&lt;Long&gt;&gt;&gt; findDupes(String fieldName) {
+<span class="nc" id="L1102">        return Finder.findDupes(this, fieldName, &quot;&quot;);</span>
+    }
+
+
+    public List&lt;Pair&lt;String, List&lt;Long&gt;&gt;&gt; findDupes(String fieldName, String search) {
+<span class="nc" id="L1107">        return Finder.findDupes(this, fieldName, search);</span>
+    }
+
+
+    /**
+     * Stats ******************************************************************** ***************************
+     */
+
+    // cardstats
+    // stats
+
+    /**
+     * Timeboxing *************************************************************** ********************************
+     */
+
+    public void setTimeLimit(long seconds) {
+        try {
+<span class="nc" id="L1124">            mConf.put(&quot;timeLim&quot;, seconds);</span>
+<span class="nc" id="L1125">        } catch (JSONException e) {</span>
+<span class="nc" id="L1126">            throw new RuntimeException(e);</span>
+<span class="nc" id="L1127">        }</span>
+<span class="nc" id="L1128">    }</span>
+
+
+    public long getTimeLimit() {
+<span class="nc" id="L1132">        long timebox = 0;</span>
+        try {
+<span class="nc" id="L1134">            timebox = mConf.getLong(&quot;timeLim&quot;);</span>
+<span class="nc" id="L1135">        } catch (JSONException e) {</span>
+<span class="nc" id="L1136">            throw new RuntimeException(e);</span>
+<span class="nc" id="L1137">        }</span>
+<span class="nc" id="L1138">        return timebox;</span>
+    }
+
+
+    public void startTimebox() {
+<span class="nc" id="L1143">        mStartTime = Utils.now();</span>
+<span class="nc" id="L1144">        mStartReps = mSched.getReps();</span>
+<span class="nc" id="L1145">    }</span>
+
+
+    /* Return (elapsedTime, reps) if timebox reached, or null. */
+    public Long[] timeboxReached() {
+        try {
+<span class="nc bnc" id="L1151" title="All 2 branches missed.">            if (mConf.getLong(&quot;timeLim&quot;) == 0) {</span>
+                // timeboxing disabled
+<span class="nc" id="L1153">                return null;</span>
+            }
+<span class="nc" id="L1155">            double elapsed = Utils.now() - mStartTime;</span>
+<span class="nc bnc" id="L1156" title="All 2 branches missed.">            if (elapsed &gt; mConf.getLong(&quot;timeLim&quot;)) {</span>
+<span class="nc" id="L1157">                return new Long[] { mConf.getLong(&quot;timeLim&quot;), (long) (mSched.getReps() - mStartReps) };</span>
+            }
+<span class="nc" id="L1159">        } catch (JSONException e) {</span>
+<span class="nc" id="L1160">            throw new RuntimeException(e);</span>
+<span class="nc" id="L1161">        }</span>
+<span class="nc" id="L1162">        return null;</span>
+    }
+
+
+    /**
+     * Undo ********************************************************************* **************************
+     */
+
+    /**
+     * [type, undoName, data] type 1 = review; type 2 =
+     */
+    public void clearUndo() {
+<span class="fc" id="L1174">        mUndo = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L1175">    }</span>
+
+
+    /** Undo menu item name, or &quot;&quot; if undo unavailable. */
+    public String undoName(Resources res) {
+<span class="nc bnc" id="L1180" title="All 2 branches missed.">        if (mUndo.size() &gt; 0) {</span>
+<span class="nc" id="L1181">            DismissType type = (DismissType) mUndo.getLast()[0];</span>
+<span class="nc" id="L1182">            return res.getString(type.undoNameId);</span>
+        }
+<span class="nc" id="L1184">        return &quot;&quot;;</span>
+    }
+
+
+    public boolean undoAvailable() {
+<span class="pc bpc" id="L1189" title="1 of 2 branches missed.">        return mUndo.size() &gt; 0;</span>
+    }
+
+
+    public long undo() {
+<span class="nc" id="L1194">    	Object[] data = mUndo.removeLast();</span>
+<span class="nc bnc" id="L1195" title="All 7 branches missed.">    	switch ((DismissType) data[0]) {</span>
+            case REVIEW:
+<span class="nc" id="L1197">                Card c = (Card) data[1];</span>
+                // remove leech tag if it didn't have it before
+<span class="nc" id="L1199">                Boolean wasLeech = (Boolean) data[2];</span>
+<span class="nc bnc" id="L1200" title="All 4 branches missed.">                if (!wasLeech &amp;&amp; c.note().hasTag(&quot;leech&quot;)) {</span>
+<span class="nc" id="L1201">                    c.note().delTag(&quot;leech&quot;);</span>
+<span class="nc" id="L1202">                    c.note().flush();</span>
+                }
+                // write old data
+<span class="nc" id="L1205">                c.flush(false);</span>
+                // and delete revlog entry
+<span class="nc" id="L1207">                long last = mDb.queryLongScalar(&quot;SELECT id FROM revlog WHERE cid = &quot; + c.getId() + &quot; ORDER BY id DESC LIMIT 1&quot;);</span>
+<span class="nc" id="L1208">                mDb.execute(&quot;DELETE FROM revlog WHERE id = &quot; + last);</span>
+                // restore any siblings
+<span class="nc" id="L1210">                mDb.execute(&quot;update cards set queue=type,mod=?,usn=? where queue=-2 and nid=?&quot;,</span>
+<span class="nc" id="L1211">                        new Object[]{Utils.intNow(), usn(), c.getNid()});</span>
+                // and finally, update daily count
+<span class="nc bnc" id="L1213" title="All 2 branches missed.">                int n = c.getQueue() == 3 ? 1 : c.getQueue();</span>
+<span class="nc" id="L1214">                String type = (new String[]{&quot;new&quot;, &quot;lrn&quot;, &quot;rev&quot;})[n];</span>
+<span class="nc" id="L1215">                mSched._updateStats(c, type, -1);</span>
+<span class="nc" id="L1216">                mSched.setReps(mSched.getReps() - 1);</span>
+<span class="nc" id="L1217">                return c.getId();</span>
+
+            case BURY_NOTE:
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">                for (Card cc : (ArrayList&lt;Card&gt;) data[2]) {</span>
+<span class="nc" id="L1221">                    cc.flush(false);</span>
+<span class="nc" id="L1222">                }</span>
+<span class="nc" id="L1223">                return (Long) data[3];</span>
+
+            case SUSPEND_CARD:
+<span class="nc" id="L1226">                Card suspendedCard = (Card) data[1];</span>
+<span class="nc" id="L1227">                suspendedCard.flush(false);</span>
+<span class="nc" id="L1228">                return suspendedCard.getId();</span>
+
+            case SUSPEND_NOTE:
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">                for (Card ccc : (ArrayList&lt;Card&gt;) data[1]) {</span>
+<span class="nc" id="L1232">                    ccc.flush(false);</span>
+<span class="nc" id="L1233">                }</span>
+<span class="nc" id="L1234">                return (Long) data[2];</span>
+
+            case DELETE_NOTE:
+<span class="nc" id="L1237">                ArrayList&lt;Long&gt; ids = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1238">                Note note2 = (Note) data[1];</span>
+<span class="nc" id="L1239">                note2.flush(note2.getMod(), false);</span>
+<span class="nc" id="L1240">                ids.add(note2.getId());</span>
+<span class="nc bnc" id="L1241" title="All 2 branches missed.">                for (Card c4 : (ArrayList&lt;Card&gt;) data[2]) {</span>
+<span class="nc" id="L1242">                    c4.flush(false);</span>
+<span class="nc" id="L1243">                    ids.add(c4.getId());</span>
+<span class="nc" id="L1244">                }</span>
+<span class="nc" id="L1245">                mDb.execute(&quot;DELETE FROM graves WHERE oid IN &quot; + Utils.ids2str(Utils.arrayList2array(ids)));</span>
+<span class="nc" id="L1246">                return (Long) data[3];</span>
+
+            case BURY_CARD:
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">                for (Card cc : (ArrayList&lt;Card&gt;) data[2]) {</span>
+<span class="nc" id="L1250">                    cc.flush(false);</span>
+<span class="nc" id="L1251">                }</span>
+<span class="nc" id="L1252">                return (Long) data[3];</span>
+            default:
+<span class="nc" id="L1254">                return 0;</span>
+        }
+    }
+
+
+    public void markUndo(DismissType type, Object[] o) {
+<span class="nc bnc" id="L1260" title="All 7 branches missed.">    	switch(type) {</span>
+    	case REVIEW:
+<span class="nc" id="L1262">    		mUndo.add(new Object[]{type, ((Card)o[0]).clone(), o[1]});</span>
+<span class="nc" id="L1263">    		break;</span>
+        case BURY_CARD:
+<span class="nc" id="L1265">            mUndo.add(new Object[]{type, o[0], o[1], o[2]});</span>
+<span class="nc" id="L1266">            break;</span>
+        case BURY_NOTE:
+<span class="nc" id="L1268">            mUndo.add(new Object[]{type, o[0], o[1], o[2]});</span>
+<span class="nc" id="L1269">            break;</span>
+        case SUSPEND_CARD:
+<span class="nc" id="L1271">            mUndo.add(new Object[]{type, ((Card)o[0]).clone()});</span>
+<span class="nc" id="L1272">            break;</span>
+        case SUSPEND_NOTE:
+<span class="nc" id="L1274">            mUndo.add(new Object[]{type, o[0], o[1]});</span>
+<span class="nc" id="L1275">            break;</span>
+    	case DELETE_NOTE:
+<span class="nc" id="L1277">    		mUndo.add(new Object[]{type, o[0], o[1], o[2]});</span>
+    		break;
+    	}
+<span class="nc bnc" id="L1280" title="All 2 branches missed.">    	while (mUndo.size() &gt; UNDO_SIZE_MAX) {</span>
+<span class="nc" id="L1281">    		mUndo.removeFirst();</span>
+    	}
+<span class="nc" id="L1283">    }</span>
+
+
+    public void markReview(Card card) {
+<span class="nc" id="L1287">        markUndo(DismissType.REVIEW, new Object[]{card, card.note().hasTag(&quot;leech&quot;)});</span>
+<span class="nc" id="L1288">    }</span>
+
+    /**
+     * DB maintenance *********************************************************** ************************************
+     */
+
+
+    /*
+     * Basic integrity check for syncing. True if ok.
+     */
+    public boolean basicCheck() {
+        // cards without notes
+<span class="nc bnc" id="L1300" title="All 2 branches missed.">        if (mDb.queryScalar(&quot;select 1 from cards where nid not in (select id from notes) limit 1&quot;) &gt; 0) {</span>
+<span class="nc" id="L1301">            return false;</span>
+        }
+<span class="nc bnc" id="L1303" title="All 2 branches missed.">        boolean badNotes = mDb.queryScalar(String.format(Locale.US,</span>
+                &quot;select 1 from notes where id not in (select distinct nid from cards) &quot; +
+<span class="nc" id="L1305">                &quot;or mid not in %s limit 1&quot;, Utils.ids2str(mModels.ids()))) &gt; 0;</span>
+        // notes without cards or models
+<span class="nc bnc" id="L1307" title="All 2 branches missed.">        if (badNotes) {</span>
+<span class="nc" id="L1308">            return false;</span>
+        }
+        try {
+            // invalid ords
+<span class="nc bnc" id="L1312" title="All 2 branches missed.">            for (JSONObject m : mModels.all()) {</span>
+                // ignore clozes
+<span class="nc bnc" id="L1314" title="All 2 branches missed.">                if (m.getInt(&quot;type&quot;) != Consts.MODEL_STD) {</span>
+<span class="nc" id="L1315">                    continue;</span>
+                }
+                // Make a list of valid ords for this model
+<span class="nc" id="L1318">                JSONArray tmpls = m.getJSONArray(&quot;tmpls&quot;);</span>
+<span class="nc" id="L1319">                int[] ords = new int[tmpls.length()];</span>
+<span class="nc bnc" id="L1320" title="All 2 branches missed.">                for (int t = 0; t &lt; tmpls.length(); t++) {</span>
+<span class="nc" id="L1321">                    ords[t] = tmpls.getJSONObject(t).getInt(&quot;ord&quot;);</span>
+                }
+
+<span class="nc bnc" id="L1324" title="All 2 branches missed.">                boolean badOrd = mDb.queryScalar(String.format(Locale.US,</span>
+                        &quot;select 1 from cards where ord not in %s and nid in ( &quot; +
+                        &quot;select id from notes where mid = %d) limit 1&quot;,
+<span class="nc" id="L1327">                        Utils.ids2str(ords), m.getLong(&quot;id&quot;))) &gt; 0;</span>
+<span class="nc bnc" id="L1328" title="All 2 branches missed.">                if (badOrd) {</span>
+<span class="nc" id="L1329">                    return false;</span>
+                }
+<span class="nc" id="L1331">            }</span>
+<span class="nc" id="L1332">        } catch (JSONException e) {</span>
+<span class="nc" id="L1333">            throw new RuntimeException(e);</span>
+<span class="nc" id="L1334">        }</span>
+<span class="nc" id="L1335">        return true;</span>
+    }
+
+
+    /** Fix possible problems and rebuild caches. */
+    public long fixIntegrity() {
+<span class="nc" id="L1341">        File file = new File(mPath);</span>
+<span class="nc" id="L1342">        ArrayList&lt;String&gt; problems = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1343">        long oldSize = file.length();</span>
+        try {
+<span class="nc" id="L1345">            mDb.getDatabase().beginTransaction();</span>
+            try {
+<span class="nc" id="L1347">                save();</span>
+<span class="nc bnc" id="L1348" title="All 2 branches missed.">                if (!mDb.queryString(&quot;PRAGMA integrity_check&quot;).equals(&quot;ok&quot;)) {</span>
+<span class="nc" id="L1349">                    return -1;</span>
+                }
+                // note types with a missing model
+<span class="nc" id="L1352">                ArrayList&lt;Long&gt; ids = mDb.queryColumn(Long.class,</span>
+<span class="nc" id="L1353">                        &quot;SELECT id FROM notes WHERE mid NOT IN &quot; + Utils.ids2str(mModels.ids()), 0);</span>
+<span class="nc bnc" id="L1354" title="All 2 branches missed.">                if (ids.size() != 0) {</span>
+<span class="nc" id="L1355">                	problems.add(&quot;Deleted &quot; + ids.size() + &quot; note(s) with missing note type.&quot;);</span>
+<span class="nc" id="L1356">	                _remNotes(Utils.arrayList2array(ids));</span>
+                }
+                // for each model
+<span class="nc bnc" id="L1359" title="All 2 branches missed.">                for (JSONObject m : mModels.all()) {</span>
+                    // cards with invalid ordinal
+<span class="nc bnc" id="L1361" title="All 2 branches missed.">                    if (m.getInt(&quot;type&quot;) == Consts.MODEL_STD) {</span>
+<span class="nc" id="L1362">                        ArrayList&lt;Integer&gt; ords = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1363">                        JSONArray tmpls = m.getJSONArray(&quot;tmpls&quot;);</span>
+<span class="nc bnc" id="L1364" title="All 2 branches missed.">                        for (int t = 0; t &lt; tmpls.length(); t++) {</span>
+<span class="nc" id="L1365">                            ords.add(tmpls.getJSONObject(t).getInt(&quot;ord&quot;));</span>
+                        }
+<span class="nc" id="L1367">                        ids = mDb.queryColumn(Long.class,</span>
+<span class="nc" id="L1368">                                &quot;SELECT id FROM cards WHERE ord NOT IN &quot; + Utils.ids2str(ords) + &quot; AND nid IN ( &quot; +</span>
+<span class="nc" id="L1369">                                &quot;SELECT id FROM notes WHERE mid = &quot; + m.getLong(&quot;id&quot;) + &quot;)&quot;, 0);</span>
+<span class="nc bnc" id="L1370" title="All 2 branches missed.">                        if (ids.size() &gt; 0) {</span>
+<span class="nc" id="L1371">                            problems.add(&quot;Deleted &quot; + ids.size() + &quot; card(s) with missing template.&quot;);</span>
+<span class="nc" id="L1372">                            remCards(Utils.arrayList2array(ids));</span>
+                        }
+                    }
+                    // notes with invalid field counts
+<span class="nc" id="L1376">                    ids = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1377">                    Cursor cur = null;</span>
+                    try {
+<span class="nc" id="L1379">                        cur = mDb.getDatabase().rawQuery(&quot;select id, flds from notes where mid = &quot; + m.getLong(&quot;id&quot;), null);</span>
+<span class="nc bnc" id="L1380" title="All 2 branches missed.">                        while (cur.moveToNext()) {</span>
+<span class="nc" id="L1381">                            String flds = cur.getString(1);</span>
+<span class="nc" id="L1382">                            long id = cur.getLong(0);</span>
+<span class="nc" id="L1383">                            int fldsCount = 0;</span>
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">                            for (int i = 0; i &lt; flds.length(); i++) {</span>
+<span class="nc bnc" id="L1385" title="All 2 branches missed.">                                if (flds.charAt(i) == 0x1f) {</span>
+<span class="nc" id="L1386">                                    fldsCount++;</span>
+                                }
+                            }
+<span class="nc bnc" id="L1389" title="All 2 branches missed.">                            if (fldsCount + 1 != m.getJSONArray(&quot;flds&quot;).length()) {</span>
+<span class="nc" id="L1390">                                ids.add(id);</span>
+                            }
+<span class="nc" id="L1392">                        }</span>
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">                        if (ids.size() &gt; 0) {</span>
+<span class="nc" id="L1394">                            problems.add(&quot;Deleted &quot; + ids.size() + &quot; note(s) with wrong field count.&quot;);</span>
+<span class="nc" id="L1395">                            _remNotes(Utils.arrayList2array(ids));</span>
+                        }
+                    } finally {
+<span class="nc bnc" id="L1398" title="All 4 branches missed.">                        if (cur != null &amp;&amp; !cur.isClosed()) {</span>
+<span class="nc" id="L1399">                            cur.close();</span>
+                        }
+                    }
+<span class="nc" id="L1402">                }</span>
+                // delete any notes with missing cards
+<span class="nc" id="L1404">                ids = mDb.queryColumn(Long.class,</span>
+                        &quot;SELECT id FROM notes WHERE id NOT IN (SELECT DISTINCT nid FROM cards)&quot;, 0);
+<span class="nc bnc" id="L1406" title="All 2 branches missed.">                if (ids.size() != 0) {</span>
+<span class="nc" id="L1407">                	problems.add(&quot;Deleted &quot; + ids.size() + &quot; note(s) with missing no cards.&quot;);</span>
+<span class="nc" id="L1408">	                _remNotes(Utils.arrayList2array(ids));</span>
+                }
+                // cards with missing notes
+<span class="nc" id="L1411">                ids = mDb.queryColumn(Long.class,</span>
+                        &quot;SELECT id FROM cards WHERE nid NOT IN (SELECT id FROM notes)&quot;, 0);
+<span class="nc bnc" id="L1413" title="All 2 branches missed.">                if (ids.size() != 0) {</span>
+<span class="nc" id="L1414">                    problems.add(&quot;Deleted &quot; + ids.size() + &quot; card(s) with missing note.&quot;);</span>
+<span class="nc" id="L1415">                    remCards(Utils.arrayList2array(ids));</span>
+                }
+                // cards with odue set when it shouldn't be
+<span class="nc" id="L1418">                ids = mDb.queryColumn(Long.class,</span>
+                        &quot;select id from cards where odue &gt; 0 and (type=1 or queue=2) and not odid&quot;, 0);
+<span class="nc bnc" id="L1420" title="All 2 branches missed.">                if (ids.size() != 0) {</span>
+<span class="nc" id="L1421">                    problems.add(&quot;Fixed &quot; + ids.size() + &quot; card(s) with invalid properties.&quot;);</span>
+<span class="nc" id="L1422">                    mDb.execute(&quot;update cards set odue=0 where id in &quot; + Utils.ids2str(ids));</span>
+                }
+                // cards with odid set when not in a dyn deck
+<span class="nc" id="L1425">                ArrayList&lt;Long&gt; dids = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">                for (long id : mDecks.allIds()) {</span>
+<span class="nc bnc" id="L1427" title="All 2 branches missed.">                    if (!mDecks.isDyn(id)) {</span>
+<span class="nc" id="L1428">                        dids.add(id);</span>
+                    }
+                }
+<span class="nc" id="L1431">                ids = mDb.queryColumn(Long.class,</span>
+<span class="nc" id="L1432">                        &quot;select id from cards where odid &gt; 0 and did in &quot; + Utils.ids2str(dids), 0);</span>
+<span class="nc bnc" id="L1433" title="All 2 branches missed.">                if (ids.size() != 0) {</span>
+<span class="nc" id="L1434">                    problems.add(&quot;Fixed &quot; + ids.size() + &quot; card(s) with invalid properties.&quot;);</span>
+<span class="nc" id="L1435">                    mDb.execute(&quot;update cards set odid=0, odue=0 where id in &quot; + Utils.ids2str(ids));</span>
+                }
+                // tags
+<span class="nc" id="L1438">                mTags.registerNotes();</span>
+                // field cache
+<span class="nc bnc" id="L1440" title="All 2 branches missed.">                for (JSONObject m : mModels.all()) {</span>
+<span class="nc" id="L1441">                    updateFieldCache(Utils.arrayList2array(mModels.nids(m)));</span>
+<span class="nc" id="L1442">                }</span>
+                // new cards can't have a due position &gt; 32 bits
+<span class="nc" id="L1444">                mDb.execute(&quot;UPDATE cards SET due = 1000000, mod = &quot; + Utils.intNow() + &quot;, usn = &quot; + usn()</span>
+                        + &quot; WHERE due &gt; 1000000 AND queue = 0&quot;);
+                // new card position
+<span class="nc" id="L1447">                mConf.put(&quot;nextPos&quot;, mDb.queryScalar(&quot;SELECT max(due) + 1 FROM cards WHERE type = 0&quot;));</span>
+                // reviews should have a reasonable due
+<span class="nc" id="L1449">                ids = mDb.queryColumn(Long.class, &quot;SELECT id FROM cards WHERE queue = 2 AND due &gt; 10000&quot;, 0);</span>
+<span class="nc bnc" id="L1450" title="All 2 branches missed.">                if (ids.size() &gt; 0) {</span>
+<span class="nc" id="L1451">                	problems.add(&quot;Reviews had incorrect due date.&quot;);</span>
+<span class="nc" id="L1452">                    mDb.execute(&quot;UPDATE cards SET due = 0, mod = &quot; + Utils.intNow() + &quot;, usn = &quot; + usn()</span>
+<span class="nc" id="L1453">                            + &quot; WHERE id IN &quot; + Utils.ids2str(Utils.arrayList2array(ids)));</span>
+                }
+<span class="nc" id="L1455">                mDb.getDatabase().setTransactionSuccessful();</span>
+                // DB must have indices. Older versions of AnkiDroid didn't create them for new collections.
+<span class="nc" id="L1457">                int ixs = mDb.queryScalar(&quot;select count(name) from sqlite_master where type = 'index'&quot;);</span>
+<span class="nc bnc" id="L1458" title="All 2 branches missed.">                if (ixs &lt; 7) {</span>
+<span class="nc" id="L1459">                    problems.add(&quot;Indices were missing.&quot;);</span>
+<span class="nc" id="L1460">                    Storage.addIndices(mDb);</span>
+                }
+<span class="nc" id="L1462">            } catch (JSONException e) {</span>
+<span class="nc" id="L1463">                throw new RuntimeException(e);</span>
+            } finally {
+<span class="nc" id="L1465">                mDb.getDatabase().endTransaction();</span>
+            }
+<span class="nc" id="L1467">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1468">            Timber.e(e, &quot;doInBackgroundCheckDatabase - RuntimeException on marking card&quot;);</span>
+<span class="nc" id="L1469">            AnkiDroidApp.sendExceptionReport(e, &quot;doInBackgroundCheckDatabase&quot;);</span>
+<span class="nc" id="L1470">            return -1;</span>
+<span class="nc" id="L1471">        }</span>
+        // and finally, optimize
+<span class="nc" id="L1473">        optimize();</span>
+<span class="nc" id="L1474">        file = new File(mPath);</span>
+<span class="nc" id="L1475">        long newSize = file.length();</span>
+        // if any problems were found, force a full sync
+<span class="nc bnc" id="L1477" title="All 2 branches missed.">        if (problems.size() &gt; 0) {</span>
+<span class="nc" id="L1478">            modSchemaNoCheck();</span>
+        }
+        // TODO: report problems
+<span class="nc" id="L1481">        return (oldSize - newSize) / 1024;</span>
+    }
+
+
+    public void optimize() {
+<span class="nc" id="L1486">        Timber.i(&quot;executing VACUUM statement&quot;);</span>
+<span class="nc" id="L1487">        mDb.execute(&quot;VACUUM&quot;);</span>
+<span class="nc" id="L1488">        Timber.i(&quot;executing ANALYZE statement&quot;);</span>
+<span class="nc" id="L1489">        mDb.execute(&quot;ANALYZE&quot;);</span>
+<span class="nc" id="L1490">    }</span>
+
+
+    /**
+     * Logging
+     * ***********************************************************
+     */
+
+    public void log(Object... args) {
+<span class="pc bpc" id="L1499" title="1 of 2 branches missed.">        if (!mDebugLog) {</span>
+<span class="nc" id="L1500">            return;</span>
+        }
+<span class="fc" id="L1502">        StackTraceElement trace = Thread.currentThread().getStackTrace()[3];</span>
+        // Overwrite any args that need special handling for an appropriate string representation
+<span class="fc bfc" id="L1504" title="All 2 branches covered.">        for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="pc bpc" id="L1505" title="1 of 2 branches missed.">            if (args[i] instanceof long[]) {</span>
+<span class="nc" id="L1506">                args[i] = Arrays.toString((long []) args[i]);</span>
+            }
+        }
+<span class="fc" id="L1509">        String s = String.format(&quot;[%s] %s:%s(): %s&quot;, Utils.intNow(), trace.getFileName(), trace.getMethodName(),</span>
+<span class="fc" id="L1510">                TextUtils.join(&quot;,  &quot;, args));</span>
+<span class="fc" id="L1511">        mLogHnd.println(s);</span>
+<span class="fc" id="L1512">        Timber.d(s);</span>
+<span class="fc" id="L1513">    }</span>
+
+
+    private void _openLog() {
+<span class="pc bpc" id="L1517" title="1 of 2 branches missed.">        if (!mDebugLog) {</span>
+<span class="nc" id="L1518">            return;</span>
+        }
+        try {
+<span class="fc" id="L1521">            File lpath = new File(mPath.replaceFirst(&quot;\\.anki2$&quot;, &quot;.log&quot;));</span>
+<span class="pc bpc" id="L1522" title="3 of 4 branches missed.">            if (lpath.exists() &amp;&amp; lpath.length() &gt; 10*1024*1024) {</span>
+<span class="nc" id="L1523">                File lpath2 = new File(lpath + &quot;.old&quot;);</span>
+<span class="nc bnc" id="L1524" title="All 2 branches missed.">                if (lpath2.exists()) {</span>
+<span class="nc" id="L1525">                    lpath2.delete();</span>
+                }
+<span class="nc" id="L1527">                lpath.renameTo(lpath2);</span>
+            }
+<span class="fc" id="L1529">            mLogHnd = new PrintWriter(new BufferedWriter(new FileWriter(lpath, true)), true);</span>
+<span class="nc" id="L1530">        } catch (IOException e) {</span>
+            // turn off logging if we can't open the log file
+<span class="nc" id="L1532">            Timber.e(&quot;Failed to open collection.log file - disabling logging&quot;);</span>
+<span class="nc" id="L1533">            mDebugLog = false;</span>
+<span class="fc" id="L1534">        }</span>
+<span class="fc" id="L1535">    }</span>
+
+
+    private void _closeLog() {
+<span class="nc bnc" id="L1539" title="All 2 branches missed.">        if (mLogHnd != null) {</span>
+<span class="nc" id="L1540">            mLogHnd.close();</span>
+<span class="nc" id="L1541">            mLogHnd = null;</span>
+        }
+<span class="nc" id="L1543">    }</span>
+
+    /**
+     * Getters/Setters ********************************************************** *************************************
+     */
+
+    public DB getDb() {
+<span class="fc" id="L1550">        return mDb;</span>
+    }
+
+
+    public Decks getDecks() {
+<span class="fc" id="L1555">        return mDecks;</span>
+    }
+
+
+    public Media getMedia() {
+<span class="nc" id="L1560">        return mMedia;</span>
+    }
+
+
+    public Models getModels() {
+<span class="fc" id="L1565">        return mModels;</span>
+    }
+
+    /** Check if this collection is valid. */
+    public boolean validCollection() {
+    	//TODO: more validation code
+<span class="nc" id="L1571">    	return mModels.validateModel();</span>
+    }
+
+    public JSONObject getConf() {
+<span class="fc" id="L1575">        return mConf;</span>
+    }
+
+
+    public void setConf(JSONObject conf) {
+<span class="nc" id="L1580">        mConf = conf;</span>
+<span class="nc" id="L1581">    }</span>
+
+
+    public long getScm() {
+<span class="nc" id="L1585">        return mScm;</span>
+    }
+
+
+    public boolean getServer() {
+<span class="fc" id="L1590">        return mServer;</span>
+    }
+
+
+    public void setLs(long ls) {
+<span class="nc" id="L1595">        mLs = ls;</span>
+<span class="nc" id="L1596">    }</span>
+
+
+    public void setUsnAfterSync(int usn) {
+<span class="nc" id="L1600">        mUsn = usn;</span>
+<span class="nc" id="L1601">    }</span>
+
+
+    public long getMod() {
+<span class="nc" id="L1605">        return mMod;</span>
+    }
+
+
+    /* this getter is only for syncing routines, use usn() instead elsewhere */
+    public int getUsnForSync() {
+<span class="nc" id="L1611">        return mUsn;</span>
+    }
+
+
+    public Tags getTags() {
+<span class="nc" id="L1616">        return mTags;</span>
+    }
+
+
+    public long getCrt() {
+<span class="fc" id="L1621">        return mCrt;</span>
+    }
+
+
+    public void setCrt(long crt) {
+<span class="nc" id="L1626">        mCrt = crt;</span>
+<span class="nc" id="L1627">    }</span>
+
+
+    public Sched getSched() {
+<span class="fc" id="L1631">        return mSched;</span>
+    }
+
+
+    public String getPath() {
+<span class="fc" id="L1636">        return mPath;</span>
+    }
+
+
+    public void setServer(boolean server) {
+<span class="nc" id="L1641">        mServer = server;</span>
+<span class="nc" id="L1642">    }</span>
+
+    public boolean getDirty() {
+<span class="nc" id="L1645">        return mDty;</span>
+    }
+
+    /**
+     * @return The context that created this Collection.
+     */
+    public Context getContext() {
+<span class="fc" id="L1652">        return mContext;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

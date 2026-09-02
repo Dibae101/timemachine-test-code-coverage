@@ -1,0 +1,153 @@
+/*
+ *  This file is part of Track & Graph
+ *
+ *  Track & Graph is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  Track & Graph is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package com.samco.trackandgraph.graphstatinput.configviews.viewmodel
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.samco.trackandgraph.data.interactor.DataInteractor
+import com.samco.trackandgraph.data.sampling.DataSampler
+import com.samco.trackandgraph.graphstatinput.GraphStatConfigEvent
+import com.samco.trackandgraph.graphstatproviders.GraphStatInteractorProvider
+import com.samco.trackandgraph.data.sampling.DataSampleProperties
+import com.samco.trackandgraph.util.FeaturePathProvider
+import com.samco.trackandgraph.util.allFeatureIds
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import timber.log.Timber
+
+abstract class GraphStatConfigViewModelBase<T : GraphStatConfigEvent.ConfigData<*>>(
+    private val io: CoroutineDispatcher,
+    private val default: CoroutineDispatcher,
+    private val ui: CoroutineDispatcher,
+    private val gsiProvider: GraphStatInteractorProvider,
+    protected val dataInteractor: DataInteractor,
+    protected val dataSampler: DataSampler
+) : ViewModel() {
+
+    private var configFlow = MutableStateFlow<GraphStatConfigEvent>(GraphStatConfigEvent.Loading)
+
+    private var initJob: Job? = null
+
+    private var updateJob: Job? = null
+
+    private var initialized = false
+    private var graphStatId: Long? = null
+
+    //These will be available after onDataLoaded is called
+    protected lateinit var featurePathProvider: FeaturePathProvider
+        private set
+    protected lateinit var dataSamplePropertiesMap: Map<Long, DataSampleProperties?>
+        private set
+
+    /**
+     * Initialize the view model. Must be called before using. This will load the
+     * [featurePathProvider] and optionally load existing config data from the database.
+     *
+     * @param graphStatId The ID of an existing graph/stat to edit, or null to create a new one.
+     */
+    fun init(graphStatId: Long? = null) {
+        if (initialized) return
+        initialized = true
+        this.graphStatId = graphStatId
+
+        initJob = viewModelScope.launch(io) {
+            configFlow.emit(GraphStatConfigEvent.Loading)
+            loadFeatureData()
+            graphStatId?.let { loadGraphStat(it) } ?: withContext(ui) { onDataLoaded(null) }
+        }
+        viewModelScope.launch(ui) { onUpdate() }
+    }
+
+    private suspend fun loadFeatureData() {
+        val groupGraph = dataInteractor.getGroupGraphSync()
+        val dataSamplePropertiesMap = groupGraph.allFeatureIds().associateWith {
+            try {
+                dataSampler.getDataSamplePropertiesForFeatureId(it)
+            } catch (e: Throwable) {
+                Timber.e(e)
+                null
+            }
+        }
+        this.featurePathProvider = FeaturePathProvider(groupGraph)
+        this.dataSamplePropertiesMap = dataSamplePropertiesMap
+    }
+
+    private suspend fun loadGraphStat(graphStatId: Long) {
+        val configData = dataInteractor.tryGetGraphStatById(graphStatId)?.let {
+            gsiProvider
+                .getDataSourceAdapter(it.type)
+                .getConfigData(graphStatId)
+                ?.second
+        }
+        withContext(ui) { onDataLoaded(configData) }
+    }
+
+    /**
+     * Call this to let [GraphStatInputViewModel] know when the demo data or validation exception
+     * may have changed and need updating
+     */
+    protected fun onUpdate() {
+        updateJob?.cancel()
+        updateJob = viewModelScope.launch(default) {
+            withContext(io) { initJob?.join() }
+            configFlow.emit(GraphStatConfigEvent.Loading)
+            updateConfig()
+            configFlow.emit(validate() ?: getConfig())
+        }
+    }
+
+    /**
+     * Call this to show loading while you perform some work. Once the work is done validate, and getConfig will
+     * be called.
+     */
+    protected fun withUpdate(block: suspend CoroutineScope.() -> Unit) {
+        updateJob?.cancel()
+        updateJob = viewModelScope.launch(default) {
+            withContext(io) { initJob?.join() }
+            configFlow.emit(GraphStatConfigEvent.Loading)
+            block()
+            configFlow.emit(validate() ?: getConfig())
+        }
+    }
+
+    /**
+     * Should update the config data for the graph or stat. This will be validated when [validate]
+     * is called and returned when [getConfig] is called.
+     */
+    abstract fun updateConfig()
+
+    /**
+     * Should return the current config data for the graph or stat
+     */
+    abstract fun getConfig(): T
+
+    /**
+     * Should return a validation exception if the config is invalid or null if it is valid
+     */
+    abstract suspend fun validate(): GraphStatConfigEvent.ValidationException?
+
+    /**
+     * A flow of events to be relayed to the [GraphStatInputViewModel]
+     */
+    fun getConfigFlow(): Flow<GraphStatConfigEvent?> = configFlow
+
+    /**
+     * Called when the config data has been loaded from the database and [featurePathProvider] is
+     * available.
+     */
+    abstract fun onDataLoaded(config: Any?)
+}

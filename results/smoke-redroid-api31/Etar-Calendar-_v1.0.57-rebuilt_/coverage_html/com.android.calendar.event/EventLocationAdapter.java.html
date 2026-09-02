@@ -1,0 +1,478 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EventLocationAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.event</a> &gt; <span class="el_source">EventLocationAdapter.java</span></div><h1>EventLocationAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.event;
+
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.AsyncTask;
+import android.provider.CalendarContract.Events;
+import android.provider.ContactsContract.CommonDataKinds;
+import android.provider.ContactsContract.Contacts;
+import android.provider.ContactsContract.RawContacts;
+import android.text.TextUtils;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
+import android.widget.Filter;
+import android.widget.Filterable;
+import android.widget.ImageView;
+import android.widget.TextView;
+
+import com.android.calendar.Utils;
+
+import com.google.android.material.imageview.ShapeableImageView;
+
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
+import java.util.concurrent.ExecutionException;
+
+import ws.xsoh.etar.R;
+
+// TODO: limit length of dropdown to stop at the soft keyboard
+// TODO: history icon resize asset
+
+/**
+ * An adapter for autocomplete of the location field in edit-event view.
+ */
+public class EventLocationAdapter extends ArrayAdapter&lt;EventLocationAdapter.Result&gt;
+        implements Filterable {
+    private static final String TAG = &quot;EventLocationAdapter&quot;;
+    // Constants for contacts query:
+    // SELECT ... FROM view_data data WHERE ((data1 LIKE 'input%' OR data1 LIKE '%input%' OR
+    // display_name LIKE 'input%' OR display_name LIKE '%input%' )) ORDER BY display_name ASC
+<span class="nc" id="L69">    private static final String[] CONTACTS_PROJECTION = new String[] {</span>
+        CommonDataKinds.StructuredPostal._ID,
+        Contacts.DISPLAY_NAME,
+        CommonDataKinds.StructuredPostal.FORMATTED_ADDRESS,
+        RawContacts.CONTACT_ID,
+        Contacts.PHOTO_ID,
+    };
+    private static final int CONTACTS_INDEX_ID = 0;
+    private static final int CONTACTS_INDEX_DISPLAY_NAME = 1;
+    private static final int CONTACTS_INDEX_ADDRESS = 2;
+    private static final int CONTACTS_INDEX_CONTACT_ID = 3;
+    private static final int CONTACTS_INDEX_PHOTO_ID = 4;
+    // TODO: Only query visible contacts?
+<span class="nc" id="L82">    private static final String CONTACTS_WHERE = new StringBuilder()</span>
+<span class="nc" id="L83">            .append(&quot;(&quot;)</span>
+<span class="nc" id="L84">            .append(CommonDataKinds.StructuredPostal.FORMATTED_ADDRESS)</span>
+<span class="nc" id="L85">            .append(&quot; LIKE ? OR &quot;)</span>
+<span class="nc" id="L86">            .append(CommonDataKinds.StructuredPostal.FORMATTED_ADDRESS)</span>
+<span class="nc" id="L87">            .append(&quot; LIKE ? OR &quot;)</span>
+<span class="nc" id="L88">            .append(Contacts.DISPLAY_NAME)</span>
+<span class="nc" id="L89">            .append(&quot; LIKE ? OR &quot;)</span>
+<span class="nc" id="L90">            .append(Contacts.DISPLAY_NAME)</span>
+<span class="nc" id="L91">            .append(&quot; LIKE ? )&quot;)</span>
+<span class="nc" id="L92">            .toString();</span>
+    // Constants for recent locations query (in Events table):
+    // SELECT ... FROM view_events WHERE (eventLocation LIKE 'input%') ORDER BY _id DESC
+<span class="nc" id="L95">    private static final String[] EVENT_PROJECTION = new String[] {</span>
+        Events._ID,
+        Events.EVENT_LOCATION,
+        Events.VISIBLE,
+    };
+    private static final int EVENT_INDEX_ID = 0;
+    private static final int EVENT_INDEX_LOCATION = 1;
+    private static final int EVENT_INDEX_VISIBLE = 2;
+    private static final String LOCATION_WHERE = Events.VISIBLE + &quot;=? AND &quot;
+            + Events.EVENT_LOCATION + &quot; LIKE ?&quot;;
+    private static final int MAX_LOCATION_SUGGESTIONS = 4;
+<span class="nc" id="L106">    private static ArrayList&lt;Result&gt; EMPTY_LIST = new ArrayList&lt;Result&gt;();</span>
+    private final Context mContext;
+    private final ContentResolver mResolver;
+    private final LayoutInflater mInflater;
+<span class="nc" id="L110">    private final ArrayList&lt;Result&gt; mResultList = new ArrayList&lt;Result&gt;();</span>
+    // The cache for contacts photos.  We don't have to worry about clearing this, as a
+    // new adapter is created for every edit event.
+<span class="nc" id="L113">    private final Map&lt;Uri, Bitmap&gt; mPhotoCache = new HashMap&lt;Uri, Bitmap&gt;();</span>
+
+    /**
+     * Constructor.
+     */
+    public EventLocationAdapter(Context context) {
+<span class="nc" id="L119">        super(context, R.layout.location_dropdown_item, EMPTY_LIST);</span>
+
+<span class="nc" id="L121">        mContext = context;</span>
+<span class="nc" id="L122">        mResolver = context.getContentResolver();</span>
+<span class="nc" id="L123">        mInflater = (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);</span>
+<span class="nc" id="L124">    }</span>
+
+    /**
+     * Matches the input string against contacts names and addresses.
+     *
+     * @param resolver        The content resolver.
+     * @param input           The user-typed input string.
+     * @param addressesRetVal The addresses in the returned result are also returned here
+     *                        for faster lookup.  Pass in an empty set.
+     * @return Ordered list of all the matched results.  If there are multiple address matches
+     * for the same contact, they will be listed together in individual items, with only
+     * the first item containing a name/icon.
+     */
+    private static List&lt;Result&gt; queryContacts(ContentResolver resolver, String input,
+                                              HashSet&lt;String&gt; addressesRetVal) {
+<span class="nc" id="L139">        String where = null;</span>
+<span class="nc" id="L140">        String[] whereArgs = null;</span>
+
+        // Match any word in contact name or address.
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (!TextUtils.isEmpty(input)) {</span>
+<span class="nc" id="L144">            where = CONTACTS_WHERE;</span>
+<span class="nc" id="L145">            String param1 = input + &quot;%&quot;;</span>
+<span class="nc" id="L146">            String param2 = &quot;% &quot; + input + &quot;%&quot;;</span>
+<span class="nc" id="L147">            whereArgs = new String[]{param1, param2, param1, param2};</span>
+        }
+
+        // Perform the query.
+<span class="nc" id="L151">        Cursor c = resolver.query(CommonDataKinds.StructuredPostal.CONTENT_URI,</span>
+                CONTACTS_PROJECTION, where, whereArgs, Contacts.DISPLAY_NAME + &quot; ASC&quot;);
+
+        // Process results.  Group together addresses for the same contact.
+        try {
+<span class="nc" id="L156">            Map&lt;String, List&lt;Result&gt;&gt; nameToAddresses = new HashMap&lt;String, List&lt;Result&gt;&gt;();</span>
+<span class="nc" id="L157">            c.moveToPosition(-1);</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            while (c.moveToNext()) {</span>
+<span class="nc" id="L159">                String name = c.getString(CONTACTS_INDEX_DISPLAY_NAME);</span>
+<span class="nc" id="L160">                String address = c.getString(CONTACTS_INDEX_ADDRESS);</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (name != null) {</span>
+
+<span class="nc" id="L163">                    List&lt;Result&gt; addressesForName = nameToAddresses.get(name);</span>
+                    Result result;
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                    if (addressesForName == null) {</span>
+                        // Determine if there is a photo for the icon.
+<span class="nc" id="L167">                        Uri contactPhotoUri = null;</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                        if (c.getLong(CONTACTS_INDEX_PHOTO_ID) &gt; 0) {</span>
+<span class="nc" id="L169">                            contactPhotoUri = ContentUris.withAppendedId(Contacts.CONTENT_URI,</span>
+<span class="nc" id="L170">                                    c.getLong(CONTACTS_INDEX_CONTACT_ID));</span>
+                        }
+
+                        // First listing for a distinct contact should have the name/icon.
+<span class="nc" id="L174">                        addressesForName = new ArrayList&lt;Result&gt;();</span>
+<span class="nc" id="L175">                        nameToAddresses.put(name, addressesForName);</span>
+<span class="nc" id="L176">                        result = new Result(name, address, R.drawable.outline_account_circle,</span>
+                                contactPhotoUri);
+<span class="nc" id="L178">                    } else {</span>
+                        // Do not include name/icon in subsequent listings for the same contact.
+<span class="nc" id="L180">                        result = new Result(null, address, null, null);</span>
+                    }
+
+<span class="nc" id="L183">                    addressesForName.add(result);</span>
+<span class="nc" id="L184">                    addressesRetVal.add(address);</span>
+                }
+<span class="nc" id="L186">            }</span>
+
+            // Return the list of results.
+<span class="nc" id="L189">            List&lt;Result&gt; allResults = new ArrayList&lt;Result&gt;();</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            for (List&lt;Result&gt; result : nameToAddresses.values()) {</span>
+<span class="nc" id="L191">                allResults.addAll(result);</span>
+<span class="nc" id="L192">            }</span>
+<span class="nc" id="L193">            return allResults;</span>
+
+        } finally {
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            if (c != null) {</span>
+<span class="nc" id="L197">                c.close();</span>
+            }
+        }
+    }
+
+    /**
+     * Matches the input string against recent locations.
+     */
+    private static List&lt;Result&gt; queryRecentLocations(ContentResolver resolver, String input, Context context) {
+        // TODO: also match each word in the address?
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        String filter = input == null ? &quot;&quot; : input + &quot;%&quot;;</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        if (filter.isEmpty()) {</span>
+<span class="nc" id="L209">            return null;</span>
+        }
+
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (!Utils.isCalendarPermissionGranted(context, true)) {</span>
+            //If permission is not granted then just return.
+<span class="nc" id="L214">            Log.d(TAG, &quot;Manifest.permission.READ_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L215">            return null;</span>
+        }
+
+        // Query all locations prefixed with the constraint.  There is no way to insert
+        // 'DISTINCT' or 'GROUP BY' to get rid of dupes, so use post-processing to
+        // remove dupes.  We will order query results by descending event ID to show
+        // results that were most recently inputed.
+<span class="nc" id="L222">        Cursor c = resolver.query(Events.CONTENT_URI, EVENT_PROJECTION, LOCATION_WHERE,</span>
+                new String[]{&quot;1&quot;, filter}, Events._ID + &quot; DESC&quot;);
+        try {
+<span class="nc" id="L225">            List&lt;Result&gt; recentLocations = null;</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (c != null) {</span>
+                // Post process query results.
+<span class="nc" id="L228">                recentLocations = processLocationsQueryResults(c);</span>
+            }
+<span class="nc" id="L230">            return recentLocations;</span>
+        } finally {
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (c != null) {</span>
+<span class="nc" id="L233">                c.close();</span>
+            }
+        }
+    }
+
+    /**
+     * Post-process the query results to return the first MAX_LOCATION_SUGGESTIONS
+     * unique locations in alphabetical order.
+     * &lt;p/&gt;
+     * TODO: Refactor to share code with the recent titles auto-complete.
+     */
+    private static List&lt;Result&gt; processLocationsQueryResults(Cursor cursor) {
+<span class="nc" id="L245">        TreeSet&lt;String&gt; locations = new TreeSet&lt;String&gt;(String.CASE_INSENSITIVE_ORDER);</span>
+<span class="nc" id="L246">        cursor.moveToPosition(-1);</span>
+
+        // Remove dupes.
+<span class="nc bnc" id="L249" title="All 4 branches missed.">        while ((locations.size() &lt; MAX_LOCATION_SUGGESTIONS) &amp;&amp; cursor.moveToNext()) {</span>
+<span class="nc" id="L250">            String location = cursor.getString(EVENT_INDEX_LOCATION).trim();</span>
+<span class="nc" id="L251">            locations.add(location);</span>
+<span class="nc" id="L252">        }</span>
+
+        // Copy the sorted results.
+<span class="nc" id="L255">        List&lt;Result&gt; results = new ArrayList&lt;Result&gt;();</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        for (String location : locations) {</span>
+<span class="nc" id="L257">            results.add(new Result(null, location, R.drawable.ic_baseline_history, null));</span>
+<span class="nc" id="L258">        }</span>
+<span class="nc" id="L259">        return results;</span>
+    }
+
+    @Override
+    public int getCount() {
+<span class="nc" id="L264">        return mResultList.size();</span>
+    }
+
+    @Override
+    public Result getItem(int index) {
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (index &lt; mResultList.size()) {</span>
+<span class="nc" id="L270">            return mResultList.get(index);</span>
+        } else {
+<span class="nc" id="L272">            return null;</span>
+        }
+    }
+
+    @Override
+    public View getView(final int position, final View convertView, final ViewGroup parent) {
+<span class="nc" id="L278">        View view = convertView;</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        if (view == null) {</span>
+<span class="nc" id="L280">            view = mInflater.inflate(R.layout.location_dropdown_item, parent, false);</span>
+        }
+<span class="nc" id="L282">        final Result result = getItem(position);</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L284">            return view;</span>
+        }
+
+        // Update the display name in the item in auto-complete list.
+<span class="nc" id="L288">        TextView nameView = (TextView) view.findViewById(R.id.location_name);</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        if (nameView != null) {</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            if (result.mName == null) {</span>
+<span class="nc" id="L291">                nameView.setVisibility(View.GONE);</span>
+            } else {
+<span class="nc" id="L293">                nameView.setVisibility(View.VISIBLE);</span>
+<span class="nc" id="L294">                nameView.setText(result.mName);</span>
+            }
+        }
+
+        // Update the address line.
+<span class="nc" id="L299">        TextView addressView = (TextView) view.findViewById(R.id.location_address);</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (addressView != null) {</span>
+<span class="nc" id="L301">            addressView.setText(result.mAddress);</span>
+        }
+
+        // Update the icon.
+<span class="nc" id="L305">        final ShapeableImageView imageView = view.findViewById(R.id.icon);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if (imageView != null) {</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">            if (result.mDefaultIcon == null) {</span>
+<span class="nc" id="L308">                imageView.setVisibility(View.INVISIBLE);</span>
+            } else {
+<span class="nc" id="L310">                imageView.setVisibility(View.VISIBLE);</span>
+<span class="nc" id="L311">                imageView.setImageResource(result.mDefaultIcon);</span>
+
+                // Save the URI on the view, so we can check against it later when updating
+                // the image.  Otherwise the async image update with using 'convertView' above
+                // resulted in the wrong list items being updated.
+<span class="nc" id="L316">                imageView.setTag(result.mContactPhotoUri);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">                if (result.mContactPhotoUri != null) {</span>
+<span class="nc" id="L318">                    Bitmap cachedPhoto = mPhotoCache.get(result.mContactPhotoUri);</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                    if (cachedPhoto != null) {</span>
+                        // Use photo in cache.
+<span class="nc" id="L321">                        imageView.setImageBitmap(cachedPhoto);</span>
+                    } else {
+                        // Asynchronously load photo and update.
+<span class="nc" id="L324">                        asyncLoadPhotoAndUpdateView(result.mContactPhotoUri, imageView);</span>
+                    }
+                }
+            }
+        }
+<span class="nc" id="L329">        return view;</span>
+    }
+
+    // TODO: Refactor to share code with ContactsAsyncHelper.
+    private void asyncLoadPhotoAndUpdateView(final Uri contactPhotoUri,
+            final ImageView imageView) {
+<span class="nc" id="L335">        AsyncTask&lt;Void, Void, Bitmap&gt; photoUpdaterTask =</span>
+<span class="nc" id="L336">                new AsyncTask&lt;Void, Void, Bitmap&gt;() {</span>
+            @Override
+            protected Bitmap doInBackground(Void... params) {
+<span class="nc" id="L339">                Bitmap photo = null;</span>
+<span class="nc" id="L340">                InputStream imageStream = Contacts.openContactPhotoInputStream(</span>
+                        mResolver, contactPhotoUri);
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                if (imageStream != null) {</span>
+<span class="nc" id="L343">                    photo = BitmapFactory.decodeStream(imageStream);</span>
+<span class="nc" id="L344">                    mPhotoCache.put(contactPhotoUri, photo);</span>
+                }
+<span class="nc" id="L346">                return photo;</span>
+            }
+
+            @Override
+            public void onPostExecute(Bitmap photo) {
+                // The View may have already been reused (because using 'convertView' above), so
+                // we must check the URI is as expected before setting the icon, or we may be
+                // setting the icon in other items.
+<span class="nc bnc" id="L354" title="All 4 branches missed.">                if (photo != null &amp;&amp; imageView.getTag() == contactPhotoUri) {</span>
+<span class="nc" id="L355">                    imageView.setImageBitmap(photo);</span>
+                }
+<span class="nc" id="L357">            }</span>
+<span class="nc" id="L358">        }.execute();</span>
+<span class="nc" id="L359">    }</span>
+
+    /**
+     * Return filter for matching against contacts info and recent locations.
+     */
+    @Override
+    public Filter getFilter() {
+<span class="nc" id="L366">        return new LocationFilter();</span>
+    }
+
+    /**
+     * Internal class for containing info for an item in the auto-complete results.
+     */
+    public static class Result {
+        private final String mName;
+        private final String mAddress;
+
+        // The default image resource for the icon.  This will be null if there should
+        // be no icon (if multiple listings for a contact, only the first one should have the
+        // photo icon).
+        private final Integer mDefaultIcon;
+
+        // The contact photo to use for the icon.  This will override the default icon.
+        private final Uri mContactPhotoUri;
+
+        public Result(String displayName, String address, Integer defaultIcon,
+<span class="nc" id="L385">                      Uri contactPhotoUri) {</span>
+<span class="nc" id="L386">            this.mName = displayName;</span>
+<span class="nc" id="L387">            this.mAddress = address;</span>
+<span class="nc" id="L388">            this.mDefaultIcon = defaultIcon;</span>
+<span class="nc" id="L389">            this.mContactPhotoUri = contactPhotoUri;</span>
+<span class="nc" id="L390">        }</span>
+
+        /**
+         * This is the autocompleted text.
+         */
+        @Override
+        public String toString() {
+<span class="nc" id="L397">            return mAddress;</span>
+        }
+    }
+
+    /**
+     * Filter implementation for matching the input string against contacts info and
+     * recent locations.
+     */
+<span class="nc" id="L405">    public class LocationFilter extends Filter {</span>
+
+        @Override
+        protected FilterResults performFiltering(CharSequence constraint) {
+<span class="nc" id="L409">            long startTime = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            final String filter = constraint == null ? &quot;&quot; : constraint.toString();</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            if (filter.isEmpty()) {</span>
+<span class="nc" id="L412">                return null;</span>
+            }
+
+            // Start the recent locations query (async).
+<span class="nc" id="L416">            AsyncTask&lt;Void, Void, List&lt;Result&gt;&gt; locationsQueryTask =</span>
+<span class="nc" id="L417">                    new AsyncTask&lt;Void, Void, List&lt;Result&gt;&gt;() {</span>
+                @Override
+                protected List&lt;Result&gt; doInBackground(Void... params) {
+<span class="nc" id="L420">                    return queryRecentLocations(mResolver, filter, mContext);</span>
+                }
+<span class="nc" id="L422">            }.execute();</span>
+
+            // Perform the contacts query (sync).
+<span class="nc" id="L425">            HashSet&lt;String&gt; contactsAddresses = new HashSet&lt;String&gt;();</span>
+<span class="nc" id="L426">            List&lt;Result&gt; contacts = queryContacts(mResolver, filter, contactsAddresses);</span>
+
+<span class="nc" id="L428">            ArrayList&lt;Result&gt; resultList = new ArrayList&lt;Result&gt;();</span>
+            try {
+                // Wait for the locations query.
+<span class="nc" id="L431">                List&lt;Result&gt; recentLocations = locationsQueryTask.get();</span>
+
+                // Add the matched recent locations to returned results.  If a match exists in
+                // both the recent locations query and the contacts addresses, only display it
+                // as a contacts match.
+<span class="nc bnc" id="L436" title="All 2 branches missed.">                for (Result recentLocation : recentLocations) {</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">                    if (recentLocation.mAddress != null &amp;&amp;</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">                            !contactsAddresses.contains(recentLocation.mAddress)) {</span>
+<span class="nc" id="L439">                        resultList.add(recentLocation);</span>
+                    }
+<span class="nc" id="L441">                }</span>
+<span class="nc" id="L442">            } catch (ExecutionException | InterruptedException e) {</span>
+<span class="nc" id="L443">                Log.e(TAG, &quot;Failed waiting for locations query results.&quot;, e);</span>
+<span class="nc" id="L444">            }</span>
+
+            // Add all the contacts matches to returned results.
+<span class="nc bnc" id="L447" title="All 2 branches missed.">            if (contacts != null) {</span>
+<span class="nc" id="L448">                resultList.addAll(contacts);</span>
+            }
+
+            // Log the processing duration.
+<span class="nc bnc" id="L452" title="All 2 branches missed.">            if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L453">                long duration = System.currentTimeMillis() - startTime;</span>
+<span class="nc" id="L454">                String msg = &quot;Autocomplete of &quot; + constraint +</span>
+                        &quot;: location query match took &quot; + duration + &quot;ms &quot; +
+<span class="nc" id="L456">                        &quot;(&quot; + resultList.size() + &quot; results)&quot;;</span>
+<span class="nc" id="L457">                Log.d(TAG, msg);</span>
+            }
+
+<span class="nc" id="L460">            final FilterResults filterResults = new FilterResults();</span>
+<span class="nc" id="L461">            filterResults.values = resultList;</span>
+<span class="nc" id="L462">            filterResults.count = resultList.size();</span>
+<span class="nc" id="L463">            return filterResults;</span>
+        }
+
+        @Override
+        protected void publishResults(CharSequence constraint, FilterResults results) {
+<span class="nc" id="L468">            mResultList.clear();</span>
+<span class="nc bnc" id="L469" title="All 4 branches missed.">            if (results != null &amp;&amp; results.count &gt; 0) {</span>
+<span class="nc" id="L470">                mResultList.addAll((ArrayList&lt;Result&gt;) results.values);</span>
+<span class="nc" id="L471">                notifyDataSetChanged();</span>
+            } else {
+<span class="nc" id="L473">                notifyDataSetInvalidated();</span>
+            }
+<span class="nc" id="L475">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

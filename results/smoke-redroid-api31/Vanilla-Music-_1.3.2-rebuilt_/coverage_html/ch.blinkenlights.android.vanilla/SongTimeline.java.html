@@ -1,0 +1,1082 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SongTimeline.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vanilla-Music</a> &gt; <a href="index.source.html" class="el_package">ch.blinkenlights.android.vanilla</a> &gt; <span class="el_source">SongTimeline.java</span></div><h1>SongTimeline.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 Christopher Eby &lt;kreed@kreed.org&gt;
+ * Copyright (C) 2015-2019 Adrian Ulrich &lt;adrian@blinkenlights.ch&gt;
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the &quot;Software&quot;), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+package ch.blinkenlights.android.vanilla;
+
+import ch.blinkenlights.android.medialibrary.MediaLibrary;
+
+import android.content.Context;
+import android.database.Cursor;
+import android.net.Uri;
+import android.provider.MediaStore;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
+import java.util.ListIterator;
+
+import junit.framework.Assert;
+
+/**
+ * Contains the list of currently playing songs, implements repeat and shuffle
+ * support, and contains methods to fetch more songs from the MediaStore.
+ */
+public final class SongTimeline {
+	/**
+	 * Stop playback.
+	 *
+	 * @see SongTimeline#setFinishAction(int)
+	 */
+	public static final int FINISH_STOP = 0;
+	/**
+	 * Repeat from the beginning.
+	 *
+	 * @see SongTimeline#setFinishAction(int)
+	 */
+	public static final int FINISH_REPEAT = 1;
+	/**
+	 * Repeat the current song. This behavior is implemented entirely in
+	 * {@link PlaybackService#onCompletion(android.media.MediaPlayer)};
+	 * pressing the next or previous buttons will advance the song as normal;
+	 * only allowing the song to play until the end will repeat it.
+	 *
+	 * @see SongTimeline#setFinishAction(int)
+	 */
+	public static final int FINISH_REPEAT_CURRENT = 2;
+	/**
+	 * Stop playback after current song. This behavior is implemented entirely
+	 * in {@link PlaybackService#onCompletion(android.media.MediaPlayer)};
+	 * pressing the next or previous buttons will advance the song as normal;
+	 * only allowing the song to play until the end.
+	 *
+	 * @see SongTimeline#setFinishAction(int)
+	 */
+	public static final int FINISH_STOP_CURRENT = 3;
+	/**
+	 * Add random songs to the playlist.
+	 *
+	 * @see SongTimeline#setFinishAction(int)
+	 */
+	public static final int FINISH_RANDOM = 4;
+
+	/**
+	 * Icons corresponding to each of the finish actions.
+	 */
+<span class="fc" id="L89">	public static final int[] FINISH_ICONS =</span>
+		{ R.drawable.repeat_inactive, R.drawable.repeat_active, R.drawable.repeat_current_active, R.drawable.stop_current_active, R.drawable.random_active };
+
+	/**
+	 * Clear the timeline and use only the provided songs.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_PLAY = 0;
+	/**
+	 * Clear the queue and add the songs after the current song.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_FLUSH_AND_PLAY_NEXT = 1;
+	/**
+	 * Add the songs at the end of the timeline, clearing random songs.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_ENQUEUE = 2;
+	/**
+	 * Like play mode, but make the song at the given position play first by
+	 * removing the songs before the given position in the query and appending
+	 * them to the end of the queue.
+	 *
+	 * Pass the position in QueryTask.data.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_PLAY_POS_FIRST = 3;
+	/**
+	 * Like play mode, but make the song with the given id play first by
+	 * removing the songs before the song in the query and appending
+	 * them to the end of the queue. If there are multiple songs with
+	 * the given id, picks the first song with that id.
+	 *
+	 * Pass the id in QueryTask.data.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_PLAY_ID_FIRST = 4;
+	/**
+	 * Like enqueue mode, but make the song with the given id play first by
+	 * removing the songs before the song in the query and appending
+	 * them to the end of the queue. If there are multiple songs with
+	 * the given id, picks the first song with that id.
+	 *
+	 * Pass the id in QueryTask.data.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_ENQUEUE_ID_FIRST = 5;
+	/**
+	 * Like enqueue mode, but make the song at the given position play first by
+	 * removing the songs before the given position in the query and appending
+	 * them to the end of the queue.
+	 *
+	 * Pass the position in QueryTask.data.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_ENQUEUE_POS_FIRST = 6;
+	/**
+	 * Enqueues the result as next item(s)
+	 *
+	 * Pass the position in QueryTask.data.
+	 *
+	 * @see SongTimeline#addSongs(Context, QueryTask)
+	 */
+	public static final int MODE_ENQUEUE_AS_NEXT = 7;
+
+	/**
+	 * Disable shuffle.
+	 *
+	 * @see SongTimeline#setShuffleMode(int)
+	 */
+	public static final int SHUFFLE_NONE = 0;
+	/**
+	 * Randomize order of songs.
+	 *
+	 * @see SongTimeline#setShuffleMode(int)
+	 */
+	public static final int SHUFFLE_SONGS = 1;
+	/**
+	 * Randomize order of albums, preserving the order of tracks inside the
+	 * albums.
+	 *
+	 * @see SongTimeline#setShuffleMode(int)
+	 */
+	public static final int SHUFFLE_ALBUMS = 2;
+
+	/**
+	 * Icons corresponding to each of the shuffle actions.
+	 */
+<span class="fc" id="L184">	public static final int[] SHUFFLE_ICONS =</span>
+		{ R.drawable.shuffle_inactive, R.drawable.shuffle_active, R.drawable.shuffle_album_active };
+
+	/**
+	 * Move current position to the previous album.
+	 *
+	 * @see SongTimeline#shiftCurrentSong(int)
+	 */
+	public static final int SHIFT_PREVIOUS_ALBUM = -2;
+	/**
+	 * Move current position to the previous song.
+	 *
+	 * @see SongTimeline#shiftCurrentSong(int)
+	 */
+	public static final int SHIFT_PREVIOUS_SONG = -1;
+	/**
+	 * Noop
+	 * @see SongTimeline#shiftCurrentSong(int)
+	 */
+	public static final int SHIFT_KEEP_SONG = 0;
+	/**
+	 * Move current position to the next song.
+	 *
+	 * @see SongTimeline#shiftCurrentSong(int)
+	 */
+	public static final int SHIFT_NEXT_SONG = 1;
+	/**
+	 * Move current position to the next album.
+	 *
+	 * @see SongTimeline#shiftCurrentSong(int)
+	 */
+	public static final int SHIFT_NEXT_ALBUM = 2;
+
+	private final Context mContext;
+	/**
+	 * All the songs currently contained in the timeline. Each Song object
+	 * should be unique, even if it refers to the same media.
+	 */
+<span class="fc" id="L222">	private ArrayList&lt;Song&gt; mSongs = new ArrayList&lt;Song&gt;(12);</span>
+	/**
+	 * The position of the current song (i.e. the playing song).
+	 */
+	private int mCurrentPos;
+	/**
+	 * How to shuffle/whether to shuffle. One of SongTimeline.SHUFFLE_*.
+	 */
+	private int mShuffleMode;
+	/**
+	 * What to do when the end of the playlist is reached.
+	 * Must be one of SongTimeline.FINISH_*.
+	 */
+	private int mFinishAction;
+	/**
+	 * Prepared (shuffled) replacement playlist
+	 */
+	private ArrayList&lt;Song&gt; mShuffleCache;
+	/**
+	 * Hash code of mSongs while mShuffleCache was generated
+	 */
+	private int mShuffleTicket;
+	/**
+	 * The last song we added randomly by calling MediaUtils.getRandomSong()
+	 */
+	private Song mLastRandomSong;
+
+	// for saveActiveSongs()
+	private Song mSavedPrevious;
+	private Song mSavedCurrent;
+	private Song mSavedNext;
+	private int mSavedPos;
+	private int mSavedSize;
+
+	/**
+	 * Interface to respond to timeline changes.
+	 */
+	public interface Callback {
+		/**
+		 * Called when an active song in the timeline is replaced by a method
+		 * other than shiftCurrentSong()
+		 *
+		 * @param delta The distance from the current song. Will always be -1,
+		 * 0, or 1.
+		 * @param song The new song at the position
+		 */
+		void activeSongReplaced(int delta, Song song);
+
+		/**
+		 * Called when the timeline state has changed and should be saved to
+		 * storage.
+		 */
+		void timelineChanged();
+
+		/**
+		 * Called when the length of the timeline has changed.
+		 */
+		void positionInfoChanged();
+	}
+	/**
+	 * The current Callback, if any.
+	 */
+	private Callback mCallback;
+
+	public SongTimeline(Context context)
+<span class="fc" id="L287">	{</span>
+<span class="fc" id="L288">		mContext = context;</span>
+<span class="fc" id="L289">	}</span>
+
+	/**
+	 * Compares the ids of songs.
+	 */
+<span class="nc" id="L294">	public static class IdComparator implements Comparator&lt;Song&gt; {</span>
+		@Override
+		public int compare(Song a, Song b)
+		{
+<span class="nc bnc" id="L298" title="All 2 branches missed.">			if (a.id == b.id)</span>
+<span class="nc" id="L299">				return 0;</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">			if (a.id &gt; b.id)</span>
+<span class="nc" id="L301">				return 1;</span>
+<span class="nc" id="L302">			return -1;</span>
+		}
+	}
+
+	/**
+	 * Compares the flags of songs.
+	 */
+<span class="nc" id="L309">	public static class FlagComparator implements Comparator&lt;Song&gt; {</span>
+		@Override
+		public int compare(Song a, Song b)
+		{
+<span class="nc" id="L313">			return a.flags - b.flags;</span>
+		}
+	}
+
+	/**
+	 * Initializes the timeline with data read from the stream. Data should have
+	 * been saved by a call to {@link SongTimeline#writeState(DataOutputStream)}.
+	 *
+	 * @param in The stream to read from.
+	 */
+	public void readState(DataInputStream in) throws IOException
+	{
+<span class="nc" id="L325">		synchronized (this) {</span>
+<span class="nc" id="L326">			int n = in.readInt();</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">			if (n &gt; 0) {</span>
+<span class="nc" id="L328">				ArrayList&lt;Song&gt; songs = new ArrayList&lt;Song&gt;(n);</span>
+
+				// Fill the selection with the ids of all the saved songs
+				// and initialize the timeline with unpopulated songs.
+<span class="nc" id="L332">				StringBuilder selection = new StringBuilder(MediaLibrary.SongColumns._ID+&quot; IN (&quot;);</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">				for (int i = 0; i != n; ++i) {</span>
+<span class="nc" id="L334">					long id = in.readLong();</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">					if (id == -1)</span>
+<span class="nc" id="L336">						continue;</span>
+
+					// Add the index to the flags so we can sort
+<span class="nc" id="L339">					int flags = in.readInt() &amp; ~(~0 &lt;&lt; Song.FLAG_COUNT) | i &lt;&lt; Song.FLAG_COUNT;</span>
+<span class="nc" id="L340">					songs.add(new Song(id, flags));</span>
+
+<span class="nc bnc" id="L342" title="All 2 branches missed.">					if (i != 0)</span>
+<span class="nc" id="L343">						selection.append(',');</span>
+<span class="nc" id="L344">					selection.append(id);</span>
+				}
+<span class="nc" id="L346">				selection.append(')');</span>
+
+				// Sort songs by id---this is the order the query will
+				// return its results in.
+<span class="nc" id="L350">				Collections.sort(songs, new IdComparator());</span>
+
+<span class="nc" id="L352">				QueryTask query = new QueryTask(MediaLibrary.VIEW_SONGS_ALBUMS_ARTISTS, Song.FILLED_PROJECTION, selection.toString(), null, MediaLibrary.SongColumns._ID);</span>
+<span class="nc" id="L353">				Cursor cursor = query.runQuery(mContext);</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">				if (cursor != null) {</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">					if (cursor.getCount() != 0) {</span>
+<span class="nc" id="L356">						cursor.moveToNext();</span>
+
+						// Loop through timeline entries, looking for a row
+						// that matches the id. One row may match multiple
+						// entries.
+<span class="nc" id="L361">						Iterator&lt;Song&gt; it = songs.iterator();</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">						while (it.hasNext()) {</span>
+<span class="nc" id="L363">							Song e = it.next();</span>
+<span class="nc bnc" id="L364" title="All 4 branches missed.">							while (cursor.getLong(0) &lt; e.id &amp;&amp; !cursor.isLast())</span>
+<span class="nc" id="L365">								cursor.moveToNext();</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">							if (cursor.getLong(0) == e.id)</span>
+<span class="nc" id="L367">								e.populate(cursor);</span>
+<span class="nc" id="L368">						}</span>
+					}
+
+<span class="nc" id="L371">					cursor.close();</span>
+
+					// The query may have returned zero results or we might
+					// have failed to populate some songs: Get rid of all
+					// uninitialized items
+<span class="nc" id="L376">					Iterator&lt;Song&gt; it = songs.iterator();</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">					while (it.hasNext()) {</span>
+<span class="nc" id="L378">						Song e = it.next();</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">						if (e.isFilled() == false) {</span>
+<span class="nc" id="L380">							it.remove();</span>
+						}
+<span class="nc" id="L382">					}</span>
+
+					// Revert to the order the songs were saved in.
+<span class="nc" id="L385">					Collections.sort(songs, new FlagComparator());</span>
+
+<span class="nc" id="L387">					mSongs = songs;</span>
+				}
+			}
+
+<span class="nc bnc" id="L391" title="All 2 branches missed.">			mCurrentPos = Math.min(mSongs == null ? 0 : mSongs.size(), Math.abs(in.readInt()));</span>
+<span class="nc" id="L392">			mFinishAction = in.readInt();</span>
+<span class="nc" id="L393">			mShuffleMode = in.readInt();</span>
+
+			// Guard against corruption
+<span class="nc bnc" id="L396" title="All 4 branches missed.">			if (mFinishAction &lt; 0 || mFinishAction &gt;= FINISH_ICONS.length)</span>
+<span class="nc" id="L397">				mFinishAction = 0;</span>
+<span class="nc bnc" id="L398" title="All 4 branches missed.">			if (mShuffleMode &lt; 0 || mShuffleMode &gt;= SHUFFLE_ICONS.length)</span>
+<span class="nc" id="L399">				mShuffleMode = 0;</span>
+<span class="nc" id="L400">		}</span>
+<span class="nc" id="L401">	}</span>
+
+	/**
+	 * Writes the current songs and state to the given stream.
+	 *
+	 * @param out The stream to write to.
+	 */
+	public void writeState(DataOutputStream out) throws IOException
+	{
+		// Must update PlaybackService.STATE_VERSION when changing behavior
+		// here.
+
+		ArrayList&lt;Song&gt; songs;
+<span class="nc" id="L414">		synchronized (this) {</span>
+			// Just grab a copy and release the lock soon:
+			// Performing the actual IO is pretty expensive and
+			// could stall UI elements accessing the timeline.
+<span class="nc" id="L418">			songs = new ArrayList(mSongs);</span>
+<span class="nc" id="L419">		}</span>
+
+<span class="nc" id="L421">		int size = songs.size();</span>
+<span class="nc" id="L422">		out.writeInt(size);</span>
+
+<span class="nc bnc" id="L424" title="All 2 branches missed.">		for (int i = 0; i != size; ++i) {</span>
+<span class="nc" id="L425">			Song song = songs.get(i);</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">			if (song == null) {</span>
+<span class="nc" id="L427">				out.writeLong(-1);</span>
+			} else {
+<span class="nc" id="L429">				out.writeLong(song.id);</span>
+<span class="nc" id="L430">				out.writeInt(song.flags);</span>
+			}
+		}
+
+<span class="nc" id="L434">		out.writeInt(mCurrentPos);</span>
+<span class="nc" id="L435">		out.writeInt(mFinishAction);</span>
+<span class="nc" id="L436">		out.writeInt(mShuffleMode);</span>
+<span class="nc" id="L437">	}</span>
+
+	/**
+	 * Sets the current callback to &lt;code&gt;callback&lt;/code&gt;.
+	 */
+	public void setCallback(Callback callback)
+	{
+<span class="fc" id="L444">		mCallback = callback;</span>
+<span class="fc" id="L445">	}</span>
+
+	/**
+	 * Return the current shuffle mode.
+	 *
+	 * @return The shuffle mode. One of SongTimeline.SHUFFLE_*.
+	 */
+	public int getShuffleMode()
+	{
+<span class="nc" id="L454">		return mShuffleMode;</span>
+	}
+
+	/**
+	 * Return the finish action.
+	 *
+	 * @see SongTimeline#setFinishAction(int)
+	 */
+	public int getFinishAction()
+	{
+<span class="nc" id="L464">		return mFinishAction;</span>
+	}
+
+	/**
+	 * Set how to shuffle. Will shuffle the current set of songs when enabling
+	 * shuffling if random mode is not enabled.
+	 *
+	 * @param mode One of SongTimeline.MODE_*
+	 */
+	public void setShuffleMode(int mode)
+	{
+<span class="nc bnc" id="L475" title="All 2 branches missed.">		if (mode == mShuffleMode)</span>
+<span class="nc" id="L476">			return;</span>
+
+<span class="nc" id="L478">		synchronized (this) {</span>
+<span class="nc" id="L479">			saveActiveSongs();</span>
+<span class="nc" id="L480">			mShuffleMode = mode;</span>
+<span class="nc bnc" id="L481" title="All 6 branches missed.">			if (mode != SHUFFLE_NONE &amp;&amp; mFinishAction != FINISH_RANDOM &amp;&amp; !mSongs.isEmpty()) {</span>
+<span class="nc" id="L482">				ArrayList&lt;Song&gt; songs = getShuffledTimeline(false);</span>
+<span class="nc" id="L483">				mCurrentPos = songs.indexOf(mSavedCurrent);</span>
+<span class="nc" id="L484">				mSongs = songs;</span>
+			}
+<span class="nc" id="L486">			broadcastChangedSongs();</span>
+<span class="nc" id="L487">		}</span>
+
+<span class="nc" id="L489">		changed();</span>
+<span class="nc" id="L490">	}</span>
+
+	/**
+	 * Set what to do when the end of the playlist is reached. Must be one of
+	 * SongTimeline.FINISH_* (stop, repeat, or add random song).
+	 */
+	public void setFinishAction(int action)
+	{
+<span class="nc" id="L498">		synchronized (this) {</span>
+<span class="nc" id="L499">			saveActiveSongs();</span>
+
+<span class="nc bnc" id="L501" title="All 2 branches missed.">			if (mFinishAction == FINISH_RANDOM) {</span>
+				// Remove the last song if we are going out of RANDOM mode and we
+				// are currently playing the 2nd last one.
+<span class="nc" id="L504">				int lastSongPos = getLength() - 1;</span>
+<span class="nc bnc" id="L505" title="All 2 branches missed.">				if (getPosition()+1 == lastSongPos) {</span>
+<span class="nc" id="L506">					Song lastSong = mSongs.get(lastSongPos);</span>
+<span class="nc bnc" id="L507" title="All 4 branches missed.">					if (lastSong.isRandom() &amp;&amp; lastSong.equals(mLastRandomSong)) {</span>
+<span class="nc" id="L508">						mSongs.remove(lastSongPos);</span>
+					}
+				}
+				// forget about the last random song, even if it survived (eg: was switching modes while not playing
+				// the 2nd last song -&gt; the last song is now considered to be part of the queue)
+<span class="nc" id="L513">				mLastRandomSong = null;</span>
+			}
+
+<span class="nc" id="L516">			mFinishAction = action;</span>
+<span class="nc" id="L517">			broadcastChangedSongs();</span>
+<span class="nc" id="L518">			changed();</span>
+<span class="nc" id="L519">		}</span>
+<span class="nc" id="L520">	}</span>
+
+	/**
+	 * Returns a shuffled (according to mShuffleMode) version
+	 * of the timeline. The returned result will get cached
+	 *
+	 * @param cached the function may return a cached version if true
+	 * @return a *copy* of a shuffled version of the timeline
+	 */
+	private ArrayList&lt;Song&gt; getShuffledTimeline(boolean cached)
+	{
+<span class="nc bnc" id="L531" title="All 2 branches missed.">		if (cached == false)</span>
+<span class="nc" id="L532">			mShuffleCache = null;</span>
+
+<span class="nc bnc" id="L534" title="All 2 branches missed.">		if (mShuffleCache == null) {</span>
+<span class="nc" id="L535">			ArrayList&lt;Song&gt; songs = new ArrayList&lt;Song&gt;(mSongs);</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">			MediaUtils.shuffle(songs, mShuffleMode == SHUFFLE_ALBUMS);</span>
+<span class="nc" id="L537">			mShuffleCache = songs;</span>
+<span class="nc" id="L538">			mShuffleTicket = mSongs.hashCode();</span>
+		}
+<span class="nc" id="L540">		return new ArrayList&lt;Song&gt;(mShuffleCache);</span>
+	}
+
+	/**
+	 * Shuffles the current timeline but keeps the current
+	 * queue position
+	 */
+	private void reshuffleTimeline()
+	{
+<span class="nc" id="L549">		synchronized (this) {</span>
+<span class="nc" id="L550">			saveActiveSongs();</span>
+<span class="nc" id="L551">			ArrayList&lt;Song&gt; songs = getShuffledTimeline(false);</span>
+<span class="nc" id="L552">			int newPosition = songs.indexOf(mSavedCurrent);</span>
+<span class="nc" id="L553">			Collections.swap(songs, newPosition, mCurrentPos);</span>
+<span class="nc" id="L554">			mSongs = songs;</span>
+<span class="nc" id="L555">			broadcastChangedSongs();</span>
+<span class="nc" id="L556">		}</span>
+<span class="nc" id="L557">		changed();</span>
+<span class="nc" id="L558">	}</span>
+
+	/**
+	 * Returns the song &lt;code&gt;delta&lt;/code&gt; places away from the current
+	 * position. Returns null if there is a problem retrieving the song.
+	 *
+	 * @param delta The offset from the current position. Must be -1, 0, or 1.
+	 */
+	public Song getSong(int delta)
+	{
+<span class="pc bpc" id="L568" title="2 of 4 branches missed.">		Assert.assertTrue(delta &gt;= -1 &amp;&amp; delta &lt;= 1);</span>
+
+<span class="fc" id="L570">		ArrayList&lt;Song&gt; timeline = mSongs;</span>
+		Song song;
+
+<span class="fc" id="L573">		synchronized (this) {</span>
+<span class="fc" id="L574">			int pos = mCurrentPos + delta;</span>
+<span class="fc" id="L575">			int size = timeline.size();</span>
+
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">			if (pos &lt; 0) {</span>
+<span class="nc bnc" id="L578" title="All 4 branches missed.">				if (size == 0 || mFinishAction == FINISH_RANDOM)</span>
+<span class="nc" id="L579">					return null;</span>
+<span class="nc" id="L580">				song = timeline.get(Math.max(0, size - 1));</span>
+<span class="pc bpc" id="L581" title="1 of 2 branches missed.">			} else if (pos &gt; size) {</span>
+<span class="nc" id="L582">				return null;</span>
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">			} else if (pos == size) {</span>
+<span class="pc bpc" id="L584" title="1 of 2 branches missed.">				if (mFinishAction == FINISH_RANDOM) {</span>
+
+<span class="nc bnc" id="L586" title="All 2 branches missed.">					final List&lt;Song&gt; songs = MediaUtils.getRandomSongs(mContext, mShuffleMode == SHUFFLE_ALBUMS);</span>
+<span class="nc bnc" id="L587" title="All 2 branches missed.">					if (songs.size() == 0) {</span>
+<span class="nc" id="L588">						return null;</span>
+					}
+
+<span class="nc bnc" id="L591" title="All 2 branches missed.">					for (Song newSong : songs) {</span>
+<span class="nc" id="L592">						timeline.add(newSong);</span>
+<span class="nc" id="L593">					}</span>
+
+<span class="nc" id="L595">					song = songs.get(0);</span>
+
+<span class="nc" id="L597">					mLastRandomSong = song;</span>
+					// Keep the queue at 20 items to avoid growing forever
+					// Note that we do not broadcast the addition of this song, as it
+					// was virtually 'always there'
+<span class="nc" id="L601">					shrinkQueue(20);</span>
+<span class="nc" id="L602">				} else {</span>
+<span class="pc bpc" id="L603" title="1 of 2 branches missed.">					if (size == 0)</span>
+						// empty queue
+<span class="fc" id="L605">						return null;</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">					else if (mShuffleMode != SHUFFLE_NONE)</span>
+<span class="nc" id="L607">						song = getShuffledTimeline(true).get(0);</span>
+					else
+<span class="nc" id="L609">						song = timeline.get(0);</span>
+				}
+			} else {
+<span class="nc" id="L612">				song = timeline.get(pos);</span>
+			}
+<span class="nc" id="L614">		}</span>
+
+<span class="nc bnc" id="L616" title="All 2 branches missed.">		if (song == null)</span>
+			// we have no songs in the library
+<span class="nc" id="L618">			return null;</span>
+
+<span class="nc" id="L620">		return song;</span>
+	}
+
+	/**
+	 * Internal implementation for shiftCurrentSong. Does all the work except
+	 * broadcasting the timeline change: updates mCurrentPos and handles
+	 * shuffling, repeating, and random mode.
+	 *
+	 * @param delta -1 to move to the previous song or 1 for the next.
+	 */
+	private void shiftCurrentSongInternal(int delta)
+	{
+<span class="nc" id="L632">		int pos = mCurrentPos + delta;</span>
+
+<span class="nc bnc" id="L634" title="All 4 branches missed.">		if (mFinishAction != FINISH_RANDOM &amp;&amp; pos == mSongs.size()) {</span>
+<span class="nc bnc" id="L635" title="All 4 branches missed.">			if (mShuffleMode != SHUFFLE_NONE &amp;&amp; !mSongs.isEmpty()) {</span>
+<span class="nc" id="L636">				mSongs = getShuffledTimeline(true);</span>
+			}
+
+<span class="nc" id="L639">			pos = 0;</span>
+<span class="nc bnc" id="L640" title="All 2 branches missed.">		} else if (pos &lt; 0) {</span>
+<span class="nc bnc" id="L641" title="All 2 branches missed.">			if (mFinishAction == FINISH_RANDOM)</span>
+<span class="nc" id="L642">				pos = 0;</span>
+			else
+<span class="nc" id="L644">				pos = Math.max(0, mSongs.size() - 1);</span>
+		}
+
+<span class="nc" id="L647">		mCurrentPos = pos;</span>
+<span class="nc" id="L648">	}</span>
+
+	/**
+	 * Hard-Jump to given queue position
+	*/
+	public Song setCurrentQueuePosition(int pos) {
+<span class="nc" id="L654">		synchronized (this) {</span>
+<span class="nc" id="L655">			saveActiveSongs();</span>
+<span class="nc" id="L656">			mCurrentPos = pos;</span>
+<span class="nc" id="L657">			broadcastChangedSongs();</span>
+<span class="nc" id="L658">		}</span>
+<span class="nc" id="L659">		changed();</span>
+<span class="nc" id="L660">		return getSong(0);</span>
+	}
+
+	/**
+	 * Returns 'Song' at given position in queue
+	*/
+	public Song getSongByQueuePosition(int pos) {
+<span class="nc" id="L667">		Song song = null;</span>
+<span class="nc" id="L668">		synchronized (this) {</span>
+<span class="nc bnc" id="L669" title="All 2 branches missed.">			if (mSongs.size() &gt; pos)</span>
+<span class="nc" id="L670">				song = mSongs.get(pos);</span>
+<span class="nc" id="L671">		}</span>
+<span class="nc" id="L672">		return song;</span>
+	}
+
+	/**
+	 * Returns song position for given {@link Song.id}
+	 */
+	public int getQueuePositionForSongId(long id) {
+<span class="nc" id="L679">		synchronized (this) {</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">			for (int pos = 0; pos &lt; mSongs.size(); pos++) {</span>
+<span class="nc" id="L681">				Song current = mSongs.get(pos);</span>
+<span class="nc bnc" id="L682" title="All 2 branches missed.">				if (current.id == id)</span>
+<span class="nc" id="L683">					return pos;</span>
+			}
+<span class="nc" id="L685">		}</span>
+<span class="nc" id="L686">		return -1;</span>
+	}
+
+	/**
+	 * Move to the next or previous song or album.
+	 *
+	 * @param delta One of SongTimeline.SHIFT_*.
+	 * @return The Song at the new position
+	 */
+	public Song shiftCurrentSong(int delta)
+	{
+<span class="fc" id="L697">		synchronized (this) {</span>
+<span class="pc bpc" id="L698" title="1 of 2 branches missed.">			if (delta == SHIFT_KEEP_SONG) {</span>
+				// void
+			}
+<span class="nc bnc" id="L701" title="All 4 branches missed.">			else if (delta == SHIFT_PREVIOUS_SONG || delta == SHIFT_NEXT_SONG) {</span>
+<span class="nc" id="L702">				shiftCurrentSongInternal(delta);</span>
+			} else {
+<span class="nc" id="L704">				Song currentSong = getSong(0);</span>
+<span class="nc" id="L705">				Song song = currentSong;</span>
+<span class="nc bnc" id="L706" title="All 2 branches missed.">				delta = delta &gt; 0 ? 1 : -1;</span>
+				for (;;) {
+<span class="nc" id="L708">					shiftCurrentSongInternal(delta);</span>
+<span class="nc" id="L709">					song = getSong(0);</span>
+
+<span class="nc bnc" id="L711" title="All 4 branches missed.">					if (currentSong == null || song == null)</span>
+<span class="nc" id="L712">						break;</span>
+<span class="nc bnc" id="L713" title="All 2 branches missed.">					if (currentSong.albumId != song.albumId) // found a new album</span>
+<span class="nc" id="L714">						break;</span>
+<span class="nc bnc" id="L715" title="All 2 branches missed.">					if (currentSong.id == song.id) // probably looping? (= only one album in queue)</span>
+<span class="nc" id="L716">						break;</span>
+<span class="nc bnc" id="L717" title="All 4 branches missed.">					if (getPosition() == 0 &amp;&amp; getFinishAction() == FINISH_RANDOM) // dead end: FINISH_RANDOM won't wrap around.</span>
+<span class="nc" id="L718">						break;</span>
+				}
+			}
+<span class="fc" id="L721">		}</span>
+
+<span class="pc bpc" id="L723" title="1 of 2 branches missed.">		if (delta != SHIFT_KEEP_SONG)</span>
+<span class="nc" id="L724">			changed();</span>
+<span class="fc" id="L725">		return getSong(0);</span>
+	}
+
+	/**
+	 * Run the given query and add the results to the song timeline.
+	 *
+	 * @param context A context to use.
+	 * @param query The query to be run. The mode variable must be initialized
+	 * to one of SongTimeline.MODE_*. The type and data variables may also need
+	 * to be initialized depending on the given mode.
+	 * @return The number of songs that were added.
+	 */
+	public int addSongs(Context context, QueryTask query)
+	{
+<span class="nc" id="L739">		Cursor cursor = query.runQuery(context);</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">		if (cursor == null) {</span>
+<span class="nc" id="L741">			return 0;</span>
+		}
+
+<span class="nc" id="L744">		int mode = query.mode;</span>
+<span class="nc" id="L745">		int type = query.type;</span>
+<span class="nc" id="L746">		long data = query.data;</span>
+
+<span class="nc" id="L748">		int count = cursor.getCount(); // Items found by query</span>
+<span class="nc" id="L749">		int added = 0;                 // Items actually added to the queue</span>
+
+<span class="nc bnc" id="L751" title="All 6 branches missed.">		if (count == 0 &amp;&amp; type == MediaUtils.TYPE_FILE &amp;&amp; query.selectionArgs.length == 1) {</span>
+			// This seems to be a simple file query which lead to no results.
+			// The file might just be unindexed, so try to return a file cursor:
+<span class="nc" id="L754">			String pathQuery = query.selectionArgs[0];</span>
+<span class="nc" id="L755">			int len = pathQuery.length();</span>
+<span class="nc bnc" id="L756" title="All 2 branches missed.">			if (len &gt; 0) {</span>
+<span class="nc" id="L757">				String lastchar = pathQuery.substring(len-1);</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">				if (lastchar.equals(&quot;%&quot;)) {</span>
+<span class="nc" id="L759">					pathQuery = pathQuery.substring(0, len-1);</span>
+				}
+
+<span class="nc" id="L762">				cursor.close(); // close old version</span>
+<span class="nc" id="L763">				cursor = MediaUtils.getCursorForFileQuery(pathQuery);</span>
+<span class="nc" id="L764">				count = cursor.getCount();</span>
+			}
+		}
+
+<span class="nc bnc" id="L768" title="All 2 branches missed.">		if (count == 0) {</span>
+<span class="nc" id="L769">			cursor.close();</span>
+<span class="nc" id="L770">			return 0;</span>
+		}
+
+<span class="nc" id="L773">		ArrayList&lt;Song&gt; timeline = mSongs;</span>
+<span class="nc" id="L774">		synchronized (this) {</span>
+<span class="nc" id="L775">			saveActiveSongs();</span>
+
+<span class="nc bnc" id="L777" title="All 4 branches missed.">			switch (mode) {</span>
+			case MODE_ENQUEUE:
+			case MODE_ENQUEUE_POS_FIRST:
+			case MODE_ENQUEUE_ID_FIRST:
+			case MODE_ENQUEUE_AS_NEXT:
+<span class="nc bnc" id="L782" title="All 2 branches missed.">				if (mFinishAction == FINISH_RANDOM) {</span>
+<span class="nc" id="L783">					int j = timeline.size();</span>
+<span class="nc bnc" id="L784" title="All 2 branches missed.">					while (--j &gt; mCurrentPos) {</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">						if (timeline.get(j).isRandom())</span>
+<span class="nc" id="L786">							timeline.remove(j);</span>
+					}
+<span class="nc" id="L788">				}</span>
+				break;
+			case MODE_FLUSH_AND_PLAY_NEXT:
+<span class="nc" id="L791">				timeline.subList(mCurrentPos + 1, timeline.size()).clear();</span>
+<span class="nc" id="L792">				break;</span>
+			case MODE_PLAY:
+			case MODE_PLAY_POS_FIRST:
+			case MODE_PLAY_ID_FIRST:
+<span class="nc" id="L796">				timeline.clear();</span>
+<span class="nc" id="L797">				mCurrentPos = 0;</span>
+<span class="nc" id="L798">				break;</span>
+			default:
+<span class="nc" id="L800">				throw new IllegalArgumentException(&quot;Invalid mode: &quot; + mode);</span>
+			}
+
+<span class="nc" id="L803">			int start = mCurrentPos + 1; // Position where our modification started</span>
+<span class="nc" id="L804">			Song jumpSong = null;        // Jump to this song if `data' requested it</span>
+
+			/* Check if addAtPos is out-of-bounds OR if
+			 * the request does not want to work at the current
+			 * playlist position anyway
+			 */
+<span class="nc bnc" id="L810" title="All 4 branches missed.">			if (start &gt; timeline.size() || mode != MODE_ENQUEUE_AS_NEXT) {</span>
+<span class="nc" id="L811">				start = timeline.size();</span>
+			}
+
+<span class="nc bnc" id="L814" title="All 2 branches missed.">			for (int j = 0; j != count; ++j) {</span>
+<span class="nc" id="L815">				cursor.moveToPosition(j);</span>
+
+<span class="nc" id="L817">				Song song = new Song(-1);</span>
+<span class="nc" id="L818">				song.populate(cursor);</span>
+<span class="nc bnc" id="L819" title="All 2 branches missed.">				if (song.isFilled() == false) {</span>
+					// Song vanished from device for some reason: we are silently skipping it.
+<span class="nc" id="L821">					continue;</span>
+				}
+
+<span class="nc" id="L824">				timeline.add(start + added, song);</span>
+<span class="nc" id="L825">				added++;</span>
+
+<span class="nc bnc" id="L827" title="All 2 branches missed.">				if (jumpSong == null) {</span>
+<span class="nc bnc" id="L828" title="All 6 branches missed.">					if ((mode == MODE_PLAY_POS_FIRST || mode == MODE_ENQUEUE_POS_FIRST) &amp;&amp; j == data) {</span>
+<span class="nc" id="L829">						jumpSong = song;</span>
+<span class="nc bnc" id="L830" title="All 4 branches missed.">					} else if (mode == MODE_PLAY_ID_FIRST || mode == MODE_ENQUEUE_ID_FIRST) {</span>
+						long id;
+<span class="nc bnc" id="L832" title="All 5 branches missed.">						switch (type) {</span>
+						case MediaUtils.TYPE_ARTIST:
+<span class="nc" id="L834">							id = song.artistId;</span>
+<span class="nc" id="L835">							break;</span>
+						case MediaUtils.TYPE_ALBUM:
+<span class="nc" id="L837">							id = song.albumId;</span>
+<span class="nc" id="L838">							break;</span>
+						case MediaUtils.TYPE_SONG:
+<span class="nc" id="L840">							id = song.id;</span>
+<span class="nc" id="L841">							break;</span>
+						case MediaUtils.TYPE_FILE:
+<span class="nc" id="L843">							id = song.id;</span>
+<span class="nc" id="L844">							break;</span>
+						default:
+<span class="nc" id="L846">							throw new IllegalArgumentException(&quot;Unsupported id type: &quot; + type);</span>
+						}
+<span class="nc bnc" id="L848" title="All 2 branches missed.">						if (id == data)</span>
+<span class="nc" id="L849">							jumpSong = song;</span>
+					}
+				}
+			}
+
+<span class="nc" id="L854">			cursor.close();</span>
+
+<span class="nc bnc" id="L856" title="All 2 branches missed.">			if (mShuffleMode != SHUFFLE_NONE)</span>
+<span class="nc bnc" id="L857" title="All 2 branches missed.">				MediaUtils.shuffle(timeline.subList(start, start+added), mShuffleMode == SHUFFLE_ALBUMS);</span>
+
+<span class="nc bnc" id="L859" title="All 2 branches missed.">			if (jumpSong != null) {</span>
+<span class="nc" id="L860">				int jumpPos = timeline.lastIndexOf(jumpSong);</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">				if (jumpPos &gt; start) {</span>
+					// Get the sublist twice to avoid a ConcurrentModificationException.
+<span class="nc" id="L863">					timeline.addAll(timeline.subList(start, jumpPos));</span>
+<span class="nc" id="L864">					timeline.subList(start, jumpPos).clear();</span>
+				}
+			}
+
+<span class="nc" id="L868">			broadcastChangedSongs();</span>
+<span class="nc" id="L869">		}</span>
+
+<span class="nc" id="L871">		changed();</span>
+
+<span class="nc" id="L873">		return added;</span>
+	}
+
+	/**
+	 * Removes any songs greater than `len' songs before the current song.
+	 */
+	private void shrinkQueue(int len) {
+<span class="nc" id="L880">		synchronized (this) {</span>
+<span class="nc bnc" id="L881" title="All 2 branches missed.">			while (mCurrentPos &gt; len) {</span>
+<span class="nc" id="L882">				mSongs.remove(0);</span>
+<span class="nc" id="L883">				mCurrentPos--;</span>
+			}
+<span class="nc" id="L885">		}</span>
+<span class="nc" id="L886">		changed();</span>
+<span class="nc" id="L887">	}</span>
+
+	/**
+	 * Clear the song queue.
+	 */
+	public void clearQueue()
+	{
+<span class="nc" id="L894">		synchronized (this) {</span>
+<span class="nc" id="L895">			saveActiveSongs();</span>
+<span class="nc bnc" id="L896" title="All 2 branches missed.">			if (mCurrentPos + 1 &lt; mSongs.size())</span>
+<span class="nc" id="L897">				mSongs.subList(mCurrentPos + 1, mSongs.size()).clear();</span>
+<span class="nc" id="L898">			broadcastChangedSongs();</span>
+<span class="nc" id="L899">		}</span>
+
+<span class="nc" id="L901">		changed();</span>
+<span class="nc" id="L902">	}</span>
+
+	/**
+	 * Empty the song queue (clear the whole queue).
+	 */
+	public void emptyQueue()
+	{
+<span class="nc" id="L909">		synchronized (this) {</span>
+<span class="nc" id="L910">			saveActiveSongs();</span>
+<span class="nc" id="L911">			mSongs.clear();</span>
+<span class="nc" id="L912">			mCurrentPos = 0;</span>
+<span class="nc" id="L913">			broadcastChangedSongs();</span>
+<span class="nc" id="L914">		}</span>
+
+<span class="nc" id="L916">		changed();</span>
+<span class="nc" id="L917">	}</span>
+
+	/**
+	 * Save the active songs for use with broadcastChangedSongs().
+	 *
+	 * @see SongTimeline#broadcastChangedSongs()
+	 */
+	private void saveActiveSongs()
+	{
+<span class="nc" id="L926">		mSavedPrevious = getSong(-1);</span>
+<span class="nc" id="L927">		mSavedCurrent = getSong(0);</span>
+<span class="nc" id="L928">		mSavedNext = getSong(+1);</span>
+<span class="nc" id="L929">		mSavedPos = mCurrentPos;</span>
+<span class="nc" id="L930">		mSavedSize = mSongs.size();</span>
+<span class="nc" id="L931">	}</span>
+
+	/**
+	 * Broadcast the active songs that have changed since the last call to
+	 * saveActiveSongs()
+	 *
+	 * @see SongTimeline#saveActiveSongs()
+	 */
+	private void broadcastChangedSongs()
+	{
+<span class="nc bnc" id="L941" title="All 2 branches missed.">		if (mCallback == null) return;</span>
+
+<span class="nc" id="L943">		Song previous = getSong(-1);</span>
+<span class="nc" id="L944">		Song current = getSong(0);</span>
+<span class="nc" id="L945">		Song next = getSong(+1);</span>
+
+<span class="nc bnc" id="L947" title="All 2 branches missed.">		if (Song.getId(mSavedPrevious) != Song.getId(previous))</span>
+<span class="nc" id="L948">			mCallback.activeSongReplaced(-1, previous);</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">		if (Song.getId(mSavedNext) != Song.getId(next))</span>
+<span class="nc" id="L950">			mCallback.activeSongReplaced(1, next);</span>
+<span class="nc bnc" id="L951" title="All 2 branches missed.">		if (Song.getId(mSavedCurrent) != Song.getId(current))</span>
+<span class="nc" id="L952">			mCallback.activeSongReplaced(0, current);</span>
+
+<span class="nc bnc" id="L954" title="All 4 branches missed.">		if (mCurrentPos != mSavedPos || mSongs.size() != mSavedSize)</span>
+<span class="nc" id="L955">			mCallback.positionInfoChanged();</span>
+<span class="nc" id="L956">	}</span>
+
+	/**
+	 * Remove the song with the given id from the timeline.
+	 *
+	 * @param id The MediaStore id of the song to remove.
+	 */
+	public void removeSong(long id)
+	{
+<span class="nc" id="L965">		synchronized (this) {</span>
+<span class="nc" id="L966">			saveActiveSongs();</span>
+
+<span class="nc" id="L968">			ArrayList&lt;Song&gt; songs = mSongs;</span>
+<span class="nc" id="L969">			ListIterator&lt;Song&gt; it = songs.listIterator();</span>
+<span class="nc bnc" id="L970" title="All 2 branches missed.">			while (it.hasNext()) {</span>
+<span class="nc" id="L971">				int i = it.nextIndex();</span>
+<span class="nc bnc" id="L972" title="All 2 branches missed.">				if (Song.getId(it.next()) == id) {</span>
+<span class="nc bnc" id="L973" title="All 2 branches missed.">					if (i &lt; mCurrentPos)</span>
+<span class="nc" id="L974">						--mCurrentPos;</span>
+<span class="nc" id="L975">					it.remove();</span>
+				}
+<span class="nc" id="L977">			}</span>
+
+<span class="nc bnc" id="L979" title="All 2 branches missed.">			if (getSong(1) == null)</span>
+<span class="nc" id="L980">				mCurrentPos = 0;</span>
+
+<span class="nc" id="L982">			broadcastChangedSongs();</span>
+<span class="nc" id="L983">		}</span>
+
+<span class="nc" id="L985">		changed();</span>
+<span class="nc" id="L986">	}</span>
+
+	/**
+	 * Removes song in timeline at given position
+	 * @param pos index to use
+	 */
+	public void removeSongPosition(int pos) {
+<span class="nc" id="L993">		synchronized (this) {</span>
+<span class="nc" id="L994">			ArrayList&lt;Song&gt; songs = mSongs;</span>
+
+<span class="nc bnc" id="L996" title="All 2 branches missed.">			if (songs.size() &lt;= pos) // may happen if we race with purge()</span>
+<span class="nc" id="L997">				return;</span>
+
+<span class="nc" id="L999">			saveActiveSongs();</span>
+
+<span class="nc" id="L1001">			songs.remove(pos);</span>
+<span class="nc bnc" id="L1002" title="All 2 branches missed.">			if (pos &lt; mCurrentPos)</span>
+<span class="nc" id="L1003">				mCurrentPos--;</span>
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">			if (getSong(1) == null) // wrap around if this was the last song</span>
+<span class="nc" id="L1005">				mCurrentPos = 0;</span>
+
+<span class="nc" id="L1007">			broadcastChangedSongs();</span>
+<span class="nc" id="L1008">		}</span>
+<span class="nc" id="L1009">		changed();</span>
+<span class="nc" id="L1010">	}</span>
+
+	/**
+	 * Moves a song in the timeline to a new position
+	 * @param from index to move from
+	 * @param to index to move to
+	 */
+	public void moveSongPosition(int from, int to) {
+<span class="nc" id="L1018">		synchronized (this) {</span>
+<span class="nc" id="L1019">			ArrayList&lt;Song&gt; songs = mSongs;</span>
+
+<span class="nc bnc" id="L1021" title="All 4 branches missed.">			if (songs.size() &lt;= from || songs.size() &lt;= to) // may happen if we race with purge()</span>
+<span class="nc" id="L1022">				return;</span>
+
+<span class="nc" id="L1024">			saveActiveSongs();</span>
+
+<span class="nc" id="L1026">			Song tmp = songs.remove(from);</span>
+<span class="nc" id="L1027">			songs.add(to, tmp);</span>
+
+<span class="nc bnc" id="L1029" title="All 2 branches missed.">			if (mCurrentPos == from) {</span>
+<span class="nc" id="L1030">				mCurrentPos = to; // active song was dragged to 'to'</span>
+<span class="nc bnc" id="L1031" title="All 4 branches missed.">			} else if (from &gt; mCurrentPos &amp;&amp; to &lt;= mCurrentPos) {</span>
+<span class="nc" id="L1032">				mCurrentPos++;</span>
+<span class="nc bnc" id="L1033" title="All 4 branches missed.">			} else if (from &lt; mCurrentPos &amp;&amp; to &gt;= mCurrentPos) {</span>
+<span class="nc" id="L1034">				mCurrentPos--;</span>
+			}
+
+<span class="nc" id="L1037">			broadcastChangedSongs();</span>
+<span class="nc" id="L1038">		}</span>
+<span class="nc" id="L1039">		changed();</span>
+<span class="nc" id="L1040">	}</span>
+
+	/**
+	 * Broadcasts that the timeline state has changed.
+	 */
+	private void changed()
+	{
+		// Invalidate shuffle cache if the timeline *contents* changed in the meantime
+<span class="nc bnc" id="L1048" title="All 4 branches missed.">		if (mShuffleCache != null &amp;&amp; mShuffleTicket != mSongs.hashCode())</span>
+<span class="nc" id="L1049">			mShuffleCache = null;</span>
+
+<span class="nc bnc" id="L1051" title="All 2 branches missed.">		if (mCallback != null)</span>
+<span class="nc" id="L1052">			mCallback.timelineChanged();</span>
+<span class="nc" id="L1053">	}</span>
+
+	/**
+	 * Return true if the finish action is to stop at the end of the queue and
+	 * the current song is the last in the queue.
+	 */
+	public boolean isEndOfQueue()
+	{
+<span class="nc" id="L1061">		synchronized (this) {</span>
+<span class="nc bnc" id="L1062" title="All 4 branches missed.">			return mFinishAction == FINISH_STOP &amp;&amp; mCurrentPos == mSongs.size() - 1;</span>
+		}
+	}
+
+	/**
+	 * Returns the position of the current song in the timeline.
+	 */
+	public int getPosition()
+	{
+<span class="fc" id="L1071">		return mCurrentPos;</span>
+	}
+
+	/**
+	 * Returns the current number of songs in the timeline.
+	 */
+	public int getLength()
+	{
+<span class="fc" id="L1079">		return mSongs.size();</span>
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

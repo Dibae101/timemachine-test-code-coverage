@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ImportDataViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">ImportDataViewModel.kt</span></div><h1>ImportDataViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.net.Uri
+import android.text.TextUtils
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.db2.AutoFillInfo
+import org.totschnig.myexpenses.db2.CategoryHelper
+import org.totschnig.myexpenses.db2.RepositoryTransaction
+import org.totschnig.myexpenses.db2.countAccounts
+import org.totschnig.myexpenses.db2.createAccount
+import org.totschnig.myexpenses.db2.createParty
+import org.totschnig.myexpenses.db2.createTransaction
+import org.totschnig.myexpenses.db2.entities.Transaction
+import org.totschnig.myexpenses.db2.findAccountType
+import org.totschnig.myexpenses.db2.findAnyOpenByLabel
+import org.totschnig.myexpenses.db2.findParty
+import org.totschnig.myexpenses.db2.findPaymentMethod
+import org.totschnig.myexpenses.db2.loadAccount
+import org.totschnig.myexpenses.db2.saveTagsForTransaction
+import org.totschnig.myexpenses.dialog.getDisplayName
+import org.totschnig.myexpenses.export.CategoryInfo
+import org.totschnig.myexpenses.export.qif.QifUtils.reduceTransfers
+import org.totschnig.myexpenses.io.ImportAccount
+import org.totschnig.myexpenses.io.ImportTransaction
+import org.totschnig.myexpenses.model.ContribFeature
+import org.totschnig.myexpenses.model.ContribFeatureNotAvailableException
+import org.totschnig.myexpenses.model.CrStatus.Companion.fromQifName
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.model.PreDefinedPaymentMethod
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.provider.SPLIT_CATID
+import org.totschnig.myexpenses.util.io.FileUtils
+
+<span class="nc" id="L40">data class ImportResult(val label: String, val successCount: Int)</span>
+
+<span class="nc" id="L42">abstract class ImportDataViewModel(application: Application) :</span>
+<span class="nc" id="L43">    ContentResolvingAndroidViewModel(application) {</span>
+<span class="nc" id="L44">    val accountTitleToAccount: MutableMap&lt;String, Account&gt; = mutableMapOf()</span>
+<span class="nc" id="L45">    private val payeeToId: MutableMap&lt;String, Long&gt; = mutableMapOf()</span>
+<span class="nc" id="L46">    private val autoFillCache: MutableMap&lt;Long, AutoFillInfo&gt; = mutableMapOf()</span>
+<span class="nc" id="L47">    private val categoryToId: MutableMap&lt;String, Long&gt; = mutableMapOf()</span>
+<span class="nc" id="L48">    val tagToId: MutableMap&lt;String, Long&gt; = mutableMapOf()</span>
+    abstract val format: String
+<span class="nc" id="L50">    private val publishProgressInternal: MutableSharedFlow&lt;String?&gt; = MutableSharedFlow()</span>
+<span class="nc" id="L51">    val publishProgress: SharedFlow&lt;String?&gt; = publishProgressInternal</span>
+
+    suspend fun publishProgress(string: String) {
+<span class="nc" id="L54">        publishProgressInternal.emit(string)</span>
+<span class="nc" id="L55">    }</span>
+
+    private fun getDefaultAccountName(uri: Uri): String {
+<span class="nc" id="L58">        var displayName = contentResolver.getDisplayName(uri)</span>
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (FileUtils.getExtension(displayName).equals(&quot;qif&quot;, ignoreCase = true)) {</span>
+<span class="nc" id="L60">            displayName = displayName.take(displayName.lastIndexOf('.'))</span>
+        }
+<span class="nc" id="L62">        return displayName.replace('-', ' ').replace('_', ' ')</span>
+    }
+
+    fun insertAccounts(accounts: List&lt;ImportAccount&gt;, currencyUnit: CurrencyUnit, uri: Uri): Int {
+<span class="nc" id="L66">        val nrOfAccounts = repository.countAccounts()</span>
+<span class="nc" id="L67">        val hasUnlimitedAccounts = getApplication&lt;MyApplication&gt;().appComponent.licenceHandler()</span>
+<span class="nc" id="L68">            .hasAccessTo(ContribFeature.ACCOUNTS_UNLIMITED)</span>
+<span class="nc" id="L69">        var importCount = 0</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        for (account: ImportAccount in accounts) {</span>
+<span class="nc" id="L71">            val dbAccountId =</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                if (TextUtils.isEmpty(account.memo)) null else repository.findAnyOpenByLabel(account.memo)</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            val dbAccount = if (dbAccountId != null) {</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">                repository.loadAccount(dbAccountId) ?: throw Exception(</span>
+                    &quot;Exception during QIF import. Did not get instance from DB for id &quot; +
+<span class="nc" id="L76">                            dbAccountId</span>
+                )
+            } else {
+<span class="nc bnc" id="L79" title="All 4 branches missed.">                val accountType = account.type?.let {</span>
+<span class="nc" id="L80">                    repository.findAccountType(it)</span>
+<span class="nc" id="L81">                } ?: throw IllegalArgumentException(&quot;Account type is null&quot;)</span>
+<span class="nc" id="L82">                account.toAccount(currencyUnit, accountType).let {</span>
+<span class="nc" id="L83">                    importCount++</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                    if (!hasUnlimitedAccounts &amp;&amp;</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                        nrOfAccounts + importCount &gt; ContribFeature.FREE_ACCOUNTS</span>
+                    ) {
+<span class="nc" id="L87">                        throw ContribFeatureNotAvailableException(</span>
+<span class="nc" id="L88">                            localizedContext.getString(</span>
+<span class="nc" id="L89">                                R.string.qif_parse_failure_found_multiple_accounts,</span>
+<span class="nc" id="L90">                                format</span>
+                            ) + &quot; &quot; +
+<span class="nc" id="L92">                                    ContribFeature.ACCOUNTS_UNLIMITED.buildTrialString(</span>
+<span class="nc" id="L93">                                        localizedContext</span>
+                                    ) +
+<span class="nc" id="L95">                                    ContribFeature.ACCOUNTS_UNLIMITED.buildRemoveLimitation(</span>
+<span class="nc" id="L96">                                        localizedContext,</span>
+<span class="nc" id="L97">                                        false</span>
+                                    )
+                        )
+                    }
+<span class="nc" id="L101">                    repository.createAccount(</span>
+<span class="nc bnc" id="L102" title="All 4 branches missed.">                        if (it.label.isEmpty()) it.copy(label = getDefaultAccountName(uri)) else it</span>
+<span class="nc" id="L103">                    )</span>
+                }
+            }
+<span class="nc" id="L106">            accountTitleToAccount[account.memo] = dbAccount</span>
+        }
+<span class="nc" id="L108">        return importCount</span>
+    }
+
+    suspend fun insertTransactions(
+        accounts: List&lt;ImportAccount&gt;,
+        currencyUnit: CurrencyUnit,
+        autofill: Boolean,
+<span class="nc" id="L115">    ) = reduceTransfers(accounts).map { (_, memo, _, _, transactions) -&gt;</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        accountTitleToAccount[memo]?.let {</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            insertTransactions(it, currencyUnit, transactions, autofill)</span>
+<span class="nc" id="L118">            publishProgress(</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                if (transactions.isEmpty()) getString(</span>
+<span class="nc" id="L120">                    R.string.import_transactions_none,</span>
+<span class="nc" id="L121">                    it.label</span>
+<span class="nc" id="L122">                ) else getString(</span>
+<span class="nc" id="L123">                    R.string.import_transactions_success,</span>
+<span class="nc" id="L124">                    transactions.size,</span>
+<span class="nc" id="L125">                    it.label</span>
+                )
+            )
+<span class="nc" id="L128">            ImportResult(it.label, transactions.size)</span>
+<span class="nc" id="L129">        }</span>
+<span class="nc" id="L130">    }</span>
+
+    fun insertPayees(payees: Set&lt;String&gt;): Int {
+<span class="nc" id="L133">        var count = 0</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        for (payee in payees) {</span>
+<span class="nc bnc" id="L135" title="All 6 branches missed.">                (repository.findParty(payee) ?: repository.createParty(payee)?.also { count++ }?.id)?.let {</span>
+<span class="nc" id="L136">                    payeeToId[payee] = it</span>
+<span class="nc" id="L137">                }</span>
+        }
+<span class="nc" id="L139">        return count</span>
+    }
+
+    fun insertCategories(categories: Set&lt;CategoryInfo&gt;, stripQifCategoryClass: Boolean) =
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        categories.sumOf {</span>
+<span class="nc" id="L144">            CategoryHelper.insert(repository, it.name, categoryToId, stripQifCategoryClass, it.type)</span>
+<span class="nc" id="L145">        }</span>
+
+    fun ImportTransaction.toTransaction(
+        a: Account,
+        currencyUnit: CurrencyUnit,
+        autofill: Boolean
+    ): RepositoryTransaction {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        val transferAccount = if (isTransfer) findToAccount() else null</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        val payeeId = payee?.let { payeeToId[it] }</span>
+<span class="nc" id="L154">        val date = date.time / 1000</span>
+<span class="nc" id="L155">        val uuid = generateUuid()</span>
+<span class="nc" id="L156">        return RepositoryTransaction(</span>
+<span class="nc" id="L157">            data = Transaction(</span>
+<span class="nc" id="L158">                date = date,</span>
+<span class="nc" id="L159">                comment = memo,</span>
+<span class="nc" id="L160">                crStatus = fromQifName(status),</span>
+<span class="nc" id="L161">                referenceNumber = number,</span>
+<span class="nc" id="L162">                amount = Money.buildWithMajor(currencyUnit, amount).getOrThrow().amountMinor,</span>
+<span class="nc" id="L163">                accountId = a.id,</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                categoryId = if (isSplit) SPLIT_CATID else</span>
+<span class="nc" id="L165">                    findCategory(payeeId, autofill),</span>
+<span class="nc" id="L166">                payeeId = payeeId,</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                transferAccountId = transferAccount?.id,</span>
+<span class="nc" id="L168">                methodId = findMethod(),</span>
+<span class="nc" id="L169">                uuid = uuid</span>
+
+            ),
+<span class="nc bnc" id="L172" title="All 4 branches missed.">            transferPeer = if (transferAccount != null &amp;&amp; toAmount != null) Transaction(</span>
+<span class="nc" id="L173">                date = date,</span>
+<span class="nc" id="L174">                amount = Money.buildWithMajor(</span>
+<span class="nc" id="L175">                    currencyContext[transferAccount.currency],</span>
+<span class="nc" id="L176">                    toAmount</span>
+<span class="nc" id="L177">                ).getOrThrow().amountMinor,</span>
+<span class="nc" id="L178">                accountId = transferAccount.id,</span>
+<span class="nc" id="L179">                transferAccountId = a.id,</span>
+<span class="nc" id="L180">                uuid = uuid</span>
+<span class="nc" id="L181">            ) else null,</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">            splitParts = splits?.map {</span>
+<span class="nc" id="L183">                it.toTransaction(a, currencyUnit, autofill)</span>
+            }
+        )
+    }
+
+    private fun insertTransactions(
+        account: Account,
+        currencyUnit: CurrencyUnit,
+        transactions: List&lt;ImportTransaction&gt;,
+        autofill: Boolean,
+    ) {
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        for (transaction in transactions) {</span>
+<span class="nc bnc" id="L195" title="All 6 branches missed.">            if (transaction.splits != null &amp;&amp; transaction.splits.sumOf { it.amount }.compareTo(transaction.amount) != 0) {</span>
+<span class="nc" id="L196">                throw InvalidDataException(&quot;Sum of splits must equal parent amount.&quot;)</span>
+            }
+<span class="nc" id="L198">            val t = repository.createTransaction(transaction.toTransaction(account, currencyUnit, autofill))</span>
+
+<span class="nc bnc" id="L200" title="All 2 branches missed.">            transaction.tags?.let { list -&gt;</span>
+<span class="nc" id="L201">                repository.saveTagsForTransaction(</span>
+<span class="nc" id="L202">                    list.mapNotNull { tag -&gt; tagToId[tag] }.toLongArray(),</span>
+<span class="nc" id="L203">                    t.id</span>
+                )
+<span class="nc" id="L205">            }</span>
+        }
+<span class="nc" id="L207">    }</span>
+
+<span class="nc" id="L209">    private fun ImportTransaction.findToAccount() = accountTitleToAccount[toAccount]</span>
+
+    private fun ImportTransaction.findCategory(payeeId: Long?, autofill: Boolean) =
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        categoryToId[category] ?: when {</span>
+<span class="nc bnc" id="L213" title="All 4 branches missed.">            autofill -&gt; payeeId?.let {</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                (autoFillCache[it] ?: repository.autoFill(it)</span>
+<span class="nc bnc" id="L215" title="All 4 branches missed.">                    ?.apply { autoFillCache[it] = this })?.categoryId</span>
+            }
+
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            isTransfer -&gt; prefHandler.defaultTransferCategory</span>
+<span class="nc" id="L219">            else -&gt; null</span>
+<span class="nc" id="L220">        }</span>
+
+<span class="nc bnc" id="L222" title="All 2 branches missed.">    private fun ImportTransaction.findMethod() = method?.let { label -&gt;</span>
+<span class="nc bnc" id="L223" title="All 8 branches missed.">        PreDefinedPaymentMethod.entries.find { localizedContext.getString(it.resId) == label }?.name</span>
+<span class="nc" id="L224">            ?: label</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">    }?.let {</span>
+<span class="nc" id="L226">        repository.findPaymentMethod(it)</span>
+<span class="nc" id="L227">    }</span>
+}
+
+<span class="nc" id="L230">class InvalidDataException(message: String): Exception(message)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

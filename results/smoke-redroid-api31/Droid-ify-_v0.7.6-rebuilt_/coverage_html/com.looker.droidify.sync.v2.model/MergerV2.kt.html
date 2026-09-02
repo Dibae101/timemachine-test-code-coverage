@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MergerV2.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.sync.v2.model</a> &gt; <span class="el_source">MergerV2.kt</span></div><h1>MergerV2.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.sync.v2.model
+
+import android.util.Log
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.json.encodeToStream
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
+import java.io.File
+import java.io.InputStream
+
+/**
+ * Merger for applying JSON Merge Patch (RFC 7386) to IndexV2 instances.
+ * Adapted from Neo Store.
+ */
+<span class="nc" id="L21">@OptIn(ExperimentalSerializationApi::class)</span>
+<span class="nc" id="L22">class IndexV2Merger(private val baseFile: File) : AutoCloseable {</span>
+<span class="nc" id="L23">    private val json = Json {</span>
+<span class="nc" id="L24">        ignoreUnknownKeys = true</span>
+<span class="nc" id="L25">        explicitNulls = true</span>
+<span class="nc" id="L26">    }</span>
+
+<span class="nc" id="L28">    fun getCurrentIndex(): IndexV2? = json.decodeFromStream(baseFile.inputStream())</span>
+
+    fun processDiff(
+        diffStream: InputStream,
+    ): Boolean {
+<span class="nc" id="L33">        val tempFile = File.createTempFile(&quot;merged_&quot;, &quot;.json&quot;)</span>
+
+<span class="nc" id="L35">        try {</span>
+<span class="nc" id="L36">            val hasChanged = merge(baseFile, diffStream, tempFile)</span>
+
+<span class="nc bnc" id="L38" title="All 2 branches missed.">            if (hasChanged) {</span>
+                // Save the merged result
+<span class="nc" id="L40">                tempFile.copyTo(baseFile, overwrite = true)</span>
+<span class="nc" id="L41">                tempFile.inputStream().use { inputStream -&gt;</span>
+<span class="nc" id="L42">                    val mergedElement = json.decodeFromStream&lt;JsonElement&gt;(inputStream)</span>
+<span class="nc" id="L43">                    val timestamp = getTimestamp(mergedElement)</span>
+<span class="nc" id="L44">                    baseFile.setLastModified(timestamp)</span>
+                }
+            }
+
+<span class="nc" id="L48">            Log.d(&quot;IndexV2Merger&quot;, &quot;Merged a diff JSON into the base: $hasChanged&quot;)</span>
+<span class="nc" id="L49">            return hasChanged</span>
+        } finally {
+<span class="nc" id="L51">            tempFile.delete()</span>
+        }
+    }
+
+    private fun merge(baseFile: File, diffStream: InputStream, outputFile: File): Boolean {
+<span class="nc" id="L56">        val baseElement =</span>
+<span class="nc" id="L57">            runCatching { baseFile.inputStream().use { json.decodeFromStream&lt;JsonElement&gt;(it) } }</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">                .fold(</span>
+<span class="nc" id="L59">                    onSuccess = { it },</span>
+                    onFailure = {
+<span class="nc bnc" id="L61" title="All 2 branches missed.">                        throw Exception(it.message.orEmpty(), it)</span>
+                    },
+                )
+<span class="nc" id="L64">        val diffElement = runCatching { json.decodeFromStream&lt;JsonElement&gt;(diffStream) }</span>
+<span class="nc bnc" id="L65" title="All 2 branches missed.">            .fold(</span>
+<span class="nc" id="L66">                onSuccess = { it },</span>
+                onFailure = {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">                    throw Exception(it.message.orEmpty(), it)</span>
+                },
+            )
+
+        // No need to apply a diff older or same as base
+<span class="nc" id="L73">        val baseTimestamp = getTimestamp(baseElement)</span>
+<span class="nc" id="L74">        val diffTimestamp = getTimestamp(diffElement)</span>
+
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (diffTimestamp &lt;= baseTimestamp) {</span>
+<span class="nc" id="L77">            baseFile.copyTo(outputFile, overwrite = true)</span>
+<span class="nc" id="L78">            return false</span>
+        }
+
+        // Apply the merge patch
+<span class="nc" id="L82">        val mergedElement = mergePatch(baseElement, diffElement)</span>
+
+        // Ensure the timestamp is updated
+<span class="nc" id="L85">        val mergedObj = mergedElement.jsonObject.toMutableMap()</span>
+<span class="nc bnc" id="L86" title="All 6 branches missed.">        val repoObj = (mergedObj[&quot;repo&quot;] as? JsonObject)?.toMutableMap() ?: run {</span>
+<span class="nc" id="L87">            baseFile.copyTo(outputFile, overwrite = true)</span>
+<span class="nc" id="L88">            return false</span>
+        }
+
+<span class="nc" id="L91">        repoObj[&quot;timestamp&quot;] = JsonPrimitive(diffTimestamp)</span>
+<span class="nc" id="L92">        val finalResult = JsonObject(mergedObj + (&quot;repo&quot; to JsonObject(repoObj)))</span>
+
+<span class="nc" id="L94">        outputFile.outputStream().use { outputStream -&gt;</span>
+<span class="nc" id="L95">            json.encodeToStream(finalResult, outputStream)</span>
+<span class="nc" id="L96">        }</span>
+
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        return baseElement != finalResult</span>
+    }
+
+    /**
+     * Applies a JSON Merge Patch (RFC 7386) to the target JSON element. RFC 7386 rules:
+     * - If patch is not an object, replace target entirely
+     * - If patch value is null, remove the key from target
+     * - If patch value is an object, recursively merge with target
+     * - Otherwise, replace target value with patch value
+     */
+    private fun mergePatch(target: JsonElement, patch: JsonElement): JsonElement {
+<span class="nc bnc" id="L109" title="All 4 branches missed.">        if (patch !is JsonObject || target !is JsonObject) return patch</span>
+<span class="nc" id="L110">        val result = target.jsonObject.toMutableMap()</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        for ((key, value) in patch) {</span>
+            // No change when object is empty
+<span class="nc bnc" id="L114" title="All 4 branches missed.">            if (value is JsonObject &amp;&amp; value.jsonObject.isEmpty()) continue</span>
+
+<span class="nc" id="L116">            when (value) {</span>
+                // Remove null objects
+<span class="nc bnc" id="L118" title="All 2 branches missed.">                is JsonNull -&gt; {</span>
+<span class="nc" id="L119">                    result.remove(key)</span>
+                }
+
+                // Recursively merge objects
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                is JsonObject -&gt; {</span>
+<span class="nc" id="L124">                    val targetValue = target.jsonObject[key]</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                    result[key] = if (targetValue is JsonObject) {</span>
+<span class="nc" id="L126">                        mergePatch(targetValue, value)</span>
+                    } else {
+                        // If target doesn't have this key or it's not an object, use the patch value
+<span class="nc" id="L129">                        value</span>
+                    }
+                }
+
+                // Replace primitive values entirely
+                else -&gt; {
+<span class="nc" id="L135">                    result[key] = value</span>
+                }
+            }
+        }
+
+<span class="nc" id="L140">        return JsonObject(result)</span>
+    }
+
+    private fun getTimestamp(element: JsonElement): Long {
+<span class="nc bnc" id="L144" title="All 10 branches missed.">        return (element.jsonObject[&quot;repo&quot;]?.jsonObject?.get(&quot;timestamp&quot;) as? JsonPrimitive)?.longOrNull</span>
+<span class="nc" id="L145">            ?: 0L</span>
+    }
+
+    override fun close() {
+        // Cleanup when needed
+<span class="nc" id="L150">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

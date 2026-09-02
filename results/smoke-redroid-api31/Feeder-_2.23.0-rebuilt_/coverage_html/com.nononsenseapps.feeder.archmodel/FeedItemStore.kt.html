@@ -1,0 +1,394 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FeedItemStore.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.archmodel</a> &gt; <span class="el_source">FeedItemStore.kt</span></div><h1>FeedItemStore.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.archmodel
+
+import android.app.Application
+import android.content.Context
+import android.text.format.DateFormat
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.map
+import androidx.sqlite.db.SimpleSQLiteQuery
+import com.nononsenseapps.feeder.db.room.AppDatabase
+import com.nononsenseapps.feeder.db.room.BlocklistDao
+import com.nononsenseapps.feeder.db.room.FeedItem
+import com.nononsenseapps.feeder.db.room.FeedItemCursor
+import com.nononsenseapps.feeder.db.room.FeedItemDao
+import com.nononsenseapps.feeder.db.room.FeedItemDao.Companion.FEED_ITEM_LIST_SORT_ORDER_ASC
+import com.nononsenseapps.feeder.db.room.FeedItemDao.Companion.FEED_ITEM_LIST_SORT_ORDER_DESC
+import com.nononsenseapps.feeder.db.room.FeedItemIdWithLink
+import com.nononsenseapps.feeder.db.room.FeedItemWithFeed
+import com.nononsenseapps.feeder.db.room.ID_SAVED_ARTICLES
+import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.db.room.upsertFeedItems
+import com.nononsenseapps.feeder.model.PREVIEW_COLUMNS
+import com.nononsenseapps.feeder.model.PreviewItem
+import com.nononsenseapps.feeder.ui.compose.feed.FeedListItem
+import com.nononsenseapps.feeder.ui.compose.feedarticle.FeedListFilter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.net.URL
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.util.Date
+import java.util.TimeZone
+
+<span class="fc" id="L42">class FeedItemStore(</span>
+<span class="fc" id="L43">    override val di: DI,</span>
+) : DIAware {
+<span class="fc" id="L45">    private val dao: FeedItemDao by instance()</span>
+<span class="fc" id="L46">    private val blocklistDao: BlocklistDao by instance()</span>
+<span class="pc" id="L47">    private val appDatabase: AppDatabase by instance()</span>
+<span class="fc" id="L48">    private val settingsStore: SettingsStore by instance()</span>
+<span class="fc" id="L49">    private val application: Application by instance()</span>
+
+    suspend fun setBlockStatusForNewInFeed(
+        feedId: Long,
+        blockTime: Instant,
+    ) {
+<span class="pc" id="L55">        blocklistDao.setItemBlockStatusForNewInFeed(feedId, blockTime, settingsStore.applyBlocklistToSummaries.value, settingsStore.applyBlocklistToLinks.value)</span>
+<span class="nc" id="L56">    }</span>
+
+    fun getFeedItemCountRaw(
+        feedId: Long,
+        tag: String,
+        minReadTime: Instant,
+        filter: FeedListFilter,
+        search: String,
+    ): Flow&lt;Int&gt; {
+<span class="fc" id="L65">        val queryString = StringBuilder()</span>
+<span class="fc" id="L66">        val args = mutableListOf&lt;Any?&gt;()</span>
+
+<span class="fc" id="L68">        queryString.apply {</span>
+<span class="fc" id="L69">            append(&quot;SELECT count(*) FROM feed_items\n&quot;)</span>
+<span class="fc" id="L70">            append(&quot;LEFT JOIN feeds ON feed_items.feed_id = feeds.id\n&quot;)</span>
+<span class="fc" id="L71">            append(&quot;WHERE\n&quot;)</span>
+
+<span class="fc" id="L73">            rawQueryFilter(filter, search, args, minReadTime, feedId, tag)</span>
+<span class="fc" id="L74">        }</span>
+
+<span class="fc" id="L76">        return dao.getPreviewsCount(SimpleSQLiteQuery(queryString.toString(), args.toTypedArray()))</span>
+    }
+
+    fun getWidgetFeedListItems(
+        feedId: Long,
+        tag: String,
+    ): Flow&lt;List&lt;FeedListItem&gt;&gt; =
+<span class="nc" id="L83">        when {</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            feedId == ID_SAVED_ARTICLES -&gt; dao.widgetPreviewsSaved()</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            feedId &gt; ID_UNSET -&gt; dao.widgetPreviewsByFeed(feedId)</span>
+<span class="nc bnc" id="L86" title="All 4 branches missed.">            tag.isNotEmpty() -&gt; dao.widgetPreviewsByTag(tag)</span>
+<span class="nc" id="L87">            else -&gt; dao.widgetPreviewsAllFeeds()</span>
+<span class="nc" id="L88">        }.map { list -&gt; list.map { it.toFeedListItem(application) } }</span>
+
+    fun getPagedFeedItemsRaw(
+        feedId: Long,
+        tag: String,
+        minReadTime: Instant,
+        newestFirst: Boolean,
+        filter: FeedListFilter,
+        search: String,
+    ): Flow&lt;PagingData&lt;FeedListItem&gt;&gt; =
+<span class="fc" id="L98">        Pager(</span>
+            config =
+<span class="fc" id="L100">                PagingConfig(</span>
+<span class="fc" id="L101">                    pageSize = 10,</span>
+<span class="fc" id="L102">                    initialLoadSize = 100,</span>
+<span class="fc" id="L103">                    prefetchDistance = 100,</span>
+<span class="fc" id="L104">                    jumpThreshold = 100,</span>
+                ),
+        ) {
+<span class="fc" id="L107">            val queryString = StringBuilder()</span>
+<span class="fc" id="L108">            val args = mutableListOf&lt;Any?&gt;()</span>
+
+<span class="fc" id="L110">            queryString.apply {</span>
+<span class="fc" id="L111">                append(&quot;SELECT $PREVIEW_COLUMNS FROM feed_items\n&quot;)</span>
+<span class="fc" id="L112">                append(&quot;LEFT JOIN feeds ON feed_items.feed_id = feeds.id\n&quot;)</span>
+<span class="fc" id="L113">                append(&quot;WHERE\n&quot;)</span>
+
+<span class="fc" id="L115">                rawQueryFilter(filter, search, args, minReadTime, feedId, tag)</span>
+
+<span class="fc" id="L117">                when (newestFirst) {</span>
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">                    true -&gt; append(&quot;ORDER BY $FEED_ITEM_LIST_SORT_ORDER_DESC\n&quot;)</span>
+<span class="pc" id="L119">                    else -&gt; append(&quot;ORDER BY $FEED_ITEM_LIST_SORT_ORDER_ASC\n&quot;)</span>
+                }
+<span class="fc" id="L121">            }</span>
+
+<span class="fc" id="L123">            dao.pagingPreviews(SimpleSQLiteQuery(queryString.toString(), args.toTypedArray()))</span>
+<span class="fc" id="L124">        }.flow</span>
+<span class="fc" id="L125">            .map { pagingData -&gt;</span>
+<span class="fc" id="L126">                pagingData</span>
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">                    .map { it.toFeedListItem(application) }</span>
+<span class="fc" id="L128">            }</span>
+
+    private fun StringBuilder.rawQueryFilter(
+        filter: FeedListFilter,
+        search: String,
+        args: MutableList&lt;Any?&gt;,
+        minReadTime: Instant,
+        feedId: Long,
+        tag: String,
+    ) {
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">        val onlySavedArticles = feedId == ID_SAVED_ARTICLES</span>
+
+        // Always blocklist
+<span class="fc" id="L141">        append(&quot;block_time is null\n&quot;)</span>
+        // List filter
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">        if (!onlySavedArticles) {</span>
+<span class="fc" id="L144">            append(&quot;AND (\n&quot;)</span>
+<span class="pc bpc" id="L145" title="2 of 6 branches missed.">            if (filter.unread &amp;&amp; !filter.recentlyRead &amp;&amp; !filter.read) {</span>
+<span class="fc" id="L146">                append(&quot;read_time is null\n&quot;)</span>
+            } else {
+<span class="fc" id="L148">                append(&quot;(read_time is null or read_time &gt;= ?)\n&quot;).also {</span>
+<span class="fc" id="L149">                    args.add(</span>
+<span class="fc" id="L150">                        when {</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">                            filter.read -&gt; Instant.EPOCH</span>
+<span class="nc" id="L152">                            else -&gt; minReadTime</span>
+<span class="fc" id="L153">                        }.toEpochMilli(),</span>
+                    )
+<span class="fc" id="L155">                }</span>
+            }
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">            if (filter.saved) {</span>
+<span class="nc" id="L158">                append(&quot;OR (bookmarked = 1)\n&quot;)</span>
+            }
+<span class="fc" id="L160">            append(&quot;)\n&quot;)</span>
+        }
+
+<span class="fc" id="L163">        when {</span>
+<span class="pc bpc" id="L164" title="2 of 4 branches missed.">            search.isNotEmpty() -&gt; {</span>
+                // User probably means the literal characters
+<span class="nc" id="L166">                val sanitizedSearch =</span>
+<span class="nc" id="L167">                    search</span>
+<span class="nc" id="L168">                        .replace(&quot;\\&quot;, &quot;\\\\&quot;)</span>
+<span class="nc" id="L169">                        .replace(&quot;%&quot;, &quot;\\%&quot;)</span>
+<span class="nc" id="L170">                        .replace(&quot;_&quot;, &quot;\\_&quot;)</span>
+<span class="nc" id="L171">                append(&quot;AND (\n&quot;)</span>
+<span class="nc" id="L172">                append(&quot;plain_title LIKE ?\n&quot;).also { args.add(&quot;%$sanitizedSearch%&quot;) }</span>
+<span class="nc" id="L173">                append(&quot;OR plain_snippet LIKE ?\n&quot;).also { args.add(&quot;%$sanitizedSearch%&quot;) }</span>
+<span class="nc" id="L174">                append(&quot;)\n&quot;)</span>
+            }
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">            onlySavedArticles -&gt; append(&quot;AND bookmarked = 1\n&quot;)</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">            feedId &gt; ID_UNSET -&gt; append(&quot;AND feed_id IS ?\n&quot;).also { args.add(feedId) }</span>
+<span class="pc bpc" id="L178" title="2 of 4 branches missed.">            tag.isNotEmpty() -&gt; append(&quot;AND tag IS ?\n&quot;).also { args.add(tag) }</span>
+        }
+<span class="fc" id="L180">    }</span>
+
+    suspend fun markAsReadRaw(
+        feedId: Long,
+        tag: String,
+        filter: FeedListFilter,
+        search: String,
+        minReadTime: Instant,
+        descending: Boolean,
+        cursor: FeedItemCursor,
+    ) {
+<span class="nc" id="L191">        val queryString = StringBuilder()</span>
+<span class="nc" id="L192">        val args = mutableListOf&lt;Any?&gt;()</span>
+
+<span class="nc" id="L194">        queryString.apply {</span>
+<span class="nc" id="L195">            append(&quot;UPDATE feed_items SET read_time = coalesce(read_time, ?), notified = 1\n&quot;).also {</span>
+<span class="nc" id="L196">                args.add(Instant.now().toEpochMilli())</span>
+<span class="nc" id="L197">            }</span>
+<span class="nc" id="L198">            append(&quot;WHERE id IN (\n&quot;)</span>
+
+<span class="nc" id="L200">            append(&quot;SELECT feed_items.id FROM feed_items\n&quot;)</span>
+<span class="nc" id="L201">            append(&quot;LEFT JOIN feeds ON feed_items.feed_id = feeds.id\n&quot;)</span>
+<span class="nc" id="L202">            append(&quot;WHERE\n&quot;)</span>
+<span class="nc" id="L203">            rawQueryFilter(filter, search, args, minReadTime, feedId, tag)</span>
+            // this version of sqlite doesn't seem to support tuple comparisons
+<span class="nc" id="L205">            append(&quot;and (\n&quot;)</span>
+
+<span class="nc" id="L207">            append(</span>
+<span class="nc" id="L208">                when (descending) {</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                    true -&gt; &quot;primary_sort_time &lt; ?\n&quot;</span>
+<span class="nc" id="L210">                    else -&gt; &quot;primary_sort_time &gt; ?\n&quot;</span>
+                },
+<span class="nc" id="L212">            ).also { args.add(cursor.primarySortTime.toEpochMilli()) }</span>
+<span class="nc" id="L213">            append(</span>
+<span class="nc" id="L214">                when (descending) {</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">                    true -&gt; &quot;or primary_sort_time = ? and pub_date &lt; ?\n&quot;</span>
+<span class="nc" id="L216">                    else -&gt; &quot;or primary_sort_time = ? and pub_date &gt; ?\n&quot;</span>
+                },
+<span class="nc" id="L218">            ).also {</span>
+<span class="nc" id="L219">                args.add(cursor.primarySortTime.toEpochMilli())</span>
+<span class="nc" id="L220">                args.add(cursor.pubDate)</span>
+<span class="nc" id="L221">            }</span>
+
+<span class="nc" id="L223">            append(</span>
+<span class="nc" id="L224">                when (descending) {</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                    true -&gt; &quot;or primary_sort_time = ? and pub_date = ? and feed_items.id &lt; ?\n&quot;</span>
+<span class="nc" id="L226">                    else -&gt; &quot;or primary_sort_time = ? and pub_date = ? and feed_items.id &gt; ?\n&quot;</span>
+                },
+<span class="nc" id="L228">            ).also {</span>
+<span class="nc" id="L229">                args.add(cursor.primarySortTime.toEpochMilli())</span>
+<span class="nc" id="L230">                args.add(cursor.pubDate)</span>
+<span class="nc" id="L231">                args.add(cursor.id)</span>
+<span class="nc" id="L232">            }</span>
+
+<span class="nc" id="L234">            append(&quot;)\n&quot;)</span>
+
+            // where id in (
+<span class="nc" id="L237">            append(&quot;)\n&quot;)</span>
+<span class="nc" id="L238">        }</span>
+
+        // Room does not support writable raw queries
+<span class="nc" id="L241">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L242">            appDatabase.openHelper.writableDatabase.execSQL(</span>
+<span class="nc" id="L243">                queryString.toString(),</span>
+<span class="nc" id="L244">                args.toTypedArray(),</span>
+            )
+<span class="nc" id="L246">            appDatabase.invalidationTracker.refreshVersionsAsync()</span>
+<span class="nc" id="L247">        }</span>
+<span class="nc" id="L248">    }</span>
+
+    suspend fun markAsNotified(itemIds: List&lt;Long&gt;) {
+<span class="nc" id="L251">        dao.markAsNotified(itemIds)</span>
+<span class="nc" id="L252">    }</span>
+
+    suspend fun markAsRead(itemIds: List&lt;Long&gt;) {
+<span class="pc" id="L255">        dao.markAsRead(itemIds)</span>
+<span class="nc" id="L256">    }</span>
+
+<span class="nc" id="L258">    suspend fun markAsReadAndNotified(</span>
+        itemId: Long,
+<span class="nc" id="L260">        readTime: Instant = Instant.now(),</span>
+    ) {
+<span class="nc" id="L262">        dao.markAsReadAndNotified(</span>
+<span class="nc" id="L263">            id = itemId,</span>
+<span class="nc" id="L264">            readTime = readTime.coerceAtLeast(Instant.EPOCH),</span>
+        )
+<span class="nc" id="L266">    }</span>
+
+    suspend fun markAsReadAndNotifiedAndOverwriteReadTime(
+        itemId: Long,
+        readTime: Instant,
+    ) {
+<span class="nc" id="L272">        dao.markAsReadAndNotifiedAndOverwriteReadTime(</span>
+<span class="nc" id="L273">            id = itemId,</span>
+<span class="nc" id="L274">            readTime = readTime.coerceAtLeast(Instant.EPOCH),</span>
+        )
+<span class="nc" id="L276">    }</span>
+
+    suspend fun markAsUnread(itemId: Long) {
+<span class="nc" id="L279">        dao.markAsUnread(itemId)</span>
+<span class="nc" id="L280">    }</span>
+
+    suspend fun setBookmarked(
+        itemId: Long,
+        bookmarked: Boolean,
+    ) {
+<span class="nc" id="L286">        dao.setBookmarked(itemId, bookmarked)</span>
+<span class="nc" id="L287">    }</span>
+
+<span class="nc bnc" id="L289" title="All 2 branches missed.">    suspend fun getFullTextByDefault(itemId: Long): Boolean = dao.getFullTextByDefault(itemId) ?: false</span>
+
+<span class="nc" id="L291">    fun getFeedItem(itemId: Long): Flow&lt;FeedItemWithFeed?&gt; = dao.getFeedItemFlow(itemId)</span>
+
+    suspend fun getFeedItemId(
+        feedUrl: URL,
+        articleGuid: String,
+<span class="nc" id="L296">    ): Long? = dao.getItemWith(feedUrl = feedUrl, articleGuid = articleGuid)</span>
+
+<span class="nc" id="L298">    suspend fun getLink(itemId: Long): String? = dao.getLink(itemId)</span>
+
+<span class="nc" id="L300">    suspend fun getArticleOpener(itemId: Long): String? = dao.getOpenArticleWith(itemId)</span>
+
+    suspend fun markAllAsReadInFeed(feedId: Long) {
+<span class="nc" id="L303">        dao.markAllAsRead(feedId)</span>
+<span class="nc" id="L304">    }</span>
+
+    suspend fun markAllAsReadInTag(tag: String) {
+<span class="nc" id="L307">        dao.markAllAsRead(tag)</span>
+<span class="nc" id="L308">    }</span>
+
+    suspend fun markAllAsRead() {
+<span class="nc" id="L311">        dao.markAllAsRead()</span>
+<span class="nc" id="L312">    }</span>
+
+<span class="nc" id="L314">    fun getFeedsItemsWithDefaultFullTextNeedingDownload(): Flow&lt;List&lt;FeedItemIdWithLink&gt;&gt; = dao.getFeedsItemsWithDefaultFullTextNeedingDownload()</span>
+
+<span class="nc" id="L316">    suspend fun markAsFullTextDownloaded(feedItemId: Long) = dao.markAsFullTextDownloaded(feedItemId)</span>
+
+<span class="fc" id="L318">    fun getFeedItemsNeedingNotifying(): Flow&lt;List&lt;Long&gt;&gt; = dao.getFeedItemsNeedingNotifying()</span>
+
+    suspend fun loadFeedItem(
+        guid: String,
+        feedId: Long,
+<span class="fc" id="L323">    ): FeedItem? = dao.loadFeedItem(guid = guid, feedId = feedId)</span>
+
+    suspend fun upsertFeedItems(
+        itemsWithText: List&lt;Pair&lt;FeedItem, String&gt;&gt;,
+        block: suspend (FeedItem, String) -&gt; Unit,
+    ) {
+<span class="pc" id="L329">        dao.upsertFeedItems(itemsWithText = itemsWithText, block = block)</span>
+<span class="nc" id="L330">    }</span>
+
+    suspend fun getItemsToBeCleanedFromFeed(
+        feedId: Long,
+        keepCount: Int,
+<span class="fc" id="L335">    ) = dao.getItemsToBeCleanedFromFeed(feedId = feedId, keepCount = keepCount)</span>
+
+    suspend fun deleteFeedItems(ids: List&lt;Long&gt;) {
+<span class="pc" id="L338">        dao.deleteFeedItems(ids)</span>
+<span class="nc" id="L339">    }</span>
+
+    suspend fun updateWordCountFull(
+        id: Long,
+        wordCount: Int,
+    ) {
+<span class="nc" id="L345">        dao.updateWordCountFull(id, wordCount)</span>
+<span class="nc" id="L346">    }</span>
+
+    suspend fun duplicateStoryExists(
+        id: Long,
+        title: String,
+        link: String?,
+    ): Boolean =
+<span class="nc" id="L353">        dao.duplicationExists(</span>
+<span class="nc" id="L354">            id = id,</span>
+<span class="nc" id="L355">            plainTitle = title,</span>
+<span class="nc" id="L356">            link = link,</span>
+<span class="nc" id="L357">        )</span>
+
+<span class="nc" id="L359">    suspend fun getArticle(id: Long): FeedItemWithFeed? = dao.getFeedItem(id)</span>
+}
+
+private fun PreviewItem.toFeedListItem(context: Context) =
+<span class="fc" id="L363">    FeedListItem(</span>
+<span class="fc" id="L364">        id = id,</span>
+<span class="fc" id="L365">        title = plainTitle,</span>
+<span class="fc" id="L366">        snippet = plainSnippet,</span>
+<span class="fc" id="L367">        feedTitle = feedDisplayTitle,</span>
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">        unread = readTime == null,</span>
+<span class="fc" id="L369">        pubDate = pubDate.formatForFeed(context),</span>
+<span class="fc" id="L370">        image = image,</span>
+<span class="fc" id="L371">        link = link,</span>
+<span class="fc" id="L372">        bookmarked = bookmarked,</span>
+<span class="fc" id="L373">        feedImageUrl = feedImageUrl,</span>
+<span class="fc" id="L374">        rawPubDate = pubDate,</span>
+<span class="fc" id="L375">        primarySortTime = primarySortTime,</span>
+<span class="fc" id="L376">        wordCount = bestWordCount,</span>
+<span class="fc" id="L377">    )</span>
+
+<span class="fc" id="L379">internal fun ZonedDateTime?.formatForFeed(</span>
+    context: Context,
+<span class="fc" id="L381">    zoneId: ZoneId = ZoneId.systemDefault(),</span>
+<span class="fc" id="L382">    today: LocalDate = LocalDate.now(zoneId),</span>
+): String =
+<span class="pc bpc" id="L384" title="2 of 4 branches missed.">    this?.let { publicationDate -&gt;</span>
+<span class="fc" id="L385">        val formatter =</span>
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">            if (publicationDate.withZoneSameInstant(zoneId).toLocalDate() &gt;= today) {</span>
+<span class="nc" id="L387">                DateFormat.getTimeFormat(context)</span>
+            } else {
+<span class="fc" id="L389">                DateFormat.getMediumDateFormat(context)</span>
+            }
+<span class="fc" id="L391">        formatter.timeZone = TimeZone.getTimeZone(zoneId)</span>
+<span class="fc" id="L392">        formatter.format(Date.from(publicationDate.toInstant()))</span>
+<span class="pc" id="L393">    } ?: &quot;&quot;</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

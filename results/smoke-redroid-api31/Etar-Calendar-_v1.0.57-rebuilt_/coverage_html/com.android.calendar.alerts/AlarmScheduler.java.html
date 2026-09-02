@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlarmScheduler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.alerts</a> &gt; <span class="el_source">AlarmScheduler.java</span></div><h1>AlarmScheduler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.alerts;
+
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
+import android.provider.CalendarContract;
+import android.provider.CalendarContract.Events;
+import android.provider.CalendarContract.Instances;
+import android.provider.CalendarContract.Reminders;
+import android.text.format.DateUtils;
+import android.util.Log;
+
+import com.android.calendar.Utils;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Schedules the next EVENT_REMINDER_APP broadcast with AlarmManager, by querying the events
+ * and reminders tables for the next upcoming alert.
+ */
+<span class="nc" id="L46">public class AlarmScheduler {</span>
+<span class="nc" id="L47">    static final String[] INSTANCES_PROJECTION = new String[] {</span>
+        Instances.EVENT_ID,
+        Instances.BEGIN,
+        Instances.ALL_DAY,
+    };
+<span class="nc" id="L52">    static final String[] REMINDERS_PROJECTION = new String[] {</span>
+        Reminders.EVENT_ID,
+        Reminders.MINUTES,
+        Reminders.METHOD,
+    };
+    // Add a slight delay for the EVENT_REMINDER_APP broadcast for a couple reasons:
+    // (1) so that the concurrent reminder broadcast from the provider doesn't result
+    // in a double ring, and (2) some OEMs modified the provider to not add an alert to
+    // the CalendarAlerts table until the alert time, so for the unbundled app's
+    // notifications to work on these devices, a delay ensures that AlertService won't
+    // read from the CalendarAlerts table until the alert is present.
+    static final int ALARM_DELAY_MS = 1000;
+    private static final String TAG = &quot;AlarmScheduler&quot;;
+    private static final String INSTANCES_WHERE = Events.VISIBLE + &quot;=? AND &quot;
+            + Instances.BEGIN + &quot;&gt;=? AND &quot; + Instances.BEGIN + &quot;&lt;=? AND &quot;
+            + Events.ALL_DAY + &quot;=?&quot;;
+    private static final int INSTANCES_INDEX_EVENTID = 0;
+    private static final int INSTANCES_INDEX_BEGIN = 1;
+    private static final int INSTANCES_INDEX_ALL_DAY = 2;
+    private static final String REMINDERS_WHERE = Reminders.METHOD + &quot;=1 AND &quot;
+            + Reminders.EVENT_ID + &quot; IN &quot;;
+    private static final int REMINDERS_INDEX_EVENT_ID = 0;
+    private static final int REMINDERS_INDEX_MINUTES = 1;
+    private static final int REMINDERS_INDEX_METHOD = 2;
+    // The reminders query looks like &quot;SELECT ... AND eventId IN 101,102,202,...&quot;.  This
+    // sets the max # of events in the query before batching into multiple queries, to
+    // limit the SQL query length.
+    private static final int REMINDER_QUERY_BATCH_SIZE = 50;
+
+    // We really need to query for reminder times that fall in some interval, but
+    // the Reminders table only stores the reminder interval (10min, 15min, etc), and
+    // we cannot do the join with the Events table to calculate the actual alert time
+    // from outside of the provider.  So the best we can do for now consider events
+    // whose start times begin within some interval (ie. 1 week out).  This means
+    // reminders which are configured for more than 1 week out won't fire on time.  We
+    // can minimize this to being only 1 day late by putting a 1 day max on the alarm time.
+    private static final long EVENT_LOOKAHEAD_WINDOW_MS = DateUtils.WEEK_IN_MILLIS;
+    private static final long MAX_ALARM_ELAPSED_MS = DateUtils.DAY_IN_MILLIS;
+
+    /**
+     * Schedules the nearest upcoming alarm, to refresh notifications.
+     *
+     * This is historically done in the provider but we dupe this here so the unbundled
+     * app will work on devices that have modified this portion of the provider.  This
+     * has the limitation of querying events within some interval from now (ie. looks at
+     * reminders for all events occurring in the next week).  This means for example,
+     * a 2 week notification will not fire on time.
+     */
+    public static void scheduleNextAlarm(Context context) {
+<span class="nc" id="L101">        scheduleNextAlarm(context, AlertUtils.createAlarmManager(context),</span>
+<span class="nc" id="L102">                REMINDER_QUERY_BATCH_SIZE, System.currentTimeMillis());</span>
+<span class="nc" id="L103">    }</span>
+
+    // VisibleForTesting
+    static void scheduleNextAlarm(Context context, AlarmManagerInterface alarmManager,
+            int batchSize, long currentMillis) {
+<span class="nc" id="L108">        Cursor instancesCursor = null;</span>
+        try {
+<span class="nc" id="L110">            instancesCursor = queryUpcomingEvents(context, context.getContentResolver(),</span>
+                    currentMillis);
+<span class="nc bnc" id="L112" title="All 2 branches missed.">            if (instancesCursor != null) {</span>
+<span class="nc" id="L113">                queryNextReminderAndSchedule(instancesCursor, context,</span>
+<span class="nc" id="L114">                        context.getContentResolver(), alarmManager, batchSize, currentMillis);</span>
+            }
+        } finally {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            if (instancesCursor != null) {</span>
+<span class="nc" id="L118">                instancesCursor.close();</span>
+            }
+        }
+<span class="nc" id="L121">    }</span>
+
+    /**
+     * Queries events starting within a fixed interval from now.
+     */
+    private static Cursor queryUpcomingEvents(Context context, ContentResolver contentResolver,
+            long currentMillis) {
+<span class="nc" id="L128">        Time time = new Time();</span>
+<span class="nc" id="L129">        time.normalize();</span>
+<span class="nc" id="L130">        long localOffset = time.getGmtOffset() * 1000;</span>
+<span class="nc" id="L131">        final long localStartMin = currentMillis;</span>
+<span class="nc" id="L132">        final long localStartMax = localStartMin + EVENT_LOOKAHEAD_WINDOW_MS;</span>
+<span class="nc" id="L133">        final long utcStartMin = localStartMin - localOffset;</span>
+<span class="nc" id="L134">        final long utcStartMax = utcStartMin + EVENT_LOOKAHEAD_WINDOW_MS;</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (!Utils.isCalendarPermissionGranted(context, true)) {</span>
+            //If permission is not granted then just return.
+<span class="nc" id="L138">            Log.d(TAG, &quot;Manifest.permission.READ_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L139">            return null;</span>
+        }
+
+        // Expand Instances table range by a day on either end to account for
+        // all-day events.
+<span class="nc" id="L144">        Uri.Builder uriBuilder = Instances.CONTENT_URI.buildUpon();</span>
+<span class="nc" id="L145">        ContentUris.appendId(uriBuilder, localStartMin - DateUtils.DAY_IN_MILLIS);</span>
+<span class="nc" id="L146">        ContentUris.appendId(uriBuilder, localStartMax + DateUtils.DAY_IN_MILLIS);</span>
+
+        // Build query for all events starting within the fixed interval.
+<span class="nc" id="L149">        StringBuilder queryBuilder = new StringBuilder();</span>
+<span class="nc" id="L150">        queryBuilder.append(&quot;(&quot;);</span>
+<span class="nc" id="L151">        queryBuilder.append(INSTANCES_WHERE);</span>
+<span class="nc" id="L152">        queryBuilder.append(&quot;) OR (&quot;);</span>
+<span class="nc" id="L153">        queryBuilder.append(INSTANCES_WHERE);</span>
+<span class="nc" id="L154">        queryBuilder.append(&quot;)&quot;);</span>
+<span class="nc" id="L155">        String[] queryArgs = new String[] {</span>
+                // allday selection
+                &quot;1&quot;,                           /* visible = ? */
+<span class="nc" id="L158">                String.valueOf(utcStartMin),   /* begin &gt;= ? */</span>
+<span class="nc" id="L159">                String.valueOf(utcStartMax),   /* begin &lt;= ? */</span>
+                &quot;1&quot;,                           /* allDay = ? */
+
+                // non-allday selection
+                &quot;1&quot;,                           /* visible = ? */
+<span class="nc" id="L164">                String.valueOf(localStartMin), /* begin &gt;= ? */</span>
+<span class="nc" id="L165">                String.valueOf(localStartMax), /* begin &lt;= ? */</span>
+                &quot;0&quot;                            /* allDay = ? */
+        };
+
+<span class="nc" id="L169">        Cursor cursor = contentResolver.query(uriBuilder.build(), INSTANCES_PROJECTION,</span>
+<span class="nc" id="L170">                queryBuilder.toString(), queryArgs, null);</span>
+<span class="nc" id="L171">        return cursor;</span>
+    }
+
+    /**
+     * Queries for all the reminders of the events in the instancesCursor, and schedules
+     * the alarm for the next upcoming reminder.
+     */
+    private static void queryNextReminderAndSchedule(Cursor instancesCursor, Context context,
+            ContentResolver contentResolver, AlarmManagerInterface alarmManager,
+            int batchSize, long currentMillis) {
+        if (AlertService.DEBUG) {
+<span class="nc" id="L182">            int eventCount = instancesCursor.getCount();</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            if (eventCount == 0) {</span>
+<span class="nc" id="L184">                Log.d(TAG, &quot;No events found starting within 1 week.&quot;);</span>
+            } else {
+<span class="nc" id="L186">                Log.d(TAG, &quot;Query result count for events starting within 1 week: &quot; + eventCount);</span>
+            }
+        }
+
+        // Put query results of all events starting within some interval into map of event ID to
+        // local start time.
+<span class="nc" id="L192">        Map&lt;Integer, List&lt;Long&gt;&gt; eventMap = new HashMap&lt;Integer, List&lt;Long&gt;&gt;();</span>
+<span class="nc" id="L193">        Time timeObj = new Time();</span>
+<span class="nc" id="L194">        long nextAlarmTime = Long.MAX_VALUE;</span>
+<span class="nc" id="L195">        int nextAlarmEventId = 0;</span>
+<span class="nc" id="L196">        instancesCursor.moveToPosition(-1);</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        while (!instancesCursor.isAfterLast()) {</span>
+<span class="nc" id="L198">            int index = 0;</span>
+<span class="nc" id="L199">            eventMap.clear();</span>
+<span class="nc" id="L200">            StringBuilder eventIdsForQuery = new StringBuilder();</span>
+<span class="nc" id="L201">            eventIdsForQuery.append('(');</span>
+<span class="nc bnc" id="L202" title="All 4 branches missed.">            while (index++ &lt; batchSize &amp;&amp; instancesCursor.moveToNext()) {</span>
+<span class="nc" id="L203">                int eventId = instancesCursor.getInt(INSTANCES_INDEX_EVENTID);</span>
+<span class="nc" id="L204">                long begin = instancesCursor.getLong(INSTANCES_INDEX_BEGIN);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                boolean allday = instancesCursor.getInt(INSTANCES_INDEX_ALL_DAY) != 0;</span>
+                long localStartTime;
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                if (allday) {</span>
+                    // Adjust allday to local time.
+<span class="nc" id="L209">                    localStartTime = Utils.convertAlldayUtcToLocal(null, begin,</span>
+<span class="nc" id="L210">                            Utils.getCurrentTimezone());</span>
+                } else {
+<span class="nc" id="L212">                    localStartTime = begin;</span>
+                }
+<span class="nc" id="L214">                List&lt;Long&gt; startTimes = eventMap.get(eventId);</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">                if (startTimes == null) {</span>
+<span class="nc" id="L216">                    startTimes = new ArrayList&lt;Long&gt;();</span>
+<span class="nc" id="L217">                    eventMap.put(eventId, startTimes);</span>
+<span class="nc" id="L218">                    eventIdsForQuery.append(eventId);</span>
+<span class="nc" id="L219">                    eventIdsForQuery.append(&quot;,&quot;);</span>
+                }
+<span class="nc" id="L221">                startTimes.add(localStartTime);</span>
+
+                // Log for debugging.
+<span class="nc bnc" id="L224" title="All 2 branches missed.">                if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L225">                    timeObj.set(localStartTime);</span>
+<span class="nc" id="L226">                    StringBuilder msg = new StringBuilder();</span>
+<span class="nc" id="L227">                    msg.append(&quot;Events cursor result -- eventId:&quot;).append(eventId);</span>
+<span class="nc" id="L228">                    msg.append(&quot;, allDay:&quot;).append(allday);</span>
+<span class="nc" id="L229">                    msg.append(&quot;, start:&quot;).append(localStartTime);</span>
+<span class="nc" id="L230">                    msg.append(&quot; (&quot;).append(timeObj.format()).append(&quot;)&quot;);</span>
+<span class="nc" id="L231">                    Log.d(TAG, msg.toString());</span>
+                }
+<span class="nc" id="L233">            }</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">            if (eventIdsForQuery.charAt(eventIdsForQuery.length() - 1) == ',') {</span>
+<span class="nc" id="L235">                eventIdsForQuery.deleteCharAt(eventIdsForQuery.length() - 1);</span>
+            }
+<span class="nc" id="L237">            eventIdsForQuery.append(')');</span>
+
+            // Query the reminders table for the events found.
+<span class="nc" id="L240">            Cursor cursor = null;</span>
+            try {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                if (!Utils.isCalendarPermissionGranted(context, false)) {</span>
+                    //If permission is not granted then just return.
+<span class="nc" id="L244">                    Log.d(TAG, &quot;Manifest.permission.READ_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L245">                    return;</span>
+                }
+<span class="nc" id="L247">                cursor = contentResolver.query(Reminders.CONTENT_URI, REMINDERS_PROJECTION,</span>
+                        REMINDERS_WHERE + eventIdsForQuery, null, null);
+
+                // Process the reminders query results to find the next reminder time.
+<span class="nc" id="L251">                cursor.moveToPosition(-1);</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                while (cursor.moveToNext()) {</span>
+<span class="nc" id="L253">                    int eventId = cursor.getInt(REMINDERS_INDEX_EVENT_ID);</span>
+<span class="nc" id="L254">                    int reminderMinutes = cursor.getInt(REMINDERS_INDEX_MINUTES);</span>
+<span class="nc" id="L255">                    List&lt;Long&gt; startTimes = eventMap.get(eventId);</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                    if (startTimes != null) {</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                        for (Long startTime : startTimes) {</span>
+<span class="nc" id="L258">                            long alarmTime = startTime -</span>
+                                    reminderMinutes * DateUtils.MINUTE_IN_MILLIS;
+<span class="nc bnc" id="L260" title="All 4 branches missed.">                            if (alarmTime &gt; currentMillis &amp;&amp; alarmTime &lt; nextAlarmTime) {</span>
+<span class="nc" id="L261">                                nextAlarmTime = alarmTime;</span>
+<span class="nc" id="L262">                                nextAlarmEventId = eventId;</span>
+                            }
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                            if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L266">                                timeObj.set(alarmTime);</span>
+<span class="nc" id="L267">                                StringBuilder msg = new StringBuilder();</span>
+<span class="nc" id="L268">                                msg.append(&quot;Reminders cursor result -- eventId:&quot;).append(eventId);</span>
+<span class="nc" id="L269">                                msg.append(&quot;, startTime:&quot;).append(startTime);</span>
+<span class="nc" id="L270">                                msg.append(&quot;, minutes:&quot;).append(reminderMinutes);</span>
+<span class="nc" id="L271">                                msg.append(&quot;, alarmTime:&quot;).append(alarmTime);</span>
+<span class="nc" id="L272">                                msg.append(&quot; (&quot;).append(timeObj.format())</span>
+<span class="nc" id="L273">                                        .append(&quot;)&quot;);</span>
+<span class="nc" id="L274">                                Log.d(TAG, msg.toString());</span>
+                            }
+<span class="nc" id="L276">                        }</span>
+                    }
+<span class="nc" id="L278">                }</span>
+            } finally {
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                if (cursor != null) {</span>
+<span class="nc" id="L281">                    cursor.close();</span>
+                }
+            }
+<span class="nc" id="L284">        }</span>
+
+        // Schedule the alarm for the next reminder time.
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (nextAlarmTime &lt; Long.MAX_VALUE) {</span>
+<span class="nc" id="L288">            scheduleAlarm(context, nextAlarmEventId, nextAlarmTime, currentMillis, alarmManager);</span>
+        }
+<span class="nc" id="L290">    }</span>
+
+    /**
+     * Schedules an alarm for the EVENT_REMINDER_APP broadcast, for the specified
+     * alarm time with a slight delay (to account for the possible duplicate broadcast
+     * from the provider).
+     */
+    private static void scheduleAlarm(Context context, long eventId, long alarmTime,
+            long currentMillis, AlarmManagerInterface alarmManager) {
+        // Max out the alarm time to 1 day out, so an alert for an event far in the future
+        // (not present in our event query results for a limited range) can only be at
+        // most 1 day late.
+<span class="nc" id="L302">        long maxAlarmTime = currentMillis + MAX_ALARM_ELAPSED_MS;</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (alarmTime &gt; maxAlarmTime) {</span>
+<span class="nc" id="L304">            alarmTime = maxAlarmTime;</span>
+        }
+
+        // Add a slight delay (see comments on the member var).
+<span class="nc" id="L308">        alarmTime += ALARM_DELAY_MS;</span>
+
+        if (AlertService.DEBUG) {
+<span class="nc" id="L311">            Time time = new Time();</span>
+<span class="nc" id="L312">            time.set(alarmTime);</span>
+<span class="nc" id="L313">            String schedTime = time.format();</span>
+<span class="nc" id="L314">            Log.d(TAG, &quot;Scheduling alarm for EVENT_REMINDER_APP broadcast for event &quot; + eventId</span>
+                    + &quot; at &quot; + alarmTime + &quot; (&quot; + schedTime + &quot;)&quot;);
+        }
+
+        // Schedule an EVENT_REMINDER_APP broadcast with AlarmManager.  The extra is
+        // only used by AlertService for logging.  It is ignored by Intent.filterEquals,
+        // so this scheduling will still overwrite the alarm that was previously pending.
+        // Note that the 'setClass' is required, because otherwise it seems the broadcast
+        // can be eaten by other apps and we somehow may never receive it.
+<span class="nc" id="L323">        Intent intent = new Intent(AlertReceiver.EVENT_REMINDER_APP_ACTION);</span>
+<span class="nc" id="L324">        intent.setClass(context, AlertReceiver.class);</span>
+<span class="nc" id="L325">        intent.putExtra(CalendarContract.CalendarAlerts.ALARM_TIME, alarmTime);</span>
+<span class="nc" id="L326">        PendingIntent pi = PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_IMMUTABLE);</span>
+<span class="nc" id="L327">        alarmManager.set(AlarmManager.RTC_WAKEUP, alarmTime, pi);</span>
+<span class="nc" id="L328">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,491 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ArticleListReaderViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ReadYou</a> &gt; <a href="index.source.html" class="el_package">me.ash.reader.ui.page.adaptive</a> &gt; <span class="el_source">ArticleListReaderViewModel.kt</span></div><h1>ArticleListReaderViewModel.kt</h1><pre class="source lang-java linenums">package me.ash.reader.ui.page.adaptive
+
+import android.net.Uri
+import androidx.compose.ui.util.fastFirstOrNull
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import dagger.hilt.android.lifecycle.HiltViewModel
+import java.util.Date
+import javax.inject.Inject
+import kotlin.collections.any
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import me.ash.reader.domain.data.ArticlePagingListUseCase
+import me.ash.reader.domain.data.DiffMapHolder
+import me.ash.reader.domain.data.FilterState
+import me.ash.reader.domain.data.FilterStateUseCase
+import me.ash.reader.domain.data.GroupWithFeedsListUseCase
+import me.ash.reader.domain.data.PagerData
+import me.ash.reader.domain.model.article.Article
+import me.ash.reader.domain.model.article.ArticleFlowItem
+import me.ash.reader.domain.model.article.ArticleWithFeed
+import me.ash.reader.domain.model.feed.Feed
+import me.ash.reader.domain.model.general.MarkAsReadConditions
+import me.ash.reader.domain.service.GoogleReaderRssService
+import me.ash.reader.domain.service.LocalRssService
+import me.ash.reader.domain.service.RssService
+import me.ash.reader.domain.service.SyncWorker
+import me.ash.reader.infrastructure.android.AndroidImageDownloader
+import me.ash.reader.infrastructure.android.TextToSpeechManager
+import me.ash.reader.infrastructure.di.ApplicationScope
+import me.ash.reader.infrastructure.di.IODispatcher
+import me.ash.reader.infrastructure.preference.PullToLoadNextFeedPreference
+import me.ash.reader.infrastructure.preference.SettingsProvider
+import me.ash.reader.infrastructure.rss.ReaderCacheHelper
+import timber.log.Timber
+
+private const val TAG = &quot;FlowViewModel&quot;
+
+@OptIn(FlowPreview::class)
+@HiltViewModel()
+class ArticleListReaderViewModel
+<span class="nc" id="L56">@Inject</span>
+constructor(
+<span class="nc" id="L58">    private val rssService: RssService,</span>
+<span class="nc" id="L59">    @IODispatcher private val ioDispatcher: CoroutineDispatcher,</span>
+<span class="nc" id="L60">    @ApplicationScope private val applicationScope: CoroutineScope,</span>
+<span class="nc" id="L61">    val diffMapHolder: DiffMapHolder,</span>
+<span class="nc" id="L62">    private val filterStateUseCase: FilterStateUseCase,</span>
+<span class="nc" id="L63">    private val groupWithFeedsListUseCase: GroupWithFeedsListUseCase,</span>
+<span class="nc" id="L64">    private val settingsProvider: SettingsProvider,</span>
+<span class="nc" id="L65">    private val readerCacheHelper: ReaderCacheHelper,</span>
+<span class="nc" id="L66">    val textToSpeechManager: TextToSpeechManager,</span>
+<span class="nc" id="L67">    private val imageDownloader: AndroidImageDownloader,</span>
+<span class="nc" id="L68">    private val articleListUseCase: ArticlePagingListUseCase,</span>
+    workManager: WorkManager,
+<span class="nc" id="L70">) : ViewModel() {</span>
+
+<span class="nc" id="L72">    val flowUiState: StateFlow&lt;FlowUiState?&gt; =</span>
+<span class="nc" id="L73">        articleListUseCase.pagerFlow</span>
+<span class="nc bnc" id="L74" title="All 4 branches missed.">            .combine(groupWithFeedsListUseCase.groupWithFeedListFlow) {</span>
+                pagerData,
+                groupWithFeedsList -&gt;
+<span class="nc" id="L77">                val filterState = pagerData.filterState</span>
+<span class="nc" id="L78">                var nextFilterState: FilterState? = null</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                if (filterState.group != null) {</span>
+<span class="nc" id="L80">                    val groupList = groupWithFeedsList.map { it.group }</span>
+<span class="nc" id="L81">                    val index = groupList.indexOfFirst { it.id == filterState.group.id }</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                    if (index != -1) {</span>
+<span class="nc" id="L83">                        val nextGroup = groupList.getOrNull(index + 1)</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                        if (nextGroup != null) {</span>
+<span class="nc" id="L85">                            nextFilterState = filterState.copy(group = nextGroup)</span>
+                        }
+                    } else {
+<span class="nc" id="L88">                        val allGroupList =</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                            rssService.get().queryAllGroupWithFeeds().map { it.group }</span>
+<span class="nc" id="L90">                        val index = allGroupList.indexOfFirst { it.id == filterState.group.id }</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                        if (index != -1) {</span>
+<span class="nc" id="L92">                            val nextGroup =</span>
+<span class="nc" id="L93">                                allGroupList.subList(index, allGroupList.size).fastFirstOrNull {</span>
+<span class="nc" id="L94">                                    groupList.map { it.id }.contains(it.id)</span>
+                                }
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                            if (nextGroup != null) {</span>
+<span class="nc" id="L97">                                nextFilterState = filterState.copy(group = nextGroup)</span>
+                            }
+                        }
+                    }
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                } else if (filterState.feed != null) {</span>
+<span class="nc" id="L102">                    val feedList = groupWithFeedsList.flatMap { it.feeds }</span>
+<span class="nc" id="L103">                    val index = feedList.indexOfFirst { it.id == filterState.feed.id }</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                    if (index != -1) {</span>
+<span class="nc" id="L105">                        val nextFeed = feedList.getOrNull(index + 1)</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                        if (nextFeed != null) {</span>
+<span class="nc" id="L107">                            nextFilterState = filterState.copy(feed = nextFeed)</span>
+                        }
+                    } else {
+<span class="nc" id="L110">                        val allFeedList =</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                            rssService.get().queryAllGroupWithFeeds().flatMap { it.feeds }</span>
+<span class="nc" id="L112">                        val index = allFeedList.indexOfFirst { it.id == filterState.feed.id }</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                        if (index != -1) {</span>
+<span class="nc" id="L114">                            val nextFeed =</span>
+<span class="nc" id="L115">                                allFeedList.subList(index, allFeedList.size).fastFirstOrNull {</span>
+<span class="nc" id="L116">                                    feedList.map { it.id }.contains(it.id)</span>
+                                }
+<span class="nc bnc" id="L118" title="All 2 branches missed.">                            if (nextFeed != null) {</span>
+<span class="nc" id="L119">                                nextFilterState = filterState.copy(feed = nextFeed)</span>
+                            }
+                        }
+                    }
+                }
+<span class="nc" id="L124">                FlowUiState(nextFilterState = nextFilterState, pagerData = pagerData)</span>
+            }
+<span class="nc" id="L126">            .stateIn(viewModelScope, SharingStarted.Eagerly, null)</span>
+
+    private val syncWorkerStatusFlow =
+<span class="nc" id="L129">        workManager</span>
+<span class="nc" id="L130">            .getWorkInfosByTagFlow(SyncWorker.SYNC_TAG)</span>
+<span class="nc" id="L131">            .map { it.any { workInfo -&gt; workInfo.state == WorkInfo.State.RUNNING } }</span>
+<span class="nc" id="L132">            .stateIn(viewModelScope, SharingStarted.Eagerly, false)</span>
+
+<span class="nc" id="L134">    private val _isSyncingFlow = MutableStateFlow(false)</span>
+<span class="nc" id="L135">    val isSyncingFlow = _isSyncingFlow.asStateFlow()</span>
+
+<span class="nc" id="L137">    init {</span>
+<span class="nc" id="L138">        viewModelScope.launch {</span>
+<span class="nc" id="L139">            syncWorkerStatusFlow.debounce(500L).collect { _isSyncingFlow.value = it }</span>
+<span class="nc" id="L140">        }</span>
+<span class="nc" id="L141">    }</span>
+
+    fun updateReadStatus(
+        groupId: String?,
+        feedId: String?,
+        articleId: String?,
+        conditions: MarkAsReadConditions,
+        isUnread: Boolean,
+    ) {
+<span class="nc" id="L150">        applicationScope.launch(ioDispatcher) {</span>
+<span class="nc" id="L151">            rssService</span>
+<span class="nc" id="L152">                .get()</span>
+<span class="nc" id="L153">                .markAsRead(</span>
+<span class="nc" id="L154">                    groupId = groupId,</span>
+<span class="nc" id="L155">                    feedId = feedId,</span>
+<span class="nc" id="L156">                    articleId = articleId,</span>
+<span class="nc" id="L157">                    before = conditions.toDate(),</span>
+<span class="nc" id="L158">                    isUnread = isUnread,</span>
+                )
+<span class="nc" id="L160">        }</span>
+<span class="nc" id="L161">    }</span>
+
+    fun updateStarredStatus(articleId: String?, isStarred: Boolean) {
+<span class="nc" id="L164">        applicationScope.launch(ioDispatcher) {</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (articleId != null) {</span>
+<span class="nc" id="L166">                rssService.get().markAsStarred(articleId = articleId, isStarred = isStarred)</span>
+            }
+<span class="nc" id="L168">        }</span>
+<span class="nc" id="L169">    }</span>
+
+    fun markAsReadFromListByDate(date: Date, isBefore: Boolean) {
+<span class="nc" id="L172">        viewModelScope.launch(ioDispatcher) {</span>
+<span class="nc" id="L173">            val items =</span>
+<span class="nc" id="L174">                articleListUseCase.itemSnapshotList</span>
+<span class="nc" id="L175">                    .filterIsInstance&lt;ArticleFlowItem.Article&gt;()</span>
+<span class="nc" id="L176">                    .map { it.articleWithFeed }</span>
+<span class="nc" id="L177">                    .filter {</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                        if (isBefore) {</span>
+<span class="nc bnc" id="L179" title="All 4 branches missed.">                            date &gt; it.article.date &amp;&amp; it.article.isUnread</span>
+                        } else {
+<span class="nc bnc" id="L181" title="All 4 branches missed.">                            date &lt; it.article.date &amp;&amp; it.article.isUnread</span>
+<span class="nc" id="L182">                        }</span>
+                    }
+<span class="nc" id="L184">                    .distinctBy { it.article.id }</span>
+
+<span class="nc" id="L186">            diffMapHolder.updateDiff(articleWithFeed = items.toTypedArray(), isUnread = false)</span>
+<span class="nc" id="L187">        }</span>
+<span class="nc" id="L188">    }</span>
+
+    fun loadNextFeedOrGroup() {
+<span class="nc" id="L191">        viewModelScope.launch {</span>
+            if (
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                settingsProvider.settings.pullToSwitchFeed ==</span>
+<span class="nc" id="L194">                    PullToLoadNextFeedPreference.MarkAsReadAndLoadNextFeed</span>
+            ) {
+<span class="nc" id="L196">                markAllAsRead()</span>
+            }
+<span class="nc bnc" id="L198" title="All 4 branches missed.">            flowUiState.value?.nextFilterState?.let { filterStateUseCase.updateFilterState(it) }</span>
+<span class="nc" id="L199">        }</span>
+<span class="nc" id="L200">    }</span>
+
+    fun markAllAsRead() {
+<span class="nc" id="L203">        viewModelScope.launch {</span>
+<span class="nc" id="L204">            val items =</span>
+<span class="nc" id="L205">                articleListUseCase.itemSnapshotList.items</span>
+<span class="nc" id="L206">                    .filterIsInstance&lt;ArticleFlowItem.Article&gt;()</span>
+<span class="nc" id="L207">                    .map { it.articleWithFeed }</span>
+
+<span class="nc" id="L209">            diffMapHolder.updateDiff(articleWithFeed = items.toTypedArray(), isUnread = false)</span>
+<span class="nc" id="L210">        }</span>
+<span class="nc" id="L211">    }</span>
+
+    fun sync() {
+<span class="nc" id="L214">        diffMapHolder.commitDiffsToDb()</span>
+<span class="nc" id="L215">        viewModelScope.launch {</span>
+<span class="nc" id="L216">            _isSyncingFlow.value = true</span>
+<span class="nc" id="L217">            val isSyncing = syncWorkerStatusFlow.value</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (!isSyncing) {</span>
+<span class="nc" id="L219">                delay(1000L)</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                if (syncWorkerStatusFlow.value == false) {</span>
+<span class="nc" id="L221">                    _isSyncingFlow.value = false</span>
+                }
+            }
+<span class="nc" id="L224">        }</span>
+<span class="nc" id="L225">        applicationScope.launch(ioDispatcher) {</span>
+<span class="nc" id="L226">            val filterState = filterStateUseCase.filterStateFlow.value</span>
+<span class="nc" id="L227">            val service = rssService.get()</span>
+<span class="nc" id="L228">            when (service) {</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                is LocalRssService -&gt;</span>
+<span class="nc" id="L230">                    service.doSyncOneTime(</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                        feedId = filterState.feed?.id,</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                        groupId = filterState.group?.id,</span>
+                    )
+
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                is GoogleReaderRssService -&gt;</span>
+<span class="nc" id="L236">                    service.doSyncOneTime(</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">                        feedId = filterState.feed?.id,</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                        groupId = filterState.group?.id,</span>
+                    )
+
+<span class="nc" id="L241">                else -&gt; service.doSyncOneTime()</span>
+            }
+<span class="nc" id="L243">        }</span>
+<span class="nc" id="L244">    }</span>
+
+    fun resetFilter() =
+<span class="nc" id="L247">        filterStateUseCase.updateFilterState(feed = null, group = null, searchContent = null)</span>
+
+    fun changeFilter(filterState: FilterState) {
+<span class="nc" id="L250">        filterStateUseCase.updateFilterState(</span>
+<span class="nc" id="L251">            filterState.feed,</span>
+<span class="nc" id="L252">            filterState.group,</span>
+<span class="nc" id="L253">            filterState.filter,</span>
+        )
+<span class="nc" id="L255">    }</span>
+
+<span class="nc" id="L257">    fun inputSearchContent(content: String? = null) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        if (content != filterStateUseCase.filterStateFlow.value.searchContent)</span>
+<span class="nc" id="L259">            filterStateUseCase.updateFilterState(searchContent = content)</span>
+<span class="nc" id="L260">    }</span>
+
+<span class="nc" id="L262">    private val _readingUiState = MutableStateFlow(ReadingUiState())</span>
+<span class="nc" id="L263">    val readingUiState: StateFlow&lt;ReadingUiState&gt; = _readingUiState.asStateFlow()</span>
+
+<span class="nc" id="L265">    private val _readerState: MutableStateFlow&lt;ReaderState&gt; = MutableStateFlow(ReaderState())</span>
+<span class="nc" id="L266">    val readerStateStateFlow = _readerState.asStateFlow()</span>
+
+    private val currentArticle: Article?
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        get() = readingUiState.value.articleWithFeed?.article</span>
+
+    private val currentFeed: Feed?
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        get() = readingUiState.value.articleWithFeed?.feed</span>
+
+<span class="nc" id="L274">    fun initData(articleId: String, listIndex: Int? = null) {</span>
+<span class="nc" id="L275">        viewModelScope.launch {</span>
+<span class="nc" id="L276">            val snapshotList = articleListUseCase.itemSnapshotList</span>
+
+<span class="nc" id="L278">            val itemByIndex =</span>
+<span class="nc bnc" id="L279" title="All 4 branches missed.">                listIndex?.let { snapshotList.getOrNull(it) as? ArticleFlowItem.Article }</span>
+
+<span class="nc" id="L281">            val itemFromList =</span>
+<span class="nc bnc" id="L282" title="All 4 branches missed.">                if (itemByIndex != null &amp;&amp; itemByIndex.articleWithFeed.article.id != articleId) {</span>
+<span class="nc" id="L283">                    itemByIndex</span>
+                } else {
+<span class="nc bnc" id="L285" title="All 6 branches missed.">                    snapshotList.find { item -&gt;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                        item is ArticleFlowItem.Article &amp;&amp;</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                            item.articleWithFeed.article.id == articleId</span>
+                    } as? ArticleFlowItem.Article
+                }
+
+<span class="nc" id="L291">            val item =</span>
+<span class="nc bnc" id="L292" title="All 4 branches missed.">                itemByIndex?.articleWithFeed</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">                    ?: (itemFromList?.articleWithFeed</span>
+<span class="nc" id="L294">                        ?: rssService.get().findArticleById(articleId)!!)</span>
+
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (diffMapHolder.checkIfUnread(item)) {</span>
+<span class="nc" id="L297">                diffMapHolder.updateDiff(item, isUnread = false)</span>
+            }
+<span class="nc" id="L299">            item.run {</span>
+<span class="nc" id="L300">                _readingUiState.update {</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">                    it.copy(articleWithFeed = this, isStarred = article.isStarred, isUnread = false)</span>
+                }
+<span class="nc" id="L303">                _readerState.update {</span>
+<span class="nc" id="L304">                    it.copy(</span>
+<span class="nc" id="L305">                            articleId = article.id,</span>
+<span class="nc" id="L306">                            feedName = feed.name,</span>
+<span class="nc" id="L307">                            title = article.title,</span>
+<span class="nc" id="L308">                            author = article.author,</span>
+<span class="nc" id="L309">                            link = article.link,</span>
+<span class="nc" id="L310">                            publishedDate = article.date,</span>
+                        )
+<span class="nc" id="L312">                        .prefetchArticleId()</span>
+<span class="nc" id="L313">                        .renderContent(this)</span>
+                }
+<span class="nc" id="L315">            }</span>
+<span class="nc" id="L316">        }</span>
+<span class="nc" id="L317">    }</span>
+
+    fun clearReadingData() {
+<span class="nc" id="L320">        _readingUiState.update { ReadingUiState() }</span>
+<span class="nc" id="L321">        _readerState.update { ReaderState() }</span>
+<span class="nc" id="L322">    }</span>
+
+<span class="nc" id="L324">    suspend fun ReaderState.renderContent(articleWithFeed: ArticleWithFeed): ReaderState {</span>
+<span class="nc" id="L325">        val contentState =</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            if (articleWithFeed.feed.isFullContent) {</span>
+<span class="nc" id="L327">                val fullContent =</span>
+<span class="nc bnc" id="L328" title="All 4 branches missed.">                    readerCacheHelper.readFullContent(articleWithFeed.article.id).getOrNull()</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                if (fullContent != null) ReaderState.FullContent(fullContent)</span>
+                else {
+<span class="nc" id="L331">                    renderFullContent()</span>
+<span class="nc" id="L332">                    ReaderState.Loading</span>
+                }
+<span class="nc" id="L334">            } else ReaderState.Description(articleWithFeed.article.rawDescription)</span>
+
+<span class="nc" id="L336">        return copy(content = contentState)</span>
+    }
+
+    fun renderDescriptionContent() {
+<span class="nc" id="L340">        _readerState.update {</span>
+<span class="nc" id="L341">            it.copy(</span>
+<span class="nc bnc" id="L342" title="All 4 branches missed.">                content = ReaderState.Description(content = currentArticle?.rawDescription ?: &quot;&quot;)</span>
+<span class="nc" id="L343">            )</span>
+        }
+<span class="nc" id="L345">    }</span>
+
+    fun renderFullContent() {
+<span class="nc" id="L348">        val fetchJob =</span>
+<span class="nc" id="L349">            viewModelScope.launch {</span>
+<span class="nc" id="L350">                readerCacheHelper</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                    .readOrFetchFullContent(currentArticle!!)</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                    .onSuccess { content -&gt;</span>
+<span class="nc" id="L353">                        _readerState.update {</span>
+<span class="nc" id="L354">                            it.copy(content = ReaderState.FullContent(content = content))</span>
+                        }
+<span class="nc" id="L356">                    }</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                    .onFailure { th -&gt;</span>
+<span class="nc" id="L358">                        _readerState.update {</span>
+<span class="nc" id="L359">                            it.copy(content = ReaderState.Error(th.message.toString()))</span>
+                        }
+<span class="nc" id="L361">                    }</span>
+<span class="nc" id="L362">            }</span>
+<span class="nc" id="L363">        viewModelScope.launch {</span>
+<span class="nc" id="L364">            delay(100L)</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if (fetchJob.isActive) {</span>
+<span class="nc" id="L366">                setLoading()</span>
+            }
+<span class="nc" id="L368">        }</span>
+<span class="nc" id="L369">    }</span>
+
+    fun updateReadStatus(isUnread: Boolean) {
+<span class="nc bnc" id="L372" title="All 2 branches missed.">        readingUiState.value.articleWithFeed?.let {</span>
+<span class="nc" id="L373">            diffMapHolder.updateDiff(it, isUnread = isUnread)</span>
+<span class="nc" id="L374">        }</span>
+<span class="nc" id="L375">        _readingUiState.update {</span>
+<span class="nc" id="L376">            it.copy(isUnread = diffMapHolder.checkIfUnread(it.articleWithFeed!!))</span>
+        }
+<span class="nc" id="L378">    }</span>
+
+    fun updateStarredStatus(isStarred: Boolean) {
+<span class="nc" id="L381">        applicationScope.launch(ioDispatcher) {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            _readingUiState.update { it.copy(isStarred = isStarred) }</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">            currentArticle?.let {</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                rssService.get().markAsStarred(articleId = it.id, isStarred = isStarred)</span>
+<span class="nc" id="L385">            }</span>
+<span class="nc" id="L386">        }</span>
+<span class="nc" id="L387">    }</span>
+
+    private fun setLoading() {
+<span class="nc" id="L390">        _readerState.update { it.copy(content = ReaderState.Loading) }</span>
+<span class="nc" id="L391">    }</span>
+
+    fun ReaderState.prefetchArticleId(): ReaderState {
+<span class="nc" id="L394">        val items = articleListUseCase.itemSnapshotList</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">        val currentId = currentArticle?.id</span>
+<span class="nc" id="L396">        val index =</span>
+<span class="nc" id="L397">            items.indexOfFirst { item -&gt;</span>
+<span class="nc bnc" id="L398" title="All 4 branches missed.">                item is ArticleFlowItem.Article &amp;&amp; item.articleWithFeed.article.id == currentId</span>
+            }
+<span class="nc" id="L400">        var previousArticle: ReaderState.PrefetchResult? = null</span>
+<span class="nc" id="L401">        var nextArticle: ReaderState.PrefetchResult? = null</span>
+
+<span class="nc bnc" id="L403" title="All 4 branches missed.">        if (index != -1 || currentId == null) {</span>
+<span class="nc" id="L404">            val prevIterator = items.listIterator(index)</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">            while (prevIterator.hasPrevious()) {</span>
+<span class="nc" id="L406">                val previousIndex = prevIterator.previousIndex()</span>
+<span class="nc" id="L407">                val prev = prevIterator.previous()</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                if (prev is ArticleFlowItem.Article) {</span>
+<span class="nc" id="L409">                    previousArticle =</span>
+<span class="nc" id="L410">                        ReaderState.PrefetchResult(</span>
+<span class="nc" id="L411">                            articleId = prev.articleWithFeed.article.id,</span>
+<span class="nc" id="L412">                            index = previousIndex,</span>
+                        )
+<span class="nc" id="L414">                    break</span>
+                }
+            }
+<span class="nc" id="L417">            val nextIterator = items.listIterator(index + 1)</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            while (nextIterator.hasNext()) {</span>
+<span class="nc" id="L419">                val nextIndex = nextIterator.nextIndex()</span>
+<span class="nc" id="L420">                val next = nextIterator.next()</span>
+                if (
+<span class="nc bnc" id="L422" title="All 4 branches missed.">                    next is ArticleFlowItem.Article &amp;&amp; next.articleWithFeed.article.id != currentId</span>
+                ) {
+<span class="nc" id="L424">                    nextArticle =</span>
+<span class="nc" id="L425">                        ReaderState.PrefetchResult(</span>
+<span class="nc" id="L426">                            articleId = next.articleWithFeed.article.id,</span>
+<span class="nc" id="L427">                            index = nextIndex,</span>
+                        )
+<span class="nc" id="L429">                    break</span>
+                }
+            }
+        }
+
+<span class="nc" id="L434">        Timber.d(&quot;$previousArticle, $nextArticle, $listIndex&quot;)</span>
+<span class="nc" id="L435">        return copy(nextArticle = nextArticle, previousArticle = previousArticle, listIndex = index)</span>
+    }
+
+<span class="nc" id="L438">    fun downloadImage(</span>
+        url: String,
+<span class="nc" id="L440">        onSuccess: (Uri) -&gt; Unit = {},</span>
+<span class="nc" id="L441">        onFailure: (Throwable) -&gt; Unit = {},</span>
+    ) {
+<span class="nc" id="L443">        viewModelScope.launch {</span>
+<span class="nc bnc" id="L444" title="All 6 branches missed.">            imageDownloader.downloadImage(url).onSuccess(onSuccess).onFailure(onFailure)</span>
+<span class="nc" id="L445">        }</span>
+<span class="nc" id="L446">    }</span>
+}
+
+<span class="nc" id="L449">data class FlowUiState(val pagerData: PagerData, val nextFilterState: FilterState? = null)</span>
+
+<span class="nc" id="L451">data class ReadingUiState(</span>
+<span class="nc" id="L452">    val articleWithFeed: ArticleWithFeed? = null,</span>
+<span class="nc" id="L453">    val isUnread: Boolean = false,</span>
+<span class="nc" id="L454">    val isStarred: Boolean = false,</span>
+<span class="nc" id="L455">)</span>
+
+<span class="nc" id="L457">data class ReaderState(</span>
+<span class="nc" id="L458">    val articleId: String? = null,</span>
+<span class="nc" id="L459">    val feedName: String = &quot;&quot;,</span>
+<span class="nc" id="L460">    val title: String? = null,</span>
+<span class="nc" id="L461">    val author: String? = null,</span>
+<span class="nc" id="L462">    val link: String? = null,</span>
+<span class="nc" id="L463">    val publishedDate: Date = Date(0L),</span>
+<span class="nc" id="L464">    val content: ContentState = Loading,</span>
+<span class="nc" id="L465">    val listIndex: Int? = null,</span>
+<span class="nc" id="L466">    val nextArticle: PrefetchResult? = null,</span>
+<span class="nc" id="L467">    val previousArticle: PrefetchResult? = null,</span>
+<span class="nc" id="L468">) {</span>
+<span class="nc" id="L469">    data class PrefetchResult(val articleId: String, val index: Int)</span>
+
+    sealed interface ContentState {
+        val text: String?
+<span class="nc" id="L473">            get() {</span>
+<span class="nc" id="L474">                return when (this) {</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                    is Description -&gt; content</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">                    is Error -&gt; message</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                    is FullContent -&gt; content</span>
+<span class="nc" id="L478">                    Loading -&gt; null</span>
+                }
+<span class="nc" id="L480">            }</span>
+    }
+
+<span class="nc" id="L483">    data class FullContent(val content: String) : ContentState</span>
+
+<span class="nc" id="L485">    data class Description(val content: String) : ContentState</span>
+
+<span class="nc" id="L487">    data class Error(val message: String) : ContentState</span>
+
+<span class="nc" id="L489">    data object Loading : ContentState</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

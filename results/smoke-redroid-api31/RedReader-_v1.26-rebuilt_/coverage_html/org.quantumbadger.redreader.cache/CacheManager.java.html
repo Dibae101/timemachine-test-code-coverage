@@ -1,0 +1,755 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CacheManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE RedReader</a> &gt; <a href="index.source.html" class="el_package">org.quantumbadger.redreader.cache</a> &gt; <span class="el_source">CacheManager.java</span></div><h1>CacheManager.java</h1><pre class="source lang-java linenums">/*******************************************************************************
+ * This file is part of RedReader.
+ *
+ * RedReader is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * RedReader is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with RedReader.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ ******************************************************************************/
+
+package org.quantumbadger.redreader.cache;
+
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.net.Uri;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.github.luben.zstd.Zstd;
+import com.github.luben.zstd.ZstdInputStream;
+
+import org.quantumbadger.redreader.account.RedditAccount;
+import org.quantumbadger.redreader.activities.BugReportActivity;
+import org.quantumbadger.redreader.common.FileUtils;
+import org.quantumbadger.redreader.common.General;
+import org.quantumbadger.redreader.common.GenericFactory;
+import org.quantumbadger.redreader.common.Optional;
+import org.quantumbadger.redreader.common.PrefsUtility;
+import org.quantumbadger.redreader.common.PrioritisedCachedThreadPool;
+import org.quantumbadger.redreader.common.Priority;
+import org.quantumbadger.redreader.common.UriString;
+import org.quantumbadger.redreader.common.datastream.MemoryDataStream;
+import org.quantumbadger.redreader.common.datastream.SeekableFileInputStream;
+import org.quantumbadger.redreader.common.datastream.SeekableInputStream;
+import org.quantumbadger.redreader.common.time.TimeDuration;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public final class CacheManager {
+
+	private static final String TAG = &quot;CacheManager&quot;;
+
+	private static final String ext = &quot;.rr_cache_data&quot;;
+	private static final String tempExt = &quot;.rr_cache_data_tmp&quot;;
+
+<span class="fc" id="L70">	private static final AtomicBoolean isAlreadyInitialized = new AtomicBoolean(false);</span>
+	private final CacheDbManager dbManager;
+
+<span class="fc" id="L73">	private final PriorityBlockingQueue&lt;CacheRequest&gt; requests</span>
+			= new PriorityBlockingQueue&lt;&gt;();
+
+	private final PrioritisedDownloadQueue downloadQueue;
+<span class="fc" id="L77">	private final PrioritisedCachedThreadPool mDiskCacheThreadPool</span>
+			= new PrioritisedCachedThreadPool(2, &quot;Disk Cache&quot;);
+
+	private final Context context;
+
+	@SuppressLint(&quot;StaticFieldLeak&quot;) private static CacheManager singleton;
+
+	public static synchronized CacheManager getInstance(@NonNull final Context context) {
+<span class="fc bfc" id="L85" title="All 2 branches covered.">		if(singleton == null) {</span>
+<span class="fc" id="L86">			singleton = new CacheManager(context.getApplicationContext());</span>
+		}
+<span class="fc" id="L88">		return singleton;</span>
+	}
+
+<span class="fc" id="L91">	private CacheManager(final Context context) {</span>
+
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">		if(!isAlreadyInitialized.compareAndSet(false, true)) {</span>
+<span class="nc" id="L94">			throw new RuntimeException(&quot;Attempt to initialize the cache twice.&quot;);</span>
+		}
+
+<span class="fc" id="L97">		this.context = context;</span>
+
+<span class="fc" id="L99">		dbManager = new CacheDbManager(context);</span>
+
+<span class="fc" id="L101">		downloadQueue = new PrioritisedDownloadQueue(context);</span>
+
+<span class="fc" id="L103">		final RequestHandlerThread requestHandler = new RequestHandlerThread();</span>
+<span class="fc" id="L104">		requestHandler.start();</span>
+<span class="fc" id="L105">	}</span>
+
+	@Nullable
+	private Long isCacheFile(@NonNull final File file) {
+
+<span class="nc" id="L110">		final String name = file.getName();</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">		if(!name.endsWith(ext)) {</span>
+<span class="nc" id="L113">			return null;</span>
+		}
+
+<span class="nc" id="L116">		final String[] nameSplit = name.split(&quot;\\.&quot;);</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">		if(nameSplit.length != 2) {</span>
+<span class="nc" id="L118">			return null;</span>
+		}
+
+		try {
+<span class="nc" id="L122">			return Long.parseLong(nameSplit[0]);</span>
+<span class="nc" id="L123">		} catch(final Exception e) {</span>
+<span class="nc" id="L124">			return null;</span>
+		}
+	}
+
+	private void getCacheFileList(final File dir, final HashSet&lt;Long&gt; currentFiles) {
+
+<span class="fc" id="L130">		final File[] list = dir.listFiles();</span>
+<span class="pc bpc" id="L131" title="1 of 2 branches missed.">		if(list == null) {</span>
+<span class="nc" id="L132">			return;</span>
+		}
+
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">		for(final File file : list) {</span>
+
+<span class="nc bnc" id="L137" title="All 2 branches missed.">			if(file.isDirectory()) {</span>
+<span class="nc" id="L138">				getCacheFileList(file, currentFiles);</span>
+
+			} else {
+<span class="nc" id="L141">				final Long cacheFileId = isCacheFile(file);</span>
+
+<span class="nc bnc" id="L143" title="All 2 branches missed.">				if(cacheFileId != null) {</span>
+<span class="nc" id="L144">					currentFiles.add(cacheFileId);</span>
+				}
+			}
+		}
+<span class="fc" id="L148">	}</span>
+
+	private static void pruneTemp(final File dir) {
+
+<span class="fc" id="L152">		final String[] list = dir.list();</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">		if(list == null) {</span>
+<span class="nc" id="L154">			return;</span>
+		}
+
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">		for(final String file : list) {</span>
+
+<span class="nc bnc" id="L159" title="All 2 branches missed.">			if(file.endsWith(tempExt)) {</span>
+<span class="nc" id="L160">				new File(dir, file).delete();</span>
+			}
+		}
+<span class="fc" id="L163">	}</span>
+
+	@NonNull
+	public static ArrayList&lt;File&gt; getCacheDirs(final Context context) {
+
+<span class="fc" id="L168">		final ArrayList&lt;File&gt; dirs = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L170">		dirs.add(context.getCacheDir());</span>
+
+<span class="fc bfc" id="L172" title="All 2 branches covered.">		for(final File dir : context.getExternalCacheDirs()) {</span>
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">			if(dir != null) {</span>
+<span class="fc" id="L174">				dirs.add(dir);</span>
+			}
+		}
+
+<span class="fc" id="L178">		return dirs;</span>
+	}
+
+	public void pruneTemp() {
+<span class="fc" id="L182">		final List&lt;File&gt; dirs = getCacheDirs(context);</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		for(final File dir : dirs) {</span>
+<span class="fc" id="L184">			pruneTemp(dir);</span>
+<span class="fc" id="L185">		}</span>
+<span class="fc" id="L186">	}</span>
+
+	public synchronized void pruneCache() {
+<span class="fc" id="L189">		pruneCache(PrefsUtility.pref_cache_maxage());</span>
+<span class="fc" id="L190">	}</span>
+
+	public synchronized void pruneCache(
+			final boolean clearListings,
+			final boolean clearThumbnails,
+			final boolean clearImages) {
+
+<span class="nc bnc" id="L197" title="All 6 branches missed.">		if(!clearListings &amp;&amp; !clearThumbnails &amp;&amp; !clearImages) {</span>
+<span class="nc" id="L198">			return;</span>
+		}
+
+		/*Use a maximum age of 0 to clear everything* in that category.
+		Otherwise, use a high number as the maximum age to ensure that nothing is deleted.
+
+		*May not clear everything if system time shenanigans have occurred.*/
+
+<span class="nc" id="L206">		final TimeDuration clearEverything = TimeDuration.secs(0);</span>
+<span class="nc" id="L207">		final TimeDuration clearNothing = TimeDuration.days(365 * 10);</span>
+
+<span class="nc" id="L209">		pruneCache(PrefsUtility.createFileTypeMap(</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">				clearListings ? clearEverything : clearNothing,</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">				clearThumbnails ? clearEverything : clearNothing,</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">				clearImages ? clearEverything : clearNothing</span>
+		));
+<span class="nc" id="L214">	}</span>
+
+	public synchronized void pruneCache(final HashMap&lt;Integer, TimeDuration&gt; maxAge) {
+
+		try {
+
+<span class="fc" id="L220">			final HashSet&lt;Long&gt; currentFiles = new HashSet&lt;&gt;(1024);</span>
+
+<span class="fc" id="L222">			final List&lt;File&gt; dirs = getCacheDirs(context);</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">			for(final File dir : dirs) {</span>
+<span class="fc" id="L224">				getCacheFileList(dir, currentFiles);</span>
+<span class="fc" id="L225">			}</span>
+
+<span class="fc" id="L227">			final ArrayList&lt;Long&gt; filesToDelete = dbManager.getFilesToPrune(</span>
+					currentFiles,
+					maxAge,
+<span class="fc" id="L230">					TimeDuration.hours(72));</span>
+
+<span class="fc" id="L232">			Log.i(&quot;CacheManager&quot;, &quot;Pruning &quot; + filesToDelete.size() + &quot; files&quot;);</span>
+
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">			for(final long id : filesToDelete) {</span>
+<span class="nc" id="L235">				final File file = getExistingCacheFile(id);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">				if(file != null) {</span>
+<span class="nc" id="L237">					file.delete();</span>
+				}
+<span class="nc" id="L239">			}</span>
+
+<span class="nc" id="L241">		} catch(final Throwable t) {</span>
+<span class="nc" id="L242">			BugReportActivity.handleGlobalError(context, t);</span>
+<span class="fc" id="L243">		}</span>
+
+<span class="fc" id="L245">	}</span>
+
+	public synchronized void emptyTheWholeCache() {
+<span class="nc" id="L248">		dbManager.emptyTheWholeCache();</span>
+<span class="nc" id="L249">	}</span>
+
+	public synchronized HashMap&lt;Integer, Long&gt; getCacheDataUsages() {
+<span class="nc" id="L252">		final HashMap&lt;Integer, Long&gt; dataUsagePerType = PrefsUtility.createFileTypeMap(0L, 0L, 0L);</span>
+
+		try {
+<span class="nc" id="L255">			final HashSet&lt;Long&gt; currentFiles = new HashSet&lt;&gt;(128);</span>
+
+<span class="nc" id="L257">			final List&lt;File&gt; dirs = getCacheDirs(context);</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">			for(final File dir : dirs) {</span>
+<span class="nc" id="L259">				getCacheFileList(dir, currentFiles);</span>
+<span class="nc" id="L260">			}</span>
+
+<span class="nc" id="L262">			final HashMap&lt;Long, Integer&gt; filesToCheckWithTypes = dbManager.getFilesToSize();</span>
+
+<span class="nc bnc" id="L264" title="All 2 branches missed.">			for(final HashMap.Entry&lt;Long, Integer&gt; fileEntry : filesToCheckWithTypes.entrySet()) {</span>
+<span class="nc" id="L265">				final long id = fileEntry.getKey();</span>
+<span class="nc" id="L266">				final int type = fileEntry.getValue();</span>
+
+<span class="nc" id="L268">				final File file = getExistingCacheFile(id);</span>
+<span class="nc bnc" id="L269" title="All 4 branches missed.">				if(file != null &amp;&amp; dataUsagePerType.containsKey(type)) {</span>
+<span class="nc" id="L270">					dataUsagePerType.put(</span>
+<span class="nc" id="L271">							type,</span>
+<span class="nc" id="L272">							Objects.requireNonNull(dataUsagePerType.get(type)) + file.length());</span>
+				}
+<span class="nc" id="L274">			}</span>
+
+<span class="nc" id="L276">		} catch(final Throwable t) {</span>
+<span class="nc" id="L277">			BugReportActivity.handleGlobalError(context, t);</span>
+<span class="nc" id="L278">		}</span>
+
+<span class="nc" id="L280">		return dataUsagePerType;</span>
+	}
+
+	public void makeRequest(@NonNull final CacheRequest request) {
+<span class="fc" id="L284">		requests.put(request);</span>
+<span class="fc" id="L285">	}</span>
+
+	public List&lt;CacheEntry&gt; getSessions(final UriString url, final RedditAccount user) {
+<span class="nc" id="L288">		return dbManager.select(url, user.username, null);</span>
+	}
+
+	public File getPreferredCacheLocation() {
+<span class="nc" id="L292">		return new File(</span>
+<span class="nc" id="L293">				PrefsUtility.pref_cache_location(context));</span>
+	}
+
+	@NonNull
+	public ReadableCacheFile getExistingCacheFileById(
+			final long cacheId,
+			@NonNull final CacheCompressionType cacheCompressionType) {
+<span class="nc" id="L300">		return new ReadableCacheFile(cacheId, cacheCompressionType);</span>
+	}
+
+	public class WritableCacheFile {
+
+		private final OutputStream mOutStream;
+<span class="nc" id="L306">		private ReadableCacheFile readableCacheFile = null;</span>
+		@NonNull final UriString mUrl;
+		@NonNull final RedditAccount mUser;
+		final int mFileType;
+		private final File location;
+<span class="nc" id="L311">		private boolean mWriteExternally = false;</span>
+
+		@NonNull private final UUID mSession;
+		@Nullable private final String mMimetype;
+
+		@NonNull private final CacheCompressionType mCacheCompressionType;
+		@NonNull private final File mTmpFile;
+
+<span class="nc" id="L319">		private long mUncompressedLength = 0;</span>
+<span class="nc" id="L320">		private long mCompressedLength = 0;</span>
+
+		private WritableCacheFile(
+				@NonNull final UriString url,
+				@NonNull final RedditAccount user,
+				final int fileType,
+				@NonNull final UUID session,
+				@Nullable final String mimetype,
+<span class="nc" id="L328">				@NonNull final CacheCompressionType cacheCompressionType) throws IOException {</span>
+
+<span class="nc" id="L330">			mUrl = url;</span>
+<span class="nc" id="L331">			mUser = user;</span>
+<span class="nc" id="L332">			mFileType = fileType;</span>
+<span class="nc" id="L333">			mSession = session;</span>
+<span class="nc" id="L334">			mMimetype = mimetype;</span>
+<span class="nc" id="L335">			mCacheCompressionType = cacheCompressionType;</span>
+
+<span class="nc" id="L337">			location = getPreferredCacheLocation();</span>
+<span class="nc" id="L338">			mTmpFile = new File(location, UUID.randomUUID().toString() + tempExt);</span>
+
+<span class="nc" id="L340">			mOutStream = new FileOutputStream(mTmpFile);</span>
+<span class="nc" id="L341">		}</span>
+
+		@NonNull
+		public ReadableCacheFile getReadableCacheFile() {
+<span class="nc" id="L345">			return Objects.requireNonNull(readableCacheFile);</span>
+		}
+
+		public void writeWholeFile(
+				final byte[] buf,
+				final int offset,
+				final int length) throws IOException {
+
+<span class="nc bnc" id="L353" title="All 2 branches missed.">			if(mCacheCompressionType == CacheCompressionType.NONE) {</span>
+<span class="nc" id="L354">				mOutStream.write(buf, offset, length);</span>
+<span class="nc" id="L355">				mCompressedLength += length;</span>
+
+<span class="nc bnc" id="L357" title="All 2 branches missed.">			} else if(mCacheCompressionType == CacheCompressionType.ZSTD) {</span>
+
+<span class="nc" id="L359">				final long maxDestSize = Zstd.compressBound(length);</span>
+
+<span class="nc bnc" id="L361" title="All 2 branches missed.">				if(maxDestSize &gt; Integer.MAX_VALUE) {</span>
+<span class="nc" id="L362">					throw new IOException(&quot;Max output size is greater than MAX_INT&quot;);</span>
+				}
+
+<span class="nc" id="L365">				final byte[] dst = new byte[(int)maxDestSize];</span>
+
+<span class="nc" id="L367">				final int size = (int)Zstd.compressByteArray(</span>
+						dst,
+						0,
+						dst.length,
+						buf,
+						offset,
+						length,
+						3);
+
+<span class="nc" id="L376">				mOutStream.write(dst, 0, size);</span>
+
+<span class="nc" id="L378">				mCompressedLength += size;</span>
+			}
+
+<span class="nc" id="L381">			mUncompressedLength += length;</span>
+<span class="nc" id="L382">		}</span>
+
+		public void onWriteFinished() throws IOException {
+
+<span class="nc bnc" id="L386" title="All 2 branches missed.">			if(mWriteExternally) {</span>
+<span class="nc" id="L387">				mCompressedLength = mTmpFile.length();</span>
+<span class="nc" id="L388">				mUncompressedLength = mCompressedLength;</span>
+
+			} else {
+<span class="nc" id="L391">				mOutStream.flush();</span>
+<span class="nc" id="L392">				mOutStream.close();</span>
+			}
+
+<span class="nc" id="L395">			final long cacheFileId = dbManager.newEntry(</span>
+					mUrl,
+					mUser,
+					mFileType,
+					mSession,
+					mMimetype,
+					mCacheCompressionType,
+					mCompressedLength,
+					mUncompressedLength);
+
+<span class="nc" id="L405">			final File subdir = getSubdirForCacheFile(location, cacheFileId);</span>
+<span class="nc" id="L406">			FileUtils.mkdirs(subdir);</span>
+
+<span class="nc" id="L408">			final File dstFile = new File(subdir, cacheFileId + ext);</span>
+<span class="nc" id="L409">			FileUtils.moveFile(mTmpFile, dstFile);</span>
+
+<span class="nc" id="L411">			dbManager.setEntryDone(cacheFileId);</span>
+
+<span class="nc" id="L413">			readableCacheFile = new ReadableCacheFile(cacheFileId, mCacheCompressionType);</span>
+<span class="nc" id="L414">		}</span>
+
+		public File writeExternally() throws IOException {
+<span class="nc" id="L417">			mWriteExternally = true;</span>
+<span class="nc" id="L418">			mOutStream.close();</span>
+<span class="nc" id="L419">			return mTmpFile;</span>
+		}
+
+		public void onWriteCancelled() {
+
+			try {
+<span class="nc" id="L425">				mOutStream.close();</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">				if(!mTmpFile.delete()) {</span>
+<span class="nc" id="L427">					Log.e(TAG, &quot;Failed to delete temp cache file &quot; + mTmpFile.delete());</span>
+				}
+
+<span class="nc" id="L430">			} catch(final Exception e) {</span>
+<span class="nc" id="L431">				Log.e(TAG, &quot;Exception during cancel&quot;, e);</span>
+<span class="nc" id="L432">			}</span>
+<span class="nc" id="L433">		}</span>
+	}
+
+	@NonNull
+	private static File getSubdirForCacheFile(
+			@NonNull final File cacheRoot,
+			final long cacheFileId) {
+
+
+<span class="nc" id="L442">		return FileUtils.buildPath(</span>
+				cacheRoot,
+				&quot;rr_cache_files&quot;,
+<span class="nc" id="L445">				String.format(Locale.US, &quot;%02d&quot;, cacheFileId % 100),</span>
+<span class="nc" id="L446">				String.format(Locale.US, &quot;%d&quot;, (cacheFileId / 100) % 10));</span>
+	}
+
+	public class ReadableCacheFile {
+
+		private final long mId;
+		@NonNull private final CacheCompressionType mCacheCompressionType;
+
+		@Nullable private Uri mCachedUri;
+
+		private ReadableCacheFile(
+				final long id,
+<span class="nc" id="L458">				@NonNull final CacheCompressionType cacheCompressionType) {</span>
+
+<span class="nc" id="L460">			mId = id;</span>
+<span class="nc" id="L461">			mCacheCompressionType = cacheCompressionType;</span>
+<span class="nc" id="L462">		}</span>
+
+		public long getId() {
+<span class="nc" id="L465">			return mId;</span>
+		}
+
+		@NonNull
+		public InputStream getInputStream() throws IOException {
+
+<span class="nc" id="L471">			final InputStream result = getCacheFileInputStream(mId, mCacheCompressionType);</span>
+
+<span class="nc bnc" id="L473" title="All 2 branches missed.">			if(result == null) {</span>
+<span class="nc" id="L474">				throw new FileNotFoundException(&quot;Stream was null for id &quot; + mId);</span>
+			}
+
+<span class="nc" id="L477">			return result;</span>
+		}
+
+		@Nullable
+		public Uri getUri() {
+
+<span class="nc bnc" id="L483" title="All 2 branches missed.">			if(mCachedUri == null) {</span>
+<span class="nc" id="L484">				mCachedUri = getCacheFileUri(mId);</span>
+			}
+
+<span class="nc" id="L487">			return mCachedUri;</span>
+		}
+
+		@NonNull
+		public Optional&lt;File&gt; getFile() {
+<span class="nc" id="L492">			return Optional.ofNullable(getExistingCacheFile(mId));</span>
+		}
+
+		@NonNull
+		public Optional&lt;String&gt; lookupMimetype() {
+
+<span class="nc" id="L498">			final Optional&lt;CacheEntry&gt; result = dbManager.selectById(mId);</span>
+
+<span class="nc bnc" id="L500" title="All 2 branches missed.">			if(result.isPresent()) {</span>
+<span class="nc" id="L501">				return Optional.of(result.get().mimetype);</span>
+
+			} else {
+<span class="nc" id="L504">				return Optional.empty();</span>
+			}
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L510">			return String.format(Locale.US, &quot;[ReadableCacheFile : id %d]&quot;, mId);</span>
+		}
+	}
+
+	@NonNull
+	public WritableCacheFile openNewCacheFile(
+			@NonNull final UriString url,
+			@NonNull final RedditAccount user,
+			final int fileType,
+			final UUID session,
+			final String mimetype,
+			@NonNull final CacheCompressionType cacheCompressionType) throws IOException {
+<span class="nc" id="L522">		return new WritableCacheFile(url, user, fileType, session, mimetype, cacheCompressionType);</span>
+	}
+
+	@Nullable
+	private File getExistingCacheFile(final long id) {
+
+<span class="nc" id="L528">		final List&lt;File&gt; dirs = getCacheDirs(context);</span>
+
+		// Try new format first
+<span class="nc bnc" id="L531" title="All 2 branches missed.">		for(final File dir : dirs) {</span>
+<span class="nc" id="L532">			final File f = new File(getSubdirForCacheFile(dir, id), id + ext);</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">			if(f.exists()) {</span>
+<span class="nc" id="L534">				return f;</span>
+			}
+<span class="nc" id="L536">		}</span>
+
+<span class="nc bnc" id="L538" title="All 2 branches missed.">		for(final File dir : dirs) {</span>
+<span class="nc" id="L539">			final File f = new File(dir, id + ext);</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">			if(f.exists()) {</span>
+<span class="nc" id="L541">				return f;</span>
+			}
+<span class="nc" id="L543">		}</span>
+
+<span class="nc" id="L545">		return null;</span>
+	}
+
+	@Nullable
+	private SeekableInputStream getCacheFileInputStream(
+			final long id,
+			@NonNull final CacheCompressionType cacheCompressionType) throws IOException {
+
+<span class="nc" id="L553">		final File cacheFile = getExistingCacheFile(id);</span>
+
+<span class="nc bnc" id="L555" title="All 2 branches missed.">		if(cacheFile == null) {</span>
+<span class="nc" id="L556">			return null;</span>
+		}
+
+<span class="nc bnc" id="L559" title="All 2 branches missed.">		if(cacheCompressionType == CacheCompressionType.NONE) {</span>
+<span class="nc" id="L560">			return new SeekableFileInputStream(cacheFile);</span>
+
+<span class="nc bnc" id="L562" title="All 2 branches missed.">		} else if(cacheCompressionType == CacheCompressionType.ZSTD) {</span>
+
+<span class="nc" id="L564">			try(InputStream is = new ZstdInputStream(new FileInputStream(cacheFile))) {</span>
+<span class="nc" id="L565">				return new MemoryDataStream(General.readWholeStream(is)).getInputStream();</span>
+			}
+
+		} else {
+<span class="nc" id="L569">			throw new RuntimeException(&quot;Unhandled compression type &quot; + cacheCompressionType);</span>
+		}
+	}
+
+	@Nullable
+	private Uri getCacheFileUri(final long id) {
+
+<span class="nc" id="L576">		final File cacheFile = getExistingCacheFile(id);</span>
+
+<span class="nc bnc" id="L578" title="All 2 branches missed.">		if(cacheFile == null) {</span>
+<span class="nc" id="L579">			return null;</span>
+		}
+
+<span class="nc" id="L582">		return Uri.fromFile(cacheFile);</span>
+	}
+
+	private class RequestHandlerThread extends Thread {
+
+<span class="fc" id="L587">		public RequestHandlerThread() {</span>
+<span class="fc" id="L588">			super(&quot;Request Handler Thread&quot;);</span>
+<span class="fc" id="L589">		}</span>
+
+		@Override
+		public void run() {
+
+			try {
+
+				CacheRequest request;
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">				while((request = requests.take()) != null) {</span>
+<span class="fc" id="L598">					handleRequest(request);</span>
+				}
+
+<span class="nc" id="L601">			} catch(final InterruptedException e) {</span>
+<span class="nc" id="L602">				throw new RuntimeException(e);</span>
+<span class="nc" id="L603">			}</span>
+<span class="nc" id="L604">		}</span>
+
+		private void handleRequest(final CacheRequest request) {
+
+<span class="pc bpc" id="L608" title="1 of 2 branches missed.">			if(request.url == null) {</span>
+<span class="nc" id="L609">				request.notifyFailure(General.getGeneralErrorForFailure(</span>
+						context,
+						CacheRequest.RequestFailureType.MALFORMED_URL,
+						new NullPointerException(&quot;URL was null&quot;),
+						null,
+						null,
+<span class="nc" id="L615">						Optional.empty()));</span>
+<span class="nc" id="L616">				return;</span>
+			}
+
+<span class="pc bpc" id="L619" title="1 of 2 branches missed.">			if(request.downloadStrategy.shouldDownloadWithoutCheckingCache()) {</span>
+<span class="fc" id="L620">				queueDownload(request);</span>
+
+			} else {
+
+<span class="nc" id="L624">				final List&lt;CacheEntry&gt; result = dbManager.select(</span>
+						request.url,
+						request.user.username,
+						request.requestSession);
+
+<span class="nc bnc" id="L629" title="All 2 branches missed.">				if(result.isEmpty()) {</span>
+
+<span class="nc bnc" id="L631" title="All 2 branches missed.">					if(request.downloadStrategy.shouldDownloadIfNotCached()) {</span>
+<span class="nc" id="L632">						queueDownload(request);</span>
+
+					} else {
+<span class="nc" id="L635">						request.notifyFailure(General.getGeneralErrorForFailure(</span>
+								context,
+								CacheRequest.RequestFailureType.CACHE_MISS,
+								null,
+								null,
+								request.url,
+<span class="nc" id="L641">								Optional.empty()));</span>
+					}
+
+				} else {
+
+<span class="nc" id="L646">					final CacheEntry entry = mostRecentFromList(result);</span>
+
+<span class="nc bnc" id="L648" title="All 2 branches missed.">					if(request.downloadStrategy.shouldDownloadIfCacheEntryFound(entry)) {</span>
+<span class="nc" id="L649">						queueDownload(request);</span>
+					} else {
+<span class="nc" id="L651">						handleCacheEntryFound(entry, request);</span>
+					}
+				}
+			}
+<span class="fc" id="L655">		}</span>
+
+		private CacheEntry mostRecentFromList(final List&lt;CacheEntry&gt; list) {
+
+<span class="nc" id="L659">			CacheEntry entry = null;</span>
+
+<span class="nc bnc" id="L661" title="All 2 branches missed.">			for(final CacheEntry e : list) {</span>
+<span class="nc bnc" id="L662" title="All 4 branches missed.">				if(entry == null || entry.timestamp.isLessThan(e.timestamp)) {</span>
+<span class="nc" id="L663">					entry = e;</span>
+				}
+<span class="nc" id="L665">			}</span>
+
+<span class="nc" id="L667">			return entry;</span>
+		}
+
+		private void queueDownload(final CacheRequest request) {
+<span class="fc" id="L671">			request.notifyDownloadNecessary();</span>
+
+			try {
+<span class="fc" id="L674">				downloadQueue.add(request, CacheManager.this);</span>
+<span class="nc" id="L675">			} catch(final Exception e) {</span>
+<span class="nc" id="L676">				request.notifyFailure(General.getGeneralErrorForFailure(</span>
+						context,
+						CacheRequest.RequestFailureType.MALFORMED_URL,
+						e,
+						null,
+						request.url,
+<span class="nc" id="L682">						Optional.empty()));</span>
+<span class="fc" id="L683">			}</span>
+<span class="fc" id="L684">		}</span>
+
+		private void handleCacheEntryFound(
+				final CacheEntry entry,
+				final CacheRequest request) {
+
+<span class="nc" id="L690">			final File cacheFile = getExistingCacheFile(entry.id);</span>
+
+<span class="nc bnc" id="L692" title="All 2 branches missed.">			if(cacheFile == null) {</span>
+
+<span class="nc" id="L694">				request.notifyFailure(General.getGeneralErrorForFailure(</span>
+						context,
+						CacheRequest.RequestFailureType.STORAGE,
+						new RuntimeException(),
+						null,
+						request.url,
+<span class="nc" id="L700">						Optional.empty()));</span>
+
+<span class="nc" id="L702">				dbManager.delete(entry.id);</span>
+
+<span class="nc" id="L704">				return;</span>
+			}
+
+<span class="nc" id="L707">			mDiskCacheThreadPool.add(new PrioritisedCachedThreadPool.Task() {</span>
+
+				@NonNull
+				@Override
+				public Priority getPriority() {
+<span class="nc" id="L712">					return request.priority;</span>
+				}
+
+				@Override
+				public void run() {
+
+<span class="nc" id="L718">					final GenericFactory&lt;SeekableInputStream, IOException&gt; streamFactory = () -&gt; {</span>
+<span class="nc" id="L719">						final SeekableInputStream stream</span>
+<span class="nc" id="L720">								= getCacheFileInputStream(entry.id, entry.cacheCompressionType);</span>
+
+<span class="nc bnc" id="L722" title="All 2 branches missed.">						if(stream == null) {</span>
+<span class="nc" id="L723">							dbManager.delete(entry.id);</span>
+<span class="nc" id="L724">							throw new IOException(&quot;Failed to open file&quot;);</span>
+						}
+
+<span class="nc" id="L727">						return stream;</span>
+					};
+
+<span class="nc" id="L730">					request.notifyDataStreamAvailable(</span>
+							streamFactory,
+							entry.timestamp,
+							entry.session,
+							true,
+							entry.mimetype);
+
+<span class="nc" id="L737">					request.notifyDataStreamComplete(</span>
+							streamFactory,
+							entry.timestamp,
+							entry.session,
+							true,
+							entry.mimetype);
+
+<span class="nc" id="L744">					request.notifyCacheFileWritten(</span>
+							new ReadableCacheFile(entry.id, entry.cacheCompressionType),
+							entry.timestamp,
+							entry.session,
+							true,
+							entry.mimetype);
+<span class="nc" id="L750">				}</span>
+			});
+<span class="nc" id="L752">		}</span>
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,518 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransformationUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE FirefoxLite</a> &gt; <a href="index.source.html" class="el_package">com.bumptech.glide.load.resource.bitmap</a> &gt; <span class="el_source">TransformationUtils.java</span></div><h1>TransformationUtils.java</h1><pre class="source lang-java linenums">package com.bumptech.glide.load.resource.bitmap;
+
+import android.graphics.Bitmap;
+import android.graphics.BitmapShader;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.media.ExifInterface;
+import android.os.Build;
+import androidx.annotation.NonNull;
+import android.util.Log;
+import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool;
+import com.bumptech.glide.util.Preconditions;
+import com.bumptech.glide.util.Synthetic;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+/**
+ * A class with methods to efficiently resize Bitmaps.
+ */
+public final class TransformationUtils {
+  private static final String TAG = &quot;TransformationUtils&quot;;
+  public static final int PAINT_FLAGS = Paint.DITHER_FLAG | Paint.FILTER_BITMAP_FLAG;
+<span class="nc" id="L33">  private static final Paint DEFAULT_PAINT = new Paint(PAINT_FLAGS);</span>
+  private static final int CIRCLE_CROP_PAINT_FLAGS = PAINT_FLAGS | Paint.ANTI_ALIAS_FLAG;
+<span class="nc" id="L35">  private static final Paint CIRCLE_CROP_SHAPE_PAINT = new Paint(CIRCLE_CROP_PAINT_FLAGS);</span>
+  private static final Paint CIRCLE_CROP_BITMAP_PAINT;
+
+  // See #738.
+<span class="nc" id="L39">  private static final List&lt;String&gt; MODELS_REQUIRING_BITMAP_LOCK =</span>
+<span class="nc" id="L40">      Arrays.asList(</span>
+          &quot;XT1097&quot;,
+          &quot;XT1085&quot;);
+  /**
+   * https://github.com/bumptech/glide/issues/738 On some devices (Moto X with android 5.1) bitmap
+   * drawing is not thread safe.
+   * This lock only locks for these specific devices. For other types of devices the lock is always
+   * available and therefore does not impact performance
+   */
+<span class="nc" id="L49">  private static final Lock BITMAP_DRAWABLE_LOCK =</span>
+<span class="nc bnc" id="L50" title="All 4 branches missed.">      MODELS_REQUIRING_BITMAP_LOCK.contains(Build.MODEL)</span>
+          &amp;&amp; Build.VERSION.SDK_INT == Build.VERSION_CODES.LOLLIPOP_MR1
+          ? new ReentrantLock() : new NoLock();
+
+  static {
+<span class="nc" id="L55">    CIRCLE_CROP_BITMAP_PAINT = new Paint(CIRCLE_CROP_PAINT_FLAGS);</span>
+<span class="nc" id="L56">    CIRCLE_CROP_BITMAP_PAINT.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));</span>
+<span class="nc" id="L57">  }</span>
+
+  private TransformationUtils() {
+    // Utility class.
+  }
+
+
+  public static Lock getBitmapDrawableLock() {
+<span class="nc" id="L65">    return BITMAP_DRAWABLE_LOCK;</span>
+  }
+
+  /**
+   * A potentially expensive operation to crop the given Bitmap so that it fills the given
+   * dimensions. This operation is significantly less expensive in terms of memory if a mutable
+   * Bitmap with the given dimensions is passed in as well.
+   *
+   * @param pool     The BitmapPool to obtain a bitmap from.
+   * @param inBitmap   The Bitmap to resize.
+   * @param width    The width in pixels of the final Bitmap.
+   * @param height   The height in pixels of the final Bitmap.
+   * @return The resized Bitmap (will be recycled if recycled is not null).
+   */
+  public static Bitmap centerCrop(@NonNull BitmapPool pool, @NonNull Bitmap inBitmap, int width,
+      int height) {
+<span class="nc bnc" id="L81" title="All 4 branches missed.">    if (inBitmap.getWidth() == width &amp;&amp; inBitmap.getHeight() == height) {</span>
+<span class="nc" id="L82">      return inBitmap;</span>
+    }
+    // From ImageView/Bitmap.createScaledBitmap.
+    final float scale;
+<span class="nc" id="L86">    float dx = 0, dy = 0;</span>
+<span class="nc" id="L87">    Matrix m = new Matrix();</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">    if (inBitmap.getWidth() * height &gt; width * inBitmap.getHeight()) {</span>
+<span class="nc" id="L89">      scale = (float) height / (float) inBitmap.getHeight();</span>
+<span class="nc" id="L90">      dx = (width - inBitmap.getWidth() * scale) * 0.5f;</span>
+    } else {
+<span class="nc" id="L92">      scale = (float) width / (float) inBitmap.getWidth();</span>
+<span class="nc" id="L93">      dy = (height - inBitmap.getHeight() * scale) * 0.5f;</span>
+    }
+
+<span class="nc" id="L96">    m.setScale(scale, scale);</span>
+<span class="nc" id="L97">    m.postTranslate((int) (dx + 0.5f), (int) (dy + 0.5f));</span>
+
+<span class="nc" id="L99">    Bitmap result = pool.get(width, height, getSafeConfig(inBitmap));</span>
+    // We don't add or remove alpha, so keep the alpha setting of the Bitmap we were given.
+<span class="nc" id="L101">    TransformationUtils.setAlpha(inBitmap, result);</span>
+
+<span class="nc" id="L103">    applyMatrix(inBitmap, result, m);</span>
+<span class="nc" id="L104">    return result;</span>
+  }
+
+  /**
+   * An expensive operation to resize the given Bitmap down so that it fits within the given
+   * dimensions maintain the original proportions.
+   *
+   * @param pool   The BitmapPool obtain a bitmap from.
+   * @param inBitmap  The Bitmap to shrink.
+   * @param width  The width in pixels the final image will fit within.
+   * @param height The height in pixels the final image will fit within.
+   * @return A new Bitmap shrunk to fit within the given dimensions, or toFit if toFit's width or
+   * height matches the given dimensions and toFit fits within the given dimensions
+   */
+  public static Bitmap fitCenter(@NonNull BitmapPool pool, @NonNull Bitmap inBitmap, int width,
+      int height) {
+<span class="nc bnc" id="L120" title="All 4 branches missed.">    if (inBitmap.getWidth() == width &amp;&amp; inBitmap.getHeight() == height) {</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L122">        Log.v(TAG, &quot;requested target size matches input, returning input&quot;);</span>
+      }
+<span class="nc" id="L124">      return inBitmap;</span>
+    }
+<span class="nc" id="L126">    final float widthPercentage = width / (float) inBitmap.getWidth();</span>
+<span class="nc" id="L127">    final float heightPercentage = height / (float) inBitmap.getHeight();</span>
+<span class="nc" id="L128">    final float minPercentage = Math.min(widthPercentage, heightPercentage);</span>
+
+    // Round here in case we've decoded exactly the image we want, but take the floor below to
+    // avoid a line of garbage or blank pixels in images.
+<span class="nc" id="L132">    int targetWidth = Math.round(minPercentage * inBitmap.getWidth());</span>
+<span class="nc" id="L133">    int targetHeight = Math.round(minPercentage * inBitmap.getHeight());</span>
+
+<span class="nc bnc" id="L135" title="All 4 branches missed.">    if (inBitmap.getWidth() == targetWidth &amp;&amp; inBitmap.getHeight() == targetHeight) {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L137">        Log.v(TAG, &quot;adjusted target size matches input, returning input&quot;);</span>
+      }
+<span class="nc" id="L139">      return inBitmap;</span>
+    }
+
+    // Take the floor of the target width/height, not round. If the matrix
+    // passed into drawBitmap rounds differently, we want to slightly
+    // overdraw, not underdraw, to avoid artifacts from bitmap reuse.
+<span class="nc" id="L145">    targetWidth = (int) (minPercentage * inBitmap.getWidth());</span>
+<span class="nc" id="L146">    targetHeight = (int) (minPercentage * inBitmap.getHeight());</span>
+
+<span class="nc" id="L148">    Bitmap.Config config = getSafeConfig(inBitmap);</span>
+<span class="nc" id="L149">    Bitmap toReuse = pool.get(targetWidth, targetHeight, config);</span>
+
+    // We don't add or remove alpha, so keep the alpha setting of the Bitmap we were given.
+<span class="nc" id="L152">    TransformationUtils.setAlpha(inBitmap, toReuse);</span>
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">    if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L155">      Log.v(TAG, &quot;request: &quot; + width + &quot;x&quot; + height);</span>
+<span class="nc" id="L156">      Log.v(TAG, &quot;toFit:   &quot; + inBitmap.getWidth() + &quot;x&quot; + inBitmap.getHeight());</span>
+<span class="nc" id="L157">      Log.v(TAG, &quot;toReuse: &quot; + toReuse.getWidth() + &quot;x&quot; + toReuse.getHeight());</span>
+<span class="nc" id="L158">      Log.v(TAG, &quot;minPct:   &quot; + minPercentage);</span>
+    }
+
+<span class="nc" id="L161">    Matrix matrix = new Matrix();</span>
+<span class="nc" id="L162">    matrix.setScale(minPercentage, minPercentage);</span>
+<span class="nc" id="L163">    applyMatrix(inBitmap, toReuse, matrix);</span>
+
+<span class="nc" id="L165">    return toReuse;</span>
+  }
+
+  /**
+   * If the Bitmap is smaller or equal to the Target it returns the original size, if not then
+   * {@link #fitCenter(BitmapPool, Bitmap, int, int)} is called instead.
+   *
+   * @param pool   The BitmapPool obtain a bitmap from.
+   * @param inBitmap  The Bitmap to center.
+   * @param width  The width in pixels of the target.
+   * @param height The height in pixels of the target.
+   * @return returns input Bitmap if smaller or equal to target, or toFit if the Bitmap's width or
+   * height is larger than the given dimensions
+   */
+  public static Bitmap centerInside(@NonNull BitmapPool pool, @NonNull Bitmap inBitmap, int width,
+      int height) {
+<span class="nc bnc" id="L181" title="All 4 branches missed.">    if (inBitmap.getWidth() &lt;= width &amp;&amp; inBitmap.getHeight() &lt;= height) {</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L183">        Log.v(TAG, &quot;requested target size larger or equal to input, returning input&quot;);</span>
+      }
+<span class="nc" id="L185">      return inBitmap;</span>
+    } else {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L188">        Log.v(TAG, &quot;requested target size too big for input, fit centering instead&quot;);</span>
+      }
+<span class="nc" id="L190">      return fitCenter(pool, inBitmap, width, height);</span>
+    }
+  }
+
+  /**
+   * Sets the alpha of the Bitmap we're going to re-use to the alpha of the Bitmap we're going to
+   * transform. This keeps {@link android.graphics.Bitmap#hasAlpha()}} consistent before and after
+   * the transformation for transformations that don't add or remove transparent pixels.
+   *
+   * @param inBitmap The {@link android.graphics.Bitmap} that will be transformed.
+   * @param outBitmap   The {@link android.graphics.Bitmap} that will be returned from the
+   *                    transformation.
+   */
+  public static void setAlpha(Bitmap inBitmap, Bitmap outBitmap) {
+<span class="nc" id="L204">    outBitmap.setHasAlpha(inBitmap.hasAlpha());</span>
+<span class="nc" id="L205">  }</span>
+
+  /**
+   * This is an expensive operation that copies the image in place with the pixels rotated. If
+   * possible rather use getOrientationMatrix, and put that as the imageMatrix on an ImageView.
+   *
+   * @param imageToOrient   Image Bitmap to orient.
+   * @param degreesToRotate number of degrees to rotate the image by. If zero the original image is
+   *                        returned unmodified.
+   * @return The oriented bitmap. May be the imageToOrient without modification, or a new Bitmap.
+   */
+  public static Bitmap rotateImage(@NonNull Bitmap imageToOrient, int degreesToRotate) {
+<span class="nc" id="L217">    Bitmap result = imageToOrient;</span>
+    try {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">      if (degreesToRotate != 0) {</span>
+<span class="nc" id="L220">        Matrix matrix = new Matrix();</span>
+<span class="nc" id="L221">        matrix.setRotate(degreesToRotate);</span>
+<span class="nc" id="L222">        result = Bitmap.createBitmap(imageToOrient, 0, 0, imageToOrient.getWidth(),</span>
+<span class="nc" id="L223">            imageToOrient.getHeight(), matrix, true /*filter*/);</span>
+      }
+<span class="nc" id="L225">    } catch (Exception e) {</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.ERROR)) {</span>
+<span class="nc" id="L227">        Log.e(TAG, &quot;Exception when trying to orient image&quot;, e);</span>
+      }
+<span class="nc" id="L229">    }</span>
+<span class="nc" id="L230">    return result;</span>
+  }
+
+  /**
+   * Get the # of degrees an image must be rotated to match the given exif orientation.
+   *
+   * @param exifOrientation The exif orientation [1-8]
+   * @return the number of degrees to rotate
+   */
+  public static int getExifOrientationDegrees(int exifOrientation) {
+    final int degreesToRotate;
+<span class="nc bnc" id="L241" title="All 4 branches missed.">    switch (exifOrientation) {</span>
+      case ExifInterface.ORIENTATION_TRANSPOSE:
+      case ExifInterface.ORIENTATION_ROTATE_90:
+<span class="nc" id="L244">        degreesToRotate = 90;</span>
+<span class="nc" id="L245">        break;</span>
+      case ExifInterface.ORIENTATION_ROTATE_180:
+      case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+<span class="nc" id="L248">        degreesToRotate = 180;</span>
+<span class="nc" id="L249">        break;</span>
+      case ExifInterface.ORIENTATION_TRANSVERSE:
+      case ExifInterface.ORIENTATION_ROTATE_270:
+<span class="nc" id="L252">        degreesToRotate = 270;</span>
+<span class="nc" id="L253">        break;</span>
+      default:
+<span class="nc" id="L255">        degreesToRotate = 0;</span>
+        break;
+    }
+<span class="nc" id="L258">    return degreesToRotate;</span>
+  }
+
+  /**
+   * Rotate and/or flip the image to match the given exif orientation.
+   *
+   * @param pool            A pool that may or may not contain an image of the necessary
+   *                        dimensions.
+   * @param inBitmap        The bitmap to rotate/flip.
+   * @param exifOrientation the exif orientation [1-8].
+   * @return The rotated and/or flipped image or toOrient if no rotation or flip was necessary.
+   */
+  public static Bitmap rotateImageExif(@NonNull BitmapPool pool, @NonNull Bitmap inBitmap,
+      int exifOrientation) {
+<span class="nc bnc" id="L272" title="All 2 branches missed.">    if (!isExifOrientationRequired(exifOrientation)) {</span>
+<span class="nc" id="L273">      return inBitmap;</span>
+    }
+
+<span class="nc" id="L276">    final Matrix matrix = new Matrix();</span>
+<span class="nc" id="L277">    initializeMatrixForRotation(exifOrientation, matrix);</span>
+
+    // From Bitmap.createBitmap.
+<span class="nc" id="L280">    final RectF newRect = new RectF(0, 0, inBitmap.getWidth(), inBitmap.getHeight());</span>
+<span class="nc" id="L281">    matrix.mapRect(newRect);</span>
+
+<span class="nc" id="L283">    final int newWidth = Math.round(newRect.width());</span>
+<span class="nc" id="L284">    final int newHeight = Math.round(newRect.height());</span>
+
+<span class="nc" id="L286">    Bitmap.Config config = getSafeConfig(inBitmap);</span>
+<span class="nc" id="L287">    Bitmap result = pool.get(newWidth, newHeight, config);</span>
+
+<span class="nc" id="L289">    matrix.postTranslate(-newRect.left, -newRect.top);</span>
+
+<span class="nc" id="L291">    applyMatrix(inBitmap, result, matrix);</span>
+<span class="nc" id="L292">    return result;</span>
+  }
+
+  /**
+   * Returns {@code true} if the given exif orientation indicates that a transformation is necessary
+   * and {@code false} otherwise.
+   */
+  public static boolean isExifOrientationRequired(int exifOrientation) {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">    switch (exifOrientation) {</span>
+      case ExifInterface.ORIENTATION_FLIP_HORIZONTAL:
+      case ExifInterface.ORIENTATION_ROTATE_180:
+      case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+      case ExifInterface.ORIENTATION_TRANSPOSE:
+      case ExifInterface.ORIENTATION_ROTATE_90:
+      case ExifInterface.ORIENTATION_TRANSVERSE:
+      case ExifInterface.ORIENTATION_ROTATE_270:
+<span class="nc" id="L308">        return true;</span>
+      default:
+<span class="nc" id="L310">        return false;</span>
+    }
+  }
+
+  /**
+   * Crop the image to a circle and resize to the specified width/height.  The circle crop will
+   * have the same width and height equal to the min-edge of the result image.
+   *
+   * @param pool   The BitmapPool obtain a bitmap from.
+   * @param inBitmap   The Bitmap to resize.
+   * @param destWidth    The width in pixels of the final Bitmap.
+   * @param destHeight   The height in pixels of the final Bitmap.
+   * @return The resized Bitmap (will be recycled if recycled is not null).
+   */
+  public static Bitmap circleCrop(@NonNull BitmapPool pool, @NonNull Bitmap inBitmap,
+      int destWidth, int destHeight) {
+<span class="nc" id="L326">    int destMinEdge = Math.min(destWidth, destHeight);</span>
+<span class="nc" id="L327">    float radius = destMinEdge / 2f;</span>
+
+<span class="nc" id="L329">    int srcWidth = inBitmap.getWidth();</span>
+<span class="nc" id="L330">    int srcHeight = inBitmap.getHeight();</span>
+
+<span class="nc" id="L332">    float scaleX = destMinEdge / (float) srcWidth;</span>
+<span class="nc" id="L333">    float scaleY = destMinEdge / (float) srcHeight;</span>
+<span class="nc" id="L334">    float maxScale = Math.max(scaleX, scaleY);</span>
+
+<span class="nc" id="L336">    float scaledWidth = maxScale * srcWidth;</span>
+<span class="nc" id="L337">    float scaledHeight = maxScale * srcHeight;</span>
+<span class="nc" id="L338">    float left = (destMinEdge - scaledWidth) / 2f;</span>
+<span class="nc" id="L339">    float top = (destMinEdge - scaledHeight) / 2f;</span>
+
+<span class="nc" id="L341">    RectF destRect = new RectF(left, top, left + scaledWidth, top + scaledHeight);</span>
+
+    // Alpha is required for this transformation.
+<span class="nc" id="L344">    Bitmap toTransform = getAlphaSafeBitmap(pool, inBitmap);</span>
+
+<span class="nc" id="L346">    Bitmap result = pool.get(destMinEdge, destMinEdge, Bitmap.Config.ARGB_8888);</span>
+<span class="nc" id="L347">    result.setHasAlpha(true);</span>
+
+<span class="nc" id="L349">    BITMAP_DRAWABLE_LOCK.lock();</span>
+    try {
+<span class="nc" id="L351">      Canvas canvas = new Canvas(result);</span>
+      // Draw a circle
+<span class="nc" id="L353">      canvas.drawCircle(radius, radius, radius, CIRCLE_CROP_SHAPE_PAINT);</span>
+      // Draw the bitmap in the circle
+<span class="nc" id="L355">      canvas.drawBitmap(toTransform, null, destRect, CIRCLE_CROP_BITMAP_PAINT);</span>
+<span class="nc" id="L356">      clear(canvas);</span>
+    } finally {
+<span class="nc" id="L358">      BITMAP_DRAWABLE_LOCK.unlock();</span>
+    }
+
+<span class="nc bnc" id="L361" title="All 2 branches missed.">    if (!toTransform.equals(inBitmap)) {</span>
+<span class="nc" id="L362">      pool.put(toTransform);</span>
+    }
+
+<span class="nc" id="L365">    return result;</span>
+  }
+
+  private static Bitmap getAlphaSafeBitmap(@NonNull BitmapPool pool,
+      @NonNull Bitmap maybeAlphaSafe) {
+<span class="nc bnc" id="L370" title="All 2 branches missed.">    if (Bitmap.Config.ARGB_8888.equals(maybeAlphaSafe.getConfig())) {</span>
+<span class="nc" id="L371">      return maybeAlphaSafe;</span>
+    }
+
+<span class="nc" id="L374">    Bitmap argbBitmap = pool.get(maybeAlphaSafe.getWidth(), maybeAlphaSafe.getHeight(),</span>
+        Bitmap.Config.ARGB_8888);
+<span class="nc" id="L376">    new Canvas(argbBitmap).drawBitmap(maybeAlphaSafe, 0 /*left*/, 0 /*top*/, null /*paint*/);</span>
+
+    // We now own this Bitmap. It's our responsibility to replace it in the pool outside this method
+    // when we're finished with it.
+<span class="nc" id="L380">    return argbBitmap;</span>
+  }
+
+  /**
+   * Creates a bitmap from a source bitmap and rounds the corners.
+   *
+   * @param inBitmap the source bitmap to use as a basis for the created bitmap.
+   * @param width the width of the generated bitmap.
+   * @param height the height of the generated bitmap.
+   * @param roundingRadius the corner radius to be applied (in device-specific pixels).
+   * @return a {@link Bitmap} similar to inBitmap but with rounded corners.
+   * @throws IllegalArgumentException if roundingRadius, width or height is 0 or less.
+   */
+  public static Bitmap roundedCorners(@NonNull BitmapPool pool, @NonNull Bitmap inBitmap,
+      int width, int height, int roundingRadius) {
+<span class="nc bnc" id="L395" title="All 2 branches missed.">    Preconditions.checkArgument(width &gt; 0, &quot;width must be greater than 0.&quot;);</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">    Preconditions.checkArgument(height &gt; 0, &quot;height must be greater than 0.&quot;);</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">    Preconditions.checkArgument(roundingRadius &gt; 0, &quot;roundingRadius must be greater than 0.&quot;);</span>
+
+    // Alpha is required for this transformation.
+<span class="nc" id="L400">    Bitmap toTransform = getAlphaSafeBitmap(pool, inBitmap);</span>
+<span class="nc" id="L401">    Bitmap result = pool.get(width, height, Bitmap.Config.ARGB_8888);</span>
+
+<span class="nc" id="L403">    result.setHasAlpha(true);</span>
+
+<span class="nc" id="L405">    BitmapShader shader = new BitmapShader(toTransform, Shader.TileMode.CLAMP,</span>
+        Shader.TileMode.CLAMP);
+<span class="nc" id="L407">    Paint paint = new Paint();</span>
+<span class="nc" id="L408">    paint.setAntiAlias(true);</span>
+<span class="nc" id="L409">    paint.setShader(shader);</span>
+<span class="nc" id="L410">    RectF rect = new RectF(0, 0, result.getWidth(), result.getHeight());</span>
+<span class="nc" id="L411">    BITMAP_DRAWABLE_LOCK.lock();</span>
+    try {
+<span class="nc" id="L413">      Canvas canvas = new Canvas(result);</span>
+<span class="nc" id="L414">      canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);</span>
+<span class="nc" id="L415">      canvas.drawRoundRect(rect, roundingRadius, roundingRadius, paint);</span>
+<span class="nc" id="L416">      clear(canvas);</span>
+    } finally {
+<span class="nc" id="L418">      BITMAP_DRAWABLE_LOCK.unlock();</span>
+    }
+
+<span class="nc bnc" id="L421" title="All 2 branches missed.">    if (!toTransform.equals(inBitmap)) {</span>
+<span class="nc" id="L422">      pool.put(toTransform);</span>
+    }
+
+<span class="nc" id="L425">    return result;</span>
+  }
+
+  // Avoids warnings in M+.
+  private static void clear(Canvas canvas) {
+<span class="nc" id="L430">    canvas.setBitmap(null);</span>
+<span class="nc" id="L431">  }</span>
+
+  private static Bitmap.Config getSafeConfig(Bitmap bitmap) {
+<span class="nc bnc" id="L434" title="All 2 branches missed.">    return bitmap.getConfig() != null ? bitmap.getConfig() : Bitmap.Config.ARGB_8888;</span>
+  }
+
+  private static void applyMatrix(@NonNull Bitmap inBitmap, @NonNull Bitmap targetBitmap,
+      Matrix matrix) {
+<span class="nc" id="L439">    BITMAP_DRAWABLE_LOCK.lock();</span>
+    try {
+<span class="nc" id="L441">      Canvas canvas = new Canvas(targetBitmap);</span>
+<span class="nc" id="L442">      canvas.drawBitmap(inBitmap, matrix, DEFAULT_PAINT);</span>
+<span class="nc" id="L443">      clear(canvas);</span>
+    } finally {
+<span class="nc" id="L445">      BITMAP_DRAWABLE_LOCK.unlock();</span>
+    }
+<span class="nc" id="L447">  }</span>
+
+  // Visible for testing.
+  static void initializeMatrixForRotation(int exifOrientation, Matrix matrix) {
+<span class="nc bnc" id="L451" title="All 8 branches missed.">    switch (exifOrientation) {</span>
+      case ExifInterface.ORIENTATION_FLIP_HORIZONTAL:
+<span class="nc" id="L453">        matrix.setScale(-1, 1);</span>
+<span class="nc" id="L454">        break;</span>
+      case ExifInterface.ORIENTATION_ROTATE_180:
+<span class="nc" id="L456">        matrix.setRotate(180);</span>
+<span class="nc" id="L457">        break;</span>
+      case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+<span class="nc" id="L459">        matrix.setRotate(180);</span>
+<span class="nc" id="L460">        matrix.postScale(-1, 1);</span>
+<span class="nc" id="L461">        break;</span>
+      case ExifInterface.ORIENTATION_TRANSPOSE:
+<span class="nc" id="L463">        matrix.setRotate(90);</span>
+<span class="nc" id="L464">        matrix.postScale(-1, 1);</span>
+<span class="nc" id="L465">        break;</span>
+      case ExifInterface.ORIENTATION_ROTATE_90:
+<span class="nc" id="L467">        matrix.setRotate(90);</span>
+<span class="nc" id="L468">        break;</span>
+      case ExifInterface.ORIENTATION_TRANSVERSE:
+<span class="nc" id="L470">        matrix.setRotate(-90);</span>
+<span class="nc" id="L471">        matrix.postScale(-1, 1);</span>
+<span class="nc" id="L472">        break;</span>
+      case ExifInterface.ORIENTATION_ROTATE_270:
+<span class="nc" id="L474">        matrix.setRotate(-90);</span>
+<span class="nc" id="L475">        break;</span>
+      default:
+        // Do nothing.
+    }
+<span class="nc" id="L479">  }</span>
+
+  private static final class NoLock implements Lock {
+
+    @Synthetic
+<span class="nc" id="L484">    NoLock() { }</span>
+
+    @Override
+    public void lock() {
+      // do nothing
+<span class="nc" id="L489">    }</span>
+
+    @Override
+    public void lockInterruptibly() throws InterruptedException {
+      // do nothing
+<span class="nc" id="L494">    }</span>
+
+    @Override
+    public boolean tryLock() {
+<span class="nc" id="L498">      return true;</span>
+    }
+
+    @Override
+    public boolean tryLock(long time, @NonNull TimeUnit unit) throws InterruptedException {
+<span class="nc" id="L503">      return true;</span>
+    }
+
+    @Override
+    public void unlock() {
+      // do nothing
+<span class="nc" id="L509">    }</span>
+
+    @NonNull
+    @Override
+    public Condition newCondition() {
+<span class="nc" id="L514">      throw new UnsupportedOperationException(&quot;Should not be called&quot;);</span>
+    }
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

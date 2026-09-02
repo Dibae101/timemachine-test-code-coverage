@@ -1,0 +1,1002 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ArticleViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.ui.compose.feedarticle</a> &gt; <span class="el_source">ArticleViewModel.kt</span></div><h1>ArticleViewModel.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.ui.compose.feedarticle
+
+import android.util.Log
+import androidx.compose.runtime.Immutable
+import androidx.compose.ui.text.AnnotatedString
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.application
+import androidx.lifecycle.viewModelScope
+import com.nononsenseapps.feeder.ApplicationCoroutineScope
+import com.nononsenseapps.feeder.R
+import com.nononsenseapps.feeder.archmodel.Article
+import com.nononsenseapps.feeder.archmodel.Enclosure
+import com.nononsenseapps.feeder.archmodel.LinkOpener
+import com.nononsenseapps.feeder.archmodel.OpenAISettings
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.archmodel.TextToDisplay
+import com.nononsenseapps.feeder.archmodel.TranslationApiSettings
+import com.nononsenseapps.feeder.background.runOnceRssSync
+import com.nononsenseapps.feeder.base.DIAwareViewModel
+import com.nononsenseapps.feeder.blob.blobFile
+import com.nononsenseapps.feeder.blob.blobFullFile
+import com.nononsenseapps.feeder.blob.blobFullInputStream
+import com.nononsenseapps.feeder.blob.blobInputStream
+import com.nononsenseapps.feeder.db.room.FeedItemForFetching
+import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.localtranslation.BergamotModelDownloadProgress
+import com.nononsenseapps.feeder.localtranslation.BergamotModelManager
+import com.nononsenseapps.feeder.localtranslation.LocalTranslator
+import com.nononsenseapps.feeder.model.ArticleTranslation
+import com.nononsenseapps.feeder.model.FeedParserError
+import com.nononsenseapps.feeder.model.FullTextParser
+import com.nononsenseapps.feeder.model.FullTextTooLarge
+import com.nononsenseapps.feeder.model.LocaleOverride
+import com.nononsenseapps.feeder.model.NoBody
+import com.nononsenseapps.feeder.model.NoUrl
+import com.nononsenseapps.feeder.model.NotHTML
+import com.nononsenseapps.feeder.model.PlaybackStatus
+import com.nononsenseapps.feeder.model.PodcastPlayerState
+import com.nononsenseapps.feeder.model.PodcastPlayerStateHolder
+import com.nononsenseapps.feeder.model.SystemTranslationSettingsRequiredException
+import com.nononsenseapps.feeder.model.TTSStateHolder
+import com.nononsenseapps.feeder.model.ThumbnailImage
+import com.nononsenseapps.feeder.model.TranslationManager
+import com.nononsenseapps.feeder.model.UnsupportedContentType
+import com.nononsenseapps.feeder.model.html.HtmlLinearizer
+import com.nononsenseapps.feeder.model.html.LinearArticle
+import com.nononsenseapps.feeder.openai.OpenAIApi
+import com.nononsenseapps.feeder.openai.canSummarize
+import com.nononsenseapps.feeder.openai.canUseAsTranslationApi
+import com.nononsenseapps.feeder.openai.isLocalTranslation
+import com.nononsenseapps.feeder.ui.compose.text.htmlToAnnotatedString
+import com.nononsenseapps.feeder.ui.text.MarkdownToHtmlConverter
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.FilePathProvider
+import com.nononsenseapps.feeder.util.ToastMaker
+import com.nononsenseapps.feeder.util.logDebug
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.jsoup.Jsoup
+import org.kodein.di.DI
+import org.kodein.di.instance
+import java.io.FileNotFoundException
+import java.time.ZonedDateTime
+import java.util.Locale
+
+<span class="nc" id="L76">class ArticleViewModel(</span>
+    di: DI,
+<span class="nc" id="L78">    private val state: SavedStateHandle,</span>
+<span class="nc" id="L79">) : DIAwareViewModel(di) {</span>
+<span class="nc" id="L80">    private val repository: Repository by instance()</span>
+<span class="nc" id="L81">    private val ttsStateHolder: TTSStateHolder by instance()</span>
+<span class="nc" id="L82">    private val podcastPlayerStateHolder: PodcastPlayerStateHolder by instance()</span>
+<span class="nc" id="L83">    private val fullTextParser: FullTextParser by instance()</span>
+<span class="nc" id="L84">    private val filePathProvider: FilePathProvider by instance()</span>
+<span class="nc" id="L85">    private val openAIApi: OpenAIApi by instance()</span>
+<span class="nc" id="L86">    private val toastMaker: ToastMaker by instance()</span>
+<span class="nc" id="L87">    private val translationManager: TranslationManager by instance()</span>
+<span class="nc" id="L88">    private val bergamotModelManager: BergamotModelManager by instance()</span>
+<span class="nc" id="L89">    private val localTranslator: LocalTranslator by instance()</span>
+
+    // Use this for actions which should complete even if app goes off screen
+<span class="nc" id="L92">    private val applicationCoroutineScope: ApplicationCoroutineScope by instance()</span>
+
+<span class="nc" id="L94">    val itemId: Long =</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        state[&quot;itemId&quot;]</span>
+<span class="nc" id="L96">            ?: throw IllegalArgumentException(&quot;Missing itemId in savedState&quot;)</span>
+
+    val scrollPosition: Int get() =
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        state[&quot;scrollPosition&quot;] ?: 0</span>
+
+    private val articleFlow =
+<span class="nc" id="L102">        repository</span>
+<span class="nc" id="L103">            .getArticleFlow(itemId)</span>
+<span class="nc" id="L104">            .stateIn(</span>
+<span class="nc" id="L105">                scope = viewModelScope,</span>
+<span class="nc" id="L106">                started = SharingStarted.Eagerly,</span>
+<span class="nc" id="L107">                initialValue = null,</span>
+            )
+
+<span class="nc" id="L110">    private val textToDisplay = MutableStateFlow(TextToDisplay.CONTENT)</span>
+<span class="nc" id="L111">    private val displayFullTextOverride = MutableStateFlow&lt;Boolean?&gt;(null)</span>
+
+    private val articleContentFlow: StateFlow&lt;LinearArticle&gt; =
+<span class="nc" id="L114">        combine(</span>
+<span class="nc" id="L115">            articleFlow,</span>
+<span class="nc" id="L116">            displayFullTextOverride,</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        ) { article, fullTextOverride -&gt;</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            article?.let {</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                it to (fullTextOverride ?: it.fullTextByDefault)</span>
+<span class="nc" id="L120">            }</span>
+<span class="nc" id="L121">        }.filterNotNull()</span>
+<span class="nc" id="L122">            .map { (article, displayFullText) -&gt;</span>
+<span class="nc" id="L123">                parseArticleContent(article, displayFullText)</span>
+<span class="nc" id="L124">            }.stateIn(</span>
+<span class="nc" id="L125">                scope = viewModelScope,</span>
+<span class="nc" id="L126">                started = SharingStarted.Eagerly,</span>
+<span class="nc" id="L127">                initialValue = LinearArticle(emptyList()),</span>
+            )
+
+<span class="nc bnc" id="L130" title="All 2 branches missed.">    private val toolbarVisible = MutableStateFlow(state[&quot;toolbarMenuVisible&quot;] ?: false)</span>
+<span class="nc" id="L131">    private val openAiSummary = MutableStateFlow&lt;OpenAISummaryState&gt;(OpenAISummaryState.Empty)</span>
+<span class="nc" id="L132">    private val showTranslatedContent = MutableStateFlow(false)</span>
+<span class="nc" id="L133">    private val translatedArticleContent = MutableStateFlow(LinearArticle(emptyList()))</span>
+<span class="nc" id="L134">    private val articleTranslationState = MutableStateFlow&lt;ArticleTranslationState&gt;(ArticleTranslationState.Empty)</span>
+    private var handledInitialOpenActions = false
+
+    fun saveScrollPosition(pos: Int) {
+<span class="nc" id="L138">        state[&quot;scrollPosition&quot;] = pos</span>
+<span class="nc" id="L139">    }</span>
+
+    private val isFullText: Boolean
+<span class="nc bnc" id="L142" title="All 6 branches missed.">        get() = displayFullTextOverride.value ?: articleFlow.value?.fullTextByDefault ?: false</span>
+
+<span class="nc" id="L144">    val viewState: StateFlow&lt;ArticleScreenViewState&gt; =</span>
+<span class="nc" id="L145">        combine(</span>
+<span class="nc" id="L146">            articleFlow,</span>
+<span class="nc" id="L147">            textToDisplay,</span>
+<span class="nc" id="L148">            articleContentFlow,</span>
+<span class="nc" id="L149">            translatedArticleContent,</span>
+<span class="nc" id="L150">            toolbarVisible,</span>
+<span class="nc" id="L151">            repository.linkOpener,</span>
+<span class="nc" id="L152">            repository.useDetectLanguage,</span>
+<span class="nc" id="L153">            ttsStateHolder.ttsState,</span>
+<span class="nc" id="L154">            ttsStateHolder.availableLanguages,</span>
+<span class="nc" id="L155">            repository.openAISettings,</span>
+<span class="nc" id="L156">            repository.translationApiSettings,</span>
+<span class="nc" id="L157">            repository.preferredTranslationLanguage,</span>
+<span class="nc" id="L158">            openAiSummary,</span>
+<span class="nc" id="L159">            showTranslatedContent,</span>
+<span class="nc" id="L160">            articleTranslationState,</span>
+<span class="nc" id="L161">            bergamotModelManager.downloadProgress,</span>
+<span class="nc" id="L162">            podcastPlayerStateHolder.playerState,</span>
+<span class="nc" id="L163">            repository.useInAppAudioPlayer,</span>
+        ) { params -&gt;
+<span class="nc" id="L165">            val article = params[0] as Article?</span>
+<span class="nc" id="L166">            val textToDisplay = params[1] as TextToDisplay</span>
+<span class="nc" id="L167">            val articleContent = params[2] as LinearArticle</span>
+<span class="nc" id="L168">            val translatedArticleContent = params[3] as LinearArticle</span>
+<span class="nc" id="L169">            val toolbarVisible = params[4] as Boolean</span>
+<span class="nc" id="L170">            val linkOpener = params[5] as LinkOpener</span>
+<span class="nc" id="L171">            val useDetectLanguage = params[6] as Boolean</span>
+<span class="nc" id="L172">            val ttsState = params[7] as PlaybackStatus</span>
+
+            @Suppress(&quot;UNCHECKED_CAST&quot;)
+<span class="nc" id="L175">            val ttsLanguages = params[8] as List&lt;Locale&gt;</span>
+
+<span class="nc" id="L177">            val summarySettings = params[9] as OpenAISettings</span>
+<span class="nc" id="L178">            val translationSettings = params[10] as TranslationApiSettings</span>
+<span class="nc" id="L179">            val preferredTranslationLanguage = (params[11] as String).trim()</span>
+<span class="nc" id="L180">            val openAiSummary = params[12] as OpenAISummaryState</span>
+<span class="nc" id="L181">            val showTranslated = params[13] as Boolean</span>
+<span class="nc" id="L182">            val translationState = params[14] as ArticleTranslationState</span>
+<span class="nc" id="L183">            val translationDownloadProgress = params[15] as BergamotModelDownloadProgress?</span>
+<span class="nc" id="L184">            val podcastPlayerState = params[16] as PodcastPlayerState</span>
+<span class="nc" id="L185">            val useInAppAudioPlayer = params[17] as Boolean</span>
+<span class="nc" id="L186">            val currentTranslation =</span>
+<span class="nc" id="L187">                (translationState as? ArticleTranslationState.Result)</span>
+<span class="nc" id="L188">                    ?.takeIf { it.isFullText == isFullText }</span>
+<span class="nc" id="L189">            val alreadyInPreferredLanguage =</span>
+<span class="nc" id="L190">                (translationState as? ArticleTranslationState.AlreadyInPreferredLanguage)</span>
+<span class="nc" id="L191">                    ?.takeIf { it.isFullText == isFullText }</span>
+<span class="nc" id="L192">            val isShowingTranslated = showTranslated &amp;&amp; currentTranslation != null</span>
+<span class="nc" id="L193">            val canRequestTranslation =</span>
+<span class="nc" id="L194">                translationSettings.canUseAsTranslationApi &amp;&amp;</span>
+<span class="nc" id="L195">                    preferredTranslationLanguage.isNotBlank() &amp;&amp;</span>
+<span class="nc" id="L196">                    !article?.link.isNullOrEmpty()</span>
+
+<span class="nc" id="L198">            ArticleState(</span>
+<span class="nc" id="L199">                useDetectLanguage = useDetectLanguage,</span>
+<span class="nc" id="L200">                isBottomBarVisible = ttsState != PlaybackStatus.STOPPED || podcastPlayerState.isVisible,</span>
+<span class="nc" id="L201">                isTTSPlaying = ttsState == PlaybackStatus.PLAYING,</span>
+<span class="nc" id="L202">                podcastPlayerState = podcastPlayerState,</span>
+<span class="nc" id="L203">                useInAppAudioPlayer = useInAppAudioPlayer,</span>
+<span class="nc" id="L204">                ttsLanguages = ttsLanguages,</span>
+<span class="nc" id="L205">                articleFeedUrl = article?.feedUrl,</span>
+<span class="nc" id="L206">                articleId = itemId,</span>
+<span class="nc" id="L207">                articleLink = article?.link,</span>
+<span class="nc" id="L208">                articleFeedId = article?.feedId ?: ID_UNSET,</span>
+<span class="nc" id="L209">                textToDisplay = textToDisplay,</span>
+<span class="nc" id="L210">                linkOpener = linkOpener,</span>
+<span class="nc" id="L211">                pubDate = article?.pubDate,</span>
+<span class="nc" id="L212">                author = article?.author,</span>
+<span class="nc" id="L213">                enclosure = article?.enclosure ?: Enclosure(),</span>
+<span class="nc" id="L214">                articleTitle = if (isShowingTranslated) currentTranslation.translatedTitle else article?.title ?: &quot;&quot;,</span>
+<span class="nc" id="L215">                showToolbarMenu = toolbarVisible,</span>
+<span class="nc" id="L216">                feedDisplayTitle = article?.feedDisplayTitle ?: &quot;&quot;,</span>
+<span class="nc" id="L217">                isBookmarked = article?.bookmarked == true,</span>
+                wordCount =
+<span class="nc" id="L219">                    if (isFullText) {</span>
+<span class="nc" id="L220">                        article?.wordCountFull ?: 0</span>
+                    } else {
+<span class="nc" id="L222">                        article?.wordCount ?: 0</span>
+                    },
+<span class="nc" id="L224">                image = article?.image,</span>
+<span class="nc" id="L225">                showSummarize = summarySettings.canSummarize &amp;&amp; !article?.link.isNullOrEmpty(),</span>
+<span class="nc" id="L226">                openAiSummary = openAiSummary,</span>
+<span class="nc" id="L227">                showTranslate = isShowingTranslated || (canRequestTranslation &amp;&amp; alreadyInPreferredLanguage == null),</span>
+<span class="nc" id="L228">                isShowingTranslated = isShowingTranslated,</span>
+<span class="nc" id="L229">                isTranslationLoading = translationState is ArticleTranslationState.Loading,</span>
+<span class="nc" id="L230">                translationModelDownloadProgress = translationDownloadProgress,</span>
+<span class="nc" id="L231">                translationSourceLanguage = currentTranslation?.sourceLanguage ?: alreadyInPreferredLanguage?.sourceLanguage.orEmpty(),</span>
+                systemTranslationSettingsMessage =
+<span class="nc" id="L233">                    (translationState as? ArticleTranslationState.SystemSettingsRequired)</span>
+<span class="nc" id="L234">                        ?.message</span>
+<span class="nc" id="L235">                        .orEmpty(),</span>
+<span class="nc" id="L236">                articleContent = if (isShowingTranslated) translatedArticleContent else articleContent,</span>
+<span class="nc" id="L237">            )</span>
+<span class="nc" id="L238">        }.stateIn(</span>
+<span class="nc" id="L239">            scope = viewModelScope,</span>
+<span class="nc" id="L240">            started = SharingStarted.Eagerly,</span>
+<span class="nc" id="L241">            initialValue = ArticleState(),</span>
+        )
+
+<span class="nc" id="L244">    init {</span>
+<span class="nc" id="L245">        viewModelScope.launch {</span>
+<span class="nc" id="L246">            articleFlow.collect { article -&gt;</span>
+<span class="nc bnc" id="L247" title="All 6 branches missed.">                val feedId = article?.item?.feedId ?: return@collect</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                if (handledInitialOpenActions) {</span>
+<span class="nc" id="L249">                    return@collect</span>
+                }
+<span class="nc" id="L251">                handledInitialOpenActions = true</span>
+
+<span class="nc" id="L253">                val feed = repository.getFeed(feedId)</span>
+<span class="nc bnc" id="L254" title="All 8 branches missed.">                if (feed?.summarizeOnOpen == true &amp;&amp; repository.openAISettings.value.canSummarize) {</span>
+<span class="nc" id="L255">                    summarize()</span>
+                }
+
+                if (
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                    repository.translateArticlesByDefault.value &amp;&amp;</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                    canTranslateArticles() &amp;&amp;</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                    canStartAutomaticArticleTranslation(article)</span>
+                ) {
+<span class="nc" id="L263">                    showTranslatedContent.value = true</span>
+<span class="nc" id="L264">                    translateCurrentArticle()</span>
+                }
+<span class="nc" id="L266">            }</span>
+        }
+
+<span class="nc bnc" id="L269" title="All 3 branches missed.">        viewModelScope.launch {</span>
+<span class="nc" id="L270">            combine(</span>
+<span class="nc" id="L271">                articleFlow,</span>
+<span class="nc" id="L272">                displayFullTextOverride,</span>
+<span class="nc" id="L273">                repository.translationApiSettings,</span>
+<span class="nc" id="L274">                repository.preferredTranslationLanguage,</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            ) { article, fullTextOverride, settings, targetLanguage -&gt;</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">                val currentArticle = article ?: return@combine null</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                val fullText = fullTextOverride ?: currentArticle.fullTextByDefault</span>
+<span class="nc bnc" id="L278" title="All 10 branches missed.">                if (!settings.canUseAsTranslationApi || targetLanguage.trim().isBlank() || currentArticle.link.isNullOrBlank()) {</span>
+<span class="nc" id="L279">                    return@combine null</span>
+                }
+<span class="nc" id="L281">                ArticleLanguageCheck(</span>
+<span class="nc" id="L282">                    article = currentArticle,</span>
+<span class="nc" id="L283">                    isFullText = fullText,</span>
+<span class="nc" id="L284">                )</span>
+<span class="nc bnc" id="L285" title="All 6 branches missed.">            }.collectLatest { request -&gt;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                if (request == null) {</span>
+<span class="nc" id="L287">                    clearAlreadyInPreferredLanguageState()</span>
+<span class="nc" id="L288">                    return@collectLatest</span>
+                }
+
+<span class="nc" id="L291">                val html =</span>
+<span class="nc bnc" id="L292" title="All 4 branches missed.">                    loadArticleHtmlForLanguageDetection(</span>
+<span class="nc" id="L293">                        article = request.article,</span>
+<span class="nc" id="L294">                        fullText = request.isFullText,</span>
+<span class="nc" id="L295">                    ) ?: run {</span>
+<span class="nc" id="L296">                        clearAlreadyInPreferredLanguageState(request.isFullText)</span>
+<span class="nc" id="L297">                        return@collectLatest</span>
+                    }
+
+<span class="nc" id="L300">                val sourceLanguage =</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">                    detectArticleAlreadyInPreferredLanguage(</span>
+<span class="nc" id="L302">                        article = request.article,</span>
+<span class="nc" id="L303">                        fullText = request.isFullText,</span>
+<span class="nc" id="L304">                        html = html,</span>
+                    )
+
+<span class="nc bnc" id="L307" title="All 2 branches missed.">                if (sourceLanguage != null) {</span>
+<span class="nc" id="L308">                    setAlreadyInPreferredLanguage(</span>
+<span class="nc" id="L309">                        sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L310">                        isFullText = request.isFullText,</span>
+                    )
+                } else {
+<span class="nc" id="L313">                    clearAlreadyInPreferredLanguageState(request.isFullText)</span>
+                }
+<span class="nc" id="L315">            }</span>
+<span class="nc" id="L316">        }</span>
+<span class="nc" id="L317">    }</span>
+
+    fun toggleFullText() {
+        // Using as general loading text
+<span class="nc" id="L321">        textToDisplay.update { TextToDisplay.LOADING_FULLTEXT }</span>
+<span class="nc bnc" id="L322" title="All 8 branches missed.">        displayFullTextOverride.value = displayFullTextOverride.value?.not() ?: articleFlow.value?.fullTextByDefault?.not() ?: true</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (showTranslatedContent.value) {</span>
+<span class="nc" id="L324">            translateCurrentArticle()</span>
+        }
+<span class="nc" id="L326">    }</span>
+
+    private suspend fun parseArticleContent(
+        article: Article,
+        fullText: Boolean,
+    ): LinearArticle {
+<span class="nc bnc" id="L332" title="All 2 branches missed.">        logDebug(LOG_TAG, &quot;parseArticleContent(${article.id}, $fullText)&quot;)</span>
+<span class="nc" id="L333">        return try {</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">            withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L335">                val htmlLinearizer =</span>
+<span class="nc" id="L336">                    HtmlLinearizer(</span>
+<span class="nc" id="L337">                        tooLargeText = application.getString(R.string.failed_to_fetch_full_article_too_large),</span>
+<span class="nc" id="L338">                        openInBrowserText = application.getString(R.string.open_in_web_view),</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">                        articleLink = article.link ?: &quot;&quot;,</span>
+                    )
+<span class="nc" id="L341">                when (fullText) {</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                    false -&gt; {</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                        if (blobFile(article.id, filePathProvider.articleDir).isFile) {</span>
+<span class="nc" id="L344">                            try {</span>
+<span class="nc" id="L345">                                blobInputStream(article.id, filePathProvider.articleDir)</span>
+<span class="nc" id="L346">                                    .use {</span>
+<span class="nc" id="L347">                                        htmlLinearizer.linearize(</span>
+<span class="nc" id="L348">                                            inputStream = it,</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                                            baseUrl = article.feedUrl ?: &quot;&quot;,</span>
+<span class="nc" id="L350">                                        )</span>
+<span class="nc" id="L351">                                    }.also {</span>
+<span class="nc" id="L352">                                        textToDisplay.update { TextToDisplay.CONTENT }</span>
+<span class="nc" id="L353">                                    }</span>
+<span class="nc" id="L354">                            } catch (e: Exception) {</span>
+                                // EOFException is possible
+<span class="nc" id="L356">                                Log.e(LOG_TAG, &quot;Could not open blob&quot;, e)</span>
+<span class="nc" id="L357">                                textToDisplay.update { TextToDisplay.FAILED_TO_LOAD_FULLTEXT }</span>
+<span class="nc" id="L358">                                LinearArticle(elements = emptyList())</span>
+                            }
+                        } else {
+<span class="nc" id="L361">                            Log.e(LOG_TAG, &quot;No default file to parse. Attempting to fetch feed again&quot;)</span>
+                            // Should not happen but keeping this as a fallback
+<span class="nc" id="L363">                            runOnceRssSync(</span>
+<span class="nc" id="L364">                                di = di,</span>
+<span class="nc" id="L365">                                feedId = article.feedId,</span>
+<span class="nc" id="L366">                                forceNetwork = true,</span>
+<span class="nc" id="L367">                                triggeredByUser = true,</span>
+                            )
+<span class="nc" id="L369">                            textToDisplay.update { TextToDisplay.CONTENT }</span>
+<span class="nc" id="L370">                            htmlLinearizer.linearize(</span>
+                                &quot;Sorry, due to a coding oversight, &quot; +
+                                    &quot;the full offline version of this article has been permanently deleted, &quot; +
+                                    &quot;see &lt;a href=\&quot;https://github.com/spacecowboy/Feeder/issues/443\&quot;&gt;feeder#443&lt;/a&gt; &quot; +
+                                    &quot;for updates on this issue&lt;br/&gt;&lt;br/&gt;&quot; +
+<span class="nc" id="L375">                                    article.snippet,</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                                article.feedUrl ?: &quot;&quot;,</span>
+                            )
+                        }
+                    }
+
+<span class="nc bnc" id="L381" title="All 2 branches missed.">                    true -&gt; {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                        if (!blobFullFile(article.id, filePathProvider.fullArticleDir).isFile) {</span>
+                            // If the fulltext file is missing, try to fetch it
+<span class="nc" id="L384">                            when (retrieveFullText(article.id).leftOrNull()) {</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">                                null -&gt; {</span>
+                                    // Success. Do nothing yet
+<span class="nc" id="L387">                                    null</span>
+                                }
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                                is NoBody -&gt; TextToDisplay.FAILED_MISSING_BODY</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                                is NoUrl -&gt; TextToDisplay.FAILED_MISSING_LINK</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">                                is UnsupportedContentType -&gt; TextToDisplay.FAILED_NOT_HTML</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">                                is NotHTML -&gt; TextToDisplay.FAILED_NOT_HTML</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                                is FullTextTooLarge -&gt; TextToDisplay.FAILED_FULLTEXT_TOO_LARGE</span>
+<span class="nc" id="L394">                                else -&gt; TextToDisplay.FAILED_TO_LOAD_FULLTEXT</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                            }?.let { errorText -&gt;</span>
+<span class="nc" id="L396">                                textToDisplay.update { errorText }</span>
+<span class="nc" id="L397">                            }</span>
+                        }
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                        if (blobFullFile(article.id, filePathProvider.fullArticleDir).isFile) {</span>
+<span class="nc" id="L400">                            try {</span>
+<span class="nc" id="L401">                                blobFullInputStream(article.id, filePathProvider.fullArticleDir)</span>
+<span class="nc" id="L402">                                    .use {</span>
+<span class="nc" id="L403">                                        htmlLinearizer.linearize(</span>
+<span class="nc" id="L404">                                            inputStream = it,</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                                            baseUrl = article.feedUrl ?: &quot;&quot;,</span>
+<span class="nc" id="L406">                                        )</span>
+<span class="nc" id="L407">                                    }.also {</span>
+<span class="nc" id="L408">                                        textToDisplay.update { TextToDisplay.CONTENT }</span>
+<span class="nc" id="L409">                                    }</span>
+<span class="nc" id="L410">                            } catch (e: Exception) {</span>
+                                // EOFException is possible
+<span class="nc" id="L412">                                Log.e(LOG_TAG, &quot;Could not open blob&quot;, e)</span>
+<span class="nc" id="L413">                                textToDisplay.update { TextToDisplay.FAILED_TO_LOAD_FULLTEXT }</span>
+<span class="nc" id="L414">                                LinearArticle(elements = emptyList())</span>
+                            }
+                        } else {
+                            // Error text should already be set above
+<span class="nc" id="L418">                            LinearArticle(elements = emptyList())</span>
+                        }
+                    }
+<span class="nc" id="L421">                }</span>
+            }
+<span class="nc" id="L423">        } catch (t: Throwable) {</span>
+<span class="nc" id="L424">            Log.e(LOG_TAG, &quot;Error parsing article&quot;, t)</span>
+<span class="nc" id="L425">            LinearArticle(elements = emptyList())</span>
+        }
+    }
+
+    private suspend fun retrieveFullText(itemId: Long): Either&lt;FeedParserError, Unit&gt; =
+<span class="nc" id="L430">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L431">            logDebug(LOG_TAG, &quot;loadFullTextThenDisplayIt($itemId)&quot;)</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (blobFullFile(itemId, filePathProvider.fullArticleDir).isFile) {</span>
+<span class="nc" id="L433">                logDebug(LOG_TAG, &quot;Fulltext file exists&quot;)</span>
+<span class="nc" id="L434">                return@withContext Either.Right(Unit)</span>
+            }
+
+<span class="nc" id="L437">            logDebug(LOG_TAG, &quot;Fulltext file does not exist&quot;)</span>
+<span class="nc" id="L438">            val link = repository.getLink(itemId)</span>
+<span class="nc" id="L439">            return@withContext fullTextParser.parseFullArticleIfMissing(</span>
+<span class="nc" id="L440">                object : FeedItemForFetching {</span>
+<span class="nc" id="L441">                    override val id = itemId</span>
+<span class="nc" id="L442">                    override val link = link</span>
+                },
+            )
+<span class="nc" id="L445">        }</span>
+
+    fun markAsUnread() {
+<span class="nc" id="L448">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L449">            repository.markAsUnread(itemId)</span>
+<span class="nc" id="L450">        }</span>
+<span class="nc" id="L451">    }</span>
+
+    fun setBookmarked(bookmarked: Boolean) =
+<span class="nc" id="L454">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L455">            repository.setBookmarked(itemId, bookmarked)</span>
+<span class="nc" id="L456">        }</span>
+
+    fun setToolbarMenuVisible(visible: Boolean) {
+<span class="nc" id="L459">        state[&quot;toolbarMenuVisible&quot;] = visible</span>
+<span class="nc" id="L460">        toolbarVisible.update { visible }</span>
+<span class="nc" id="L461">    }</span>
+
+    fun ttsPlay() {
+<span class="nc" id="L464">        stopPodcastPlayback()</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        if (ttsStateHolder.resumeIfPausedOn(itemId)) {</span>
+<span class="nc" id="L466">            return</span>
+        }
+<span class="nc" id="L468">        viewModelScope.launch(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">            val feedItem = repository.getCurrentArticle() ?: return@launch</span>
+<span class="nc" id="L470">            val article = Article(feedItem)</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            val readFullText = displayFullTextOverride.value ?: feedItem.fullTextByDefault</span>
+<span class="nc" id="L472">            val textToRead =</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">                if (showTranslatedContent.value) {</span>
+<span class="nc" id="L474">                    Either.catching&lt;TSSError, List&lt;AnnotatedString&gt;&gt;(</span>
+                        onCatch = {
+<span class="nc" id="L476">                            when (it) {</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                                is FileNotFoundException -&gt; TTSFileNotFound</span>
+<span class="nc" id="L478">                                else -&gt; TTSUnknownError</span>
+<span class="nc" id="L479">                            }</span>
+                        },
+                    ) {
+<span class="nc" id="L482">                        htmlToAnnotatedString(</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">                            inputStream = loadTranslatedArticle(article, readFullText).translatedHtml.byteInputStream(),</span>
+<span class="nc" id="L484">                            baseUrl = feedItem.feedUrl.toString(),</span>
+<span class="nc" id="L485">                        )</span>
+                    }
+                } else {
+<span class="nc" id="L488">                    when (readFullText) {</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">                        false -&gt;</span>
+<span class="nc" id="L490">                            Either.catching&lt;TSSError, List&lt;AnnotatedString&gt;&gt;(</span>
+                                onCatch = {
+<span class="nc" id="L492">                                    when (it) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">                                        is FileNotFoundException -&gt; TTSFileNotFound</span>
+<span class="nc" id="L494">                                        else -&gt; TTSUnknownError</span>
+<span class="nc" id="L495">                                    }</span>
+                                },
+                            ) {
+<span class="nc" id="L498">                                blobInputStream(article.id, filePathProvider.articleDir).use {</span>
+<span class="nc" id="L499">                                    htmlToAnnotatedString(</span>
+<span class="nc" id="L500">                                        inputStream = it,</span>
+<span class="nc" id="L501">                                        baseUrl = feedItem.feedUrl.toString(),</span>
+<span class="nc" id="L502">                                    )</span>
+<span class="nc" id="L503">                                }</span>
+                            }
+
+<span class="nc bnc" id="L506" title="All 2 branches missed.">                        true -&gt;</span>
+<span class="nc" id="L507">                            Either.catching&lt;TSSError, List&lt;AnnotatedString&gt;&gt;(</span>
+                                onCatch = {
+<span class="nc" id="L509">                                    when (it) {</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">                                        is FileNotFoundException -&gt; TTSFileNotFound</span>
+<span class="nc" id="L511">                                        else -&gt; TTSUnknownError</span>
+<span class="nc" id="L512">                                    }</span>
+                                },
+                            ) {
+<span class="nc" id="L515">                                blobFullInputStream(article.id, filePathProvider.fullArticleDir).use {</span>
+<span class="nc" id="L516">                                    htmlToAnnotatedString(</span>
+<span class="nc" id="L517">                                        inputStream = it,</span>
+<span class="nc" id="L518">                                        baseUrl = feedItem.feedUrl.toString(),</span>
+<span class="nc" id="L519">                                    )</span>
+<span class="nc" id="L520">                                }</span>
+                            }
+                    }
+                }
+
+            // TODO show error some message
+<span class="nc" id="L526">            textToRead.onRight {</span>
+<span class="nc" id="L527">                ttsStateHolder.tts(</span>
+<span class="nc" id="L528">                    textArray = it,</span>
+<span class="nc" id="L529">                    useDetectLanguage = repository.useDetectLanguage.value,</span>
+<span class="nc" id="L530">                    articleId = itemId,</span>
+                )
+<span class="nc" id="L532">            }</span>
+<span class="nc" id="L533">        }</span>
+<span class="nc" id="L534">    }</span>
+
+    fun ttsPause() {
+<span class="nc" id="L537">        ttsStateHolder.pause()</span>
+<span class="nc" id="L538">    }</span>
+
+    fun ttsStop() {
+<span class="nc" id="L541">        ttsStateHolder.stop()</span>
+<span class="nc" id="L542">    }</span>
+
+    fun openPodcastPlayer(link: String) {
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        if (link.isBlank()) {</span>
+<span class="nc" id="L546">            return</span>
+        }
+
+<span class="nc" id="L549">        ttsStop()</span>
+<span class="nc" id="L550">        podcastPlayerStateHolder.playLink(link)</span>
+<span class="nc" id="L551">    }</span>
+
+    fun podcastPlay() {
+<span class="nc" id="L554">        podcastPlayerStateHolder.play()</span>
+<span class="nc" id="L555">    }</span>
+
+    fun podcastPause() {
+<span class="nc" id="L558">        podcastPlayerStateHolder.pause()</span>
+<span class="nc" id="L559">    }</span>
+
+    fun stopPodcastPlayback() {
+<span class="nc" id="L562">        podcastPlayerStateHolder.stop()</span>
+<span class="nc" id="L563">    }</span>
+
+    fun podcastSeekBy(deltaMillis: Int) {
+<span class="nc" id="L566">        podcastPlayerStateHolder.seekBy(deltaMillis)</span>
+<span class="nc" id="L567">    }</span>
+
+    fun podcastSeekTo(positionMillis: Int) {
+<span class="nc" id="L570">        podcastPlayerStateHolder.seekTo(positionMillis)</span>
+<span class="nc" id="L571">    }</span>
+
+    fun ttsSkipNext() {
+<span class="nc" id="L574">        ttsStateHolder.skipNext()</span>
+<span class="nc" id="L575">    }</span>
+
+    fun ttsOnSelectLanguage(lang: LocaleOverride) {
+<span class="nc" id="L578">        ttsStateHolder.setLanguage(lang)</span>
+<span class="nc" id="L579">    }</span>
+
+    fun summarize() {
+<span class="nc" id="L582">        viewModelScope.launch(Dispatchers.IO) {</span>
+<span class="nc" id="L583">            try {</span>
+<span class="nc" id="L584">                openAiSummary.value = OpenAISummaryState.Loading</span>
+<span class="nc" id="L585">                val content = loadArticleContent()</span>
+<span class="nc" id="L586">                val summaryResult = openAIApi.summarize(content, repository.openAISettings.value)</span>
+<span class="nc" id="L587">                val annotatedStrings = convertSummaryToAnnotatedStrings(summaryResult)</span>
+<span class="nc" id="L588">                openAiSummary.value =</span>
+<span class="nc" id="L589">                    OpenAISummaryState.Result(</span>
+<span class="nc" id="L590">                        value = summaryResult,</span>
+<span class="nc" id="L591">                        annotatedStrings = annotatedStrings,</span>
+                    )
+<span class="nc" id="L593">            } catch (e: Exception) {</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                val errorResult = OpenAIApi.SummaryResult.Error(content = e.message ?: &quot;Unknown error&quot;)</span>
+<span class="nc" id="L595">                val annotatedStrings = convertSummaryToAnnotatedStrings(errorResult)</span>
+<span class="nc" id="L596">                openAiSummary.value =</span>
+<span class="nc" id="L597">                    OpenAISummaryState.Result(</span>
+<span class="nc" id="L598">                        value = errorResult,</span>
+<span class="nc" id="L599">                        annotatedStrings = annotatedStrings,</span>
+                    )
+            }
+<span class="nc" id="L602">        }</span>
+<span class="nc" id="L603">    }</span>
+
+    fun translate() {
+<span class="nc bnc" id="L606" title="All 2 branches missed.">        if (showTranslatedContent.value) {</span>
+<span class="nc" id="L607">            showTranslatedContent.value = false</span>
+<span class="nc" id="L608">            return</span>
+        }
+<span class="nc" id="L610">        showTranslatedContent.value = true</span>
+<span class="nc" id="L611">        translateCurrentArticle()</span>
+<span class="nc" id="L612">    }</span>
+
+    private fun translateCurrentArticle() {
+<span class="nc" id="L615">        viewModelScope.launch(Dispatchers.IO) {</span>
+<span class="nc" id="L616">            try {</span>
+<span class="nc" id="L617">                val targetLanguage = repository.preferredTranslationLanguage.value.trim()</span>
+<span class="nc bnc" id="L618" title="All 2 branches missed.">                if (targetLanguage.isBlank()) {</span>
+<span class="nc" id="L619">                    toastMaker.makeToast(R.string.set_translation_language_first)</span>
+<span class="nc" id="L620">                    clearTranslatedContent()</span>
+<span class="nc" id="L621">                    return@launch</span>
+                }
+
+<span class="nc bnc" id="L624" title="All 2 branches missed.">                val article = articleFlow.value ?: return@launch</span>
+<span class="nc" id="L625">                val fullText = isFullText</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">                if (!repository.translationApiSettings.value.canUseAsTranslationApi) {</span>
+<span class="nc" id="L627">                    clearTranslatedContent()</span>
+<span class="nc" id="L628">                    return@launch</span>
+                }
+
+<span class="nc bnc" id="L631" title="All 2 branches missed.">                val html = loadArticleHtml(article, fullText)</span>
+<span class="nc" id="L632">                val sourceLanguage =</span>
+<span class="nc" id="L633">                    detectArticleAlreadyInPreferredLanguage(</span>
+<span class="nc" id="L634">                        article = article,</span>
+<span class="nc bnc" id="L635" title="All 2 branches missed.">                        fullText = fullText,</span>
+<span class="nc" id="L636">                        html = html,</span>
+                    )
+<span class="nc bnc" id="L638" title="All 2 branches missed.">                if (sourceLanguage != null) {</span>
+<span class="nc" id="L639">                    setAlreadyInPreferredLanguage(</span>
+<span class="nc" id="L640">                        sourceLanguage = sourceLanguage,</span>
+<span class="nc bnc" id="L641" title="All 2 branches missed.">                        isFullText = fullText,</span>
+                    )
+<span class="nc" id="L643">                    return@launch</span>
+                }
+
+<span class="nc" id="L646">                articleTranslationState.value = ArticleTranslationState.Loading</span>
+<span class="nc" id="L647">                val translation =</span>
+<span class="nc bnc" id="L648" title="All 2 branches missed.">                    translationManager.getOrTranslateArticle(</span>
+<span class="nc" id="L649">                        itemId = article.id,</span>
+<span class="nc" id="L650">                        title = article.title,</span>
+<span class="nc" id="L651">                        html = html,</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">                        isFullText = fullText,</span>
+<span class="nc" id="L653">                    ) ?: throw IllegalStateException(&quot;Translation failed&quot;)</span>
+
+<span class="nc" id="L655">                translatedArticleContent.value =</span>
+<span class="nc" id="L656">                    HtmlLinearizer(</span>
+<span class="nc" id="L657">                        tooLargeText = application.getString(R.string.failed_to_fetch_full_article_too_large),</span>
+<span class="nc" id="L658">                        openInBrowserText = application.getString(R.string.open_in_web_view),</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">                        articleLink = article.link ?: &quot;&quot;,</span>
+<span class="nc" id="L660">                    ).linearize(</span>
+<span class="nc" id="L661">                        translation.translatedHtml,</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                        article.feedUrl ?: &quot;&quot;,</span>
+                    )
+<span class="nc" id="L664">                articleTranslationState.value =</span>
+<span class="nc" id="L665">                    ArticleTranslationState.Result(</span>
+<span class="nc" id="L666">                        translatedTitle = translation.translatedTitle,</span>
+<span class="nc" id="L667">                        sourceLanguage = translation.sourceLanguage,</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">                        isFullText = fullText,</span>
+                    )
+<span class="nc" id="L670">            } catch (e: SystemTranslationSettingsRequiredException) {</span>
+<span class="nc" id="L671">                showTranslatedContent.value = false</span>
+<span class="nc" id="L672">                translatedArticleContent.value = LinearArticle(emptyList())</span>
+<span class="nc" id="L673">                articleTranslationState.value =</span>
+<span class="nc" id="L674">                    ArticleTranslationState.SystemSettingsRequired(</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">                        e.message ?: &quot;Translation model required&quot;,</span>
+                    )
+<span class="nc" id="L677">            } catch (e: Exception) {</span>
+<span class="nc" id="L678">                clearTranslatedContent()</span>
+<span class="nc bnc" id="L679" title="All 2 branches missed.">                toastMaker.makeToast(e.message ?: &quot;Translation failed&quot;)</span>
+            }
+<span class="nc" id="L681">        }</span>
+<span class="nc" id="L682">    }</span>
+
+<span class="nc" id="L684">    private suspend fun canStartAutomaticArticleTranslation(article: Article): Boolean {</span>
+<span class="nc" id="L685">        val settings = repository.translationApiSettings.value</span>
+<span class="nc bnc" id="L686" title="All 2 branches missed.">        if (!settings.isLocalTranslation) {</span>
+<span class="nc" id="L687">            return true</span>
+        }
+
+<span class="nc" id="L690">        val targetLanguage = repository.preferredTranslationLanguage.value.trim()</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">        if (targetLanguage.isBlank()) {</span>
+<span class="nc" id="L692">            return false</span>
+        }
+
+<span class="nc" id="L695">        val fullText = article.fullTextByDefault</span>
+<span class="nc bnc" id="L696" title="All 2 branches missed.">        val html = loadArticleHtml(article, fullText)</span>
+
+<span class="nc" id="L698">        val hasCachedTranslation =</span>
+<span class="nc" id="L699">            translationManager.hasCachedTranslatedArticle(</span>
+<span class="nc" id="L700">                itemId = article.id,</span>
+<span class="nc" id="L701">                title = article.title,</span>
+<span class="nc" id="L702">                html = html,</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">                isFullText = fullText,</span>
+<span class="nc" id="L704">                settings = settings,</span>
+<span class="nc" id="L705">                targetLanguage = targetLanguage,</span>
+            )
+<span class="nc bnc" id="L707" title="All 2 branches missed.">        if (hasCachedTranslation) {</span>
+<span class="nc" id="L708">            return true</span>
+        }
+
+<span class="nc" id="L711">        return runCatching {</span>
+<span class="nc" id="L712">            localTranslator.canTranslateWithoutBergamotDownload(</span>
+<span class="nc" id="L713">                content = html,</span>
+<span class="nc" id="L714">                targetLanguage = targetLanguage,</span>
+<span class="nc" id="L715">                preserveHtml = true,</span>
+<span class="nc" id="L716">            )</span>
+<span class="nc bnc" id="L717" title="All 2 branches missed.">        }.getOrDefault(false)</span>
+    }
+
+<span class="nc" id="L720">    private suspend fun loadTranslatedArticle(</span>
+        article: Article,
+        fullText: Boolean,
+    ): ArticleTranslation =
+<span class="nc bnc" id="L724" title="All 2 branches missed.">        translationManager.getOrTranslateArticle(</span>
+<span class="nc" id="L725">            itemId = article.id,</span>
+<span class="nc" id="L726">            title = article.title,</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">            html = loadArticleHtml(article, fullText),</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">            isFullText = fullText,</span>
+<span class="nc" id="L729">        ) ?: throw IllegalStateException(&quot;Translation failed&quot;)</span>
+
+    private suspend fun convertSummaryToAnnotatedStrings(summaryResult: OpenAIApi.SummaryResult): List&lt;AnnotatedString&gt; =
+<span class="nc" id="L732">        withContext(Dispatchers.Default) {</span>
+<span class="nc" id="L733">            return@withContext when (summaryResult) {</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">                is OpenAIApi.SummaryResult.Success -&gt; {</span>
+<span class="nc" id="L735">                    val markdownConverter = MarkdownToHtmlConverter()</span>
+<span class="nc" id="L736">                    val htmlContent = markdownConverter.convertToHtml(summaryResult.content)</span>
+<span class="nc" id="L737">                    htmlToAnnotatedString(htmlContent.byteInputStream(), &quot;&quot;)</span>
+                }
+<span class="nc" id="L739">                is OpenAIApi.SummaryResult.Error -&gt; {</span>
+                    // For error messages, create a simple AnnotatedString directly
+                    // without going through markdown/HTML conversion
+<span class="nc" id="L742">                    listOf(AnnotatedString(summaryResult.content))</span>
+                }
+            }
+<span class="nc" id="L745">        }</span>
+
+    private suspend fun loadArticleContent(): String {
+<span class="nc" id="L748">        val viewState = viewState.value</span>
+<span class="nc" id="L749">        val blobFile = blobFullFile(viewState.articleId, filePathProvider.fullArticleDir)</span>
+<span class="nc" id="L750">        val contentStream =</span>
+<span class="nc bnc" id="L751" title="All 2 branches missed.">            if (blobFile.isFile) {</span>
+<span class="nc" id="L752">                blobFullInputStream(viewState.articleId, filePathProvider.fullArticleDir)</span>
+            } else {
+<span class="nc" id="L754">                fullTextParser</span>
+<span class="nc" id="L755">                    .parseFullArticleIfMissing(</span>
+<span class="nc" id="L756">                        object : FeedItemForFetching {</span>
+<span class="nc" id="L757">                            override val id = viewState.articleId</span>
+<span class="nc" id="L758">                            override val link = viewState.articleLink</span>
+                        },
+<span class="nc" id="L760">                    ).let {</span>
+<span class="nc" id="L761">                        val error = it.leftOrNull()</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">                        if (error == null) {</span>
+<span class="nc" id="L763">                            blobFullInputStream(viewState.articleId, filePathProvider.fullArticleDir)</span>
+                        } else {
+<span class="nc" id="L765">                            throw IllegalStateException(&quot;Cannot load article: ${error.description}&quot;, error.throwable)</span>
+<span class="nc" id="L766">                        }</span>
+                    }
+            }
+
+<span class="nc bnc" id="L770" title="All 2 branches missed.">        return Jsoup.parse(contentStream, null, viewState.articleFeedUrl ?: &quot;&quot;).body().text()</span>
+    }
+
+    private suspend fun detectArticleAlreadyInPreferredLanguage(
+        article: Article,
+        fullText: Boolean,
+        html: String,
+    ): String? =
+<span class="nc" id="L778">        translationManager.detectArticleAlreadyInTargetLanguage(</span>
+<span class="nc" id="L779">            itemId = article.id,</span>
+<span class="nc" id="L780">            title = article.title,</span>
+<span class="nc" id="L781">            html = html,</span>
+<span class="nc" id="L782">            isFullText = fullText,</span>
+<span class="nc" id="L783">        )</span>
+
+    private suspend fun loadArticleHtml(
+        article: Article,
+        fullText: Boolean,
+    ): String =
+<span class="nc" id="L789">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L790">            when (fullText) {</span>
+<span class="nc bnc" id="L791" title="All 4 branches missed.">                false -&gt; readArticleBlobIfPresent(article.id) ?: article.snippet</span>
+
+<span class="nc bnc" id="L793" title="All 2 branches missed.">                true -&gt; {</span>
+<span class="nc" id="L794">                    val cachedHtml = readFullArticleBlobIfPresent(article.id)</span>
+<span class="nc bnc" id="L795" title="All 2 branches missed.">                    if (cachedHtml != null) {</span>
+<span class="nc" id="L796">                        return@withContext cachedHtml</span>
+                    }
+
+<span class="nc" id="L799">                    val error = retrieveFullText(article.id).leftOrNull()</span>
+<span class="nc bnc" id="L800" title="All 2 branches missed.">                    if (error != null) {</span>
+<span class="nc" id="L801">                        throw IllegalStateException(&quot;Cannot load article: ${error.description}&quot;, error.throwable)</span>
+                    }
+<span class="nc bnc" id="L803" title="All 2 branches missed.">                    readFullArticleBlobIfPresent(article.id)</span>
+<span class="nc" id="L804">                        ?: throw IllegalStateException(&quot;Cannot load article&quot;)</span>
+                }
+<span class="nc" id="L806">            }</span>
+<span class="nc" id="L807">        }</span>
+
+    private suspend fun loadArticleHtmlForLanguageDetection(
+        article: Article,
+        fullText: Boolean,
+    ): String? =
+<span class="nc" id="L813">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L814">            when (fullText) {</span>
+<span class="nc bnc" id="L815" title="All 8 branches missed.">                false -&gt; readArticleBlobIfPresent(article.id) ?: article.snippet.takeIf(String::isNotBlank)</span>
+<span class="nc bnc" id="L816" title="All 2 branches missed.">                true -&gt; readFullArticleBlobIfPresent(article.id)</span>
+<span class="nc" id="L817">            }</span>
+<span class="nc" id="L818">        }</span>
+
+    private fun readArticleBlobIfPresent(itemId: Long): String? =
+<span class="nc" id="L821">        blobFile(itemId, filePathProvider.articleDir)</span>
+<span class="nc bnc" id="L822" title="All 2 branches missed.">            .takeIf { it.isFile }</span>
+<span class="nc bnc" id="L823" title="All 2 branches missed.">            ?.let {</span>
+<span class="nc bnc" id="L824" title="All 2 branches missed.">                blobInputStream(itemId, filePathProvider.articleDir).bufferedReader().use { reader -&gt;</span>
+<span class="nc" id="L825">                    reader.readText()</span>
+<span class="nc" id="L826">                }</span>
+<span class="nc" id="L827">            }</span>
+
+    private fun readFullArticleBlobIfPresent(itemId: Long): String? =
+<span class="nc" id="L830">        blobFullFile(itemId, filePathProvider.fullArticleDir)</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">            .takeIf { it.isFile }</span>
+<span class="nc bnc" id="L832" title="All 2 branches missed.">            ?.let {</span>
+<span class="nc bnc" id="L833" title="All 2 branches missed.">                blobFullInputStream(itemId, filePathProvider.fullArticleDir).bufferedReader().use { reader -&gt;</span>
+<span class="nc" id="L834">                    reader.readText()</span>
+<span class="nc" id="L835">                }</span>
+<span class="nc" id="L836">            }</span>
+
+    private fun canTranslateArticles(): Boolean =
+<span class="nc bnc" id="L839" title="All 2 branches missed.">        repository.translationApiSettings.value.canUseAsTranslationApi &amp;&amp;</span>
+<span class="nc bnc" id="L840" title="All 2 branches missed.">            repository.preferredTranslationLanguage.value</span>
+<span class="nc" id="L841">                .trim()</span>
+<span class="nc bnc" id="L842" title="All 2 branches missed.">                .isNotBlank()</span>
+
+    private fun setAlreadyInPreferredLanguage(
+        sourceLanguage: String,
+        isFullText: Boolean,
+    ) {
+<span class="nc" id="L848">        showTranslatedContent.value = false</span>
+<span class="nc" id="L849">        translatedArticleContent.value = LinearArticle(emptyList())</span>
+<span class="nc" id="L850">        articleTranslationState.value =</span>
+<span class="nc" id="L851">            ArticleTranslationState.AlreadyInPreferredLanguage(</span>
+<span class="nc" id="L852">                sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L853">                isFullText = isFullText,</span>
+            )
+<span class="nc" id="L855">    }</span>
+
+<span class="nc" id="L857">    private fun clearAlreadyInPreferredLanguageState(isFullText: Boolean? = null) {</span>
+<span class="nc bnc" id="L858" title="All 4 branches missed.">        val currentState = articleTranslationState.value as? ArticleTranslationState.AlreadyInPreferredLanguage ?: return</span>
+<span class="nc bnc" id="L859" title="All 4 branches missed.">        if (isFullText == null || currentState.isFullText == isFullText) {</span>
+<span class="nc" id="L860">            articleTranslationState.value = ArticleTranslationState.Empty</span>
+        }
+<span class="nc" id="L862">    }</span>
+
+    private fun clearTranslatedContent() {
+<span class="nc" id="L865">        showTranslatedContent.value = false</span>
+<span class="nc" id="L866">        translatedArticleContent.value = LinearArticle(emptyList())</span>
+<span class="nc" id="L867">        articleTranslationState.value = ArticleTranslationState.Empty</span>
+<span class="nc" id="L868">    }</span>
+
+    fun dismissSystemTranslationSettingsPrompt() {
+<span class="nc bnc" id="L871" title="All 2 branches missed.">        if (articleTranslationState.value is ArticleTranslationState.SystemSettingsRequired) {</span>
+<span class="nc" id="L872">            articleTranslationState.value = ArticleTranslationState.Empty</span>
+        }
+<span class="nc" id="L874">    }</span>
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_ArticleVM&quot;
+    }
+}
+
+<span class="nc" id="L881">private data class ArticleState(</span>
+<span class="nc" id="L882">    override val useDetectLanguage: Boolean = false,</span>
+<span class="nc" id="L883">    override val isBottomBarVisible: Boolean = false,</span>
+<span class="nc" id="L884">    override val isTTSPlaying: Boolean = false,</span>
+<span class="nc" id="L885">    override val podcastPlayerState: PodcastPlayerState = PodcastPlayerState(),</span>
+<span class="nc" id="L886">    override val useInAppAudioPlayer: Boolean = true,</span>
+<span class="nc" id="L887">    override val ttsLanguages: List&lt;Locale&gt; = emptyList(),</span>
+<span class="nc" id="L888">    override val articleFeedUrl: String? = null,</span>
+<span class="nc" id="L889">    override val articleId: Long = ID_UNSET,</span>
+<span class="nc" id="L890">    override val articleLink: String? = null,</span>
+<span class="nc" id="L891">    override val articleFeedId: Long = ID_UNSET,</span>
+<span class="nc" id="L892">    override val textToDisplay: TextToDisplay = TextToDisplay.CONTENT,</span>
+<span class="nc" id="L893">    override val linkOpener: LinkOpener = LinkOpener.CUSTOM_TAB,</span>
+<span class="nc" id="L894">    override val pubDate: ZonedDateTime? = null,</span>
+<span class="nc" id="L895">    override val author: String? = null,</span>
+<span class="nc" id="L896">    override val enclosure: Enclosure = Enclosure(),</span>
+<span class="nc" id="L897">    override val articleTitle: String = &quot;&quot;,</span>
+<span class="nc" id="L898">    override val showToolbarMenu: Boolean = false,</span>
+<span class="nc" id="L899">    override val feedDisplayTitle: String = &quot;&quot;,</span>
+<span class="nc" id="L900">    override val isBookmarked: Boolean = false,</span>
+<span class="nc" id="L901">    override val keyHolder: ArticleItemKeyHolder = RotatingArticleItemKeyHolder,</span>
+<span class="nc" id="L902">    override val wordCount: Int = 0,</span>
+<span class="nc" id="L903">    override val image: ThumbnailImage? = null,</span>
+<span class="nc" id="L904">    override val showSummarize: Boolean = false,</span>
+<span class="nc" id="L905">    override val openAiSummary: OpenAISummaryState = OpenAISummaryState.Empty,</span>
+<span class="nc" id="L906">    override val showTranslate: Boolean = false,</span>
+<span class="nc" id="L907">    override val isShowingTranslated: Boolean = false,</span>
+<span class="nc" id="L908">    override val isTranslationLoading: Boolean = false,</span>
+<span class="nc" id="L909">    override val translationModelDownloadProgress: BergamotModelDownloadProgress? = null,</span>
+<span class="nc" id="L910">    override val translationSourceLanguage: String = &quot;&quot;,</span>
+<span class="nc" id="L911">    override val systemTranslationSettingsMessage: String = &quot;&quot;,</span>
+<span class="nc" id="L912">    override val articleContent: LinearArticle = LinearArticle(emptyList()),</span>
+<span class="nc" id="L913">) : ArticleScreenViewState</span>
+
+@Immutable
+interface ArticleScreenViewState {
+    val useDetectLanguage: Boolean
+    val isBottomBarVisible: Boolean
+    val isTTSPlaying: Boolean
+    val podcastPlayerState: PodcastPlayerState
+    val useInAppAudioPlayer: Boolean
+    val ttsLanguages: List&lt;Locale&gt;
+    val articleFeedUrl: String?
+    val articleId: Long
+    val articleLink: String?
+    val articleFeedId: Long
+    val textToDisplay: TextToDisplay
+    val linkOpener: LinkOpener
+    val pubDate: ZonedDateTime?
+    val author: String?
+    val enclosure: Enclosure
+    val articleTitle: String
+    val showToolbarMenu: Boolean
+    val feedDisplayTitle: String
+    val isBookmarked: Boolean
+    val keyHolder: ArticleItemKeyHolder
+    val wordCount: Int
+    val image: ThumbnailImage?
+    val showSummarize: Boolean
+    val openAiSummary: OpenAISummaryState
+    val showTranslate: Boolean
+    val isShowingTranslated: Boolean
+    val isTranslationLoading: Boolean
+    val translationModelDownloadProgress: BergamotModelDownloadProgress?
+    val translationSourceLanguage: String
+    val systemTranslationSettingsMessage: String
+    val articleContent: LinearArticle
+}
+
+sealed interface OpenAISummaryState {
+    data object Empty : OpenAISummaryState
+
+    data object Loading : OpenAISummaryState
+
+<span class="nc" id="L955">    data class Result(</span>
+<span class="nc" id="L956">        val value: OpenAIApi.SummaryResult,</span>
+<span class="nc" id="L957">        val annotatedStrings: List&lt;AnnotatedString&gt;,</span>
+    ) : OpenAISummaryState
+}
+
+sealed interface ArticleTranslationState {
+    data object Empty : ArticleTranslationState
+
+    data object Loading : ArticleTranslationState
+
+<span class="nc" id="L966">    data class AlreadyInPreferredLanguage(</span>
+<span class="nc" id="L967">        val sourceLanguage: String,</span>
+<span class="nc" id="L968">        val isFullText: Boolean,</span>
+    ) : ArticleTranslationState
+
+<span class="nc" id="L971">    data class SystemSettingsRequired(</span>
+<span class="nc" id="L972">        val message: String,</span>
+    ) : ArticleTranslationState
+
+<span class="nc" id="L975">    data class Result(</span>
+<span class="nc" id="L976">        val translatedTitle: String,</span>
+<span class="nc" id="L977">        val sourceLanguage: String,</span>
+<span class="nc" id="L978">        val isFullText: Boolean,</span>
+    ) : ArticleTranslationState
+}
+
+<span class="nc" id="L982">private data class ArticleLanguageCheck(</span>
+<span class="nc" id="L983">    val article: Article,</span>
+<span class="nc" id="L984">    val isFullText: Boolean,</span>
+)
+
+interface ArticleItemKeyHolder {
+    fun getAndIncrementKey(): Any
+}
+
+object RotatingArticleItemKeyHolder : ArticleItemKeyHolder {
+    private var key: Long = 0L
+
+<span class="nc" id="L994">    override fun getAndIncrementKey(): Long = key++</span>
+}
+
+sealed class TSSError
+
+<span class="nc" id="L999">data object TTSFileNotFound : TSSError()</span>
+
+<span class="nc" id="L1001">data object TTSUnknownError : TSSError()</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

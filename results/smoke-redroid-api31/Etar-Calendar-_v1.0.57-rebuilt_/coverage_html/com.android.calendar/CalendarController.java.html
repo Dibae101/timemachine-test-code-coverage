@@ -1,0 +1,856 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CalendarController.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar</a> &gt; <span class="el_source">CalendarController.java</span></div><h1>CalendarController.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2010 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar;
+
+import static android.provider.CalendarContract.Attendees.ATTENDEE_STATUS;
+import static android.provider.CalendarContract.EXTRA_EVENT_ALL_DAY;
+import static android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME;
+import static android.provider.CalendarContract.EXTRA_EVENT_END_TIME;
+
+import android.accounts.Account;
+import android.accounts.AccountManager;
+import android.app.Activity;
+import android.app.SearchManager;
+import android.app.SearchableInfo;
+import android.content.ComponentName;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.Calendars;
+import android.provider.CalendarContract.Events;
+import android.util.Log;
+import android.util.Pair;
+
+import com.android.calendar.event.EditEventActivity;
+import com.android.calendar.settings.GeneralPreferences;
+import com.android.calendar.settings.SettingsActivity;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.lang.ref.WeakReference;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.Map.Entry;
+import java.util.WeakHashMap;
+
+public class CalendarController {
+    public static final String EVENT_EDIT_ON_LAUNCH = &quot;editMode&quot;;
+    public static final int MIN_CALENDAR_YEAR = 1970;
+    public static final int MAX_CALENDAR_YEAR = 2036;
+    public static final int MIN_CALENDAR_WEEK = 0;
+    public static final int MAX_CALENDAR_WEEK = 3497; // weeks between 1/1/1970 and 1/1/2037
+    /**
+     * Pass to the ExtraLong parameter for EventType.CREATE_EVENT to create
+     * an all-day event
+     */
+    public static final long EXTRA_CREATE_ALL_DAY = 0x10;
+    /**
+     * Pass to the ExtraLong parameter for EventType.GO_TO to signal the time
+     * can be ignored
+     */
+    public static final long EXTRA_GOTO_DATE = 1;
+    public static final long EXTRA_GOTO_TIME = 2;
+    public static final long EXTRA_GOTO_BACK_TO_PREVIOUS = 4;
+    public static final long EXTRA_GOTO_TODAY = 8;
+    private static final boolean DEBUG = false;
+    private static final String TAG = &quot;CalendarController&quot;;
+<span class="fc" id="L75">    private static WeakHashMap&lt;Context, WeakReference&lt;CalendarController&gt;&gt; instances =</span>
+            new WeakHashMap&lt;Context, WeakReference&lt;CalendarController&gt;&gt;();
+    private final Context mContext;
+    // This uses a LinkedHashMap so that we can replace fragments based on the
+    // view id they are being expanded into since we can't guarantee a reference
+    // to the handler will be findable
+<span class="fc" id="L81">    private final LinkedHashMap&lt;Integer,EventHandler&gt; eventHandlers =</span>
+            new LinkedHashMap&lt;Integer,EventHandler&gt;(5);
+<span class="fc" id="L83">    private final LinkedList&lt;Integer&gt; mToBeRemovedEventHandlers = new LinkedList&lt;Integer&gt;();</span>
+<span class="fc" id="L84">    private final LinkedHashMap&lt;Integer, EventHandler&gt; mToBeAddedEventHandlers = new LinkedHashMap&lt;</span>
+            Integer, EventHandler&gt;();
+<span class="fc" id="L86">    private final WeakHashMap&lt;Object, Long&gt; filters = new WeakHashMap&lt;Object, Long&gt;(1);</span>
+<span class="fc" id="L87">    private final Time mTime = new Time();</span>
+<span class="fc" id="L88">    private final Runnable mUpdateTimezone = new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="fc" id="L91">            mTime.switchTimezone(Utils.getTimeZone(mContext, this));</span>
+<span class="fc" id="L92">        }</span>
+    };
+    private Pair&lt;Integer, EventHandler&gt; mFirstEventHandler;
+    private Pair&lt;Integer, EventHandler&gt; mToBeAddedFirstEventHandler;
+<span class="fc" id="L96">    private volatile int mDispatchInProgressCounter = 0;</span>
+<span class="fc" id="L97">    private int mViewType = -1;</span>
+<span class="fc" id="L98">    private int mDetailViewType = -1;</span>
+<span class="fc" id="L99">    private int mPreviousViewType = -1;</span>
+<span class="fc" id="L100">    private long mEventId = -1;</span>
+<span class="fc" id="L101">    private long mDateFlags = 0;</span>
+
+<span class="fc" id="L103">    private CalendarController(Context context) {</span>
+<span class="fc" id="L104">        mContext = context;</span>
+<span class="fc" id="L105">        mUpdateTimezone.run();</span>
+<span class="fc" id="L106">        mTime.set(System.currentTimeMillis());</span>
+<span class="fc" id="L107">        mDetailViewType = Utils.getSharedPreference(mContext,</span>
+                GeneralPreferences.KEY_DETAILED_VIEW,
+                GeneralPreferences.DEFAULT_DETAILED_VIEW);
+<span class="fc" id="L110">    }</span>
+
+    /**
+     * Creates and/or returns an instance of CalendarController associated with
+     * the supplied context. It is best to pass in the current Activity.
+     *
+     * @param context The activity if at all possible.
+     */
+    public static CalendarController getInstance(Context context) {
+<span class="fc" id="L119">        synchronized (instances) {</span>
+<span class="fc" id="L120">            CalendarController controller = null;</span>
+<span class="fc" id="L121">            WeakReference&lt;CalendarController&gt; weakController = instances.get(context);</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">            if (weakController != null) {</span>
+<span class="fc" id="L123">                controller = weakController.get();</span>
+            }
+
+<span class="fc bfc" id="L126" title="All 2 branches covered.">            if (controller == null) {</span>
+<span class="fc" id="L127">                controller = new CalendarController(context);</span>
+<span class="fc" id="L128">                instances.put(context, new WeakReference(controller));</span>
+            }
+<span class="fc" id="L130">            return controller;</span>
+        }
+    }
+
+    /**
+     * Removes an instance when it is no longer needed. This should be called in
+     * an activity's onDestroy method.
+     *
+     * @param context The activity used to create the controller
+     */
+    public static void removeInstance(Context context) {
+<span class="nc" id="L141">        instances.remove(context);</span>
+<span class="nc" id="L142">    }</span>
+
+    public void sendEventRelatedEvent(Object sender, long eventType, long eventId, long startMillis,
+                                      long endMillis, int x, int y, long selectedMillis) {
+        // TODO: pass the real allDay status or at least a status that says we don't know the
+        // status and have the receiver query the data.
+        // The current use of this method for VIEW_EVENT is by the day view to show an EventInfo
+        // so currently the missing allDay status has no effect.
+<span class="nc" id="L150">        sendEventRelatedEventWithExtra(sender, eventType, eventId, startMillis, endMillis, x, y,</span>
+<span class="nc" id="L151">                EventInfo.buildViewExtraLong(Attendees.ATTENDEE_STATUS_NONE, false),</span>
+                selectedMillis);
+<span class="nc" id="L153">    }</span>
+
+    /**
+     * Helper for sending New/View/Edit/Delete events
+     *
+     * @param sender object of the caller
+     * @param eventType one of {@link EventType}
+     * @param eventId event id
+     * @param startMillis start time
+     * @param endMillis end time
+     * @param x x coordinate in the activity space
+     * @param y y coordinate in the activity space
+     * @param extraLong default response value for the &quot;simple event view&quot; and all day indication.
+     *        Use Attendees.ATTENDEE_STATUS_NONE for no response.
+     * @param selectedMillis The time to specify as selected
+     */
+    public void sendEventRelatedEventWithExtra(Object sender, long eventType, long eventId,
+                                               long startMillis, long endMillis, int x, int y, long extraLong, long selectedMillis) {
+<span class="nc" id="L171">        sendEventRelatedEventWithExtraWithTitleWithCalendarId(sender, eventType, eventId,</span>
+                startMillis, endMillis, x, y, extraLong, selectedMillis, null, -1);
+<span class="nc" id="L173">    }</span>
+
+    /**
+     * Helper for sending New/View/Edit/Delete events
+     *
+     * @param sender object of the caller
+     * @param eventType one of {@link EventType}
+     * @param eventId event id
+     * @param startMillis start time
+     * @param endMillis end time
+     * @param x x coordinate in the activity space
+     * @param y y coordinate in the activity space
+     * @param extraLong default response value for the &quot;simple event view&quot; and all day indication.
+     *        Use Attendees.ATTENDEE_STATUS_NONE for no response.
+     * @param selectedMillis The time to specify as selected
+     * @param title The title of the event
+     * @param calendarId The id of the calendar which the event belongs to
+     */
+    public void sendEventRelatedEventWithExtraWithTitleWithCalendarId(Object sender, long eventType,
+                                                                      long eventId, long startMillis, long endMillis, int x, int y, long extraLong,
+                                                                      long selectedMillis, String title, long calendarId) {
+<span class="nc" id="L194">        EventInfo info = new EventInfo();</span>
+<span class="nc" id="L195">        info.eventType = eventType;</span>
+<span class="nc bnc" id="L196" title="All 4 branches missed.">        if (eventType == EventType.EDIT_EVENT || eventType == EventType.VIEW_EVENT_DETAILS) {</span>
+<span class="nc" id="L197">            info.viewType = ViewType.CURRENT;</span>
+        }
+
+<span class="nc" id="L200">        info.id = eventId;</span>
+<span class="nc" id="L201">        info.startTime = new Time(Utils.getTimeZone(mContext, mUpdateTimezone));</span>
+<span class="nc" id="L202">        info.startTime.set(startMillis);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (selectedMillis != -1) {</span>
+<span class="nc" id="L204">            info.selectedTime = new Time(Utils.getTimeZone(mContext, mUpdateTimezone));</span>
+<span class="nc" id="L205">            info.selectedTime.set(selectedMillis);</span>
+        } else {
+<span class="nc" id="L207">            info.selectedTime = info.startTime;</span>
+        }
+<span class="nc" id="L209">        info.endTime = new Time(Utils.getTimeZone(mContext, mUpdateTimezone));</span>
+<span class="nc" id="L210">        info.endTime.set(endMillis);</span>
+<span class="nc" id="L211">        info.x = x;</span>
+<span class="nc" id="L212">        info.y = y;</span>
+<span class="nc" id="L213">        info.extraLong = extraLong;</span>
+<span class="nc" id="L214">        info.eventTitle = title;</span>
+<span class="nc" id="L215">        info.calendarId = calendarId;</span>
+<span class="nc" id="L216">        this.sendEvent(sender, info);</span>
+<span class="nc" id="L217">    }</span>
+
+    /**
+     * Helper for sending non-calendar-event events
+     *
+     * @param sender    object of the caller
+     * @param eventType one of {@link EventType}
+     * @param start     start time
+     * @param end       end time
+     * @param eventId   event id
+     * @param viewType  {@link ViewType}
+     */
+    public void sendEvent(Object sender, long eventType, Time start, Time end, long eventId,
+                          int viewType) {
+<span class="fc" id="L231">        sendEvent(sender, eventType, start, end, start, eventId, viewType, EXTRA_GOTO_TIME, null,</span>
+                null);
+<span class="fc" id="L233">    }</span>
+
+    /**
+     * sendEvent() variant with extraLong, search query, and search component name.
+     */
+    public void sendEvent(Object sender, long eventType, Time start, Time end, long eventId,
+                          int viewType, long extraLong, String query, ComponentName componentName) {
+<span class="fc" id="L240">        sendEvent(sender, eventType, start, end, start, eventId, viewType, extraLong, query,</span>
+                componentName);
+<span class="fc" id="L242">    }</span>
+
+    public void sendEvent(Object sender, long eventType, Time start, Time end, Time selected,
+                          long eventId, int viewType, long extraLong, String query, ComponentName componentName) {
+<span class="fc" id="L246">        EventInfo info = new EventInfo();</span>
+<span class="fc" id="L247">        info.eventType = eventType;</span>
+<span class="fc" id="L248">        info.startTime = start;</span>
+<span class="fc" id="L249">        info.selectedTime = selected;</span>
+<span class="fc" id="L250">        info.endTime = end;</span>
+<span class="fc" id="L251">        info.id = eventId;</span>
+<span class="fc" id="L252">        info.viewType = viewType;</span>
+<span class="fc" id="L253">        info.query = query;</span>
+<span class="fc" id="L254">        info.componentName = componentName;</span>
+<span class="fc" id="L255">        info.extraLong = extraLong;</span>
+<span class="fc" id="L256">        this.sendEvent(sender, info);</span>
+<span class="fc" id="L257">    }</span>
+
+    public void sendEvent(Object sender, final EventInfo event) {
+        // TODO Throw exception on invalid events
+
+        if (DEBUG) {
+            Log.d(TAG, eventInfoToString(event));
+        }
+
+<span class="fc" id="L266">        Long filteredTypes = filters.get(sender);</span>
+<span class="pc bpc" id="L267" title="3 of 4 branches missed.">        if (filteredTypes != null &amp;&amp; (filteredTypes.longValue() &amp; event.eventType) != 0) {</span>
+            // Suppress event per filter
+            if (DEBUG) {
+                Log.d(TAG, &quot;Event suppressed&quot;);
+            }
+<span class="nc" id="L272">            return;</span>
+        }
+
+<span class="fc" id="L275">        mPreviousViewType = mViewType;</span>
+
+        // Fix up view if not specified
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">        if (event.viewType == ViewType.DETAIL) {</span>
+<span class="nc" id="L279">            event.viewType = mDetailViewType;</span>
+<span class="nc" id="L280">            mViewType = mDetailViewType;</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">        } else if (event.viewType == ViewType.CURRENT) {</span>
+<span class="fc" id="L282">            event.viewType = mViewType;</span>
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">        } else if (event.viewType != ViewType.EDIT) {</span>
+<span class="fc" id="L284">            mViewType = event.viewType;</span>
+
+<span class="pc bpc" id="L286" title="2 of 4 branches missed.">            if (event.viewType == ViewType.AGENDA || event.viewType == ViewType.DAY</span>
+<span class="pc bpc" id="L287" title="3 of 4 branches missed.">                    || (Utils.getAllowWeekForDetailView() &amp;&amp; event.viewType == ViewType.WEEK)) {</span>
+<span class="nc" id="L288">                mDetailViewType = mViewType;</span>
+            }
+        }
+
+        if (DEBUG) {
+            Log.d(TAG, &quot;vvvvvvvvvvvvvvv&quot;);
+            Log.d(TAG, &quot;Start  &quot; + (event.startTime == null ? &quot;null&quot; : event.startTime.toString()));
+            Log.d(TAG, &quot;End    &quot; + (event.endTime == null ? &quot;null&quot; : event.endTime.toString()));
+            Log.d(TAG, &quot;Select &quot; + (event.selectedTime == null ? &quot;null&quot; : event.selectedTime.toString()));
+            Log.d(TAG, &quot;mTime  &quot; + (mTime == null ? &quot;null&quot; : mTime.toString()));
+        }
+
+<span class="fc" id="L300">        long startMillis = 0;</span>
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">        if (event.startTime != null) {</span>
+<span class="fc" id="L302">            startMillis = event.startTime.toMillis();</span>
+        }
+
+        // Set mTime if selectedTime is set
+<span class="pc bpc" id="L306" title="1 of 4 branches missed.">        if (event.selectedTime != null &amp;&amp; event.selectedTime.toMillis() != 0) {</span>
+<span class="fc" id="L307">            mTime.set(event.selectedTime);</span>
+        } else {
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">            if (startMillis != 0) {</span>
+                // selectedTime is not set so set mTime to startTime iff it is not
+                // within start and end times
+<span class="fc" id="L312">                long mtimeMillis = mTime.toMillis();</span>
+<span class="pc bpc" id="L313" title="2 of 4 branches missed.">                if (mtimeMillis &lt; startMillis</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">                        || (event.endTime != null &amp;&amp; mtimeMillis &gt; event.endTime.toMillis())) {</span>
+<span class="nc" id="L315">                    mTime.set(event.startTime);</span>
+                }
+            }
+<span class="fc" id="L318">            event.selectedTime = mTime;</span>
+        }
+        // Store the formatting flags if this is an update to the title
+<span class="fc bfc" id="L321" title="All 2 branches covered.">        if (event.eventType == EventType.UPDATE_TITLE) {</span>
+<span class="fc" id="L322">            mDateFlags = event.extraLong;</span>
+        }
+
+        // Fix up start time if not specified
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">        if (startMillis == 0) {</span>
+<span class="nc" id="L327">            event.startTime = mTime;</span>
+        }
+        if (DEBUG) {
+            Log.d(TAG, &quot;Start  &quot; + (event.startTime == null ? &quot;null&quot; : event.startTime.toString()));
+            Log.d(TAG, &quot;End    &quot; + (event.endTime == null ? &quot;null&quot; : event.endTime.toString()));
+            Log.d(TAG, &quot;Select &quot; + (event.selectedTime == null ? &quot;null&quot; : event.selectedTime.toString()));
+            Log.d(TAG, &quot;mTime  &quot; + (mTime == null ? &quot;null&quot; : mTime.toString()));
+            Log.d(TAG, &quot;^^^^^^^^^^^^^^^&quot;);
+        }
+
+        // Store the eventId if we're entering edit event
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">        if ((event.eventType</span>
+                &amp; (EventType.CREATE_EVENT | EventType.EDIT_EVENT | EventType.VIEW_EVENT_DETAILS))
+                != 0) {
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            if (event.id &gt; 0) {</span>
+<span class="nc" id="L342">                mEventId = event.id;</span>
+            } else {
+<span class="nc" id="L344">                mEventId = -1;</span>
+            }
+        }
+
+<span class="fc" id="L348">        boolean handled = false;</span>
+<span class="fc" id="L349">        synchronized (this) {</span>
+<span class="fc" id="L350">            mDispatchInProgressCounter++;</span>
+
+            if (DEBUG) {
+                Log.d(TAG, &quot;sendEvent: Dispatching to &quot; + eventHandlers.size() + &quot; handlers&quot;);
+            }
+            // Dispatch to event handler(s)
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">            if (mFirstEventHandler != null) {</span>
+                // Handle the 'first' one before handling the others
+<span class="fc" id="L358">                EventHandler handler = mFirstEventHandler.second;</span>
+<span class="pc bpc" id="L359" title="2 of 4 branches missed.">                if (handler != null &amp;&amp; (handler.getSupportedEventTypes() &amp; event.eventType) != 0</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">                        &amp;&amp; !mToBeRemovedEventHandlers.contains(mFirstEventHandler.first)) {</span>
+<span class="fc" id="L361">                    handler.handleEvent(event);</span>
+<span class="fc" id="L362">                    handled = true;</span>
+                }
+            }
+<span class="fc bfc" id="L365" title="All 2 branches covered.">            for (Entry&lt;Integer, EventHandler&gt; entry : eventHandlers.entrySet()) {</span>
+<span class="fc" id="L366">                int key = entry.getKey();</span>
+<span class="pc bpc" id="L367" title="1 of 4 branches missed.">                if (mFirstEventHandler != null &amp;&amp; key == mFirstEventHandler.first) {</span>
+                    // If this was the 'first' handler it was already handled
+<span class="fc" id="L369">                    continue;</span>
+                }
+<span class="fc" id="L371">                EventHandler eventHandler = entry.getValue();</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">                if (eventHandler != null</span>
+<span class="fc bfc" id="L373" title="All 2 branches covered.">                        &amp;&amp; (eventHandler.getSupportedEventTypes() &amp; event.eventType) != 0) {</span>
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">                    if (mToBeRemovedEventHandlers.contains(key)) {</span>
+<span class="nc" id="L375">                        continue;</span>
+                    }
+<span class="fc" id="L377">                    eventHandler.handleEvent(event);</span>
+<span class="fc" id="L378">                    handled = true;</span>
+                }
+<span class="fc" id="L380">            }</span>
+
+<span class="fc" id="L382">            mDispatchInProgressCounter--;</span>
+
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">            if (mDispatchInProgressCounter == 0) {</span>
+
+                // Deregister removed handlers
+<span class="pc bpc" id="L387" title="1 of 2 branches missed.">                if (mToBeRemovedEventHandlers.size() &gt; 0) {</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">                    for (Integer zombie : mToBeRemovedEventHandlers) {</span>
+<span class="nc" id="L389">                        eventHandlers.remove(zombie);</span>
+<span class="nc bnc" id="L390" title="All 4 branches missed.">                        if (mFirstEventHandler != null &amp;&amp; zombie.equals(mFirstEventHandler.first)) {</span>
+<span class="nc" id="L391">                            mFirstEventHandler = null;</span>
+                        }
+<span class="nc" id="L393">                    }</span>
+<span class="nc" id="L394">                    mToBeRemovedEventHandlers.clear();</span>
+                }
+                // Add new handlers
+<span class="pc bpc" id="L397" title="1 of 2 branches missed.">                if (mToBeAddedFirstEventHandler != null) {</span>
+<span class="nc" id="L398">                    mFirstEventHandler = mToBeAddedFirstEventHandler;</span>
+<span class="nc" id="L399">                    mToBeAddedFirstEventHandler = null;</span>
+                }
+<span class="pc bpc" id="L401" title="1 of 2 branches missed.">                if (mToBeAddedEventHandlers.size() &gt; 0) {</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">                    for (Entry&lt;Integer, EventHandler&gt; food : mToBeAddedEventHandlers.entrySet()) {</span>
+<span class="nc" id="L403">                        eventHandlers.put(food.getKey(), food.getValue());</span>
+<span class="nc" id="L404">                    }</span>
+                }
+            }
+<span class="fc" id="L407">        }</span>
+
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">        if (!handled) {</span>
+            // Launch Settings
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            if (event.eventType == EventType.LAUNCH_SETTINGS) {</span>
+<span class="nc" id="L412">                launchSettings();</span>
+<span class="nc" id="L413">                return;</span>
+            }
+
+            // Create/View/Edit/Delete Event
+<span class="nc bnc" id="L417" title="All 2 branches missed.">            long endTime = (event.endTime == null) ? -1 : event.endTime.toMillis();</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            if (event.eventType == EventType.CREATE_EVENT) {</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                launchCreateEvent(event.startTime.toMillis(), endTime,</span>
+                        event.extraLong == EXTRA_CREATE_ALL_DAY, event.eventTitle,
+                        event.calendarId);
+<span class="nc" id="L422">                return;</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">            } else if (event.eventType == EventType.VIEW_EVENT) {</span>
+<span class="nc" id="L424">                launchViewEvent(event.id, event.startTime.toMillis(), endTime,</span>
+<span class="nc" id="L425">                        event.getResponse());</span>
+<span class="nc" id="L426">                return;</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            } else if (event.eventType == EventType.EDIT_EVENT) {</span>
+<span class="nc" id="L428">                launchEditEvent(event.id, event.startTime.toMillis(), endTime, true);</span>
+<span class="nc" id="L429">                return;</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            } else if (event.eventType == EventType.VIEW_EVENT_DETAILS) {</span>
+<span class="nc" id="L431">                launchEditEvent(event.id, event.startTime.toMillis(), endTime, false);</span>
+<span class="nc" id="L432">                return;</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            } else if (event.eventType == EventType.DELETE_EVENT) {</span>
+<span class="nc" id="L434">                launchDeleteEvent(event.id, event.startTime.toMillis(), endTime);</span>
+<span class="nc" id="L435">                return;</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">            } else if (event.eventType == EventType.SEARCH) {</span>
+<span class="nc" id="L437">                launchSearch(event.id, event.query, event.componentName);</span>
+<span class="nc" id="L438">                return;</span>
+            }
+        }
+<span class="fc" id="L441">    }</span>
+
+    /**
+     * Adds or updates an event handler. This uses a LinkedHashMap so that we can
+     * replace fragments based on the view id they are being expanded into.
+     *
+     * @param key The view id or placeholder for this handler
+     * @param eventHandler Typically a fragment or activity in the calendar app
+     */
+    public void registerEventHandler(int key, EventHandler eventHandler) {
+<span class="fc" id="L451">        synchronized (this) {</span>
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">            if (mDispatchInProgressCounter &gt; 0) {</span>
+<span class="nc" id="L453">                mToBeAddedEventHandlers.put(key, eventHandler);</span>
+            } else {
+<span class="fc" id="L455">                eventHandlers.put(key, eventHandler);</span>
+            }
+<span class="fc" id="L457">        }</span>
+<span class="fc" id="L458">    }</span>
+
+    public void registerFirstEventHandler(int key, EventHandler eventHandler) {
+<span class="fc" id="L461">        synchronized (this) {</span>
+<span class="fc" id="L462">            registerEventHandler(key, eventHandler);</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">            if (mDispatchInProgressCounter &gt; 0) {</span>
+<span class="nc" id="L464">                mToBeAddedFirstEventHandler = new Pair&lt;Integer, EventHandler&gt;(key, eventHandler);</span>
+            } else {
+<span class="fc" id="L466">                mFirstEventHandler = new Pair&lt;Integer, EventHandler&gt;(key, eventHandler);</span>
+            }
+<span class="fc" id="L468">        }</span>
+<span class="fc" id="L469">    }</span>
+
+    public void deregisterEventHandler(Integer key) {
+<span class="fc" id="L472">        synchronized (this) {</span>
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">            if (mDispatchInProgressCounter &gt; 0) {</span>
+                // To avoid ConcurrencyException, stash away the event handler for now.
+<span class="nc" id="L475">                mToBeRemovedEventHandlers.add(key);</span>
+            } else {
+<span class="fc" id="L477">                eventHandlers.remove(key);</span>
+<span class="pc bpc" id="L478" title="2 of 4 branches missed.">                if (mFirstEventHandler != null &amp;&amp; mFirstEventHandler.first == key) {</span>
+<span class="fc" id="L479">                    mFirstEventHandler = null;</span>
+                }
+            }
+<span class="fc" id="L482">        }</span>
+<span class="fc" id="L483">    }</span>
+
+    public void deregisterAllEventHandlers() {
+<span class="nc" id="L486">        synchronized (this) {</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">            if (mDispatchInProgressCounter &gt; 0) {</span>
+                // To avoid ConcurrencyException, stash away the event handler for now.
+<span class="nc" id="L489">                mToBeRemovedEventHandlers.addAll(eventHandlers.keySet());</span>
+            } else {
+<span class="nc" id="L491">                eventHandlers.clear();</span>
+<span class="nc" id="L492">                mFirstEventHandler = null;</span>
+            }
+<span class="nc" id="L494">        }</span>
+<span class="nc" id="L495">    }</span>
+
+    // FRAG_TODO doesn't work yet
+    public void filterBroadcasts(Object sender, long eventTypes) {
+<span class="nc" id="L499">        filters.put(sender, eventTypes);</span>
+<span class="nc" id="L500">    }</span>
+
+    /**
+     * @return the time that this controller is currently pointed at
+     */
+    public long getTime() {
+<span class="fc" id="L506">        return mTime.toMillis();</span>
+    }
+
+    /**
+     * Set the time this controller is currently pointed at
+     *
+     * @param millisTime Time since epoch in millis
+     */
+    public void setTime(long millisTime) {
+<span class="nc" id="L515">        mTime.set(millisTime);</span>
+<span class="nc" id="L516">    }</span>
+
+    /**
+     * @return the last set of date flags sent with
+     * {@link EventType#UPDATE_TITLE}
+     */
+    public long getDateFlags() {
+<span class="fc" id="L523">        return mDateFlags;</span>
+    }
+
+    /**
+     * @return the last event ID the edit view was launched with
+     */
+    public long getEventId() {
+<span class="nc" id="L530">        return mEventId;</span>
+    }
+
+    // Sets the eventId. Should only be used for initialization.
+    public void setEventId(long eventId) {
+<span class="nc" id="L535">        mEventId = eventId;</span>
+<span class="nc" id="L536">    }</span>
+
+    public int getViewType() {
+<span class="fc" id="L539">        return mViewType;</span>
+    }
+
+    // Forces the viewType. Should only be used for initialization.
+    public void setViewType(int viewType) {
+<span class="nc" id="L544">        mViewType = viewType;</span>
+<span class="nc" id="L545">    }</span>
+
+    public int getPreviousViewType() {
+<span class="fc" id="L548">        return mPreviousViewType;</span>
+    }
+
+    private void launchSettings() {
+<span class="nc" id="L552">        Intent intent = new Intent(Intent.ACTION_VIEW);</span>
+<span class="nc" id="L553">        intent.setClass(mContext, SettingsActivity.class);</span>
+<span class="nc" id="L554">        intent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP);</span>
+<span class="nc" id="L555">        mContext.startActivity(intent);</span>
+<span class="nc" id="L556">    }</span>
+
+    private void launchCreateEvent(long startMillis, long endMillis, boolean allDayEvent,
+                                   String title, long calendarId) {
+<span class="nc" id="L560">        Intent intent = generateCreateEventIntent(startMillis, endMillis, allDayEvent, title,</span>
+                calendarId);
+<span class="nc" id="L562">        mEventId = -1;</span>
+<span class="nc" id="L563">        mContext.startActivity(intent);</span>
+<span class="nc" id="L564">    }</span>
+
+    public Intent generateCreateEventIntent(long startMillis, long endMillis,
+                                            boolean allDayEvent, String title, long calendarId) {
+<span class="nc" id="L568">        Intent intent = new Intent(Intent.ACTION_VIEW);</span>
+<span class="nc" id="L569">        intent.setClass(mContext, EditEventActivity.class);</span>
+<span class="nc" id="L570">        intent.putExtra(EXTRA_EVENT_BEGIN_TIME, startMillis);</span>
+<span class="nc" id="L571">        intent.putExtra(EXTRA_EVENT_END_TIME, endMillis);</span>
+<span class="nc" id="L572">        intent.putExtra(EXTRA_EVENT_ALL_DAY, allDayEvent);</span>
+<span class="nc" id="L573">        intent.putExtra(Events.CALENDAR_ID, calendarId);</span>
+<span class="nc" id="L574">        intent.putExtra(Events.TITLE, title);</span>
+<span class="nc" id="L575">        return intent;</span>
+    }
+
+    public void launchViewEvent(long eventId, long startMillis, long endMillis, int response) {
+<span class="nc" id="L579">        Intent intent = new Intent(Intent.ACTION_VIEW);</span>
+<span class="nc" id="L580">        Uri eventUri = ContentUris.withAppendedId(Events.CONTENT_URI, eventId);</span>
+<span class="nc" id="L581">        intent.setData(eventUri);</span>
+<span class="nc" id="L582">        intent.setClass(mContext, AllInOneActivity.class);</span>
+<span class="nc" id="L583">        intent.putExtra(EXTRA_EVENT_BEGIN_TIME, startMillis);</span>
+<span class="nc" id="L584">        intent.putExtra(EXTRA_EVENT_END_TIME, endMillis);</span>
+<span class="nc" id="L585">        intent.putExtra(ATTENDEE_STATUS, response);</span>
+<span class="nc" id="L586">        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);</span>
+<span class="nc" id="L587">        mContext.startActivity(intent);</span>
+<span class="nc" id="L588">    }</span>
+
+    private void launchEditEvent(long eventId, long startMillis, long endMillis, boolean edit) {
+<span class="nc" id="L591">        Uri uri = ContentUris.withAppendedId(Events.CONTENT_URI, eventId);</span>
+<span class="nc" id="L592">        Intent intent = new Intent(Intent.ACTION_EDIT, uri);</span>
+<span class="nc" id="L593">        intent.putExtra(EXTRA_EVENT_BEGIN_TIME, startMillis);</span>
+<span class="nc" id="L594">        intent.putExtra(EXTRA_EVENT_END_TIME, endMillis);</span>
+<span class="nc" id="L595">        intent.setClass(mContext, EditEventActivity.class);</span>
+<span class="nc" id="L596">        intent.putExtra(EVENT_EDIT_ON_LAUNCH, edit);</span>
+<span class="nc" id="L597">        mEventId = eventId;</span>
+<span class="nc" id="L598">        mContext.startActivity(intent);</span>
+<span class="nc" id="L599">    }</span>
+
+    private void launchDeleteEvent(long eventId, long startMillis, long endMillis) {
+<span class="nc" id="L602">        launchDeleteEventAndFinish(null, eventId, startMillis, endMillis, -1);</span>
+<span class="nc" id="L603">    }</span>
+
+    private void launchDeleteEventAndFinish(Activity parentActivity, long eventId, long startMillis,
+                                            long endMillis, int deleteWhich) {
+<span class="nc bnc" id="L607" title="All 2 branches missed.">        DeleteEventHelper deleteEventHelper = new DeleteEventHelper(mContext, parentActivity,</span>
+                parentActivity != null /* exit when done */);
+<span class="nc" id="L609">        deleteEventHelper.delete(startMillis, endMillis, eventId, deleteWhich);</span>
+<span class="nc" id="L610">    }</span>
+
+//    private void launchAlerts() {
+//        Intent intent = new Intent();
+//        intent.setClass(mContext, AlertActivity.class);
+//        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+//        mContext.startActivity(intent);
+//    }
+
+    private void launchSearch(long eventId, String query, ComponentName componentName) {
+<span class="nc" id="L620">        final SearchManager searchManager =</span>
+<span class="nc" id="L621">                (SearchManager) mContext.getSystemService(Context.SEARCH_SERVICE);</span>
+<span class="nc" id="L622">        final SearchableInfo searchableInfo = searchManager.getSearchableInfo(componentName);</span>
+<span class="nc" id="L623">        final Intent intent = new Intent(Intent.ACTION_SEARCH);</span>
+<span class="nc" id="L624">        intent.putExtra(SearchManager.QUERY, query);</span>
+<span class="nc" id="L625">        intent.setComponent(searchableInfo.getSearchActivity());</span>
+<span class="nc" id="L626">        intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);</span>
+<span class="nc" id="L627">        mContext.startActivity(intent);</span>
+<span class="nc" id="L628">    }</span>
+
+    /**
+     * Performs a manual refresh of calendars in all known accounts.
+     */
+    public void refreshCalendars() {
+<span class="nc" id="L634">        Account[] accounts = AccountManager.get(mContext).getAccounts();</span>
+<span class="nc" id="L635">        Log.d(TAG, &quot;Refreshing &quot; + accounts.length + &quot; accounts&quot;);</span>
+
+<span class="nc" id="L637">        String authority = Calendars.CONTENT_URI.getAuthority();</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">        for (Account account : accounts) {</span>
+<span class="nc bnc" id="L639" title="All 2 branches missed.">            if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L640">                Log.d(TAG, &quot;Refreshing calendars for: &quot; + account);</span>
+            }
+<span class="nc" id="L642">            Bundle extras = new Bundle();</span>
+<span class="nc" id="L643">            extras.putBoolean(ContentResolver.SYNC_EXTRAS_MANUAL, true);</span>
+<span class="nc" id="L644">            ContentResolver.requestSync(account, authority, extras);</span>
+        }
+<span class="nc" id="L646">    }</span>
+
+    private String eventInfoToString(EventInfo eventInfo) {
+<span class="nc" id="L649">        String tmp = &quot;Unknown&quot;;</span>
+
+<span class="nc" id="L651">        StringBuilder builder = new StringBuilder();</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        if ((eventInfo.eventType &amp; EventType.GO_TO) != 0) {</span>
+<span class="nc" id="L653">            tmp = &quot;Go to time/event&quot;;</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.CREATE_EVENT) != 0) {</span>
+<span class="nc" id="L655">            tmp = &quot;New event&quot;;</span>
+<span class="nc bnc" id="L656" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.VIEW_EVENT) != 0) {</span>
+<span class="nc" id="L657">            tmp = &quot;View event&quot;;</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.VIEW_EVENT_DETAILS) != 0) {</span>
+<span class="nc" id="L659">            tmp = &quot;View details&quot;;</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.EDIT_EVENT) != 0) {</span>
+<span class="nc" id="L661">            tmp = &quot;Edit event&quot;;</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.DELETE_EVENT) != 0) {</span>
+<span class="nc" id="L663">            tmp = &quot;Delete event&quot;;</span>
+<span class="nc bnc" id="L664" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.LAUNCH_SETTINGS) != 0) {</span>
+<span class="nc" id="L665">            tmp = &quot;Launch settings&quot;;</span>
+<span class="nc bnc" id="L666" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.EVENTS_CHANGED) != 0) {</span>
+<span class="nc" id="L667">            tmp = &quot;Refresh events&quot;;</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.SEARCH) != 0) {</span>
+<span class="nc" id="L669">            tmp = &quot;Search&quot;;</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.USER_HOME) != 0) {</span>
+<span class="nc" id="L671">            tmp = &quot;Gone home&quot;;</span>
+<span class="nc bnc" id="L672" title="All 2 branches missed.">        } else if ((eventInfo.eventType &amp; EventType.UPDATE_TITLE) != 0) {</span>
+<span class="nc" id="L673">            tmp = &quot;Update title&quot;;</span>
+        }
+<span class="nc" id="L675">        builder.append(tmp);</span>
+<span class="nc" id="L676">        builder.append(&quot;: id=&quot;);</span>
+<span class="nc" id="L677">        builder.append(eventInfo.id);</span>
+<span class="nc" id="L678">        builder.append(&quot;, selected=&quot;);</span>
+<span class="nc" id="L679">        builder.append(eventInfo.selectedTime);</span>
+<span class="nc" id="L680">        builder.append(&quot;, start=&quot;);</span>
+<span class="nc" id="L681">        builder.append(eventInfo.startTime);</span>
+<span class="nc" id="L682">        builder.append(&quot;, end=&quot;);</span>
+<span class="nc" id="L683">        builder.append(eventInfo.endTime);</span>
+<span class="nc" id="L684">        builder.append(&quot;, viewType=&quot;);</span>
+<span class="nc" id="L685">        builder.append(eventInfo.viewType);</span>
+<span class="nc" id="L686">        builder.append(&quot;, x=&quot;);</span>
+<span class="nc" id="L687">        builder.append(eventInfo.x);</span>
+<span class="nc" id="L688">        builder.append(&quot;, y=&quot;);</span>
+<span class="nc" id="L689">        builder.append(eventInfo.y);</span>
+<span class="nc" id="L690">        return builder.toString();</span>
+    }
+
+    /**
+     * One of the event types that are sent to or from the controller
+     */
+    public interface EventType {
+        final long CREATE_EVENT = 1L;
+
+        // Simple view of an event
+        final long VIEW_EVENT = 1L &lt;&lt; 1;
+
+        // Full detail view in read only mode
+        final long VIEW_EVENT_DETAILS = 1L &lt;&lt; 2;
+
+        // full detail view in edit mode
+        final long EDIT_EVENT = 1L &lt;&lt; 3;
+
+        final long DELETE_EVENT = 1L &lt;&lt; 4;
+
+        final long GO_TO = 1L &lt;&lt; 5;
+
+        final long LAUNCH_SETTINGS = 1L &lt;&lt; 6;
+
+        final long EVENTS_CHANGED = 1L &lt;&lt; 7;
+
+        final long SEARCH = 1L &lt;&lt; 8;
+
+        // User has pressed the home key
+        final long USER_HOME = 1L &lt;&lt; 9;
+
+        // date range has changed, update the title
+        final long UPDATE_TITLE = 1L &lt;&lt; 10;
+    }
+
+    /**
+     * One of the Agenda/Day/Week/Month view types
+     */
+    public interface ViewType {
+        final int DETAIL = -1;
+        final int CURRENT = 0;
+        final int AGENDA = 1;
+        final int DAY = 2;
+        final int WEEK = 3;
+        final int MONTH = 4;
+        final int EDIT = 5;
+        final int MAX_VALUE = 5;
+    }
+
+    public interface EventHandler {
+        long getSupportedEventTypes();
+
+        void handleEvent(EventInfo event);
+
+        /**
+         * This notifies the handler that the database has changed and it should
+         * update its view.
+         */
+        void eventsChanged();
+    }
+
+<span class="fc" id="L751">    public static class EventInfo {</span>
+
+        private static final long ATTENTEE_STATUS_MASK = 0xFF;
+        private static final long ALL_DAY_MASK = 0x100;
+        private static final int ATTENDEE_STATUS_NONE_MASK = 0x01;
+        private static final int ATTENDEE_STATUS_ACCEPTED_MASK = 0x02;
+        private static final int ATTENDEE_STATUS_DECLINED_MASK = 0x04;
+        private static final int ATTENDEE_STATUS_TENTATIVE_MASK = 0x08;
+
+        public long eventType; // one of the EventType
+        public int viewType; // one of the ViewType
+        public long id; // event id
+        public Time selectedTime; // the selected time in focus
+
+        // Event start and end times.  All-day events are represented in:
+        // - local time for GO_TO commands
+        // - UTC time for VIEW_EVENT and other event-related commands
+        public Time startTime;
+        public Time endTime;
+
+        public int x; // x coordinate in the activity space
+        public int y; // y coordinate in the activity space
+        public String query; // query for a user search
+        public ComponentName componentName;  // used in combination with query
+        public String eventTitle;
+        public long calendarId;
+
+        /**
+         * For EventType.VIEW_EVENT:
+         * It is the default attendee response and an all day event indicator.
+         * Set to Attendees.ATTENDEE_STATUS_NONE, Attendees.ATTENDEE_STATUS_ACCEPTED,
+         * Attendees.ATTENDEE_STATUS_DECLINED, or Attendees.ATTENDEE_STATUS_TENTATIVE.
+         * To signal the event is an all-day event, &quot;or&quot; ALL_DAY_MASK with the response.
+         * Alternatively, use buildViewExtraLong(), getResponse(), and isAllDay().
+         * &lt;p/&gt;
+         * For EventType.CREATE_EVENT:
+         * Set to {@link #EXTRA_CREATE_ALL_DAY} for creating an all-day event.
+         * &lt;p/&gt;
+         * For EventType.GO_TO:
+         * Set to {@link #EXTRA_GOTO_TIME} to go to the specified date/time.
+         * Set to {@link #EXTRA_GOTO_DATE} to consider the date but ignore the time.
+         * Set to {@link #EXTRA_GOTO_BACK_TO_PREVIOUS} if back should bring back previous view.
+         * Set to {@link #EXTRA_GOTO_TODAY} if this is a user request to go to the current time.
+         * &lt;p/&gt;
+         * For EventType.UPDATE_TITLE:
+         * Set formatting flags for Utils.formatDateRange
+         */
+        public long extraLong;
+
+        // Used to build the extra long for a VIEW event.
+        public static long buildViewExtraLong(int response, boolean allDay) {
+<span class="nc bnc" id="L802" title="All 2 branches missed.">            long extra = allDay ? ALL_DAY_MASK : 0;</span>
+
+<span class="nc bnc" id="L804" title="All 5 branches missed.">            switch (response) {</span>
+                case Attendees.ATTENDEE_STATUS_NONE:
+<span class="nc" id="L806">                    extra |= ATTENDEE_STATUS_NONE_MASK;</span>
+<span class="nc" id="L807">                    break;</span>
+                case Attendees.ATTENDEE_STATUS_ACCEPTED:
+<span class="nc" id="L809">                    extra |= ATTENDEE_STATUS_ACCEPTED_MASK;</span>
+<span class="nc" id="L810">                    break;</span>
+                case Attendees.ATTENDEE_STATUS_DECLINED:
+<span class="nc" id="L812">                    extra |= ATTENDEE_STATUS_DECLINED_MASK;</span>
+<span class="nc" id="L813">                    break;</span>
+                case Attendees.ATTENDEE_STATUS_TENTATIVE:
+<span class="nc" id="L815">                    extra |= ATTENDEE_STATUS_TENTATIVE_MASK;</span>
+<span class="nc" id="L816">                    break;</span>
+                default:
+<span class="nc" id="L818">                    Log.wtf(TAG, &quot;Unknown attendee response &quot; + response);</span>
+<span class="nc" id="L819">                    extra |= ATTENDEE_STATUS_NONE_MASK;</span>
+                    break;
+            }
+<span class="nc" id="L822">            return extra;</span>
+        }
+
+        public boolean isAllDay() {
+<span class="nc bnc" id="L826" title="All 2 branches missed.">            if (eventType != EventType.VIEW_EVENT) {</span>
+<span class="nc" id="L827">                Log.wtf(TAG, &quot;illegal call to isAllDay , wrong event type &quot; + eventType);</span>
+<span class="nc" id="L828">                return false;</span>
+            }
+<span class="nc bnc" id="L830" title="All 2 branches missed.">            return ((extraLong &amp; ALL_DAY_MASK) != 0) ? true : false;</span>
+        }
+
+        public int getResponse() {
+<span class="nc bnc" id="L834" title="All 2 branches missed.">            if (eventType != EventType.VIEW_EVENT) {</span>
+<span class="nc" id="L835">                Log.wtf(TAG, &quot;illegal call to getResponse , wrong event type &quot; + eventType);</span>
+<span class="nc" id="L836">                return Attendees.ATTENDEE_STATUS_NONE;</span>
+            }
+
+<span class="nc" id="L839">            int response = (int) (extraLong &amp; ATTENTEE_STATUS_MASK);</span>
+<span class="nc bnc" id="L840" title="All 5 branches missed.">            switch (response) {</span>
+                case ATTENDEE_STATUS_NONE_MASK:
+<span class="nc" id="L842">                    return Attendees.ATTENDEE_STATUS_NONE;</span>
+                case ATTENDEE_STATUS_ACCEPTED_MASK:
+<span class="nc" id="L844">                    return Attendees.ATTENDEE_STATUS_ACCEPTED;</span>
+                case ATTENDEE_STATUS_DECLINED_MASK:
+<span class="nc" id="L846">                    return Attendees.ATTENDEE_STATUS_DECLINED;</span>
+                case ATTENDEE_STATUS_TENTATIVE_MASK:
+<span class="nc" id="L848">                    return Attendees.ATTENDEE_STATUS_TENTATIVE;</span>
+                default:
+<span class="nc" id="L850">                    Log.wtf(TAG, &quot;Unknown attendee response &quot; + response);</span>
+            }
+<span class="nc" id="L852">            return ATTENDEE_STATUS_NONE_MASK;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

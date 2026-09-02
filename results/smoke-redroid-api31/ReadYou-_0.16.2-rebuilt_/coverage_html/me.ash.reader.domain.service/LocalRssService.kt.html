@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalRssService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ReadYou</a> &gt; <a href="index.source.html" class="el_package">me.ash.reader.domain.service</a> &gt; <span class="el_source">LocalRssService.kt</span></div><h1>LocalRssService.kt</h1><pre class="source lang-java linenums">package me.ash.reader.domain.service
+
+import android.content.Context
+import androidx.work.ListenableWorker
+import androidx.work.WorkManager
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.Date
+import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import me.ash.reader.domain.data.SyncLogger
+import me.ash.reader.domain.model.account.AccountType
+import me.ash.reader.domain.model.feed.Feed
+import me.ash.reader.domain.model.feed.FeedWithArticle
+import me.ash.reader.domain.repository.ArticleDao
+import me.ash.reader.domain.repository.FeedDao
+import me.ash.reader.domain.repository.GroupDao
+import me.ash.reader.infrastructure.android.NotificationHelper
+import me.ash.reader.infrastructure.di.DefaultDispatcher
+import me.ash.reader.infrastructure.di.IODispatcher
+import me.ash.reader.infrastructure.rss.RssHelper
+import timber.log.Timber
+
+private const val TAG = &quot;LocalRssService&quot;
+
+class LocalRssService
+<span class="fc" id="L32">@Inject</span>
+constructor(
+<span class="fc" id="L34">    @ApplicationContext private val context: Context,</span>
+<span class="fc" id="L35">    private val articleDao: ArticleDao,</span>
+<span class="fc" id="L36">    private val feedDao: FeedDao,</span>
+<span class="fc" id="L37">    private val rssHelper: RssHelper,</span>
+<span class="fc" id="L38">    private val notificationHelper: NotificationHelper,</span>
+<span class="fc" id="L39">    private val groupDao: GroupDao,</span>
+<span class="fc" id="L40">    @IODispatcher private val ioDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L41">    @DefaultDispatcher private val defaultDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L42">    private val workManager: WorkManager,</span>
+<span class="fc" id="L43">    private val accountService: AccountService,</span>
+<span class="fc" id="L44">    private val syncLogger: SyncLogger,</span>
+) :
+<span class="fc" id="L46">    AbstractRssRepository(</span>
+<span class="fc" id="L47">        articleDao,</span>
+<span class="fc" id="L48">        groupDao,</span>
+<span class="fc" id="L49">        feedDao,</span>
+<span class="fc" id="L50">        workManager,</span>
+<span class="fc" id="L51">        rssHelper,</span>
+<span class="fc" id="L52">        notificationHelper,</span>
+<span class="fc" id="L53">        ioDispatcher,</span>
+<span class="fc" id="L54">        defaultDispatcher,</span>
+<span class="fc" id="L55">        accountService,</span>
+    ) {
+
+    override suspend fun sync(
+        accountId: Int,
+        feedId: String?,
+        groupId: String?
+<span class="pc bpc" id="L62" title="4 of 9 branches missed.">    ): ListenableWorker.Result = supervisorScope {</span>
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">        return@supervisorScope runCatching {</span>
+<span class="fc" id="L64">            val preTime = System.currentTimeMillis()</span>
+<span class="fc" id="L65">            val preDate = Date(preTime)</span>
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">            val currentAccount = accountService.getAccountById(accountId)!!</span>
+<span class="pc bpc" id="L67" title="2 of 4 branches missed.">            require(currentAccount.type.id == AccountType.Local.id) {</span>
+<span class="nc" id="L68">                &quot;Account type is invalid&quot;</span>
+            }
+<span class="fc" id="L70">            val semaphore = Semaphore(16)</span>
+
+<span class="fc" id="L72">            val feedsToSync =</span>
+<span class="fc" id="L73">                when {</span>
+<span class="pc bpc" id="L74" title="3 of 4 branches missed.">                    feedId != null -&gt; listOfNotNull(feedDao.queryById(feedId))</span>
+<span class="pc bpc" id="L75" title="3 of 4 branches missed.">                    groupId != null -&gt; feedDao.queryByGroupId(accountId, groupId)</span>
+<span class="pc bpc" id="L76" title="1 of 2 branches missed.">                    else -&gt; feedDao.queryAll(accountId)</span>
+                }
+
+<span class="fc" id="L79">            feedsToSync</span>
+<span class="fc" id="L80">                .mapIndexed { _, currentFeed -&gt;</span>
+<span class="fc" id="L81">                    async(Dispatchers.IO) {</span>
+<span class="fc" id="L82">                        semaphore.withPermit {</span>
+<span class="fc" id="L83">                            val archivedArticles =</span>
+<span class="fc" id="L84">                                feedDao</span>
+<span class="fc" id="L85">                                    .queryArchivedArticles(currentFeed.id)</span>
+<span class="pc" id="L86">                                    .map { it.link }</span>
+<span class="fc" id="L87">                                    .toSet()</span>
+<span class="fc" id="L88">                            val fetchedFeed = syncFeed(currentFeed, preDate)</span>
+<span class="fc" id="L89">                            val fetchedArticles =</span>
+<span class="fc" id="L90">                                fetchedFeed.articles.filterNot {</span>
+<span class="fc" id="L91">                                    archivedArticles.contains(it.link)</span>
+                                }
+
+<span class="fc" id="L94">                            val newArticles =</span>
+<span class="fc" id="L95">                                articleDao.insertListIfNotExist(</span>
+<span class="fc" id="L96">                                    articles = fetchedArticles,</span>
+<span class="fc" id="L97">                                    feed = currentFeed,</span>
+                                )
+<span class="pc bpc" id="L99" title="5 of 6 branches missed.">                            if (currentFeed.isNotification &amp;&amp; newArticles.isNotEmpty()) {</span>
+<span class="nc" id="L100">                                notificationHelper.notify(</span>
+<span class="nc" id="L101">                                    fetchedFeed.copy(articles = newArticles, feed = currentFeed)</span>
+                                )
+                            }
+<span class="fc" id="L104">                        }</span>
+<span class="fc" id="L105">                    }</span>
+                }
+<span class="pc bpc" id="L107" title="1 of 2 branches missed.">                .awaitAll()</span>
+
+<span class="fc" id="L109">            Timber.tag(&quot;RlOG&quot;).i(&quot;onCompletion: ${System.currentTimeMillis() - preTime}&quot;)</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">            accountService.update(currentAccount.copy(updateAt = Date()))</span>
+<span class="fc" id="L111">            ListenableWorker.Result.success()</span>
+        }
+<span class="pc bpc" id="L113" title="3 of 4 branches missed.">            .onFailure { syncLogger.log(it) }</span>
+<span class="pc bpc" id="L114" title="1 of 2 branches missed.">            .getOrNull() ?: ListenableWorker.Result.retry()</span>
+<span class="fc" id="L115">    }</span>
+
+<span class="pc" id="L117">    private suspend fun syncFeed(feed: Feed, preDate: Date = Date()): FeedWithArticle {</span>
+<span class="fc" id="L118">        val articles = rssHelper.queryRssXml(feed, &quot;&quot;, preDate)</span>
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">        if (feed.icon == null) {</span>
+<span class="nc" id="L120">            val iconLink = rssHelper.queryRssIconLink(feed.url)</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            if (iconLink != null) {</span>
+<span class="nc" id="L122">                rssHelper.saveRssIcon(feedDao, feed, iconLink)</span>
+            }
+        }
+<span class="pc" id="L125">        return FeedWithArticle(</span>
+<span class="pc bpc" id="L126" title="5 of 6 branches missed.">            feed = feed.copy(isNotification = feed.isNotification &amp;&amp; articles.isNotEmpty()),</span>
+<span class="fc" id="L127">            articles = articles,</span>
+        )
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

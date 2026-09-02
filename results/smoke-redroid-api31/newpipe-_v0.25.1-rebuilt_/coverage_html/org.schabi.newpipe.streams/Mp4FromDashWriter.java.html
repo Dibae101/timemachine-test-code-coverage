@@ -1,0 +1,913 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Mp4FromDashWriter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE newpipe</a> &gt; <a href="index.source.html" class="el_package">org.schabi.newpipe.streams</a> &gt; <span class="el_source">Mp4FromDashWriter.java</span></div><h1>Mp4FromDashWriter.java</h1><pre class="source lang-java linenums">package org.schabi.newpipe.streams;
+
+import org.schabi.newpipe.streams.Mp4DashReader.Hdlr;
+import org.schabi.newpipe.streams.Mp4DashReader.Mdia;
+import org.schabi.newpipe.streams.Mp4DashReader.Mp4DashChunk;
+import org.schabi.newpipe.streams.Mp4DashReader.Mp4DashSample;
+import org.schabi.newpipe.streams.Mp4DashReader.Mp4Track;
+import org.schabi.newpipe.streams.Mp4DashReader.TrackKind;
+import org.schabi.newpipe.streams.Mp4DashReader.TrunEntry;
+import org.schabi.newpipe.streams.io.SharpStream;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+
+/**
+ * @author kapodamy
+ */
+public class Mp4FromDashWriter {
+    private static final int EPOCH_OFFSET = 2082844800;
+    private static final short DEFAULT_TIMESCALE = 1000;
+    private static final byte SAMPLES_PER_CHUNK_INIT = 2;
+    // ffmpeg uses 2, basic uses 1 (with 60fps uses 21 or 22). NewPipe will use 6
+    private static final byte SAMPLES_PER_CHUNK = 6;
+    // near 3.999 GiB
+    private static final long THRESHOLD_FOR_CO64 = 0xFFFEFFFFL;
+    // 2.2 MiB enough for: 1080p 60fps 00h35m00s
+    private static final int THRESHOLD_MOOV_LENGTH = (256 * 1024) + (2048 * 1024);
+
+    private final long time;
+
+    private ByteBuffer auxBuffer;
+    private SharpStream outStream;
+
+<span class="nc" id="L35">    private long lastWriteOffset = -1;</span>
+    private long writeOffset;
+
+<span class="nc" id="L38">    private boolean moovSimulation = true;</span>
+
+<span class="nc" id="L40">    private boolean done = false;</span>
+<span class="nc" id="L41">    private boolean parsed = false;</span>
+
+    private Mp4Track[] tracks;
+    private SharpStream[] sourceTracks;
+
+    private Mp4DashReader[] readers;
+    private Mp4DashChunk[] readersChunks;
+
+<span class="nc" id="L49">    private int overrideMainBrand = 0x00;</span>
+
+<span class="nc" id="L51">    private final ArrayList&lt;Integer&gt; compatibleBrands = new ArrayList&lt;&gt;(5);</span>
+
+<span class="nc" id="L53">    public Mp4FromDashWriter(final SharpStream... sources) throws IOException {</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        for (final SharpStream src : sources) {</span>
+<span class="nc bnc" id="L55" title="All 4 branches missed.">            if (!src.canRewind() &amp;&amp; !src.canRead()) {</span>
+<span class="nc" id="L56">                throw new IOException(&quot;All sources must be readable and allow rewind&quot;);</span>
+            }
+        }
+
+<span class="nc" id="L60">        sourceTracks = sources;</span>
+<span class="nc" id="L61">        readers = new Mp4DashReader[sourceTracks.length];</span>
+<span class="nc" id="L62">        readersChunks = new Mp4DashChunk[readers.length];</span>
+<span class="nc" id="L63">        time = (System.currentTimeMillis() / 1000L) + EPOCH_OFFSET;</span>
+
+<span class="nc" id="L65">        compatibleBrands.add(0x6D703431); // mp41</span>
+<span class="nc" id="L66">        compatibleBrands.add(0x69736F6D); // isom</span>
+<span class="nc" id="L67">        compatibleBrands.add(0x69736F32); // iso2</span>
+<span class="nc" id="L68">    }</span>
+
+    public Mp4Track[] getTracksFromSource(final int sourceIndex) throws IllegalStateException {
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (!parsed) {</span>
+<span class="nc" id="L72">            throw new IllegalStateException(&quot;All sources must be parsed first&quot;);</span>
+        }
+
+<span class="nc" id="L75">        return readers[sourceIndex].getAvailableTracks();</span>
+    }
+
+    public void parseSources() throws IOException, IllegalStateException {
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        if (done) {</span>
+<span class="nc" id="L80">            throw new IllegalStateException(&quot;already done&quot;);</span>
+        }
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (parsed) {</span>
+<span class="nc" id="L83">            throw new IllegalStateException(&quot;already parsed&quot;);</span>
+        }
+
+        try {
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            for (int i = 0; i &lt; readers.length; i++) {</span>
+<span class="nc" id="L88">                readers[i] = new Mp4DashReader(sourceTracks[i]);</span>
+<span class="nc" id="L89">                readers[i].parse();</span>
+            }
+
+        } finally {
+<span class="nc" id="L93">            parsed = true;</span>
+        }
+<span class="nc" id="L95">    }</span>
+
+    public void selectTracks(final int... trackIndex) throws IOException {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (done) {</span>
+<span class="nc" id="L99">            throw new IOException(&quot;already done&quot;);</span>
+        }
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (tracks != null) {</span>
+<span class="nc" id="L102">            throw new IOException(&quot;tracks already selected&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L106">            tracks = new Mp4Track[readers.length];</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">            for (int i = 0; i &lt; readers.length; i++) {</span>
+<span class="nc" id="L108">                tracks[i] = readers[i].selectTrack(trackIndex[i]);</span>
+            }
+        } finally {
+<span class="nc" id="L111">            parsed = true;</span>
+        }
+<span class="nc" id="L113">    }</span>
+
+    public void setMainBrand(final int brand) {
+<span class="nc" id="L116">        overrideMainBrand = brand;</span>
+<span class="nc" id="L117">    }</span>
+
+    public boolean isDone() {
+<span class="nc" id="L120">        return done;</span>
+    }
+
+    public boolean isParsed() {
+<span class="nc" id="L124">        return parsed;</span>
+    }
+
+    public void close() throws IOException {
+<span class="nc" id="L128">        done = true;</span>
+<span class="nc" id="L129">        parsed = true;</span>
+
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        for (final SharpStream src : sourceTracks) {</span>
+<span class="nc" id="L132">            src.close();</span>
+        }
+
+<span class="nc" id="L135">        tracks = null;</span>
+<span class="nc" id="L136">        sourceTracks = null;</span>
+
+<span class="nc" id="L138">        readers = null;</span>
+<span class="nc" id="L139">        readersChunks = null;</span>
+
+<span class="nc" id="L141">        auxBuffer = null;</span>
+<span class="nc" id="L142">        outStream = null;</span>
+<span class="nc" id="L143">    }</span>
+
+    @SuppressWarnings(&quot;MethodLength&quot;)
+    public void build(final SharpStream output) throws IOException {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (done) {</span>
+<span class="nc" id="L148">            throw new RuntimeException(&quot;already done&quot;);</span>
+        }
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        if (!output.canWrite()) {</span>
+<span class="nc" id="L151">            throw new IOException(&quot;the provided output is not writable&quot;);</span>
+        }
+
+        //
+        // WARNING: the muxer requires at least 8 samples of every track
+        //          not allowed for very short tracks (less than 0.5 seconds)
+        //
+<span class="nc" id="L158">        outStream = output;</span>
+<span class="nc" id="L159">        long read = 8; // mdat box header size</span>
+<span class="nc" id="L160">        long totalSampleSize = 0;</span>
+<span class="nc" id="L161">        final int[] sampleExtra = new int[readers.length];</span>
+<span class="nc" id="L162">        final int[] defaultMediaTime = new int[readers.length];</span>
+<span class="nc" id="L163">        final int[] defaultSampleDuration = new int[readers.length];</span>
+<span class="nc" id="L164">        final int[] sampleCount = new int[readers.length];</span>
+
+<span class="nc" id="L166">        final TablesInfo[] tablesInfo = new TablesInfo[tracks.length];</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        for (int i = 0; i &lt; tablesInfo.length; i++) {</span>
+<span class="nc" id="L168">            tablesInfo[i] = new TablesInfo();</span>
+        }
+
+        final int singleSampleBuffer;
+<span class="nc bnc" id="L172" title="All 4 branches missed.">        if (tracks.length == 1 &amp;&amp; tracks[0].kind == TrackKind.Audio) {</span>
+            // near 1 second of audio data per chunk, avoid split the audio stream in large chunks
+<span class="nc" id="L174">            singleSampleBuffer = tracks[0].trak.mdia.mdhdTimeScale / 1000;</span>
+        } else {
+<span class="nc" id="L176">            singleSampleBuffer = -1;</span>
+        }
+
+
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        for (int i = 0; i &lt; readers.length; i++) {</span>
+<span class="nc" id="L181">            int samplesSize = 0;</span>
+<span class="nc" id="L182">            int sampleSizeChanges = 0;</span>
+<span class="nc" id="L183">            int compositionOffsetLast = -1;</span>
+
+            Mp4DashChunk chunk;
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            while ((chunk = readers[i].getNextChunk(true)) != null) {</span>
+
+<span class="nc bnc" id="L188" title="All 4 branches missed.">                if (defaultMediaTime[i] &lt; 1 &amp;&amp; chunk.moof.traf.tfhd.defaultSampleDuration &gt; 0) {</span>
+<span class="nc" id="L189">                    defaultMediaTime[i] = chunk.moof.traf.tfhd.defaultSampleDuration;</span>
+                }
+
+<span class="nc" id="L192">                read += chunk.moof.traf.trun.chunkSize;</span>
+<span class="nc" id="L193">                sampleExtra[i] += chunk.moof.traf.trun.chunkDuration; // calculate track duration</span>
+
+                TrunEntry info;
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                while ((info = chunk.getNextSampleInfo()) != null) {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                    if (info.isKeyframe) {</span>
+<span class="nc" id="L198">                        tablesInfo[i].stss++;</span>
+                    }
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">                    if (info.sampleDuration &gt; defaultSampleDuration[i]) {</span>
+<span class="nc" id="L202">                        defaultSampleDuration[i] = info.sampleDuration;</span>
+                    }
+
+<span class="nc" id="L205">                    tablesInfo[i].stsz++;</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                    if (samplesSize != info.sampleSize) {</span>
+<span class="nc" id="L207">                        samplesSize = info.sampleSize;</span>
+<span class="nc" id="L208">                        sampleSizeChanges++;</span>
+                    }
+
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                    if (info.hasCompositionTimeOffset) {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                        if (info.sampleCompositionTimeOffset != compositionOffsetLast) {</span>
+<span class="nc" id="L213">                            tablesInfo[i].ctts++;</span>
+<span class="nc" id="L214">                            compositionOffsetLast = info.sampleCompositionTimeOffset;</span>
+                        }
+                    }
+
+<span class="nc" id="L218">                    totalSampleSize += info.sampleSize;</span>
+                }
+<span class="nc" id="L220">            }</span>
+
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (defaultMediaTime[i] &lt; 1) {</span>
+<span class="nc" id="L223">                defaultMediaTime[i] = defaultSampleDuration[i];</span>
+            }
+
+<span class="nc" id="L226">            readers[i].rewind();</span>
+
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            if (singleSampleBuffer &gt; 0) {</span>
+<span class="nc" id="L229">                initChunkTables(tablesInfo[i], singleSampleBuffer, singleSampleBuffer);</span>
+            } else {
+<span class="nc" id="L231">                initChunkTables(tablesInfo[i], SAMPLES_PER_CHUNK_INIT, SAMPLES_PER_CHUNK);</span>
+            }
+
+<span class="nc" id="L234">            sampleCount[i] = tablesInfo[i].stsz;</span>
+
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            if (sampleSizeChanges == 1) {</span>
+<span class="nc" id="L237">                tablesInfo[i].stsz = 0;</span>
+<span class="nc" id="L238">                tablesInfo[i].stszDefault = samplesSize;</span>
+            } else {
+<span class="nc" id="L240">                tablesInfo[i].stszDefault = 0;</span>
+            }
+
+<span class="nc bnc" id="L243" title="All 2 branches missed.">            if (tablesInfo[i].stss == tablesInfo[i].stsz) {</span>
+<span class="nc" id="L244">                tablesInfo[i].stss = -1; // for audio tracks (all samples are keyframes)</span>
+            }
+
+            // ensure track duration
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            if (tracks[i].trak.tkhd.duration &lt; 1) {</span>
+<span class="nc" id="L249">                tracks[i].trak.tkhd.duration = sampleExtra[i]; // this never should happen</span>
+            }
+        }
+
+
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        final boolean is64 = read &gt; THRESHOLD_FOR_CO64;</span>
+
+        // calculate the moov size
+<span class="nc" id="L257">        final int auxSize = makeMoov(defaultMediaTime, tablesInfo, is64);</span>
+
+<span class="nc bnc" id="L259" title="All 2 branches missed.">        if (auxSize &lt; THRESHOLD_MOOV_LENGTH) {</span>
+<span class="nc" id="L260">            auxBuffer = ByteBuffer.allocate(auxSize); // cache moov in the memory</span>
+        }
+
+<span class="nc" id="L263">        moovSimulation = false;</span>
+<span class="nc" id="L264">        writeOffset = 0;</span>
+
+<span class="nc" id="L266">        final int ftypSize = makeFtyp();</span>
+
+        // reserve moov space in the output stream
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (auxSize &gt; 0) {</span>
+<span class="nc" id="L270">            int length = auxSize;</span>
+<span class="nc" id="L271">            final byte[] buffer = new byte[64 * 1024]; // 64 KiB</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            while (length &gt; 0) {</span>
+<span class="nc" id="L273">                final int count = Math.min(length, buffer.length);</span>
+<span class="nc" id="L274">                outWrite(buffer, count);</span>
+<span class="nc" id="L275">                length -= count;</span>
+<span class="nc" id="L276">            }</span>
+        }
+
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        if (auxBuffer == null) {</span>
+<span class="nc" id="L280">            outSeek(ftypSize);</span>
+        }
+
+        // tablesInfo contains row counts
+        // and after returning from makeMoov() will contain those table offsets
+<span class="nc" id="L285">        makeMoov(defaultMediaTime, tablesInfo, is64);</span>
+
+        // write tables: stts stsc sbgp
+        // reset for ctts table: sampleCount sampleExtra
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        for (int i = 0; i &lt; readers.length; i++) {</span>
+<span class="nc" id="L290">            writeEntryArray(tablesInfo[i].stts, 2, sampleCount[i], defaultSampleDuration[i]);</span>
+<span class="nc" id="L291">            writeEntryArray(tablesInfo[i].stsc, tablesInfo[i].stscBEntries.length,</span>
+                    tablesInfo[i].stscBEntries);
+<span class="nc" id="L293">            tablesInfo[i].stscBEntries = null;</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">            if (tablesInfo[i].ctts &gt; 0) {</span>
+<span class="nc" id="L295">                sampleCount[i] = 1; // the index is not base zero</span>
+<span class="nc" id="L296">                sampleExtra[i] = -1;</span>
+            }
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (tablesInfo[i].sbgp &gt; 0) {</span>
+<span class="nc" id="L299">                writeEntryArray(tablesInfo[i].sbgp, 1, sampleCount[i]);</span>
+            }
+        }
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (auxBuffer == null) {</span>
+<span class="nc" id="L304">            outRestore();</span>
+        }
+
+<span class="nc" id="L307">        outWrite(makeMdat(totalSampleSize, is64));</span>
+
+<span class="nc" id="L309">        final int[] sampleIndex = new int[readers.length];</span>
+        final int[] sizes =
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                new int[singleSampleBuffer &gt; 0 ? singleSampleBuffer : SAMPLES_PER_CHUNK];</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        final int[] sync = new int[singleSampleBuffer &gt; 0 ? singleSampleBuffer : SAMPLES_PER_CHUNK];</span>
+
+<span class="nc" id="L314">        int written = readers.length;</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        while (written &gt; 0) {</span>
+<span class="nc" id="L316">            written = 0;</span>
+
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            for (int i = 0; i &lt; readers.length; i++) {</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                if (sampleIndex[i] &lt; 0) {</span>
+<span class="nc" id="L320">                    continue; // track is done</span>
+                }
+
+<span class="nc" id="L323">                final long chunkOffset = writeOffset;</span>
+<span class="nc" id="L324">                int syncCount = 0;</span>
+                final int limit;
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                if (singleSampleBuffer &gt; 0) {</span>
+<span class="nc" id="L327">                    limit = singleSampleBuffer;</span>
+                } else {
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                    limit = sampleIndex[i] == 0 ? SAMPLES_PER_CHUNK_INIT : SAMPLES_PER_CHUNK;</span>
+                }
+
+<span class="nc" id="L332">                int j = 0;</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                for (; j &lt; limit; j++) {</span>
+<span class="nc" id="L334">                    final Mp4DashSample sample = getNextSample(i);</span>
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                    if (sample == null) {</span>
+<span class="nc bnc" id="L337" title="All 4 branches missed.">                        if (tablesInfo[i].ctts &gt; 0 &amp;&amp; sampleExtra[i] &gt;= 0) {</span>
+<span class="nc" id="L338">                            writeEntryArray(tablesInfo[i].ctts, 1, sampleCount[i],</span>
+                                    sampleExtra[i]); // flush last entries
+<span class="nc" id="L340">                            outRestore();</span>
+                        }
+<span class="nc" id="L342">                        sampleIndex[i] = -1;</span>
+<span class="nc" id="L343">                        break;</span>
+                    }
+
+<span class="nc" id="L346">                    sampleIndex[i]++;</span>
+
+<span class="nc bnc" id="L348" title="All 2 branches missed.">                    if (tablesInfo[i].ctts &gt; 0) {</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                        if (sample.info.sampleCompositionTimeOffset == sampleExtra[i]) {</span>
+<span class="nc" id="L350">                            sampleCount[i]++;</span>
+                        } else {
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                            if (sampleExtra[i] &gt;= 0) {</span>
+<span class="nc" id="L353">                                tablesInfo[i].ctts = writeEntryArray(tablesInfo[i].ctts, 2,</span>
+                                        sampleCount[i], sampleExtra[i]);
+<span class="nc" id="L355">                                outRestore();</span>
+                            }
+<span class="nc" id="L357">                            sampleCount[i] = 1;</span>
+<span class="nc" id="L358">                            sampleExtra[i] = sample.info.sampleCompositionTimeOffset;</span>
+                        }
+                    }
+
+<span class="nc bnc" id="L362" title="All 4 branches missed.">                    if (tablesInfo[i].stss &gt; 0 &amp;&amp; sample.info.isKeyframe) {</span>
+<span class="nc" id="L363">                        sync[syncCount++] = sampleIndex[i];</span>
+                    }
+
+<span class="nc bnc" id="L366" title="All 2 branches missed.">                    if (tablesInfo[i].stsz &gt; 0) {</span>
+<span class="nc" id="L367">                        sizes[j] = sample.data.length;</span>
+                    }
+
+<span class="nc" id="L370">                    outWrite(sample.data, sample.data.length);</span>
+                }
+
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                if (j &gt; 0) {</span>
+<span class="nc" id="L374">                    written++;</span>
+
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                    if (tablesInfo[i].stsz &gt; 0) {</span>
+<span class="nc" id="L377">                        tablesInfo[i].stsz = writeEntryArray(tablesInfo[i].stsz, j, sizes);</span>
+                    }
+
+<span class="nc bnc" id="L380" title="All 2 branches missed.">                    if (syncCount &gt; 0) {</span>
+<span class="nc" id="L381">                        tablesInfo[i].stss = writeEntryArray(tablesInfo[i].stss, syncCount, sync);</span>
+                    }
+
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                    if (tablesInfo[i].stco &gt; 0) {</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">                        if (is64) {</span>
+<span class="nc" id="L386">                            tablesInfo[i].stco = writeEntry64(tablesInfo[i].stco, chunkOffset);</span>
+                        } else {
+<span class="nc" id="L388">                            tablesInfo[i].stco = writeEntryArray(tablesInfo[i].stco, 1,</span>
+                                    (int) chunkOffset);
+                        }
+                    }
+
+<span class="nc" id="L393">                    outRestore();</span>
+                }
+            }
+        }
+
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (auxBuffer != null) {</span>
+            // dump moov
+<span class="nc" id="L400">            outSeek(ftypSize);</span>
+<span class="nc" id="L401">            outStream.write(auxBuffer.array(), 0, auxBuffer.capacity());</span>
+<span class="nc" id="L402">            auxBuffer = null;</span>
+        }
+<span class="nc" id="L404">    }</span>
+
+    private Mp4DashSample getNextSample(final int track) throws IOException {
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (readersChunks[track] == null) {</span>
+<span class="nc" id="L408">            readersChunks[track] = readers[track].getNextChunk(false);</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            if (readersChunks[track] == null) {</span>
+<span class="nc" id="L410">                return null; // EOF reached</span>
+            }
+        }
+
+<span class="nc" id="L414">        final Mp4DashSample sample = readersChunks[track].getNextSample();</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        if (sample == null) {</span>
+<span class="nc" id="L416">            readersChunks[track] = null;</span>
+<span class="nc" id="L417">            return getNextSample(track);</span>
+        } else {
+<span class="nc" id="L419">            return sample;</span>
+        }
+    }
+
+
+    private int writeEntry64(final int offset, final long value) throws IOException {
+<span class="nc" id="L425">        outBackup();</span>
+
+<span class="nc" id="L427">        auxSeek(offset);</span>
+<span class="nc" id="L428">        auxWrite(ByteBuffer.allocate(8).putLong(value).array());</span>
+
+<span class="nc" id="L430">        return offset + 8;</span>
+    }
+
+    private int writeEntryArray(final int offset, final int count, final int... values)
+            throws IOException {
+<span class="nc" id="L435">        outBackup();</span>
+
+<span class="nc" id="L437">        auxSeek(offset);</span>
+
+<span class="nc" id="L439">        final int size = count * 4;</span>
+<span class="nc" id="L440">        final ByteBuffer buffer = ByteBuffer.allocate(size);</span>
+
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        for (int i = 0; i &lt; count; i++) {</span>
+<span class="nc" id="L443">            buffer.putInt(values[i]);</span>
+        }
+
+<span class="nc" id="L446">        auxWrite(buffer.array());</span>
+
+<span class="nc" id="L448">        return offset + size;</span>
+    }
+
+    private void outBackup() {
+<span class="nc bnc" id="L452" title="All 4 branches missed.">        if (auxBuffer == null &amp;&amp; lastWriteOffset &lt; 0) {</span>
+<span class="nc" id="L453">            lastWriteOffset = writeOffset;</span>
+        }
+<span class="nc" id="L455">    }</span>
+
+    /**
+     * Restore to the previous position before the first call to writeEntry64()
+     * or writeEntryArray() methods.
+     */
+    private void outRestore() throws IOException {
+<span class="nc bnc" id="L462" title="All 2 branches missed.">        if (lastWriteOffset &gt; 0) {</span>
+<span class="nc" id="L463">            outSeek(lastWriteOffset);</span>
+<span class="nc" id="L464">            lastWriteOffset = -1;</span>
+        }
+<span class="nc" id="L466">    }</span>
+
+    private void initChunkTables(final TablesInfo tables, final int firstCount,
+                                 final int successiveCount) {
+        // tables.stsz holds amount of samples of the track (total)
+<span class="nc" id="L471">        final int totalSamples = (tables.stsz - firstCount);</span>
+<span class="nc" id="L472">        final float chunkAmount = totalSamples / (float) successiveCount;</span>
+<span class="nc" id="L473">        final int remainChunkOffset = (int) Math.ceil(chunkAmount);</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">        final boolean remain = remainChunkOffset != (int) chunkAmount;</span>
+<span class="nc" id="L475">        int index = 0;</span>
+
+<span class="nc" id="L477">        tables.stsc = 1;</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">        if (firstCount != successiveCount) {</span>
+<span class="nc" id="L479">            tables.stsc++;</span>
+        }
+<span class="nc bnc" id="L481" title="All 2 branches missed.">        if (remain) {</span>
+<span class="nc" id="L482">            tables.stsc++;</span>
+        }
+
+        // stsc_table_entry = [first_chunk, samples_per_chunk, sample_description_index]
+<span class="nc" id="L486">        tables.stscBEntries = new int[tables.stsc * 3];</span>
+<span class="nc" id="L487">        tables.stco = remainChunkOffset + 1; // total entries in chunk offset box</span>
+
+<span class="nc" id="L489">        tables.stscBEntries[index++] = 1;</span>
+<span class="nc" id="L490">        tables.stscBEntries[index++] = firstCount;</span>
+<span class="nc" id="L491">        tables.stscBEntries[index++] = 1;</span>
+
+<span class="nc bnc" id="L493" title="All 2 branches missed.">        if (firstCount != successiveCount) {</span>
+<span class="nc" id="L494">            tables.stscBEntries[index++] = 2;</span>
+<span class="nc" id="L495">            tables.stscBEntries[index++] = successiveCount;</span>
+<span class="nc" id="L496">            tables.stscBEntries[index++] = 1;</span>
+        }
+
+<span class="nc bnc" id="L499" title="All 2 branches missed.">        if (remain) {</span>
+<span class="nc" id="L500">            tables.stscBEntries[index++] = remainChunkOffset + 1;</span>
+<span class="nc" id="L501">            tables.stscBEntries[index++] = totalSamples % successiveCount;</span>
+<span class="nc" id="L502">            tables.stscBEntries[index] = 1;</span>
+        }
+<span class="nc" id="L504">    }</span>
+
+    private void outWrite(final byte[] buffer) throws IOException {
+<span class="nc" id="L507">        outWrite(buffer, buffer.length);</span>
+<span class="nc" id="L508">    }</span>
+
+    private void outWrite(final byte[] buffer, final int count) throws IOException {
+<span class="nc" id="L511">        writeOffset += count;</span>
+<span class="nc" id="L512">        outStream.write(buffer, 0, count);</span>
+<span class="nc" id="L513">    }</span>
+
+    private void outSeek(final long offset) throws IOException {
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        if (outStream.canSeek()) {</span>
+<span class="nc" id="L517">            outStream.seek(offset);</span>
+<span class="nc" id="L518">            writeOffset = offset;</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        } else if (outStream.canRewind()) {</span>
+<span class="nc" id="L520">            outStream.rewind();</span>
+<span class="nc" id="L521">            writeOffset = 0;</span>
+<span class="nc" id="L522">            outSkip(offset);</span>
+        } else {
+<span class="nc" id="L524">            throw new IOException(&quot;cannot seek or rewind the output stream&quot;);</span>
+        }
+<span class="nc" id="L526">    }</span>
+
+    private void outSkip(final long amount) throws IOException {
+<span class="nc" id="L529">        outStream.skip(amount);</span>
+<span class="nc" id="L530">        writeOffset += amount;</span>
+<span class="nc" id="L531">    }</span>
+
+    private int lengthFor(final int offset) throws IOException {
+<span class="nc" id="L534">        final int size = auxOffset() - offset;</span>
+
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (moovSimulation) {</span>
+<span class="nc" id="L537">            return size;</span>
+        }
+
+<span class="nc" id="L540">        auxSeek(offset);</span>
+<span class="nc" id="L541">        auxWrite(size);</span>
+<span class="nc" id="L542">        auxSkip(size - 4);</span>
+
+<span class="nc" id="L544">        return size;</span>
+    }
+
+    private int make(final int type, final int extra, final int columns, final int rows)
+            throws IOException {
+<span class="nc" id="L549">        final byte base = 16;</span>
+<span class="nc" id="L550">        final int size = columns * rows * 4;</span>
+<span class="nc" id="L551">        int total = size + base;</span>
+<span class="nc" id="L552">        int offset = auxOffset();</span>
+
+<span class="nc bnc" id="L554" title="All 2 branches missed.">        if (extra &gt;= 0) {</span>
+<span class="nc" id="L555">            total += 4;</span>
+        }
+
+<span class="nc" id="L558">        auxWrite(ByteBuffer.allocate(12)</span>
+<span class="nc" id="L559">                .putInt(total)</span>
+<span class="nc" id="L560">                .putInt(type)</span>
+<span class="nc" id="L561">                .putInt(0x00)// default version &amp; flags</span>
+<span class="nc" id="L562">                .array()</span>
+        );
+
+<span class="nc bnc" id="L565" title="All 2 branches missed.">        if (extra &gt;= 0) {</span>
+<span class="nc" id="L566">            offset += 4;</span>
+<span class="nc" id="L567">            auxWrite(extra);</span>
+        }
+
+<span class="nc" id="L570">        auxWrite(rows);</span>
+<span class="nc" id="L571">        auxSkip(size);</span>
+
+<span class="nc" id="L573">        return offset + base;</span>
+    }
+
+    private void auxWrite(final int value) throws IOException {
+<span class="nc" id="L577">        auxWrite(ByteBuffer.allocate(4)</span>
+<span class="nc" id="L578">                .putInt(value)</span>
+<span class="nc" id="L579">                .array()</span>
+        );
+<span class="nc" id="L581">    }</span>
+
+    private void auxWrite(final byte[] buffer) throws IOException {
+<span class="nc bnc" id="L584" title="All 2 branches missed.">        if (moovSimulation) {</span>
+<span class="nc" id="L585">            writeOffset += buffer.length;</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">        } else if (auxBuffer == null) {</span>
+<span class="nc" id="L587">            outWrite(buffer, buffer.length);</span>
+        } else {
+<span class="nc" id="L589">            auxBuffer.put(buffer);</span>
+        }
+<span class="nc" id="L591">    }</span>
+
+    private void auxSeek(final int offset) throws IOException {
+<span class="nc bnc" id="L594" title="All 2 branches missed.">        if (moovSimulation) {</span>
+<span class="nc" id="L595">            writeOffset = offset;</span>
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        } else if (auxBuffer == null) {</span>
+<span class="nc" id="L597">            outSeek(offset);</span>
+        } else {
+<span class="nc" id="L599">            auxBuffer.position(offset);</span>
+        }
+<span class="nc" id="L601">    }</span>
+
+    private void auxSkip(final int amount) throws IOException {
+<span class="nc bnc" id="L604" title="All 2 branches missed.">        if (moovSimulation) {</span>
+<span class="nc" id="L605">            writeOffset += amount;</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">        } else if (auxBuffer == null) {</span>
+<span class="nc" id="L607">            outSkip(amount);</span>
+        } else {
+<span class="nc" id="L609">            auxBuffer.position(auxBuffer.position() + amount);</span>
+        }
+<span class="nc" id="L611">    }</span>
+
+    private int auxOffset() {
+<span class="nc bnc" id="L614" title="All 2 branches missed.">        return auxBuffer == null ? (int) writeOffset : auxBuffer.position();</span>
+    }
+
+    private int makeFtyp() throws IOException {
+<span class="nc" id="L618">        int size = 16 + (compatibleBrands.size() * 4);</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">        if (overrideMainBrand != 0) {</span>
+<span class="nc" id="L620">            size += 4;</span>
+        }
+
+<span class="nc" id="L623">        final ByteBuffer buffer = ByteBuffer.allocate(size);</span>
+<span class="nc" id="L624">        buffer.putInt(size);</span>
+<span class="nc" id="L625">        buffer.putInt(0x66747970); // &quot;ftyp&quot;</span>
+
+<span class="nc bnc" id="L627" title="All 2 branches missed.">        if (overrideMainBrand == 0) {</span>
+<span class="nc" id="L628">            buffer.putInt(0x6D703432); // mayor brand &quot;mp42&quot;</span>
+<span class="nc" id="L629">            buffer.putInt(512); // default minor version</span>
+        } else {
+<span class="nc" id="L631">            buffer.putInt(overrideMainBrand);</span>
+<span class="nc" id="L632">            buffer.putInt(0);</span>
+<span class="nc" id="L633">            buffer.putInt(0x6D703432); // &quot;mp42&quot; compatible brand</span>
+        }
+
+<span class="nc bnc" id="L636" title="All 2 branches missed.">        for (final Integer brand : compatibleBrands) {</span>
+<span class="nc" id="L637">            buffer.putInt(brand); // compatible brand</span>
+<span class="nc" id="L638">        }</span>
+
+<span class="nc" id="L640">        outWrite(buffer.array());</span>
+
+<span class="nc" id="L642">        return size;</span>
+    }
+
+    private byte[] makeMdat(final long refSize, final boolean is64) {
+<span class="nc" id="L646">        long size = refSize;</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">        if (is64) {</span>
+<span class="nc" id="L648">            size += 16;</span>
+        } else {
+<span class="nc" id="L650">            size += 8;</span>
+        }
+
+<span class="nc bnc" id="L653" title="All 2 branches missed.">        final ByteBuffer buffer = ByteBuffer.allocate(is64 ? 16 : 8)</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">                .putInt(is64 ? 0x01 : (int) size)</span>
+<span class="nc" id="L655">                .putInt(0x6D646174); // mdat</span>
+
+<span class="nc bnc" id="L657" title="All 2 branches missed.">        if (is64) {</span>
+<span class="nc" id="L658">            buffer.putLong(size);</span>
+        }
+
+<span class="nc" id="L661">        return buffer.array();</span>
+    }
+
+    private void makeMvhd(final long longestTrack) throws IOException {
+<span class="nc" id="L665">        auxWrite(new byte[]{</span>
+                0x00, 0x00, 0x00, 0x78, 0x6D, 0x76, 0x68, 0x64, 0x01, 0x00, 0x00, 0x00
+        });
+<span class="nc" id="L668">        auxWrite(ByteBuffer.allocate(28)</span>
+<span class="nc" id="L669">                .putLong(time)</span>
+<span class="nc" id="L670">                .putLong(time)</span>
+<span class="nc" id="L671">                .putInt(DEFAULT_TIMESCALE)</span>
+<span class="nc" id="L672">                .putLong(longestTrack)</span>
+<span class="nc" id="L673">                .array()</span>
+        );
+
+<span class="nc" id="L676">        auxWrite(new byte[]{</span>
+                0x00, 0x01, 0x00, 0x00, 0x01, 0x00, // default volume and rate
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // reserved values
+                // default matrix
+                0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x40, 0x00, 0x00, 0x00
+        });
+<span class="nc" id="L685">        auxWrite(new byte[24]); // predefined</span>
+<span class="nc" id="L686">        auxWrite(ByteBuffer.allocate(4)</span>
+<span class="nc" id="L687">                .putInt(tracks.length + 1)</span>
+<span class="nc" id="L688">                .array()</span>
+        );
+<span class="nc" id="L690">    }</span>
+
+    private int makeMoov(final int[] defaultMediaTime, final TablesInfo[] tablesInfo,
+                         final boolean is64) throws RuntimeException, IOException {
+<span class="nc" id="L694">        final int start = auxOffset();</span>
+
+<span class="nc" id="L696">        auxWrite(new byte[]{</span>
+                0x00, 0x00, 0x00, 0x00, 0x6D, 0x6F, 0x6F, 0x76
+        });
+
+<span class="nc" id="L700">        long longestTrack = 0;</span>
+<span class="nc" id="L701">        final long[] durations = new long[tracks.length];</span>
+
+<span class="nc bnc" id="L703" title="All 2 branches missed.">        for (int i = 0; i &lt; durations.length; i++) {</span>
+<span class="nc" id="L704">            durations[i] = (long) Math.ceil(</span>
+                    ((double) tracks[i].trak.tkhd.duration / tracks[i].trak.mdia.mdhdTimeScale)
+                            * DEFAULT_TIMESCALE);
+
+<span class="nc bnc" id="L708" title="All 2 branches missed.">            if (durations[i] &gt; longestTrack) {</span>
+<span class="nc" id="L709">                longestTrack = durations[i];</span>
+            }
+        }
+
+<span class="nc" id="L713">        makeMvhd(longestTrack);</span>
+
+<span class="nc bnc" id="L715" title="All 2 branches missed.">        for (int i = 0; i &lt; tracks.length; i++) {</span>
+<span class="nc bnc" id="L716" title="All 2 branches missed.">            if (tracks[i].trak.tkhd.matrix.length != 36) {</span>
+<span class="nc" id="L717">                throw</span>
+                    new RuntimeException(&quot;bad track matrix length (expected 36) in track n°&quot; + i);
+            }
+<span class="nc" id="L720">            makeTrak(i, durations[i], defaultMediaTime[i], tablesInfo[i], is64);</span>
+        }
+
+<span class="nc" id="L723">        return lengthFor(start);</span>
+    }
+
+    private void makeTrak(final int index, final long duration, final int defaultMediaTime,
+                          final TablesInfo tables, final boolean is64) throws IOException {
+<span class="nc" id="L728">        final int start = auxOffset();</span>
+
+<span class="nc" id="L730">        auxWrite(new byte[]{</span>
+                // trak header
+                0x00, 0x00, 0x00, 0x00, 0x74, 0x72, 0x61, 0x6B,
+                // tkhd header
+                0x00, 0x00, 0x00, 0x68, 0x74, 0x6B, 0x68, 0x64, 0x01, 0x00, 0x00, 0x03
+        });
+
+<span class="nc" id="L737">        final ByteBuffer buffer = ByteBuffer.allocate(48);</span>
+<span class="nc" id="L738">        buffer.putLong(time);</span>
+<span class="nc" id="L739">        buffer.putLong(time);</span>
+<span class="nc" id="L740">        buffer.putInt(index + 1);</span>
+<span class="nc" id="L741">        buffer.position(24);</span>
+<span class="nc" id="L742">        buffer.putLong(duration);</span>
+<span class="nc" id="L743">        buffer.position(40);</span>
+<span class="nc" id="L744">        buffer.putShort(tracks[index].trak.tkhd.bLayer);</span>
+<span class="nc" id="L745">        buffer.putShort(tracks[index].trak.tkhd.bAlternateGroup);</span>
+<span class="nc" id="L746">        buffer.putShort(tracks[index].trak.tkhd.bVolume);</span>
+<span class="nc" id="L747">        auxWrite(buffer.array());</span>
+
+<span class="nc" id="L749">        auxWrite(tracks[index].trak.tkhd.matrix);</span>
+<span class="nc" id="L750">        auxWrite(ByteBuffer.allocate(8)</span>
+<span class="nc" id="L751">                .putInt(tracks[index].trak.tkhd.bWidth)</span>
+<span class="nc" id="L752">                .putInt(tracks[index].trak.tkhd.bHeight)</span>
+<span class="nc" id="L753">                .array()</span>
+        );
+
+<span class="nc" id="L756">        auxWrite(new byte[]{</span>
+                0x00, 0x00, 0x00, 0x24, 0x65, 0x64, 0x74, 0x73, // edts header
+                0x00, 0x00, 0x00, 0x1C, 0x65, 0x6C, 0x73, 0x74,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 // elst header
+        });
+
+        final int bMediaRate;
+        final int mediaTime;
+
+<span class="nc bnc" id="L765" title="All 2 branches missed.">        if (tracks[index].trak.edstElst == null) {</span>
+            // is a audio track ¿is edst/elst optional for audio tracks?
+<span class="nc" id="L767">            mediaTime = 0x00; // ffmpeg set this value as zero, instead of defaultMediaTime</span>
+<span class="nc" id="L768">            bMediaRate = 0x00010000;</span>
+        } else {
+<span class="nc" id="L770">            mediaTime = (int) tracks[index].trak.edstElst.mediaTime;</span>
+<span class="nc" id="L771">            bMediaRate = tracks[index].trak.edstElst.bMediaRate;</span>
+        }
+
+<span class="nc" id="L774">        auxWrite(ByteBuffer</span>
+<span class="nc" id="L775">                .allocate(12)</span>
+<span class="nc" id="L776">                .putInt((int) duration)</span>
+<span class="nc" id="L777">                .putInt(mediaTime)</span>
+<span class="nc" id="L778">                .putInt(bMediaRate)</span>
+<span class="nc" id="L779">                .array()</span>
+        );
+
+<span class="nc bnc" id="L782" title="All 2 branches missed.">        makeMdia(tracks[index].trak.mdia, tables, is64, tracks[index].kind == TrackKind.Audio);</span>
+
+<span class="nc" id="L784">        lengthFor(start);</span>
+<span class="nc" id="L785">    }</span>
+
+    private void makeMdia(final Mdia mdia, final TablesInfo tablesInfo, final boolean is64,
+                          final boolean isAudio) throws IOException {
+<span class="nc" id="L789">        final int startMdia = auxOffset();</span>
+<span class="nc" id="L790">        auxWrite(new byte[]{0x00, 0x00, 0x00, 0x00, 0x6D, 0x64, 0x69, 0x61}); // mdia</span>
+<span class="nc" id="L791">        auxWrite(mdia.mdhd);</span>
+<span class="nc" id="L792">        auxWrite(makeHdlr(mdia.hdlr));</span>
+
+<span class="nc" id="L794">        final int startMinf = auxOffset();</span>
+<span class="nc" id="L795">        auxWrite(new byte[]{0x00, 0x00, 0x00, 0x00, 0x6D, 0x69, 0x6E, 0x66}); // minf</span>
+<span class="nc" id="L796">        auxWrite(mdia.minf.mhd);</span>
+<span class="nc" id="L797">        auxWrite(mdia.minf.dinf);</span>
+
+<span class="nc" id="L799">        final int startStbl = auxOffset();</span>
+<span class="nc" id="L800">        auxWrite(new byte[]{0x00, 0x00, 0x00, 0x00, 0x73, 0x74, 0x62, 0x6C}); // stbl</span>
+<span class="nc" id="L801">        auxWrite(mdia.minf.stblStsd);</span>
+
+        //
+        // In audio tracks the following tables is not required: ssts ctts
+        // And stsz can be empty if has a default sample size
+        //
+<span class="nc bnc" id="L807" title="All 2 branches missed.">        if (moovSimulation) {</span>
+<span class="nc" id="L808">            make(0x73747473, -1, 2, 1); // stts</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            if (tablesInfo.stss &gt; 0) {</span>
+<span class="nc" id="L810">                make(0x73747373, -1, 1, tablesInfo.stss);</span>
+            }
+<span class="nc bnc" id="L812" title="All 2 branches missed.">            if (tablesInfo.ctts &gt; 0) {</span>
+<span class="nc" id="L813">                make(0x63747473, -1, 2, tablesInfo.ctts);</span>
+            }
+<span class="nc" id="L815">            make(0x73747363, -1, 3, tablesInfo.stsc);</span>
+<span class="nc" id="L816">            make(0x7374737A, tablesInfo.stszDefault, 1, tablesInfo.stsz);</span>
+<span class="nc bnc" id="L817" title="All 4 branches missed.">            make(is64 ? 0x636F3634 : 0x7374636F, -1, is64 ? 2 : 1, tablesInfo.stco);</span>
+        } else {
+<span class="nc" id="L819">            tablesInfo.stts = make(0x73747473, -1, 2, 1);</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">            if (tablesInfo.stss &gt; 0) {</span>
+<span class="nc" id="L821">                tablesInfo.stss = make(0x73747373, -1, 1, tablesInfo.stss);</span>
+            }
+<span class="nc bnc" id="L823" title="All 2 branches missed.">            if (tablesInfo.ctts &gt; 0) {</span>
+<span class="nc" id="L824">                tablesInfo.ctts = make(0x63747473, -1, 2, tablesInfo.ctts);</span>
+            }
+<span class="nc" id="L826">            tablesInfo.stsc = make(0x73747363, -1, 3, tablesInfo.stsc);</span>
+<span class="nc" id="L827">            tablesInfo.stsz = make(0x7374737A, tablesInfo.stszDefault, 1, tablesInfo.stsz);</span>
+<span class="nc bnc" id="L828" title="All 4 branches missed.">            tablesInfo.stco = make(is64 ? 0x636F3634 : 0x7374636F, -1, is64 ? 2 : 1,</span>
+                    tablesInfo.stco);
+        }
+
+<span class="nc bnc" id="L832" title="All 2 branches missed.">        if (isAudio) {</span>
+<span class="nc" id="L833">            auxWrite(makeSgpd());</span>
+<span class="nc" id="L834">            tablesInfo.sbgp = makeSbgp(); // during simulation the returned offset is ignored</span>
+        }
+
+<span class="nc" id="L837">        lengthFor(startStbl);</span>
+<span class="nc" id="L838">        lengthFor(startMinf);</span>
+<span class="nc" id="L839">        lengthFor(startMdia);</span>
+<span class="nc" id="L840">    }</span>
+
+    private byte[] makeHdlr(final Hdlr hdlr) {
+<span class="nc" id="L843">        final ByteBuffer buffer = ByteBuffer.wrap(new byte[]{</span>
+                0x00, 0x00, 0x00, 0x21, 0x68, 0x64, 0x6C, 0x72, // hdlr
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00// null string character
+        });
+
+<span class="nc" id="L850">        buffer.position(12);</span>
+<span class="nc" id="L851">        buffer.putInt(hdlr.type);</span>
+<span class="nc" id="L852">        buffer.putInt(hdlr.subType);</span>
+<span class="nc" id="L853">        buffer.put(hdlr.bReserved); // always is a zero array</span>
+
+<span class="nc" id="L855">        return buffer.array();</span>
+    }
+
+    private int makeSbgp() throws IOException {
+<span class="nc" id="L859">        final int offset = auxOffset();</span>
+
+<span class="nc" id="L861">        auxWrite(new byte[] {</span>
+                0x00, 0x00, 0x00, 0x1C, // box size
+                0x73, 0x62, 0x67, 0x70, // &quot;sbpg&quot;
+                0x00, 0x00, 0x00, 0x00, // default box flags
+                0x72, 0x6F, 0x6C, 0x6C, // group type &quot;roll&quot;
+                0x00, 0x00, 0x00, 0x01, // group table size
+                0x00, 0x00, 0x00, 0x00, // group[0] total samples (to be set later)
+                0x00, 0x00, 0x00, 0x01 // group[0] description index
+        });
+
+<span class="nc" id="L871">        return offset + 0x14;</span>
+    }
+
+    private byte[] makeSgpd() {
+        /*
+         * Sample Group Description Box
+         *
+         * ¿whats does?
+         * the table inside of this box gives information about the
+         * characteristics of sample groups. The descriptive information is any other
+         * information needed to define or characterize the sample group.
+         *
+         * ¿is replicable this box?
+         * NO due lacks of documentation about this box but...
+         * most of m4a encoders and ffmpeg uses this box with dummy values (same values)
+         */
+
+<span class="nc" id="L888">        final ByteBuffer buffer = ByteBuffer.wrap(new byte[] {</span>
+                0x00, 0x00, 0x00, 0x1A, // box size
+                0x73, 0x67, 0x70, 0x64, // &quot;sgpd&quot;
+                0x01, 0x00, 0x00, 0x00, // box flags (unknown flag sets)
+                0x72, 0x6F, 0x6C, 0x6C, // ¿¿group type??
+                0x00, 0x00, 0x00, 0x02, // ¿¿??
+                0x00, 0x00, 0x00, 0x01, // ¿¿??
+                (byte) 0xFF, (byte) 0xFF // ¿¿??
+        });
+
+<span class="nc" id="L898">        return buffer.array();</span>
+    }
+
+<span class="nc" id="L901">    static class TablesInfo {</span>
+        int stts;
+        int stsc;
+        int[] stscBEntries;
+        int ctts;
+        int stsz;
+        int stszDefault;
+        int stss;
+        int stco;
+        int sbgp;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

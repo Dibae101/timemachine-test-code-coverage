@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>VolumePreference.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AlarmClock</a> &gt; <a href="index.source.html" class="el_package">com.better.alarm.view</a> &gt; <span class="el_source">VolumePreference.kt</span></div><h1>VolumePreference.kt</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.better.alarm.view
+
+import android.content.Context
+import android.media.AudioManager
+import android.media.RingtoneManager
+import android.net.Uri
+import android.util.AttributeSet
+import android.view.View
+import android.widget.SeekBar
+import android.widget.SeekBar.OnSeekBarChangeListener
+import android.widget.TextView
+import androidx.preference.Preference
+import androidx.preference.PreferenceViewHolder
+import com.better.alarm.R
+import com.better.alarm.background.KlaxonPlugin
+import com.better.alarm.background.PluginAlarmData
+import com.better.alarm.background.TargetVolume
+import com.better.alarm.configuration.Prefs
+import com.better.alarm.configuration.Prefs.Companion.MAX_PREALARM_VOLUME
+import com.better.alarm.configuration.globalInject
+import com.better.alarm.configuration.globalLogger
+import com.better.alarm.util.subscribeIn
+import io.reactivex.Observable
+import io.reactivex.android.schedulers.AndroidSchedulers
+import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.disposables.Disposables
+import io.reactivex.subjects.PublishSubject
+import java.util.concurrent.TimeUnit
+import org.koin.core.qualifier.named
+
+<span class="fc" id="L47">class VolumePreference(mContext: Context, attrs: AttributeSet) : Preference(mContext, attrs) {</span>
+<span class="pc" id="L48">  private val log by globalLogger(&quot;VolumePreference&quot;)</span>
+<span class="pc" id="L49">  private val rxPrefs: Prefs by globalInject()</span>
+<span class="pc" id="L50">  private val am: AudioManager by globalInject()</span>
+<span class="fc" id="L51">  private val alarmTypeUri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)</span>
+
+  private var ringtoneSummary: TextView? = null
+<span class="fc" id="L54">  private var fragmentScope = CompositeDisposable()</span>
+<span class="fc" id="L55">  private var prealarmSampleDisposable = Disposables.empty()</span>
+<span class="fc" id="L56">  private var sampleDisposable = Disposables.empty()</span>
+
+<span class="pc" id="L58">  private val klaxon: KlaxonPlugin by globalInject(named(&quot;volumePreferenceDemo&quot;))</span>
+
+<span class="nc" id="L60">  var showPicker: (() -&gt; Unit)? = null</span>
+<span class="nc" id="L61">  var ringtoneTitle: CharSequence? = null</span>
+    set(value) {
+<span class="nc" id="L63">      field = value</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">      ringtoneSummary?.text = value</span>
+<span class="nc" id="L65">    }</span>
+
+<span class="fc" id="L67">  init {</span>
+<span class="fc" id="L68">    layoutResource = R.layout.seekbar_dialog</span>
+<span class="fc" id="L69">  }</span>
+
+  override fun onBindViewHolder(holder: PreferenceViewHolder) {
+<span class="nc" id="L72">    super.onBindViewHolder(holder)</span>
+<span class="nc" id="L73">    bindPrealarmSeekBar(holder.findById(R.id.seekbar_dialog_seekbar_prealarm_volume))</span>
+<span class="nc" id="L74">    bindAudioManagerVolume(holder.findById(R.id.seekbar_dialog_seekbar_master_volume))</span>
+<span class="nc" id="L75">    ringtoneSummary = holder.findById(R.id.settings_ringtone_summary)</span>
+<span class="nc bnc" id="L76" title="All 4 branches missed.">    ringtoneTitle?.let { ringtoneSummary?.text = it }</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">    holder.findById&lt;View&gt;(R.id.settings_ringtone).setOnClickListener { showPicker?.invoke() }</span>
+<span class="nc" id="L78">  }</span>
+
+  /** Extension function to avoid crashes cause by an incorrect cast (see history) */
+<span class="nc" id="L81">  private fun &lt;T&gt; PreferenceViewHolder.findById(id: Int): T = findViewById(id) as T</span>
+
+  override fun onDetached() {
+<span class="nc" id="L84">    super.onDetached()</span>
+<span class="nc" id="L85">    fragmentScope.dispose()</span>
+<span class="nc" id="L86">  }</span>
+
+  /** Called from [com.better.alarm.presenter.SettingsFragment.onPause] */
+  fun onPause() {
+<span class="nc" id="L90">    stopMasterSample()</span>
+<span class="nc" id="L91">    stopPrealarmSample()</span>
+<span class="nc" id="L92">  }</span>
+
+  /** This function controls playback using AudioManager */
+  private fun bindAudioManagerVolume(seekBar: SeekBar) {
+<span class="nc" id="L96">    seekBar.progress = am.getStreamVolume(AudioManager.STREAM_ALARM)</span>
+<span class="nc" id="L97">    seekBar.max = am.getStreamMaxVolume(AudioManager.STREAM_ALARM)</span>
+
+<span class="nc" id="L99">    val masterVolumeProgress = seekBar.attachProgressChangedListener()</span>
+
+<span class="nc" id="L101">    masterVolumeProgress.subscribeIn(fragmentScope) { progress -&gt;</span>
+<span class="nc" id="L102">      stopPrealarmSample()</span>
+<span class="nc" id="L103">      stopMasterSample()</span>
+<span class="nc" id="L104">      am.setStreamVolume(AudioManager.STREAM_ALARM, progress, 0)</span>
+<span class="nc" id="L105">      sampleDisposable =</span>
+<span class="nc" id="L106">          klaxon.go(</span>
+<span class="nc" id="L107">              PluginAlarmData(</span>
+<span class="nc" id="L108">                  id = -1,</span>
+<span class="nc" id="L109">                  label = &quot;&quot;,</span>
+<span class="nc" id="L110">                  alarmtone = rxPrefs.defaultRingtone(),</span>
+              ),
+<span class="nc" id="L112">              prealarm = false,</span>
+<span class="nc" id="L113">              targetVolume = Observable.just(TargetVolume.FADED_IN))</span>
+<span class="nc" id="L114">    }</span>
+
+<span class="nc" id="L116">    masterVolumeProgress</span>
+        // stop after 3 seconds of inactivity
+<span class="nc" id="L118">        .debounce(3, TimeUnit.SECONDS, AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L119">        .subscribeIn(fragmentScope) { stopMasterSample() }</span>
+<span class="nc" id="L120">  }</span>
+
+  private fun bindPrealarmSeekBar(preAlarmSeekBar: SeekBar) {
+<span class="nc" id="L123">    preAlarmSeekBar.max = MAX_PREALARM_VOLUME</span>
+
+<span class="nc" id="L125">    rxPrefs.preAlarmVolume.observe().subscribeIn(fragmentScope) { preAlarmSeekBar.progress = it }</span>
+
+<span class="nc" id="L127">    val preAlarmSeekBarProgress = preAlarmSeekBar.attachProgressChangedListener()</span>
+
+<span class="nc" id="L129">    preAlarmSeekBarProgress.subscribeIn(fragmentScope) { progress -&gt;</span>
+<span class="nc" id="L130">      log.debug { &quot;Pre-alarm $progress&quot; }</span>
+<span class="nc" id="L131">      rxPrefs.preAlarmVolume.value = progress</span>
+<span class="nc" id="L132">      stopMasterSample()</span>
+<span class="nc" id="L133">      stopPrealarmSample()</span>
+<span class="nc" id="L134">      prealarmSampleDisposable =</span>
+<span class="nc" id="L135">          klaxon.go(</span>
+<span class="nc" id="L136">              PluginAlarmData(</span>
+<span class="nc" id="L137">                  id = -1,</span>
+<span class="nc" id="L138">                  label = &quot;&quot;,</span>
+<span class="nc" id="L139">                  alarmtone = rxPrefs.defaultRingtone(),</span>
+              ),
+<span class="nc" id="L141">              prealarm = true,</span>
+<span class="nc" id="L142">              targetVolume = Observable.just(TargetVolume.FADED_IN))</span>
+<span class="nc" id="L143">    }</span>
+
+<span class="nc" id="L145">    preAlarmSeekBarProgress</span>
+        // stop after 3 seconds of inactivity
+<span class="nc" id="L147">        .debounce(3, TimeUnit.SECONDS, AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L148">        .subscribeIn(fragmentScope) { stopPrealarmSample() }</span>
+<span class="nc" id="L149">  }</span>
+
+  private fun stopPrealarmSample() {
+<span class="nc" id="L152">    prealarmSampleDisposable.dispose()</span>
+<span class="nc" id="L153">  }</span>
+
+  private fun stopMasterSample() {
+<span class="nc" id="L156">    sampleDisposable.dispose()</span>
+<span class="nc" id="L157">  }</span>
+
+  /** Turns a [SeekBar] into a volume control. */
+  private fun SeekBar.attachProgressChangedListener(): Observable&lt;Int&gt; {
+<span class="nc" id="L161">    val progressChanged = PublishSubject.create&lt;Int&gt;()</span>
+<span class="nc" id="L162">    setOnSeekBarChangeListener(</span>
+<span class="nc" id="L163">        object : OnSeekBarChangeListener {</span>
+          override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromTouch: Boolean) {
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (!fromTouch) return</span>
+<span class="nc" id="L166">            progressChanged.onNext(progress)</span>
+<span class="nc" id="L167">          }</span>
+
+<span class="nc" id="L169">          override fun onStartTrackingTouch(seekBar: SeekBar) = Unit</span>
+
+<span class="nc" id="L171">          override fun onStopTrackingTouch(seekBar: SeekBar) = Unit</span>
+        })
+<span class="nc" id="L173">    return progressChanged</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

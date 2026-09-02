@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DownloadStatsWorker.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.work</a> &gt; <span class="el_source">DownloadStatsWorker.kt</span></div><h1>DownloadStatsWorker.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.work
+
+import android.content.Context
+import android.util.Log
+import androidx.hilt.work.HiltWorker
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import com.looker.droidify.data.PrivacyRepository
+import com.looker.droidify.data.local.model.DownloadStatsData
+import com.looker.droidify.data.local.model.DownloadStatsData.Companion.toEpochMillis
+import com.looker.droidify.datastore.Settings
+import com.looker.droidify.datastore.SettingsRepository
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.NetworkResponse
+import com.looker.droidify.utility.common.Constants
+import com.looker.droidify.utility.common.cache.Cache
+import com.looker.droidify.utility.common.extension.exceptCancellation
+import com.looker.droidify.utility.common.monthlyFileNamesSince
+import com.looker.droidify.utility.common.toForegroundInfo
+import com.looker.droidify.utility.notifications.createDownloadStatsNotification
+import dagger.assisted.Assisted
+import dagger.assisted.AssistedInject
+import java.io.File
+import java.net.HttpURLConnection.HTTP_NOT_MODIFIED
+import java.util.*
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.time.ExperimentalTime
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withContext
+
+<span class="fc" id="L37">@HiltWorker</span>
+<span class="fc" id="L38">class DownloadStatsWorker @AssistedInject constructor(</span>
+<span class="fc" id="L39">    @Assisted private val context: Context,</span>
+    @Assisted params: WorkerParameters,
+<span class="fc" id="L41">    private val privacyRepository: PrivacyRepository,</span>
+<span class="fc" id="L42">    private val settingsRepo: SettingsRepository,</span>
+<span class="fc" id="L43">    private val downloader: Downloader,</span>
+<span class="fc" id="L44">) : CoroutineWorker(context, params) {</span>
+
+<span class="fc" id="L46">    val downloadSemaphores = Semaphore(2)</span>
+
+<span class="fc" id="L48">    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {</span>
+<span class="fc" id="L49">        val settings = settingsRepo.getInitial()</span>
+<span class="pc bpc" id="L50" title="1 of 2 branches missed.">        if (!settings.dlStatsEnabled) {</span>
+<span class="nc" id="L51">            Log.i(TAG, &quot;Download statistics disabled, skipping&quot;)</span>
+<span class="nc" id="L52">            return@withContext Result.success()</span>
+        }
+<span class="fc" id="L54">        try {</span>
+<span class="fc" id="L55">            setForegroundAsync(</span>
+<span class="fc" id="L56">                context</span>
+<span class="fc" id="L57">                    .createDownloadStatsNotification()</span>
+<span class="fc" id="L58">                    .toForegroundInfo(Constants.NOTIFICATION_ID_STATS_DOWNLOAD),</span>
+            )
+<span class="fc" id="L60">            fetchData(settings)</span>
+<span class="fc" id="L61">            Log.i(TAG, &quot;Successfully processed download stats monthly files&quot;)</span>
+<span class="fc" id="L62">            Result.success()</span>
+<span class="nc" id="L63">        } catch (e: Exception) {</span>
+<span class="nc" id="L64">            e.exceptCancellation()</span>
+<span class="nc" id="L65">            Log.e(TAG, &quot;Failed fetching download stats&quot;, e)</span>
+<span class="pc" id="L66">            Result.failure()</span>
+<span class="fc" id="L67">        }</span>
+<span class="fc" id="L68">    }</span>
+
+<span class="pc" id="L70">    private suspend fun fetchData(settings: Settings) = withContext(Dispatchers.IO) {</span>
+<span class="pc bpc" id="L71" title="1 of 3 branches missed.">        supervisorScope {</span>
+<span class="fc" id="L72">            val lastModified = settings.lastModifiedDownloadStats</span>
+<span class="fc" id="L73">            val fileNames = monthlyFileNamesSince(lastModified)</span>
+
+<span class="fc" id="L75">            Log.d(TAG, &quot;Fetching ${fileNames.size} monthly files&quot;)</span>
+<span class="fc" id="L76">            fileNames.forEach { fileName -&gt;</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">                downloadSemaphores.acquire()</span>
+<span class="fc" id="L78">                launch {</span>
+<span class="fc" id="L79">                    var target: File? = null</span>
+<span class="fc" id="L80">                    try {</span>
+<span class="fc" id="L81">                        target = Cache.getTemporaryFile(context)</span>
+<span class="fc" id="L82">                        Log.i(TAG, &quot;Downloading $fileName&quot;)</span>
+<span class="fc" id="L83">                        val response = downloadFile(fileName, target)</span>
+<span class="fc" id="L84">                        Log.i(TAG, &quot;Downloaded $fileName with $response&quot;)</span>
+
+<span class="fc bfc" id="L86" title="All 2 branches covered.">                        if (response is NetworkResponse.Success</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">                            &amp;&amp; response.statusCode != HTTP_NOT_MODIFIED</span>
+                        ) {
+<span class="fc" id="L89">                            processDownloadStats(</span>
+<span class="fc" id="L90">                                response = response,</span>
+<span class="fc" id="L91">                                fileName = fileName,</span>
+<span class="fc" id="L92">                                target = target,</span>
+                            )
+                        }
+                    } finally {
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">                        target?.delete()</span>
+<span class="fc" id="L97">                        downloadSemaphores.release()</span>
+                    }
+<span class="fc" id="L99">                }</span>
+<span class="fc" id="L100">            }</span>
+<span class="fc" id="L101">        }</span>
+<span class="pc" id="L102">    }</span>
+
+    @OptIn(ExperimentalAtomicApi::class, ExperimentalTime::class)
+    private suspend fun processDownloadStats(
+        response: NetworkResponse.Success,
+        fileName: String,
+        target: File,
+    ) {
+<span class="fc" id="L110">        Log.i(TAG, &quot;Processing $fileName&quot;)</span>
+<span class="pc" id="L111">        val downloadStats = target.inputStream().use {</span>
+<span class="fc" id="L112">            DownloadStatsData.fromStream(it)</span>
+<span class="fc" id="L113">                .toDownloadStats(fileName.substringBefore('.').toEpochMillis())</span>
+        }
+<span class="fc" id="L115">        privacyRepository.save(downloadStats)</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">        settingsRepo.updateLastModifiedDownloadStats(response.lastModified ?: Date())</span>
+<span class="fc" id="L117">        Log.d(TAG, &quot;Processed updated file: $fileName&quot;)</span>
+<span class="fc" id="L118">    }</span>
+
+    private suspend fun downloadFile(
+        fileName: String,
+        target: File,
+<span class="fc" id="L123">    ): NetworkResponse = downloader.downloadToFile(</span>
+<span class="fc" id="L124">        url = IZZY_STATS_MONTHLY + fileName,</span>
+<span class="fc" id="L125">        target = target,</span>
+<span class="fc" id="L126">    )</span>
+
+    companion object {
+        private const val TAG = &quot;DownloadStatsWorker&quot;
+
+        private const val IZZY_STATS_MONTHLY =
+            &quot;https://dlstats.izzyondroid.org/iod-stats-collector/stats/basic/monthly/&quot;
+
+        fun fetchDownloadStats(context: Context) {
+<span class="fc" id="L135">            val workManager = WorkManager.getInstance(context)</span>
+<span class="fc" id="L136">            workManager.enqueueUniqueWork(</span>
+<span class="fc" id="L137">                &quot;download_stats&quot;,</span>
+<span class="fc" id="L138">                ExistingWorkPolicy.REPLACE,</span>
+<span class="fc" id="L139">                OneTimeWorkRequestBuilder&lt;DownloadStatsWorker&gt;().build(),</span>
+            )
+<span class="fc" id="L141">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

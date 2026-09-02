@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlannerViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">PlannerViewModel.kt</span></div><h1>PlannerViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.content.ContentUris
+import android.database.Cursor
+import android.net.Uri
+import android.provider.CalendarContract
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.TextUtils
+import android.text.style.ClickableSpan
+import android.view.View
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.viewModelScope
+import app.cash.copper.flow.mapToList
+import app.cash.copper.flow.mapToOne
+import app.cash.copper.flow.observeQuery
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.totschnig.myexpenses.db2.instantiateTemplate
+import org.totschnig.myexpenses.injector
+import org.totschnig.myexpenses.model.Grouping
+import org.totschnig.myexpenses.provider.CalendarProviderProxy
+import org.totschnig.myexpenses.provider.KEY_AMOUNT
+import org.totschnig.myexpenses.provider.KEY_TRANSACTIONID
+import org.totschnig.myexpenses.provider.PlannerUtils
+import org.totschnig.myexpenses.provider.getLongOrNull
+import org.totschnig.myexpenses.util.ExchangeRateHandler
+import org.totschnig.myexpenses.util.getDateTimeFormatter
+import org.totschnig.myexpenses.util.toEpochMillis
+import org.totschnig.myexpenses.viewmodel.data.Event
+import org.totschnig.myexpenses.viewmodel.data.PlanInstance
+import org.totschnig.myexpenses.viewmodel.data.PlanInstanceState
+import org.totschnig.myexpenses.viewmodel.data.PlanInstanceUpdate
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import javax.inject.Inject
+
+<span class="nc" id="L44">class PlannerViewModel(application: Application) : ContentResolvingAndroidViewModel(application) {</span>
+
+    @Inject
+<span class="nc" id="L47">    lateinit var plannerUtils: PlannerUtils</span>
+
+    @Inject
+<span class="nc" id="L50">    lateinit var exchangeRateHandler: ExchangeRateHandler</span>
+
+<span class="nc" id="L52">    data class Month(val year: Int, val month: Int, val startDay: Int = 1) {</span>
+<span class="nc" id="L53">        init {</span>
+<span class="nc bnc" id="L54" title="All 6 branches missed.">            if (month !in 1..12) throw IllegalArgumentException()</span>
+<span class="nc" id="L55">        }</span>
+
+        fun next(): Month {
+<span class="nc" id="L58">            var nextMonth = month + 1</span>
+<span class="nc bnc" id="L59" title="All 2 branches missed.">            val nextYear = if (nextMonth &gt; 12) {</span>
+<span class="nc" id="L60">                nextMonth = 1</span>
+<span class="nc" id="L61">                year + 1</span>
+<span class="nc" id="L62">            } else year</span>
+<span class="nc" id="L63">            return Month(nextYear, nextMonth, startDay)</span>
+        }
+
+        fun prev(): Month {
+<span class="nc" id="L67">            var prevMonth = month - 1</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            val prevYear = if (prevMonth &lt; 1) {</span>
+<span class="nc" id="L69">                prevMonth = 12</span>
+<span class="nc" id="L70">                year - 1</span>
+<span class="nc" id="L71">            } else year</span>
+<span class="nc" id="L72">            return Month(prevYear, prevMonth, startDay)</span>
+        }
+
+<span class="nc" id="L75">        fun startMillis() = startDate.atTime(LocalTime.MIN).toEpochMillis()</span>
+
+<span class="nc" id="L77">        fun endMillis() = endDate.atTime(LocalTime.MAX).toEpochMillis()</span>
+
+        private val range: Pair&lt;LocalDate, LocalDate&gt; =
+<span class="nc" id="L80">            Grouping.getMonthRange(year, month-1, startDay)</span>
+
+<span class="nc" id="L82">        val endDate = range.second</span>
+
+<span class="nc" id="L84">        val startDate = range.first</span>
+    }
+
+<span class="nc" id="L87">    var first: Month</span>
+<span class="nc" id="L88">    var last: Month</span>
+
+    private val formatter: DateTimeFormatter
+
+<span class="nc" id="L92">    private var updateMap: MutableMap&lt;Uri, Flow&lt;PlanInstanceUpdate&gt;&gt; = mutableMapOf()</span>
+
+<span class="nc" id="L94">    init {</span>
+<span class="nc" id="L95">        application.injector.inject(this)</span>
+<span class="nc" id="L96">        val nowZDT = ZonedDateTime.now().toLocalDate()</span>
+<span class="nc" id="L97">        first = Month(nowZDT.year, nowZDT.monthValue, prefHandler.monthStart)</span>
+<span class="nc" id="L98">        last = first.next()</span>
+<span class="nc" id="L99">        formatter = getDateTimeFormatter(application)</span>
+<span class="nc" id="L100">    }</span>
+
+<span class="nc" id="L102">    private val instances = MutableLiveData&lt;Event&lt;Pair&lt;Boolean, List&lt;PlanInstance&gt;&gt;&gt;&gt;()</span>
+<span class="nc" id="L103">    private val title = MutableLiveData&lt;CharSequence&gt;()</span>
+<span class="nc" id="L104">    private val updates = MutableLiveData&lt;PlanInstanceUpdate&gt;()</span>
+<span class="nc" id="L105">    private val bulkCompleted = MutableLiveData&lt;Event&lt;List&lt;PlanInstance&gt;&gt;&gt;()</span>
+<span class="nc" id="L106">    fun getInstances(): LiveData&lt;Event&lt;Pair&lt;Boolean, List&lt;PlanInstance&gt;&gt;&gt;&gt; = instances</span>
+<span class="nc" id="L107">    fun getTitle(): LiveData&lt;CharSequence&gt; = title</span>
+<span class="nc" id="L108">    fun getUpdates(): LiveData&lt;PlanInstanceUpdate&gt; = updates</span>
+<span class="nc" id="L109">    fun getBulkCompleted(): LiveData&lt;Event&lt;List&lt;PlanInstance&gt;&gt;&gt; = bulkCompleted</span>
+<span class="nc" id="L110">    fun loadInstances(later: Boolean? = null) {</span>
+        // Construct the query with the desired date range.
+<span class="nc" id="L112">        val startMonth: Month</span>
+<span class="nc" id="L113">        val endMonth: Month</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (later == null) {</span>
+            //first call
+<span class="nc" id="L116">            startMonth = first</span>
+<span class="nc" id="L117">            endMonth = last</span>
+        } else {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if (later) {</span>
+<span class="nc" id="L120">                last = last.next()</span>
+<span class="nc" id="L121">                startMonth = last</span>
+<span class="nc" id="L122">                endMonth = last</span>
+            } else {
+<span class="nc" id="L124">                first = first.prev()</span>
+<span class="nc" id="L125">                startMonth = first</span>
+<span class="nc" id="L126">                endMonth = first</span>
+            }
+        }
+<span class="nc" id="L129">        val builder = CalendarProviderProxy.INSTANCES_URI.buildUpon()</span>
+<span class="nc" id="L130">        ContentUris.appendId(builder, startMonth.startMillis())</span>
+<span class="nc" id="L131">        ContentUris.appendId(builder, endMonth.endMillis())</span>
+<span class="nc" id="L132">        viewModelScope.launch {</span>
+<span class="nc" id="L133">            val plannerCalendarId = withContext(Dispatchers.Default) { plannerUtils.checkPlanner() }</span>
+<span class="nc" id="L134">            contentResolver.observeQuery( builder.build(), null,</span>
+<span class="nc" id="L135">                CalendarContract.Events.CALENDAR_ID + &quot; = &quot; + plannerCalendarId,</span>
+<span class="nc" id="L136">                null, CalendarContract.Instances.BEGIN + &quot; ASC&quot;, false)</span>
+<span class="nc" id="L137">                .mapToList { PlanInstance.fromEventCursor(it, repository) }</span>
+<span class="nc" id="L138">                .collect {</span>
+<span class="nc" id="L139">                    val start = SpannableString(first.startDate.format(formatter))</span>
+<span class="nc" id="L140">                    val end = SpannableString(last.endDate.format(formatter))</span>
+<span class="nc" id="L141">                    start.setSpan(</span>
+<span class="nc" id="L142">                        ClickableDateSpan(false),</span>
+<span class="nc" id="L143">                        0,</span>
+<span class="nc" id="L144">                        start.length,</span>
+<span class="nc" id="L145">                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE</span>
+                    )
+<span class="nc" id="L147">                    end.setSpan(</span>
+<span class="nc" id="L148">                        ClickableDateSpan(true),</span>
+<span class="nc" id="L149">                        0,</span>
+<span class="nc" id="L150">                        end.length,</span>
+<span class="nc" id="L151">                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE</span>
+                    )
+<span class="nc" id="L153">                    title.postValue(TextUtils.concat(start, &quot; - &quot;, end))</span>
+<span class="nc" id="L154">                    instances.postValue(Event(Pair(later == true, it.filterNotNull())))</span>
+<span class="nc" id="L155">                }</span>
+<span class="nc" id="L156">        }</span>
+<span class="nc" id="L157">    }</span>
+
+<span class="nc" id="L159">    inner class ClickableDateSpan(val later: Boolean) : ClickableSpan() {</span>
+        override fun onClick(widget: View) {
+<span class="nc" id="L161">            loadInstances(later)</span>
+<span class="nc" id="L162">        }</span>
+    }
+
+    fun getUpdateFor(uri: Uri) {
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (!updateMap.contains(uri)) {</span>
+<span class="nc" id="L167">            val templateId = uri.pathSegments[1].toLong()</span>
+<span class="nc" id="L168">            val instanceId = uri.pathSegments[2].toLong()</span>
+<span class="nc" id="L169">            val mapper = { cursor: Cursor -&gt;</span>
+<span class="nc" id="L170">                val transactionId = cursor.getLongOrNull(KEY_TRANSACTIONID)</span>
+<span class="nc" id="L171">                val newState =</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                    if (transactionId == null) PlanInstanceState.CANCELLED else PlanInstanceState.APPLIED</span>
+<span class="nc" id="L173">                val amount = cursor.getLongOrNull(KEY_AMOUNT)</span>
+<span class="nc" id="L174">                PlanInstanceUpdate(templateId, instanceId, newState, transactionId, amount)</span>
+            }
+<span class="nc" id="L176">            updateMap[uri] = contentResolver.observeQuery(uri, null, null, null, null, false)</span>
+<span class="nc" id="L177">                .mapToOne(</span>
+<span class="nc" id="L178">                    default = PlanInstanceUpdate(</span>
+<span class="nc" id="L179">                        templateId,</span>
+<span class="nc" id="L180">                        instanceId,</span>
+<span class="nc" id="L181">                        PlanInstanceState.OPEN,</span>
+<span class="nc" id="L182">                        null,</span>
+<span class="nc" id="L183">                        null</span>
+                    ),
+<span class="nc" id="L185">                    mapper = mapper</span>
+<span class="nc" id="L186">                ).also { flow -&gt;</span>
+<span class="nc" id="L187">                    viewModelScope.launch {</span>
+<span class="nc" id="L188">                        flow.collect {</span>
+<span class="nc" id="L189">                            updates.value = it</span>
+<span class="nc" id="L190">                        }</span>
+<span class="nc" id="L191">                    }</span>
+<span class="nc" id="L192">                }</span>
+        }
+<span class="nc" id="L194">    }</span>
+
+    fun applyBulk(selectedInstances: List&lt;PlanInstance&gt;) {
+<span class="nc" id="L197">        viewModelScope.launch {</span>
+<span class="nc" id="L198">            withContext(Dispatchers.Default) {</span>
+<span class="nc" id="L199">                selectedInstances.forEach { planInstance -&gt;</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                    repository.instantiateTemplate(</span>
+<span class="nc" id="L201">                        exchangeRateHandler,</span>
+<span class="nc" id="L202">                        PlanInstanceInfo(</span>
+<span class="nc" id="L203">                            planInstance.templateId,</span>
+<span class="nc" id="L204">                            planInstance.instanceId,</span>
+<span class="nc" id="L205">                            planInstance.date</span>
+                        ),
+<span class="nc" id="L207">                        currencyContext,</span>
+<span class="nc" id="L208">                        ifOpen = true</span>
+                    )
+<span class="nc" id="L210">                }</span>
+<span class="nc" id="L211">            }</span>
+<span class="nc" id="L212">            bulkCompleted.postValue(Event(selectedInstances))</span>
+<span class="nc" id="L213">        }</span>
+<span class="nc" id="L214">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlertUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.alerts</a> &gt; <span class="el_source">AlertUtils.java</span></div><h1>AlertUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License
+ */
+
+package com.android.calendar.alerts;
+
+import android.Manifest;
+import android.app.AlarmManager;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.provider.CalendarContract;
+import android.provider.CalendarContract.CalendarAlerts;
+import android.text.TextUtils;
+import android.text.format.DateFormat;
+import android.text.format.DateUtils;
+import android.util.Log;
+
+import androidx.core.content.ContextCompat;
+import androidx.work.Data;
+import androidx.work.ExistingWorkPolicy;
+import androidx.work.OneTimeWorkRequest;
+import androidx.work.WorkManager;
+
+import com.android.calendar.EventInfoActivity;
+import com.android.calendar.Utils;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimeZone;
+
+import ws.xsoh.etar.R;
+
+<span class="nc" id="L54">public class AlertUtils {</span>
+    // We use one notification id for the expired events notification.  All
+    // other notifications (the 'active' future/concurrent ones) use a unique ID.
+    public static final int EXPIRED_GROUP_NOTIFICATION_ID = 0;
+    public static final String EVENT_ID_KEY = &quot;eventid&quot;;
+    public static final String EVENT_START_KEY = &quot;eventstart&quot;;
+    public static final String EVENT_END_KEY = &quot;eventend&quot;;
+    public static final String NOTIFICATION_ID_KEY = &quot;notificationid&quot;;
+    public static final String EVENT_IDS_KEY = &quot;eventids&quot;;
+    public static final String SNOOZE_DELAY_KEY = &quot;snoozedelay&quot;;
+    public static final String EVENT_STARTS_KEY = &quot;starts&quot;;
+    static final boolean DEBUG = true;
+    private static final String TAG = &quot;AlertUtils&quot;;
+    // SharedPrefs table name for storing fired alerts.  This prevents other installed
+    // Calendar apps from eating the alerts.
+    private static final String ALERTS_SHARED_PREFS_NAME = &quot;calendar_alerts&quot;;
+    // Keyname prefix for the alerts data in SharedPrefs.  The key will contain a combo
+    // of event ID, begin time, and alarm time.  The value will be the fired time.
+    private static final String KEY_FIRED_ALERT_PREFIX = &quot;preference_alert_&quot;;
+    // The last time the SharedPrefs was scanned and flushed of old alerts data.
+    private static final String KEY_LAST_FLUSH_TIME_MS = &quot;preference_flushTimeMs&quot;;
+    // The # of days to save alert states in the shared prefs table, before flushing.  This
+    // can be any value, since AlertService will also check for a recent alertTime before
+    // ringing the alert.
+    private static final int FLUSH_INTERVAL_DAYS = 1;
+    private static final int FLUSH_INTERVAL_MS = FLUSH_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+    // A flag for using local storage to save alert state instead of the alerts DB table.
+    // This allows the unbundled app to run alongside other calendar apps without eating
+    // alerts from other apps.
+<span class="nc" id="L83">    static boolean BYPASS_DB = true;</span>
+
+    /**
+     * Creates an AlarmManagerInterface that wraps a real AlarmManager.  The alarm code
+     * was abstracted to an interface to make it testable.
+     */
+    public static AlarmManagerInterface createAlarmManager(Context context) {
+<span class="nc" id="L90">        final AlarmManager mgr = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);</span>
+<span class="nc" id="L91">        return new AlarmManagerInterface() {</span>
+            @Override
+            public void set(int type, long triggerAtMillis, PendingIntent operation) {
+<span class="nc" id="L94">                mgr.setExactAndAllowWhileIdle(type, triggerAtMillis, operation);</span>
+<span class="nc" id="L95">            }</span>
+        };
+    }
+
+    /**
+     * Schedules an alarm intent with the system AlarmManager that will notify
+     * listeners when a reminder should be fired. The provider will keep
+     * scheduled reminders up to date but apps may use this to implement snooze
+     * functionality without modifying the reminders table. Scheduled alarms
+     * will generate an intent using AlertReceiver.EVENT_REMINDER_APP_ACTION.
+     *
+     * @param context A context for referencing system resources
+     * @param manager The AlarmManager to use or null
+     * @param alarmTime The time to fire the intent in UTC millis since epoch
+     */
+    public static void scheduleAlarm(Context context, AlarmManagerInterface manager,
+            long alarmTime) {
+<span class="nc" id="L112">        scheduleAlarmHelper(context, manager, alarmTime, false);</span>
+<span class="nc" id="L113">    }</span>
+
+    /**
+     * Schedules the next alarm to silently refresh the notifications.  Note that if there
+     * is a pending silent refresh alarm, it will be replaced with this one.
+     */
+    static void scheduleNextNotificationRefresh(Context context, AlarmManagerInterface manager,
+            long alarmTime) {
+<span class="nc" id="L121">        scheduleAlarmHelper(context, manager, alarmTime, true);</span>
+<span class="nc" id="L122">    }</span>
+
+    private static void scheduleAlarmHelper(Context context, AlarmManagerInterface manager,
+            long alarmTime, boolean quietUpdate) {
+<span class="nc" id="L126">        int alarmType = AlarmManager.RTC_WAKEUP;</span>
+<span class="nc" id="L127">        Intent intent = new Intent(AlertReceiver.EVENT_REMINDER_APP_ACTION);</span>
+<span class="nc" id="L128">        intent.setClass(context, AlertReceiver.class);</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (quietUpdate) {</span>
+<span class="nc" id="L130">            alarmType = AlarmManager.RTC;</span>
+        } else {
+            // Set data field so we get a unique PendingIntent instance per alarm or else alarms
+            // may be dropped.
+<span class="nc" id="L134">            Uri.Builder builder = CalendarAlerts.CONTENT_URI.buildUpon();</span>
+<span class="nc" id="L135">            ContentUris.appendId(builder, alarmTime);</span>
+<span class="nc" id="L136">            intent.setData(builder.build());</span>
+        }
+
+<span class="nc" id="L139">        intent.putExtra(CalendarContract.CalendarAlerts.ALARM_TIME, alarmTime);</span>
+<span class="nc" id="L140">        PendingIntent pi = PendingIntent.getBroadcast(context, 0, intent,</span>
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+<span class="nc" id="L142">        manager.set(alarmType, alarmTime, pi);</span>
+<span class="nc" id="L143">    }</span>
+
+    /**
+     * Format the second line which shows time and location for single alert or the
+     * number of events for multiple alerts
+     *     1) Show time only for non-all day events
+     *     2) No date for today
+     *     3) Show &quot;tomorrow&quot; for tomorrow
+     *     4) Show date for days beyond that
+     */
+    static String formatTimeLocation(Context context, long startMillis, boolean allDay,
+            String location) {
+<span class="nc" id="L155">        String tz = Utils.getTimeZone(context, null);</span>
+<span class="nc" id="L156">        Time time = new Time(tz);</span>
+<span class="nc" id="L157">        time.set(System.currentTimeMillis());</span>
+<span class="nc" id="L158">        int today = Time.getJulianDay(time.toMillis(), time.getGmtOffset());</span>
+<span class="nc" id="L159">        time.set(startMillis);</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        int eventDay = Time.getJulianDay(time.toMillis(), allDay ? 0 : time.getGmtOffset());</span>
+
+<span class="nc" id="L162">        int flags = DateUtils.FORMAT_ABBREV_ALL;</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (!allDay) {</span>
+<span class="nc" id="L164">            flags |= DateUtils.FORMAT_SHOW_TIME;</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (DateFormat.is24HourFormat(context)) {</span>
+<span class="nc" id="L166">                flags |= DateUtils.FORMAT_24HOUR;</span>
+            }
+        } else {
+<span class="nc" id="L169">            flags |= DateUtils.FORMAT_UTC;</span>
+        }
+
+<span class="nc bnc" id="L172" title="All 4 branches missed.">        if (eventDay &lt; today || eventDay &gt; today + 1) {</span>
+<span class="nc" id="L173">            flags |= DateUtils.FORMAT_SHOW_DATE;</span>
+        }
+
+<span class="nc" id="L176">        StringBuilder sb = new StringBuilder(Utils.formatDateRange(context, startMillis,</span>
+                startMillis, flags));
+
+<span class="nc bnc" id="L179" title="All 4 branches missed.">        if (!allDay &amp;&amp; tz != Utils.getCurrentTimezone()) {</span>
+<span class="nc" id="L180">            TimeZone displayTz = TimeZone.getTimeZone(tz);</span>
+<span class="nc" id="L181">            sb.append(&quot; &quot;).append(displayTz.getDisplayName(</span>
+<span class="nc" id="L182">                    displayTz.inDaylightTime(new java.util.Date(startMillis)),</span>
+<span class="nc" id="L183">                    TimeZone.SHORT, Locale.getDefault()));</span>
+        }
+
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if (eventDay == today + 1) {</span>
+            // Tomorrow
+<span class="nc" id="L188">            sb.append(&quot;, &quot;);</span>
+<span class="nc" id="L189">            sb.append(context.getString(R.string.tomorrow));</span>
+        }
+
+        String loc;
+<span class="nc bnc" id="L193" title="All 4 branches missed.">        if (location != null &amp;&amp; !TextUtils.isEmpty(loc = location.trim())) {</span>
+<span class="nc" id="L194">            sb.append(&quot;, &quot;);</span>
+<span class="nc" id="L195">            sb.append(loc);</span>
+        }
+<span class="nc" id="L197">        return sb.toString();</span>
+    }
+
+    public static ContentValues makeContentValues(long eventId, long begin, long end,
+            long alarmTime, int minutes) {
+<span class="nc" id="L202">        ContentValues values = new ContentValues();</span>
+<span class="nc" id="L203">        values.put(CalendarAlerts.EVENT_ID, eventId);</span>
+<span class="nc" id="L204">        values.put(CalendarAlerts.BEGIN, begin);</span>
+<span class="nc" id="L205">        values.put(CalendarAlerts.END, end);</span>
+<span class="nc" id="L206">        values.put(CalendarAlerts.ALARM_TIME, alarmTime);</span>
+<span class="nc" id="L207">        long currentTime = System.currentTimeMillis();</span>
+<span class="nc" id="L208">        values.put(CalendarAlerts.CREATION_TIME, currentTime);</span>
+<span class="nc" id="L209">        values.put(CalendarAlerts.RECEIVED_TIME, 0);</span>
+<span class="nc" id="L210">        values.put(CalendarAlerts.NOTIFY_TIME, 0);</span>
+<span class="nc" id="L211">        values.put(CalendarAlerts.STATE, CalendarAlerts.STATE_SCHEDULED);</span>
+<span class="nc" id="L212">        values.put(CalendarAlerts.MINUTES, minutes);</span>
+<span class="nc" id="L213">        return values;</span>
+    }
+
+    public static Intent buildEventViewIntent(Context c, long eventId, long begin, long end) {
+<span class="nc" id="L217">        Intent i = new Intent(Intent.ACTION_VIEW);</span>
+<span class="nc" id="L218">        Uri.Builder builder = CalendarContract.CONTENT_URI.buildUpon();</span>
+<span class="nc" id="L219">        builder.appendEncodedPath(&quot;events/&quot; + eventId);</span>
+<span class="nc" id="L220">        i.setData(builder.build());</span>
+<span class="nc" id="L221">        i.setClass(c, EventInfoActivity.class);</span>
+<span class="nc" id="L222">        i.putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, begin);</span>
+<span class="nc" id="L223">        i.putExtra(CalendarContract.EXTRA_EVENT_END_TIME, end);</span>
+<span class="nc" id="L224">        return i;</span>
+    }
+
+    /**
+     * Removes a notification and dismisses a fired alarm by updating the calendar alert state from
+     * {@link CalendarAlerts#STATE_FIRED} to {@link CalendarAlerts#STATE_DISMISSED}.
+     *
+     * @param context        application context
+     * @param eventId        the event id to update the alert state of
+     * @param notificationId the notification to dismiss
+     */
+    public static void dismissNotificationAndFiredAlarm(Context context, long eventId,
+        int notificationId) {
+
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (notificationId != -1) {</span>
+<span class="nc" id="L239">            NotificationManager notificationManager =</span>
+<span class="nc" id="L240">                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);</span>
+<span class="nc" id="L241">            notificationManager.cancel(notificationId);</span>
+        }
+
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALENDAR)</span>
+            != PackageManager.PERMISSION_GRANTED) {
+            //If permission is not granted then just return.
+<span class="nc" id="L247">            Log.d(TAG, &quot;Manifest.permission.WRITE_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L248">            return;</span>
+        }
+
+<span class="nc" id="L251">        String selection = CalendarAlerts.STATE + &quot;=&quot; + CalendarAlerts.STATE_FIRED + &quot; AND &quot; +</span>
+            CalendarAlerts.EVENT_ID + &quot;=&quot; + eventId;
+<span class="nc" id="L253">        ContentResolver resolver = context.getContentResolver();</span>
+<span class="nc" id="L254">        ContentValues values = new ContentValues();</span>
+<span class="nc" id="L255">        values.put(CalendarAlerts.STATE, CalendarAlerts.STATE_DISMISSED);</span>
+
+<span class="nc" id="L257">        resolver.update(CalendarAlerts.CONTENT_URI, values, selection, null);</span>
+<span class="nc" id="L258">    }</span>
+
+    public static SharedPreferences getFiredAlertsTable(Context context) {
+<span class="nc" id="L261">        return context.getSharedPreferences(ALERTS_SHARED_PREFS_NAME, Context.MODE_PRIVATE);</span>
+    }
+
+    private static String getFiredAlertsKey(long eventId, long beginTime,
+            long alarmTime) {
+<span class="nc" id="L266">        StringBuilder sb = new StringBuilder(KEY_FIRED_ALERT_PREFIX);</span>
+<span class="nc" id="L267">        sb.append(eventId);</span>
+<span class="nc" id="L268">        sb.append(&quot;_&quot;);</span>
+<span class="nc" id="L269">        sb.append(beginTime);</span>
+<span class="nc" id="L270">        sb.append(&quot;_&quot;);</span>
+<span class="nc" id="L271">        sb.append(alarmTime);</span>
+<span class="nc" id="L272">        return sb.toString();</span>
+    }
+
+    /**
+     * Returns whether the SharedPrefs storage indicates we have fired the alert before.
+     */
+    static boolean hasAlertFiredInSharedPrefs(Context context, long eventId, long beginTime,
+            long alarmTime) {
+<span class="nc" id="L280">        SharedPreferences prefs = getFiredAlertsTable(context);</span>
+<span class="nc" id="L281">        return prefs.contains(getFiredAlertsKey(eventId, beginTime, alarmTime));</span>
+    }
+
+    /**
+     * Store fired alert info in the SharedPrefs.
+     */
+    static void setAlertFiredInSharedPrefs(Context context, long eventId, long beginTime,
+            long alarmTime) {
+        // Store alarm time as the value too so we don't have to parse all the keys to flush
+        // old alarms out of the table later.
+<span class="nc" id="L291">        SharedPreferences prefs = getFiredAlertsTable(context);</span>
+<span class="nc" id="L292">        SharedPreferences.Editor editor = prefs.edit();</span>
+<span class="nc" id="L293">        editor.putLong(getFiredAlertsKey(eventId, beginTime, alarmTime), alarmTime);</span>
+<span class="nc" id="L294">        editor.apply();</span>
+<span class="nc" id="L295">    }</span>
+
+    /**
+     * Scans and flushes the internal storage of old alerts.  Looks up the previous flush
+     * time in SharedPrefs, and performs the flush if overdue.  Otherwise, no-op.
+     */
+    static void flushOldAlertsFromInternalStorage(Context context) {
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        if (BYPASS_DB) {</span>
+<span class="nc" id="L303">            SharedPreferences prefs = getFiredAlertsTable(context);</span>
+
+            // Only flush if it hasn't been done in a while.
+<span class="nc" id="L306">            long nowTime = System.currentTimeMillis();</span>
+<span class="nc" id="L307">            long lastFlushTimeMs = prefs.getLong(KEY_LAST_FLUSH_TIME_MS, 0);</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (nowTime - lastFlushTimeMs &gt; FLUSH_INTERVAL_MS) {</span>
+                if (DEBUG) {
+<span class="nc" id="L310">                    Log.d(TAG, &quot;Flushing old alerts from shared prefs table&quot;);</span>
+                }
+
+                // Scan through all fired alert entries, removing old ones.
+<span class="nc" id="L314">                SharedPreferences.Editor editor = prefs.edit();</span>
+<span class="nc" id="L315">                Time timeObj = new Time();</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                for (Map.Entry&lt;String, ?&gt; entry : prefs.getAll().entrySet()) {</span>
+<span class="nc" id="L317">                    String key = entry.getKey();</span>
+<span class="nc" id="L318">                    Object value = entry.getValue();</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                    if (key.startsWith(KEY_FIRED_ALERT_PREFIX)) {</span>
+                        long alertTime;
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                        if (value instanceof Long) {</span>
+<span class="nc" id="L322">                            alertTime = (Long) value;</span>
+                        } else {
+                            // Should never occur.
+<span class="nc" id="L325">                            Log.e(TAG,&quot;SharedPrefs key &quot; + key + &quot; did not have Long value: &quot; +</span>
+                                    value);
+<span class="nc" id="L327">                            continue;</span>
+                        }
+
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                        if (nowTime - alertTime &gt;= FLUSH_INTERVAL_MS) {</span>
+<span class="nc" id="L331">                            editor.remove(key);</span>
+                            if (DEBUG) {
+<span class="nc" id="L333">                                int ageInDays = getIntervalInDays(alertTime, nowTime, timeObj);</span>
+<span class="nc" id="L334">                                Log.d(TAG, &quot;SharedPrefs key &quot; + key + &quot;: removed (&quot; + ageInDays +</span>
+                                        &quot; days old)&quot;);
+<span class="nc" id="L336">                            }</span>
+                        } else {
+                            if (DEBUG) {
+<span class="nc" id="L339">                                int ageInDays = getIntervalInDays(alertTime, nowTime, timeObj);</span>
+<span class="nc" id="L340">                                Log.d(TAG, &quot;SharedPrefs key &quot; + key + &quot;: keep (&quot; + ageInDays +</span>
+                                        &quot; days old)&quot;);
+                            }
+                        }
+                    }
+<span class="nc" id="L345">                }</span>
+<span class="nc" id="L346">                editor.putLong(KEY_LAST_FLUSH_TIME_MS, nowTime);</span>
+<span class="nc" id="L347">                editor.apply();</span>
+            }
+        }
+<span class="nc" id="L350">    }</span>
+
+    private static int getIntervalInDays(long startMillis, long endMillis, Time timeObj) {
+<span class="nc" id="L353">        timeObj.set(startMillis);</span>
+<span class="nc" id="L354">        int startDay = Time.getJulianDay(startMillis, timeObj.getGmtOffset());</span>
+<span class="nc" id="L355">        timeObj.set(endMillis);</span>
+<span class="nc" id="L356">        return Time.getJulianDay(endMillis, timeObj.getGmtOffset()) - startDay;</span>
+    }
+
+    /**
+     * Queues the AlertWorker with a specific action and a REPLACE policy
+     *
+     * @param context The application context.
+     * @param action The action to be triggered, e.g., Intent.ACTION_TIME_CHANGED.
+     */
+    public static void scheduleAlertWorker(Context context, String action) {
+        // Create input data for the worker
+<span class="nc" id="L367">        Data inputData = new Data.Builder()</span>
+<span class="nc" id="L368">                .putString(AlertWorker.KEY_ACTION, action)</span>
+<span class="nc" id="L369">                .build();</span>
+
+        // Create a work request
+<span class="nc" id="L372">        OneTimeWorkRequest alertWorkRequest = new OneTimeWorkRequest.Builder(AlertWorker.class)</span>
+<span class="nc" id="L373">                .setInputData(inputData)</span>
+<span class="nc" id="L374">                .addTag(&quot;alert_processing_work&quot;)</span>
+<span class="nc" id="L375">                .build();</span>
+
+        // Queue work to avoid duplicates
+<span class="nc" id="L378">        WorkManager.getInstance(context).enqueueUniqueWork(</span>
+                &quot;CalendarAlertProcessing&quot;,
+                ExistingWorkPolicy.REPLACE,
+                alertWorkRequest);
+<span class="nc" id="L382">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

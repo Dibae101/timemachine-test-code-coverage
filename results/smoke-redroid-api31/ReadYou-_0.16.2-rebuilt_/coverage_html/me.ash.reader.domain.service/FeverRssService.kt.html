@@ -1,0 +1,401 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FeverRssService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ReadYou</a> &gt; <a href="index.source.html" class="el_package">me.ash.reader.domain.service</a> &gt; <span class="el_source">FeverRssService.kt</span></div><h1>FeverRssService.kt</h1><pre class="source lang-java linenums">package me.ash.reader.domain.service
+
+import android.content.Context
+import android.util.Log
+import androidx.annotation.CheckResult
+import androidx.compose.ui.util.fastFilter
+import androidx.work.ListenableWorker
+import androidx.work.WorkManager
+import com.rometools.rome.feed.synd.SyndFeed
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.Date
+import javax.inject.Inject
+import kotlin.collections.set
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.coroutineScope
+import me.ash.reader.R
+import me.ash.reader.domain.model.account.Account
+import me.ash.reader.domain.model.account.AccountType
+import me.ash.reader.domain.model.account.security.FeverSecurityKey
+import me.ash.reader.domain.model.article.Article
+import me.ash.reader.domain.model.article.ArticleMeta
+import me.ash.reader.domain.model.feed.Feed
+import me.ash.reader.domain.model.group.Group
+import me.ash.reader.domain.repository.ArticleDao
+import me.ash.reader.domain.repository.FeedDao
+import me.ash.reader.domain.repository.GroupDao
+import me.ash.reader.infrastructure.android.NotificationHelper
+import me.ash.reader.infrastructure.di.DefaultDispatcher
+import me.ash.reader.infrastructure.di.IODispatcher
+import me.ash.reader.infrastructure.di.MainDispatcher
+import me.ash.reader.infrastructure.exception.FeverAPIException
+import me.ash.reader.infrastructure.html.Readability
+import me.ash.reader.infrastructure.rss.RssHelper
+import me.ash.reader.infrastructure.rss.provider.fever.FeverAPI
+import me.ash.reader.infrastructure.rss.provider.fever.FeverDTO
+import me.ash.reader.ui.ext.decodeHTML
+import me.ash.reader.ui.ext.dollarLast
+import me.ash.reader.ui.ext.isFuture
+import me.ash.reader.ui.ext.spacerDollar
+
+class FeverRssService
+<span class="fc" id="L42">@Inject</span>
+constructor(
+<span class="fc" id="L44">    @ApplicationContext private val context: Context,</span>
+<span class="fc" id="L45">    private val articleDao: ArticleDao,</span>
+<span class="fc" id="L46">    private val feedDao: FeedDao,</span>
+<span class="fc" id="L47">    private val rssHelper: RssHelper,</span>
+<span class="fc" id="L48">    private val notificationHelper: NotificationHelper,</span>
+<span class="fc" id="L49">    private val groupDao: GroupDao,</span>
+<span class="fc" id="L50">    @IODispatcher private val ioDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L51">    @MainDispatcher private val mainDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L52">    @DefaultDispatcher private val defaultDispatcher: CoroutineDispatcher,</span>
+    workManager: WorkManager,
+<span class="fc" id="L54">    private val accountService: AccountService,</span>
+) :
+<span class="fc" id="L56">    AbstractRssRepository(</span>
+<span class="fc" id="L57">        articleDao,</span>
+<span class="fc" id="L58">        groupDao,</span>
+<span class="fc" id="L59">        feedDao,</span>
+<span class="fc" id="L60">        workManager,</span>
+<span class="fc" id="L61">        rssHelper,</span>
+<span class="fc" id="L62">        notificationHelper,</span>
+<span class="fc" id="L63">        ioDispatcher,</span>
+<span class="fc" id="L64">        defaultDispatcher,</span>
+<span class="fc" id="L65">        accountService,</span>
+    ) {
+
+<span class="nc" id="L68">    override val importSubscription: Boolean = false</span>
+<span class="nc" id="L69">    override val addSubscription: Boolean = false</span>
+<span class="nc" id="L70">    override val moveSubscription: Boolean = false</span>
+<span class="nc" id="L71">    override val deleteSubscription: Boolean = false</span>
+<span class="nc" id="L72">    override val updateSubscription: Boolean = false</span>
+
+    private suspend fun getFeverAPI() =
+<span class="nc" id="L75">        FeverSecurityKey(accountService.getCurrentAccount().securityKey).run {</span>
+<span class="nc" id="L76">            FeverAPI.getInstance(</span>
+<span class="nc" id="L77">                context = context,</span>
+<span class="nc" id="L78">                serverUrl = serverUrl!!,</span>
+<span class="nc" id="L79">                username = username!!,</span>
+<span class="nc" id="L80">                password = password!!,</span>
+<span class="nc" id="L81">                httpUsername = null,</span>
+<span class="nc" id="L82">                httpPassword = null,</span>
+<span class="nc" id="L83">                clientCertificateAlias = clientCertificateAlias,</span>
+<span class="nc" id="L84">            )</span>
+<span class="nc" id="L85">        }</span>
+
+    override suspend fun validCredentials(account: Account): Boolean =
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        getFeverAPI().validCredentials() &gt; 0</span>
+
+    override suspend fun clearAuthorization() {
+<span class="nc" id="L91">        FeverAPI.clearInstance()</span>
+<span class="nc" id="L92">    }</span>
+
+    override suspend fun subscribe(
+        feedLink: String,
+        searchedFeed: SyndFeed,
+        groupId: String,
+        isNotification: Boolean,
+        isFullContent: Boolean,
+        isBrowser: Boolean,
+    ) {
+<span class="nc" id="L102">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun addGroup(destFeed: Feed?, newGroupName: String): String {
+<span class="nc" id="L106">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun renameGroup(group: Group) {
+<span class="nc" id="L110">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun renameFeed(feed: Feed) {
+<span class="nc" id="L114">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun deleteGroup(group: Group, onlyDeleteNoStarred: Boolean?) {
+<span class="nc" id="L118">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun deleteFeed(feed: Feed, onlyDeleteNoStarred: Boolean?) {
+<span class="nc" id="L122">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun moveFeed(originGroupId: String, feed: Feed) {
+<span class="nc" id="L126">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    override suspend fun changeFeedUrl(feed: Feed) {
+<span class="nc" id="L130">        throw FeverAPIException(&quot;Unsupported&quot;)</span>
+    }
+
+    /**
+     * Fever API synchronous processing with object's ID to ensure idempotence and handle foreign
+     * key relationships such as read status, starred status, etc.
+     *
+     * When synchronizing articles, 50 articles will be pulled in each round. The ID of the 50th
+     * article in this round will be recorded and used as the starting mark for the next pull until
+     * the number of articles obtained is 0 or their quantity exceeds 250, at which point the
+     * pulling process stops.
+     * 1. Fetch the Fever groups (may need to remove orphaned groups)
+     * 2. Fetch the Fever feeds (including favicons, may need to remove orphaned feeds)
+     * 3. Fetch the Fever articles
+     * 4. Synchronize read/unread and starred/un-starred items
+     */
+    override suspend fun sync(
+        accountId: Int,
+        feedId: String?,
+        groupId: String?,
+<span class="nc" id="L150">    ): ListenableWorker.Result = coroutineScope {</span>
+<span class="nc" id="L151">        try {</span>
+<span class="nc" id="L152">            val preTime = System.currentTimeMillis()</span>
+<span class="nc" id="L153">            val preDate = Date(preTime)</span>
+<span class="nc" id="L154">            val account = accountService.getAccountById(accountId)!!</span>
+<span class="nc bnc" id="L155" title="All 4 branches missed.">            check(account.type.id == AccountType.Fever.id) { &quot;account type is invalid&quot; }</span>
+
+<span class="nc" id="L157">            val feverAPI = getFeverAPI()</span>
+
+            // 1. Fetch the Fever groups
+<span class="nc" id="L160">            val groupsBody = feverAPI.getGroups()</span>
+
+<span class="nc" id="L162">            val groups =</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                groupsBody.groups?.map {</span>
+<span class="nc" id="L164">                    Group(</span>
+<span class="nc" id="L165">                        id = accountId.spacerDollar(it.id!!),</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                        name = it.title ?: context.getString(R.string.empty),</span>
+<span class="nc" id="L167">                        accountId = accountId,</span>
+<span class="nc" id="L168">                    )</span>
+<span class="nc" id="L169">                } ?: emptyList()</span>
+<span class="nc" id="L170">            groupDao.insertOrUpdate(groups)</span>
+
+            // 2. Fetch the Fever feeds
+<span class="nc" id="L173">            val feedsBody = feverAPI.getFeeds()</span>
+
+<span class="nc" id="L175">            val feedsGroupsMap =</span>
+<span class="nc" id="L176">                buildMap&lt;String, String&gt; {</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                    groupsBody.feeds_groups?.forEach { feedsGroups -&gt;</span>
+<span class="nc bnc" id="L178" title="All 4 branches missed.">                        feedsGroups.group_id?.toString()?.let { groupId -&gt;</span>
+<span class="nc bnc" id="L179" title="All 4 branches missed.">                            feedsGroups.feed_ids?.split(&quot;,&quot;)?.forEach { feedId -&gt;</span>
+<span class="nc" id="L180">                                this[feedId] = groupId</span>
+<span class="nc" id="L181">                            }</span>
+<span class="nc" id="L182">                        }</span>
+<span class="nc" id="L183">                    }</span>
+
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                    feedsBody.feeds_groups?.forEach { feedsGroups -&gt;</span>
+<span class="nc bnc" id="L186" title="All 4 branches missed.">                        feedsGroups.group_id?.toString()?.let { groupId -&gt;</span>
+<span class="nc bnc" id="L187" title="All 4 branches missed.">                            feedsGroups.feed_ids?.split(&quot;,&quot;)?.forEach { feedId -&gt;</span>
+<span class="nc" id="L188">                                this[feedId] = groupId</span>
+<span class="nc" id="L189">                            }</span>
+<span class="nc" id="L190">                        }</span>
+<span class="nc" id="L191">                    }</span>
+<span class="nc" id="L192">                }</span>
+
+            // Fetch the Fever favicons
+<span class="nc bnc" id="L195" title="All 2 branches missed.">            val faviconsById = feverAPI.getFavicons().favicons?.associateBy { it.id } ?: emptyMap()</span>
+<span class="nc" id="L196">            feedDao.insertOrUpdate(</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                feedsBody.feeds?.map {</span>
+<span class="nc" id="L198">                    Feed(</span>
+<span class="nc" id="L199">                        id = accountId.spacerDollar(it.id!!),</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                        name = it.title.decodeHTML() ?: context.getString(R.string.empty),</span>
+<span class="nc" id="L201">                        url = it.url!!,</span>
+<span class="nc" id="L202">                        groupId = accountId.spacerDollar(feedsGroupsMap[it.id.toString()]!!),</span>
+<span class="nc" id="L203">                        accountId = accountId,</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                        icon = faviconsById[it.favicon_id]?.data,</span>
+<span class="nc" id="L205">                    )</span>
+<span class="nc" id="L206">                } ?: emptyList()</span>
+            )
+
+            // Handle empty icon for feeds
+<span class="nc" id="L210">            val noIconFeeds = feedDao.queryNoIcon(accountId)</span>
+<span class="nc" id="L211">            feedDao.update(</span>
+<span class="nc" id="L212">                *noIconFeeds</span>
+<span class="nc" id="L213">                    .map { it.copy(icon = rssHelper.queryRssIconLink(it.url)) }</span>
+<span class="nc" id="L214">                    .toTypedArray()</span>
+            )
+
+            // 3. Fetch the Fever articles (up to unlimited counts)
+<span class="nc" id="L218">            val allArticles = mutableListOf&lt;Article&gt;()</span>
+
+<span class="nc bnc" id="L220" title="All 4 branches missed.">            var lastSeenId = account.lastArticleId?.dollarLast() ?: &quot;&quot;</span>
+
+<span class="nc" id="L222">            while (true) {</span>
+<span class="nc" id="L223">                val itemsBody = feverAPI.getItemsSince(lastSeenId)</span>
+<span class="nc" id="L224">                val fetchedItems = itemsBody.items</span>
+
+<span class="nc bnc" id="L226" title="All 6 branches missed.">                if (fetchedItems.isNullOrEmpty()) {</span>
+<span class="nc" id="L227">                    break</span>
+                }
+
+<span class="nc" id="L230">                val articlesFromBatch =</span>
+<span class="nc" id="L231">                    fetchedItems.map { item -&gt;</span>
+<span class="nc bnc" id="L232" title="All 4 branches missed.">                        Article(</span>
+<span class="nc" id="L233">                            id = accountId.spacerDollar(item.id!!),</span>
+                            date =
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                                item.created_on_time</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                                    ?.run { Date(this * 1000) }</span>
+<span class="nc bnc" id="L237" title="All 4 branches missed.">                                    ?.takeIf { !it.isFuture(preDate) } ?: preDate,</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                            title = item.title.decodeHTML() ?: context.getString(R.string.empty),</span>
+<span class="nc" id="L239">                            author = item.author,</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">                            rawDescription = item.html ?: &quot;&quot;,</span>
+                            shortDescription =
+<span class="nc" id="L242">                                Readability.parseToText(item.html, item.url).take(280),</span>
+<span class="nc" id="L243">                            img = rssHelper.findThumbnail(item.html),</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                            link = item.url ?: &quot;&quot;,</span>
+<span class="nc" id="L245">                            feedId = accountId.spacerDollar(item.feed_id!!),</span>
+<span class="nc" id="L246">                            accountId = accountId,</span>
+<span class="nc bnc" id="L247" title="All 4 branches missed.">                            isUnread = (item.is_read ?: 0) &lt;= 0,</span>
+<span class="nc bnc" id="L248" title="All 4 branches missed.">                            isStarred = (item.is_saved ?: 0) &gt; 0,</span>
+<span class="nc" id="L249">                            updateAt = preDate,</span>
+<span class="nc" id="L250">                        )</span>
+                    }
+
+<span class="nc" id="L253">                allArticles.addAll(articlesFromBatch)</span>
+
+<span class="nc bnc" id="L255" title="All 4 branches missed.">                lastSeenId = fetchedItems.lastOrNull()?.id ?: break</span>
+
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                if (fetchedItems.size &lt; 50) {</span>
+<span class="nc" id="L258">                    break</span>
+                }
+            }
+
+<span class="nc bnc" id="L262" title="All 4 branches missed.">            if (allArticles.isNotEmpty()) {</span>
+<span class="nc" id="L263">                articleDao.insert(*allArticles.toTypedArray())</span>
+<span class="nc" id="L264">                val notificationFeeds =</span>
+<span class="nc" id="L265">                    feedDao.queryNotificationEnabled(accountId).associateBy { it.id }</span>
+<span class="nc" id="L266">                val notificationFeedIds = notificationFeeds.keys</span>
+<span class="nc" id="L267">                allArticles</span>
+<span class="nc bnc" id="L268" title="All 4 branches missed.">                    .fastFilter { it.isUnread &amp;&amp; it.feedId in notificationFeedIds }</span>
+<span class="nc" id="L269">                    .groupBy { it.feedId }</span>
+<span class="nc" id="L270">                    .mapKeys { (feedId, _) -&gt; notificationFeeds[feedId]!! }</span>
+<span class="nc" id="L271">                    .forEach { (feed, articles) -&gt; notificationHelper.notify(feed, articles) }</span>
+            }
+
+            // 4. Synchronize read/unread and starred/un-starred
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            val unreadArticleIds = feverAPI.getUnreadItems().unread_item_ids?.split(&quot;,&quot;)</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            val starredArticleIds = feverAPI.getSavedItems().saved_item_ids?.split(&quot;,&quot;)</span>
+<span class="nc" id="L277">            val articleMeta = articleDao.queryMetadataAll(accountId)</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            for (meta: ArticleMeta in articleMeta) {</span>
+<span class="nc" id="L279">                val articleId = meta.id.dollarLast()</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                val shouldBeUnread = unreadArticleIds?.contains(articleId)</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                val shouldBeStarred = starredArticleIds?.contains(articleId)</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                if (meta.isUnread != shouldBeUnread) {</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">                    articleDao.markAsReadByArticleId(accountId, meta.id, shouldBeUnread ?: true)</span>
+                }
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                if (meta.isStarred != shouldBeStarred) {</span>
+<span class="nc" id="L286">                    articleDao.markAsStarredByArticleId(</span>
+<span class="nc" id="L287">                        accountId,</span>
+<span class="nc" id="L288">                        meta.id,</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                        shouldBeStarred ?: false,</span>
+                    )
+                }
+            }
+
+            // Remove orphaned groups and feeds, after synchronizing the starred/un-starred
+<span class="nc" id="L295">            val groupIds = groups.map { it.id }</span>
+<span class="nc" id="L296">            groupDao.queryAll(accountId).forEach {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">                if (!groupIds.contains(it.id)) {</span>
+<span class="nc" id="L298">                    super.deleteGroup(it, true)</span>
+                }
+<span class="nc" id="L300">            }</span>
+
+<span class="nc" id="L302">            feedDao.queryAll(accountId).forEach {</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                if (!feedsGroupsMap.contains(it.id.dollarLast())) {</span>
+<span class="nc" id="L304">                    super.deleteFeed(it, true)</span>
+                }
+<span class="nc" id="L306">            }</span>
+
+<span class="nc" id="L308">            Log.i(&quot;RLog&quot;, &quot;onCompletion: ${System.currentTimeMillis() - preTime}&quot;)</span>
+<span class="nc" id="L309">            accountService.update(</span>
+<span class="nc" id="L310">                account.copy(</span>
+<span class="nc" id="L311">                    updateAt = Date(),</span>
+                    lastArticleId =
+<span class="nc bnc" id="L313" title="All 4 branches missed.">                        if (lastSeenId.isNotEmpty()) {</span>
+<span class="nc" id="L314">                            accountId.spacerDollar(lastSeenId)</span>
+<span class="nc" id="L315">                        } else account.lastArticleId,</span>
+                )
+            )
+<span class="nc" id="L318">            ListenableWorker.Result.success()</span>
+<span class="nc" id="L319">        } catch (e: Exception) {</span>
+<span class="nc" id="L320">            Log.e(&quot;RLog&quot;, &quot;On sync exception: ${e.message}&quot;, e)</span>
+            //                withContext(mainDispatcher) {
+            //                    context.showToast(e.message)
+            //                }
+<span class="nc" id="L324">            ListenableWorker.Result.failure()</span>
+<span class="nc" id="L325">        }</span>
+<span class="nc" id="L326">    }</span>
+
+<span class="nc" id="L328">    override suspend fun markAsRead(</span>
+        groupId: String?,
+        feedId: String?,
+        articleId: String?,
+        before: Date?,
+        isUnread: Boolean,
+    ) {
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        super.markAsRead(groupId, feedId, articleId, before, isUnread)</span>
+<span class="nc" id="L336">        val feverAPI = getFeverAPI()</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        val beforeUnixTimestamp = (before?.time ?: Date(Long.MAX_VALUE).time) / 1000</span>
+<span class="nc" id="L338">        when {</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">            groupId != null -&gt; {</span>
+<span class="nc" id="L340">                feverAPI.markGroup(</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                    status = if (isUnread) FeverDTO.StatusEnum.Unread else FeverDTO.StatusEnum.Read,</span>
+<span class="nc" id="L342">                    id = groupId.dollarLast().toLong(),</span>
+<span class="nc" id="L343">                    before = beforeUnixTimestamp,</span>
+                )
+            }
+
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            feedId != null -&gt; {</span>
+<span class="nc" id="L348">                feverAPI.markFeed(</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                    status = if (isUnread) FeverDTO.StatusEnum.Unread else FeverDTO.StatusEnum.Read,</span>
+<span class="nc" id="L350">                    id = feedId.dollarLast().toLong(),</span>
+<span class="nc" id="L351">                    before = beforeUnixTimestamp,</span>
+                )
+            }
+
+<span class="nc bnc" id="L355" title="All 2 branches missed.">            articleId != null -&gt; {</span>
+<span class="nc" id="L356">                feverAPI.markItem(</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                    status = if (isUnread) FeverDTO.StatusEnum.Unread else FeverDTO.StatusEnum.Read,</span>
+<span class="nc" id="L358">                    id = articleId.dollarLast(),</span>
+                )
+            }
+
+            else -&gt; {
+<span class="nc" id="L363">                feedDao.queryAll(accountService.getCurrentAccountId()).forEach {</span>
+<span class="nc" id="L364">                    feverAPI.markFeed(</span>
+                        status =
+<span class="nc bnc" id="L366" title="All 2 branches missed.">                            if (isUnread) FeverDTO.StatusEnum.Unread else FeverDTO.StatusEnum.Read,</span>
+<span class="nc" id="L367">                        id = it.id.dollarLast().toLong(),</span>
+<span class="nc" id="L368">                        before = beforeUnixTimestamp,</span>
+                    )
+<span class="nc" id="L370">                }</span>
+            }
+        }
+<span class="nc" id="L373">    }</span>
+
+<span class="nc" id="L375">    @CheckResult</span>
+    override suspend fun syncReadStatus(articleIds: Set&lt;String&gt;, isUnread: Boolean): Set&lt;String&gt; {
+<span class="nc" id="L377">        val feverAPI = getFeverAPI()</span>
+<span class="nc" id="L378">        val syncedEntries = mutableSetOf&lt;String&gt;()</span>
+<span class="nc" id="L379">        articleIds</span>
+<span class="nc bnc" id="L380" title="All 4 branches missed.">            .takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">            ?.forEachIndexed { index, it -&gt;</span>
+<span class="nc" id="L382">                Log.d(&quot;RLog&quot;, &quot;sync markAsRead: ${index}/${articleIds.size} num&quot;)</span>
+<span class="nc" id="L383">                feverAPI.markItem(</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                    status = if (isUnread) FeverDTO.StatusEnum.Unread else FeverDTO.StatusEnum.Read,</span>
+<span class="nc" id="L385">                    id = it.dollarLast(),</span>
+                )
+<span class="nc" id="L387">                syncedEntries += it</span>
+<span class="nc" id="L388">            }</span>
+<span class="nc" id="L389">        return syncedEntries</span>
+    }
+
+<span class="nc" id="L392">    override suspend fun markAsStarred(articleId: String, isStarred: Boolean) {</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">        super.markAsStarred(articleId, isStarred)</span>
+<span class="nc" id="L394">        val feverAPI = getFeverAPI()</span>
+<span class="nc" id="L395">        feverAPI.markItem(</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">            status = if (isStarred) FeverDTO.StatusEnum.Saved else FeverDTO.StatusEnum.Unsaved,</span>
+<span class="nc" id="L397">            id = articleId.dollarLast(),</span>
+        )
+<span class="nc" id="L399">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

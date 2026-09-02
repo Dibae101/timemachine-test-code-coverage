@@ -1,0 +1,699 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyntaxHighlighterBase.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Markor</a> &gt; <a href="index.source.html" class="el_package">net.gsantner.markor.frontend.textview</a> &gt; <span class="el_source">SyntaxHighlighterBase.java</span></div><h1>SyntaxHighlighterBase.java</h1><pre class="source lang-java linenums">/*#######################################################
+ *
+ *   Maintained 2017-2025 by Gregor Santner &lt;gsantner AT mailbox DOT org&gt;
+ *   License of this file: Apache 2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+#########################################################*/
+
+package net.gsantner.markor.frontend.textview;
+
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Typeface;
+import android.text.Spannable;
+import android.text.Spanned;
+import android.text.TextPaint;
+import android.text.TextUtils;
+import android.text.style.CharacterStyle;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.ReplacementSpan;
+import android.text.style.SubscriptSpan;
+import android.text.style.SuperscriptSpan;
+import android.text.style.TypefaceSpan;
+import android.text.style.UpdateAppearance;
+import android.text.style.UpdateLayout;
+import android.util.Log;
+
+import androidx.annotation.ColorInt;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import net.gsantner.markor.format.general.ColorUnderlineSpan;
+import net.gsantner.markor.format.plaintext.PlaintextSyntaxHighlighter;
+import net.gsantner.markor.model.AppSettings;
+import net.gsantner.opoc.format.GsTextUtils;
+import net.gsantner.opoc.util.GsContextUtils;
+import net.gsantner.opoc.wrapper.GsCallback;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NavigableSet;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * This is the base class for syntax highlighting, it contains routines for
+ * managing highlighting spans in the HighlightingEditor.
+ * &lt;p&gt;
+ * Android's EditText uses a SpannableStringBuilder class to manage it's text, and
+ * DynamicLayout to to manage the text layout. Both are not very efficient with a large
+ * number of spans.
+ * &lt;p&gt;
+ * The approach taken here is to:
+ * 1. Compute all spans (highlighting) for the text
+ * 2. Apply only those spans which are currently in the viewport
+ * 3. Update (remove and reapply) spans when the viewport moves (i.e we scroll)
+ * &lt;p&gt;
+ * Spans are further divided into two categories: dynamic and static.
+ * - Dynamic spans are updated as one scrolls, as described above
+ * - Static spans are applied once and never updated. These are typically used for
+ * spans which affect the text layout.
+ * - For example, a span which makes text bigger.
+ * - Updating these dynamically would make the text jump around as one scrolls
+ * &lt;p&gt;
+ * Fixup:
+ * - As the user types we shift all spans to accomodate the changed text.
+ * - This is done so that dynamically applied spans are applied to the correct region.
+ * - Fixup is batched and performed only if necessary.
+ * &lt;p&gt;
+ * Span generation:
+ * - Derived classes should override generateSpans() to generate all spans
+ * - New spans are added by calling addSpanGroup()
+ * - The HighlightingEditor will trigger the generation of spans when the text changes.
+ * - This is debounced so that changes are batched
+ * - Span generation is done on a background thread
+ * &lt;p&gt;
+ * Other performance tips:
+ * - Performance is heavily dependent on the number of spans applied to the text.
+ * - Combine related spans into a single span if possible
+ * - HighlightSpan is a helper class which can be used to create a span with multiple attributes
+ * - For example, a span which makes text bold and italic
+ * - Absolutely minimize the number of spans implementing `UpdateLayout`
+ * - These spans trigger a text layout update when changed in any way
+ * - Instead consider using a span implementing `StaticSpan`
+ * - If StaticSpans are present, the text is reflowed after applying them
+ * - This happens once, and not for each span, which is much more efficient
+ */
+public abstract class SyntaxHighlighterBase {
+
+    protected final static int LONG_HIGHLIGHTING_DELAY = 2400;
+
+<span class="nc" id="L97">    private static final Pattern PATTERN_TAB = Pattern.compile(&quot;\t&quot;);</span>
+
+    /**
+     * Url pattern with required http/https protocol. Case-sensitive.
+     */
+<span class="nc" id="L102">    public static final Pattern URL = Pattern.compile(&quot;\\bhttps?://(?:(?:[-;:&amp;=+$,\\w]+@)?[A-Za-z0-9.-]+|(?:www\\.|[-;:&amp;=+$,\\w]+@)[A-Za-z0-9.-]+)(?:/[+~%/.\\w_-]*\\??[-+=&amp;;%@.\\w_]*#?[.!/\\\\\\w]*)?&quot;);</span>
+
+    protected static SyntaxHighlighterBase getDefaultHighlighter(final AppSettings as) {
+<span class="nc" id="L105">        return new PlaintextSyntaxHighlighter(as);</span>
+    }
+
+    // Functions for derived classes to implement
+    // ---------------------------------------------------------------------------------------------
+
+    // Derived classes should override this to generate all spans
+    // All exceptions will be caught and handled
+    protected abstract void generateSpans();
+
+    public int getHighlightingDelay() {
+<span class="nc" id="L116">        return _delay;</span>
+    }
+
+    // Configuration - to be set on a call to configure
+<span class="nc" id="L120">    protected int _delay = LONG_HIGHLIGHTING_DELAY;</span>
+<span class="nc" id="L121">    protected int _tabSize = 1;</span>
+<span class="nc" id="L122">    protected boolean _isDarkMode = false;</span>
+<span class="nc" id="L123">    protected int _textColor = Color.BLACK;</span>
+<span class="nc" id="L124">    protected String _fontFamily = &quot;&quot;;</span>
+
+    public SyntaxHighlighterBase configure() {
+<span class="nc" id="L127">        return configure(null);</span>
+    }
+
+    /**
+     * Configure this highlighter. Call before doing any highlighting
+     * This is separate from the constructor as we may want to reconfigure after font size etc change
+     *
+     * @param paint Optional paint to pass in - used for text parameters
+     * @return Highlighter
+     */
+    public SyntaxHighlighterBase configure(@Nullable final Paint paint) {
+<span class="nc" id="L138">        _isDarkMode = GsContextUtils.instance.isDarkModeEnabled(_appSettings.getContext());</span>
+<span class="nc" id="L139">        _fontFamily = _appSettings.getFontFamily();</span>
+<span class="nc" id="L140">        _textColor = _appSettings.getEditorForegroundColor();</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        if (paint != null) {</span>
+<span class="nc" id="L142">            _tabSize = (int) (_appSettings.getTabWidth() * paint.measureText(&quot; &quot;));</span>
+        }
+<span class="nc" id="L144">        return this;</span>
+    }
+
+    // Instance
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * A class holding any span
+     */
+    public static class SpanGroup implements Comparable&lt;SpanGroup&gt; {
+        public int start, end;
+        public final Object span;
+        final boolean isStatic;
+        final boolean needsReflow;
+        final int type;
+
+<span class="nc" id="L160">        SpanGroup(Object span, int start, int end, int type) {</span>
+<span class="nc" id="L161">            this.span = span;</span>
+<span class="nc" id="L162">            this.start = start;</span>
+<span class="nc" id="L163">            this.end = end;</span>
+<span class="nc" id="L164">            this.type = type;</span>
+
+<span class="nc" id="L166">            needsReflow = span instanceof StaticSpan;</span>
+<span class="nc bnc" id="L167" title="All 4 branches missed.">            isStatic = needsReflow || span instanceof UpdateLayout;</span>
+<span class="nc" id="L168">        }</span>
+
+        @Override
+        public int compareTo(final SpanGroup o) {
+<span class="nc" id="L172">            return start - o.start;</span>
+        }
+    }
+
+    private static class ForceUpdateLayout implements UpdateLayout {
+        // Empty class - just implements UpdateLayout
+    }
+
+    public interface StaticSpan extends UpdateAppearance {
+    }
+
+    private final ForceUpdateLayout _layoutUpdater;
+
+    private final List&lt;SpanGroup&gt; _groups, _groupBuffer;
+    private final NavigableSet&lt;Integer&gt; _appliedDynamic;
+<span class="nc" id="L187">    private boolean _staticApplied = false;</span>
+<span class="nc" id="L188">    private int _fixupAfter = -1, _fixupDelta = 0;</span>
+
+    protected Spannable _spannable;
+    protected final AppSettings _appSettings;
+
+<span class="nc" id="L193">    public SyntaxHighlighterBase(final AppSettings as) {</span>
+<span class="nc" id="L194">        _appSettings = as;</span>
+<span class="nc" id="L195">        _groups = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L196">        _groupBuffer = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L197">        _appliedDynamic = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L198">        _layoutUpdater = new ForceUpdateLayout();</span>
+<span class="nc" id="L199">    }</span>
+
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Removes all dynamic spans applied by this highlighter to the currently set spannable
+     *
+     * @return this
+     */
+    public SyntaxHighlighterBase clearDynamic() {
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        if (_spannable == null) {</span>
+<span class="nc" id="L210">            return this;</span>
+        }
+
+<span class="nc" id="L213">        final Iterator&lt;Integer&gt; it = _appliedDynamic.descendingIterator();</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        while (it.hasNext()) {</span>
+<span class="nc" id="L215">            _spannable.removeSpan(_groups.get(it.next()).span);</span>
+        }
+<span class="nc" id="L217">        _appliedDynamic.clear();</span>
+
+<span class="nc" id="L219">        return this;</span>
+    }
+
+    /**
+     * Removes all static spans applied by this highlighter to the currently set spannable
+     *
+     * @return this
+     */
+    public SyntaxHighlighterBase clearStatic(final boolean reflow) {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        if (_spannable == null) {</span>
+<span class="nc" id="L229">            return this;</span>
+        }
+
+<span class="nc" id="L232">        boolean needsReflow = false;</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        for (int i = _groups.size() - 1; i &gt;= 0; i--) {</span>
+<span class="nc" id="L234">            final SpanGroup group = _groups.get(i);</span>
+<span class="nc bnc" id="L235" title="All 4 branches missed.">            if (group != null &amp;&amp; group.isStatic) {</span>
+<span class="nc" id="L236">                needsReflow |= group.needsReflow;</span>
+<span class="nc" id="L237">                _spannable.removeSpan(group.span);</span>
+            }
+        }
+
+<span class="nc bnc" id="L241" title="All 4 branches missed.">        if (reflow &amp;&amp; needsReflow) {</span>
+<span class="nc" id="L242">            reflow();</span>
+        }
+
+<span class="nc" id="L245">        _staticApplied = false;</span>
+
+<span class="nc" id="L247">        return this;</span>
+    }
+
+    public SyntaxHighlighterBase clearComputed() {
+<span class="nc" id="L251">        _groups.clear();</span>
+<span class="nc" id="L252">        return this;</span>
+    }
+
+    /**
+     * Change the currently attached spannable.
+     * Caller is responsible for clearing spans attached to existing spannable
+     *
+     * @param spannable Spannable to work on
+     * @return this
+     */
+    public SyntaxHighlighterBase setSpannable(@Nullable final Spannable spannable) {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        if (spannable != _spannable) {</span>
+<span class="nc" id="L264">            _groups.clear();</span>
+<span class="nc" id="L265">            _appliedDynamic.clear();</span>
+<span class="nc" id="L266">            _spannable = spannable;</span>
+        }
+
+<span class="nc" id="L269">        return this;</span>
+    }
+
+    // Get currently attached spannable
+    public Spannable getSpannable() {
+<span class="nc" id="L274">        return _spannable;</span>
+    }
+
+    public boolean hasSpans() {
+<span class="nc bnc" id="L278" title="All 4 branches missed.">        return _spannable != null &amp;&amp; !_groups.isEmpty();</span>
+    }
+
+    /**
+     * Helper to change spans in 'onTextChanged'
+     */
+    public SyntaxHighlighterBase fixup(final int start, final int before, final int count) {
+<span class="nc" id="L285">        return fixup(start + before, count - before);</span>
+    }
+
+    /**
+     * Adjust all currently computed spans so that the spans are still valid after text changes
+     * We internally buffer / batch these fixes for increased performance
+     *
+     * @param after Apply to spans with region starting after 'after'
+     * @param delta How much to shift each span
+     * @return this
+     */
+    public SyntaxHighlighterBase fixup(final int after, final int delta) {
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        if (_fixupAfter == -1) {</span>
+<span class="nc" id="L298">            _fixupAfter = after;</span>
+<span class="nc" id="L299">            _fixupDelta = delta;</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        } else if (isFixupOverlap(after, delta)) {</span>
+<span class="nc" id="L301">            _fixupAfter = Math.min(_fixupAfter, after);</span>
+<span class="nc" id="L302">            _fixupDelta += delta;</span>
+        } else {
+<span class="nc" id="L304">            applyFixup();</span>
+        }
+<span class="nc" id="L306">        return this;</span>
+    }
+
+    // Test if fixup region overlaps with the current fixup
+    private boolean isFixupOverlap(final int after, final int delta) {
+<span class="nc bnc" id="L311" title="All 6 branches missed.">        return (after &gt;= _fixupAfter &amp;&amp; after &lt;= _fixupAfter + Math.abs(_fixupDelta)) ||</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                (_fixupAfter &gt;= after &amp;&amp; _fixupAfter &lt;= after + Math.abs(delta));</span>
+    }
+
+    private SyntaxHighlighterBase applyFixup() {
+<span class="nc bnc" id="L316" title="All 4 branches missed.">        if (_fixupAfter &gt;= 0 &amp;&amp; _fixupDelta != 0) {</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            for (int i = _groups.size() - 1; i &gt;= 0; i--) {</span>
+<span class="nc" id="L318">                final SpanGroup group = _groups.get(i);</span>
+                // Very simple fixup. If the group is entirely after 'after', adjust it's region
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                if (group.start &lt;= _fixupAfter) {</span>
+                    // We iterate backwards. As groups are sorted, if start is before after, can break out
+<span class="nc" id="L322">                    break;</span>
+                } else {
+<span class="nc" id="L324">                    group.start += _fixupDelta;</span>
+<span class="nc" id="L325">                    group.end += _fixupDelta;</span>
+                }
+            }
+<span class="nc" id="L328">            clearFixup();</span>
+        }
+<span class="nc" id="L330">        return this;</span>
+    }
+
+    private void clearFixup() {
+<span class="nc" id="L334">        _fixupAfter = -1;</span>
+<span class="nc" id="L335">        _fixupDelta = 0;</span>
+<span class="nc" id="L336">    }</span>
+
+    public SyntaxHighlighterBase applyDynamic() {
+<span class="nc" id="L339">        return applyDynamic(new int[]{0, _spannable.length()});</span>
+    }
+
+    /**
+     * Apply spans which intersect region [start, end)
+     *
+     * @return this
+     */
+    public SyntaxHighlighterBase applyDynamic(final int[] range) {
+<span class="nc bnc" id="L348" title="All 4 branches missed.">        if (GsTextUtils.isValidSelection(_spannable, range) &amp;&amp; range.length &gt;= 2) {</span>
+<span class="nc" id="L349">            applyFixup();</span>
+<span class="nc" id="L350">            final int length = _spannable.length();</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">            for (int i = 0; i &lt; _groups.size(); i++) {</span>
+<span class="nc" id="L352">                final SpanGroup group = _groups.get(i);</span>
+
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                if (group.isStatic) {</span>
+<span class="nc" id="L355">                    continue;</span>
+                }
+
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                if (group.start &gt;= range[1]) {</span>
+                    // As we are sorted on start, we can break out after the first group.start &gt; end
+<span class="nc" id="L360">                    break;</span>
+                }
+
+<span class="nc bnc" id="L363" title="All 6 branches missed.">                final boolean valid = group.start &gt;= 0 &amp;&amp; group.end &gt; range[0] &amp;&amp; group.end &lt;= length;</span>
+<span class="nc bnc" id="L364" title="All 4 branches missed.">                if (valid &amp;&amp; !_appliedDynamic.contains(i)) {</span>
+<span class="nc" id="L365">                    _spannable.setSpan(group.span, group.start, group.end, group.type);</span>
+<span class="nc" id="L366">                    _appliedDynamic.add(i);</span>
+                }
+            }
+        }
+<span class="nc" id="L370">        return this;</span>
+    }
+
+    public SyntaxHighlighterBase applyStatic() {
+<span class="nc bnc" id="L374" title="All 4 branches missed.">        if (_spannable != null &amp;&amp; !_staticApplied) {</span>
+<span class="nc" id="L375">            applyFixup();</span>
+
+<span class="nc" id="L377">            boolean needsReflow = false;</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">            for (final SpanGroup group : _groups) {</span>
+<span class="nc bnc" id="L379" title="All 4 branches missed.">                if (group != null &amp;&amp; group.isStatic) {</span>
+<span class="nc" id="L380">                    needsReflow |= group.needsReflow;</span>
+<span class="nc" id="L381">                    _spannable.setSpan(group.span, group.start, group.end, group.type);</span>
+                }
+<span class="nc" id="L383">            }</span>
+
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (needsReflow) {</span>
+<span class="nc" id="L386">                reflow();</span>
+            }
+
+<span class="nc" id="L389">            _staticApplied = true;</span>
+        }
+
+<span class="nc" id="L392">        return this;</span>
+    }
+
+    public final SyntaxHighlighterBase reflow() {
+<span class="nc" id="L396">        return reflow(new int[]{0, _spannable.length()});</span>
+    }
+
+    // Reflow selected region's lines
+    public final SyntaxHighlighterBase reflow(final int[] range) {
+<span class="nc bnc" id="L401" title="All 4 branches missed.">        if (GsTextUtils.isValidSelection(_spannable, range) &amp;&amp; range.length &gt;= 2) {</span>
+<span class="nc" id="L402">            _spannable.setSpan(_layoutUpdater, range[0], range[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);</span>
+<span class="nc" id="L403">            _spannable.removeSpan(_layoutUpdater);</span>
+        }
+<span class="nc" id="L405">        return this;</span>
+    }
+
+    public final SyntaxHighlighterBase recompute() {
+<span class="nc" id="L409">        return compute().setComputed();</span>
+    }
+
+    /**
+     * Make computed spans current. References to existing spans will be lost.
+     * Caller is responsible for calling 'clear()' before this, if necessary
+     *
+     * @return this
+     */
+    public final SyntaxHighlighterBase setComputed() {
+<span class="nc" id="L419">        _groups.clear();</span>
+<span class="nc" id="L420">        _appliedDynamic.clear();</span>
+<span class="nc" id="L421">        _staticApplied = false;</span>
+<span class="nc" id="L422">        _groups.addAll(_groupBuffer);</span>
+<span class="nc" id="L423">        _groupBuffer.clear();</span>
+<span class="nc" id="L424">        clearFixup();</span>
+<span class="nc" id="L425">        return this;</span>
+    }
+
+    /**
+     * Compute all highlighting spans to a buffer.
+     * The buffer is not made current until one calls 'setComputed'
+     *
+     * @return this
+     */
+    public final SyntaxHighlighterBase compute() {
+<span class="nc" id="L435">        _groupBuffer.clear();</span>
+
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        if (TextUtils.isEmpty(_spannable)) {</span>
+<span class="nc" id="L438">            return this;</span>
+        }
+
+        // Highlighting cannot generate exceptions!
+        try {
+<span class="nc" id="L443">            generateSpans();</span>
+<span class="nc" id="L444">            Collections.sort(_groupBuffer); // Dramatically improves performance</span>
+<span class="nc" id="L445">        } catch (Exception ex) {</span>
+<span class="nc" id="L446">            Log.w(getClass().getName(), ex);</span>
+<span class="nc" id="L447">        } catch (Error er) {</span>
+<span class="nc" id="L448">            Log.w(getClass().getName(), er);</span>
+<span class="nc" id="L449">        }</span>
+
+<span class="nc" id="L451">        return this;</span>
+    }
+
+    //
+    // Helpers for creating spans
+    //
+
+    protected final void addSpanGroup(final Object span, final int start, final int end) {
+<span class="nc bnc" id="L459" title="All 4 branches missed.">        if (end &gt;= start &amp;&amp; span != null) {</span>
+<span class="nc" id="L460">            _groupBuffer.add(new SpanGroup(span, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE));</span>
+        }
+<span class="nc" id="L462">    }</span>
+
+    protected final void addSpanGroup(final Object span, final int start, final int end, final int type) {
+<span class="nc bnc" id="L465" title="All 4 branches missed.">        if (end &gt;= start &amp;&amp; span != null) {</span>
+<span class="nc" id="L466">            _groupBuffer.add(new SpanGroup(span, start, end, type));</span>
+        }
+<span class="nc" id="L468">    }</span>
+
+    protected final void createSpanForMatches(final Pattern pattern, GsCallback.r1&lt;Object, Matcher&gt; creator, int... groupsToMatch) {
+<span class="nc bnc" id="L471" title="All 4 branches missed.">        if (groupsToMatch == null || groupsToMatch.length &lt; 1) {</span>
+<span class="nc" id="L472">            groupsToMatch = new int[]{0};</span>
+        }
+<span class="nc" id="L474">        final Matcher m = pattern.matcher(_spannable);</span>
+
+<span class="nc bnc" id="L476" title="All 2 branches missed.">        while (m.find()) {</span>
+<span class="nc" id="L477">            final Object span = creator.callback(m);</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">            if (span != null) {</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">                for (final int g : groupsToMatch) {</span>
+<span class="nc" id="L480">                    final int start = m.start(g);</span>
+<span class="nc" id="L481">                    final int end = m.end(g);</span>
+<span class="nc bnc" id="L482" title="All 6 branches missed.">                    if ((g == 0 || g &lt;= m.groupCount()) &amp;&amp; Math.abs(end - start) &gt; 0) {</span>
+<span class="nc" id="L483">                        addSpanGroup(span, start, end);</span>
+                    }
+                }
+            }
+<span class="nc" id="L487">        }</span>
+<span class="nc" id="L488">    }</span>
+
+    protected final void createStyleSpanForMatches(final Pattern pattern, final int style, int... groupsToMatch) {
+<span class="nc" id="L491">        createSpanForMatches(pattern, new HighlightSpan().setTypeface(style), groupsToMatch);</span>
+<span class="nc" id="L492">    }</span>
+
+    protected final void createColorSpanForMatches(final Pattern pattern, final int color, int... groupsToMatch) {
+<span class="nc" id="L495">        createSpanForMatches(pattern, new HighlightSpan().setForeColor(color), groupsToMatch);</span>
+<span class="nc" id="L496">    }</span>
+
+    protected final void createColorBackgroundSpan(final Pattern pattern, final int color, int... groupsToMatch) {
+<span class="nc" id="L499">        createSpanForMatches(pattern, new HighlightSpan().setBackColor(color), groupsToMatch);</span>
+<span class="nc" id="L500">    }</span>
+
+    protected final void createStrikeThroughSpanForMatches(final Pattern pattern, int... groupsToMatch) {
+<span class="nc" id="L503">        createSpanForMatches(pattern, new HighlightSpan().setStrike(true), groupsToMatch);</span>
+<span class="nc" id="L504">    }</span>
+
+    protected final void createTypefaceSpanForMatches(Pattern pattern, final String typeface, int... groupsToMatch) {
+<span class="nc" id="L507">        createSpanForMatches(pattern, matcher -&gt; new TypefaceSpan(typeface), groupsToMatch);</span>
+<span class="nc" id="L508">    }</span>
+
+    protected final void createRelativeSizeSpanForMatches(final Pattern pattern, float relativeSize, int... groupsToMatch) {
+<span class="nc" id="L511">        createSpanForMatches(pattern, matcher -&gt; new RelativeSizeSpan(relativeSize), groupsToMatch);</span>
+<span class="nc" id="L512">    }</span>
+
+    protected final void createReplacementSpanForMatches(final Pattern pattern, final int charWidth, int... groupsToMatch) {
+<span class="nc" id="L515">        createSpanForMatches(pattern, matcher -&gt; new ReplacementSpan() {</span>
+            @Override
+            public int getSize(@NonNull Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+<span class="nc" id="L518">                return charWidth;</span>
+            }
+
+            @Override
+            public void draw(@NonNull Canvas canvas, CharSequence text, int start, int end, float x, int top, int y, int bottom, @NonNull Paint paint) {
+<span class="nc" id="L523">            }</span>
+        }, groupsToMatch);
+<span class="nc" id="L525">    }</span>
+
+    protected final void createMonospaceSpanForMatches(final Pattern pattern, int... groupsToMatch) {
+<span class="nc" id="L528">        createTypefaceSpanForMatches(pattern, &quot;monospace&quot;, groupsToMatch);</span>
+<span class="nc" id="L529">    }</span>
+
+    protected final void createColoredUnderlineSpanForMatches(final Pattern pattern, @ColorInt int color, int... groupsToMatch) {
+<span class="nc" id="L532">        createSpanForMatches(pattern, matcher -&gt; new ColorUnderlineSpan(color, null), groupsToMatch);</span>
+<span class="nc" id="L533">    }</span>
+
+    protected final void createColoredUnderlineSpanForMatches(final Pattern pattern, final GsCallback.r1&lt;Object, Matcher&gt; creator, int... groupsToMatch) {
+<span class="nc" id="L536">        createSpanForMatches(pattern, creator, groupsToMatch);</span>
+<span class="nc" id="L537">    }</span>
+
+    protected final void createSuperscriptStyleSpanForMatches(final Pattern pattern, final int... groupsToMatch) {
+<span class="nc" id="L540">        createSpanForMatches(pattern, matcher -&gt; new SuperscriptSpan(), groupsToMatch);</span>
+<span class="nc" id="L541">    }</span>
+
+    protected final void createSubscriptStyleSpanForMatches(final Pattern pattern, final int... groupsToMatch) {
+<span class="nc" id="L544">        createSpanForMatches(pattern, matcher -&gt; new SubscriptSpan(), groupsToMatch);</span>
+<span class="nc" id="L545">    }</span>
+
+    protected final void createTabSpans(final int tabWidth) {
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (tabWidth &gt; 0) {</span>
+<span class="nc" id="L549">            createReplacementSpanForMatches(PATTERN_TAB, tabWidth);</span>
+        }
+<span class="nc" id="L551">    }</span>
+
+    protected final void createSmallBlueLinkSpans() {
+<span class="nc" id="L554">        createSpanForMatches(URL, new HighlightSpan().setForeColor(0xff1ea3fd).setItalic(true).setTextScale(0.85f));</span>
+<span class="nc" id="L555">    }</span>
+
+    protected final void createUnderlineHexColorsSpans() {
+<span class="nc" id="L558">        createColoredUnderlineSpanForMatches(ColorUnderlineSpan.HEX_CODE_UNDERLINE_PATTERN, m -&gt; new ColorUnderlineSpan(m.group(1), 3f), 1);</span>
+<span class="nc" id="L559">    }</span>
+
+    // We _do not_ implement UpdateLayout or Parcelable for performance reasons
+<span class="nc" id="L562">    public static class HighlightSpan extends CharacterStyle implements UpdateAppearance, GsCallback.r1&lt;Object, Matcher&gt; {</span>
+
+<span class="nc" id="L564">        public Boolean bold = null;</span>
+<span class="nc" id="L565">        public Boolean italic = null;</span>
+<span class="nc" id="L566">        public Boolean underline = null;</span>
+<span class="nc" id="L567">        public Boolean strikethrough = null;</span>
+<span class="nc" id="L568">        public Float textScale = null;</span>
+<span class="nc" id="L569">        public @ColorInt</span>
+        Integer foregroundColor = null;
+<span class="nc" id="L571">        public @ColorInt</span>
+        Integer backgroundColor = null;
+
+        // Setters. Use null (default) to indicate &quot;don't change this value&quot;
+        public HighlightSpan setForeColor(@ColorInt Integer color) {
+<span class="nc" id="L576">            foregroundColor = color;</span>
+<span class="nc" id="L577">            return this;</span>
+        }
+
+        public HighlightSpan setBackColor(@ColorInt Integer color) {
+<span class="nc" id="L581">            backgroundColor = color;</span>
+<span class="nc" id="L582">            return this;</span>
+        }
+
+        public HighlightSpan setTextScale(Float scale) {
+<span class="nc" id="L586">            textScale = scale;</span>
+<span class="nc" id="L587">            return this;</span>
+        }
+
+        public HighlightSpan setStrike(Boolean val) {
+<span class="nc" id="L591">            strikethrough = val;</span>
+<span class="nc" id="L592">            return this;</span>
+        }
+
+        public HighlightSpan setUnderline(Boolean val) {
+<span class="nc" id="L596">            underline = val;</span>
+<span class="nc" id="L597">            return this;</span>
+        }
+
+        public HighlightSpan setBold(Boolean val) {
+<span class="nc" id="L601">            bold = val;</span>
+<span class="nc" id="L602">            return this;</span>
+        }
+
+        public HighlightSpan setItalic(Boolean val) {
+<span class="nc" id="L606">            italic = val;</span>
+<span class="nc" id="L607">            return this;</span>
+        }
+
+        public HighlightSpan setTypeface(final int tf) {
+<span class="nc bnc" id="L611" title="All 4 branches missed.">            return setBold((tf &amp; Typeface.BOLD) != 0).setItalic((tf &amp; Typeface.ITALIC) != 0);</span>
+        }
+
+        @Override
+        public void updateDrawState(TextPaint tp) {
+<span class="nc bnc" id="L616" title="All 2 branches missed.">            if (bold != null) {</span>
+<span class="nc" id="L617">                tp.setFakeBoldText(bold);</span>
+            }
+
+<span class="nc bnc" id="L620" title="All 2 branches missed.">            if (strikethrough != null) {</span>
+<span class="nc" id="L621">                tp.setStrikeThruText(strikethrough);</span>
+            }
+
+<span class="nc bnc" id="L624" title="All 2 branches missed.">            if (underline != null) {</span>
+<span class="nc" id="L625">                tp.setUnderlineText(underline);</span>
+            }
+
+<span class="nc bnc" id="L628" title="All 4 branches missed.">            if (italic != null &amp;&amp; italic) {</span>
+<span class="nc" id="L629">                tp.setTextSkewX(-0.25f); // This is what android uses</span>
+            }
+
+<span class="nc bnc" id="L632" title="All 2 branches missed.">            if (foregroundColor != null) {</span>
+<span class="nc" id="L633">                tp.setColor(foregroundColor);</span>
+            }
+
+<span class="nc bnc" id="L636" title="All 2 branches missed.">            if (backgroundColor != null) {</span>
+<span class="nc" id="L637">                tp.bgColor = backgroundColor;</span>
+            }
+
+<span class="nc bnc" id="L640" title="All 2 branches missed.">            if (textScale != null) {</span>
+<span class="nc" id="L641">                tp.setTextSize(tp.getTextSize() * textScale);</span>
+            }
+<span class="nc" id="L643">        }</span>
+
+        // The class is a callback which returns a clone of itself
+        // So we can construct an instance and use it as a span generator
+        @Override
+        public HighlightSpan callback(Matcher m) {
+<span class="nc" id="L649">            return new HighlightSpan()</span>
+<span class="nc" id="L650">                    .setForeColor(foregroundColor)</span>
+<span class="nc" id="L651">                    .setBackColor(backgroundColor)</span>
+<span class="nc" id="L652">                    .setBold(bold)</span>
+<span class="nc" id="L653">                    .setItalic(italic)</span>
+<span class="nc" id="L654">                    .setUnderline(underline)</span>
+<span class="nc" id="L655">                    .setStrike(strikethrough)</span>
+<span class="nc" id="L656">                    .setTextScale(textScale);</span>
+        }
+    }
+
+    /**
+     * Inject additional spans into the current set of computed spans
+     * &lt;p&gt;
+     * These are added to the list of computed spans. Therefore:
+     * 1. They are subject to modification by fixup
+     * 2. They will need to be re-added after `setComputed()` is called
+     */
+    public SyntaxHighlighterBase addAdditional(final Collection&lt;SpanGroup&gt; additionalSpans) {
+<span class="nc bnc" id="L668" title="All 2 branches missed.">        if (!additionalSpans.isEmpty()) {</span>
+<span class="nc" id="L669">            _groups.addAll(additionalSpans);</span>
+<span class="nc" id="L670">            Collections.sort(_groups);</span>
+        }
+<span class="nc" id="L672">        return this;</span>
+    }
+
+    public SyntaxHighlighterBase addAdditional(final SpanGroup additionalSpan) {
+<span class="nc bnc" id="L676" title="All 2 branches missed.">        if (additionalSpan != null) {</span>
+<span class="nc" id="L677">            _groups.add(additionalSpan);</span>
+<span class="nc" id="L678">            Collections.sort(_groups);</span>
+        }
+<span class="nc" id="L680">        return this;</span>
+    }
+
+    public SyntaxHighlighterBase clearAdditional(final Collection&lt;SpanGroup&gt; additionalSpans) {
+<span class="nc" id="L684">        _groups.removeAll(additionalSpans);</span>
+<span class="nc" id="L685">        return this;</span>
+    }
+
+    public SyntaxHighlighterBase clearAdditional(SpanGroup additionalSpan) {
+<span class="nc bnc" id="L689" title="All 2 branches missed.">        if (additionalSpan != null) {</span>
+<span class="nc" id="L690">            _groups.remove(additionalSpan);</span>
+        }
+<span class="nc" id="L692">        return this;</span>
+    }
+
+    public static SpanGroup createBackgroundHighlight(final int start, final int end, final @ColorInt int color) {
+<span class="nc" id="L696">        return new SpanGroup(new HighlightSpan().setBackColor(color), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlayerStateMachine.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.nextcloud.client.media</a> &gt; <span class="el_source">PlayerStateMachine.kt</span></div><h1>PlayerStateMachine.kt</h1><pre class="source lang-java linenums">/**
+ * Nextcloud Android client application
+ *
+ * @author Chris Narkiewicz
+ * Copyright (C) 2019 Chris Narkiewicz &lt;hello@ezaquarii.com&gt;
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+package com.nextcloud.client.media
+
+import com.github.oxo42.stateless4j.StateMachine
+import com.github.oxo42.stateless4j.StateMachineConfig
+import com.github.oxo42.stateless4j.delegates.Action
+import com.github.oxo42.stateless4j.transitions.Transition
+import java.util.ArrayDeque
+
+/*
+ * To see visual representation of the state machine, install PlanUml plugin.
+ * http://plantuml.com/
+ *
+ * @startuml
+ *
+ * note &quot;&gt; - entry action\n&lt; - exit action\n[exp] - transition guard\nfunction() - transition action&quot; as README
+ *
+ * [*] --&gt; STOPPED
+ * STOPPED --&gt; RUNNING: PLAY\n[hasEnqueuedFile]
+ * RUNNING --&gt; STOPPED: STOP\nonStop
+ * RUNNING --&gt; STOPPED: ERROR\nonError
+ * RUNNING: &gt;onStartRunning
+ *
+ * state RUNNING {
+ *      [*] --&gt; DOWNLOADING: [!isDownloaded]
+ *      [*] --&gt; PREPARING: [isDownloaded]
+ *      DOWNLOADING: &gt;onStartDownloading
+ *      DOWNLOADING --&gt; PREPARING: DOWNLOADED
+ *
+ *      PREPARING: &gt;onPrepare
+ *      PREPARING --&gt; PLAYING: PREPARED\n[autoPlay]
+ *      PREPARING --&gt; PAUSED: PREPARED\n[!autoPlay]
+ *      PLAYING --&gt; PAUSED: PAUSE\nFOCUS_LOST
+ *
+ *      PAUSED: &gt;onPausePlayback
+ *      PAUSED --&gt; PLAYING: PLAY
+ *
+ *      PLAYING: &gt;onRequestFocus
+ *      PLAYING: &lt;onReleaseFocus
+ *      state PLAYING {
+ *          [*] -r-&gt; AWAIT_FOCUS
+ *          AWAIT_FOCUS --&gt; FOCUSED: FOCUS_GAIN\nonStartPlayback()
+ *          FOCUSED -l-&gt; DUCKED: FOCUS_DUCK
+ *          DUCKED: &gt;onAudioDuck(true)\n&lt;onAudioDuck(false)
+ *          DUCKED -r-&gt; FOCUSED: FOCUS_GAIN
+ *      }
+ * }
+ *
+ * @enduml
+ */
+<span class="nc" id="L69">internal class PlayerStateMachine(initialState: State, private val delegate: Delegate) {</span>
+
+<span class="nc" id="L71">    constructor(delegate: Delegate) : this(State.STOPPED, delegate)</span>
+
+    interface Delegate {
+        val isDownloaded: Boolean
+        val isAutoplayEnabled: Boolean
+        val hasEnqueuedFile: Boolean
+
+        fun onStartRunning()
+        fun onStartDownloading()
+        fun onPrepare()
+        fun onStopped()
+        fun onError()
+        fun onStartPlayback()
+        fun onPausePlayback()
+        fun onRequestFocus()
+        fun onReleaseFocus()
+        fun onAudioDuck(enabled: Boolean)
+    }
+
+    enum class State {
+        STOPPED,
+        RUNNING,
+        RUNNING_INITIAL,
+        DOWNLOADING,
+        PREPARING,
+        PAUSED,
+        PLAYING,
+        AWAIT_FOCUS,
+        FOCUSED,
+        DUCKED
+    }
+
+    enum class Event {
+        PLAY,
+        DOWNLOADED,
+        PREPARED,
+        STOP,
+        PAUSE,
+        ERROR,
+        FOCUS_LOST,
+        FOCUS_GAIN,
+        FOCUS_DUCK,
+        IMMEDIATE_TRANSITION,
+    }
+
+<span class="nc" id="L116">    private var pendingEvents = ArrayDeque&lt;Event&gt;()</span>
+    private var isProcessing = false
+    private val stateMachine: StateMachine&lt;State, Event&gt;
+
+    /**
+     * Immediate state machine state. This attribute provides innermost active state.
+     * For checking parent states, use [PlayerStateMachine.isInState].
+     */
+    val state: State
+        get() {
+<span class="nc" id="L126">            return stateMachine.state</span>
+        }
+
+    init {
+<span class="nc" id="L130">        val config = StateMachineConfig&lt;State, Event&gt;()</span>
+
+<span class="nc" id="L132">        config.configure(State.STOPPED)</span>
+<span class="nc" id="L133">            .permitIf(Event.PLAY, State.RUNNING_INITIAL) { delegate.hasEnqueuedFile }</span>
+<span class="nc" id="L134">            .onEntryFrom(Event.STOP, delegate::onStopped)</span>
+<span class="nc" id="L135">            .onEntryFrom(Event.ERROR, delegate::onError)</span>
+
+<span class="nc" id="L137">        config.configure(State.RUNNING)</span>
+<span class="nc" id="L138">            .permit(Event.STOP, State.STOPPED)</span>
+<span class="nc" id="L139">            .permit(Event.ERROR, State.STOPPED)</span>
+<span class="nc" id="L140">            .onEntry(delegate::onStartRunning)</span>
+
+<span class="nc" id="L142">        config.configure(State.RUNNING_INITIAL)</span>
+<span class="nc" id="L143">            .substateOf(State.RUNNING)</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            .permitIf(Event.IMMEDIATE_TRANSITION, State.DOWNLOADING, { !delegate.isDownloaded })</span>
+<span class="nc" id="L145">            .permitIf(Event.IMMEDIATE_TRANSITION, State.PREPARING, { delegate.isDownloaded })</span>
+<span class="nc" id="L146">            .onEntry(this::immediateTransition)</span>
+
+<span class="nc" id="L148">        config.configure(State.DOWNLOADING)</span>
+<span class="nc" id="L149">            .substateOf(State.RUNNING)</span>
+<span class="nc" id="L150">            .permit(Event.DOWNLOADED, State.PREPARING)</span>
+<span class="nc" id="L151">            .onEntry(delegate::onStartDownloading)</span>
+
+<span class="nc" id="L153">        config.configure(State.PREPARING)</span>
+<span class="nc" id="L154">            .substateOf(State.RUNNING)</span>
+<span class="nc" id="L155">            .permitIf(Event.PREPARED, State.AWAIT_FOCUS) { delegate.isAutoplayEnabled }</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            .permitIf(Event.PREPARED, State.PAUSED) { !delegate.isAutoplayEnabled }</span>
+<span class="nc" id="L157">            .onEntry(delegate::onPrepare)</span>
+
+<span class="nc" id="L159">        config.configure(State.PLAYING)</span>
+<span class="nc" id="L160">            .substateOf(State.RUNNING)</span>
+<span class="nc" id="L161">            .permit(Event.PAUSE, State.PAUSED)</span>
+<span class="nc" id="L162">            .permit(Event.FOCUS_LOST, State.PAUSED)</span>
+<span class="nc" id="L163">            .onEntry(delegate::onRequestFocus)</span>
+<span class="nc" id="L164">            .onExit(delegate::onReleaseFocus)</span>
+
+<span class="nc" id="L166">        config.configure(State.PAUSED)</span>
+<span class="nc" id="L167">            .substateOf(State.RUNNING)</span>
+<span class="nc" id="L168">            .permit(Event.PLAY, State.AWAIT_FOCUS)</span>
+<span class="nc" id="L169">            .onEntry(delegate::onPausePlayback)</span>
+
+<span class="nc" id="L171">        config.configure(State.AWAIT_FOCUS)</span>
+<span class="nc" id="L172">            .substateOf(State.PLAYING)</span>
+<span class="nc" id="L173">            .permit(Event.FOCUS_GAIN, State.FOCUSED)</span>
+
+<span class="nc" id="L175">        config.configure(State.FOCUSED)</span>
+<span class="nc" id="L176">            .substateOf(State.PLAYING)</span>
+<span class="nc" id="L177">            .permit(Event.FOCUS_DUCK, State.DUCKED)</span>
+<span class="nc" id="L178">            .onEntry(this::onAudioFocusGain)</span>
+
+<span class="nc" id="L180">        config.configure(State.DUCKED)</span>
+<span class="nc" id="L181">            .substateOf(State.PLAYING)</span>
+<span class="nc" id="L182">            .permit(Event.FOCUS_GAIN, State.FOCUSED)</span>
+<span class="nc" id="L183">            .onEntry(Action { delegate.onAudioDuck(true) })</span>
+<span class="nc" id="L184">            .onExit(Action { delegate.onAudioDuck(false) })</span>
+
+<span class="nc" id="L186">        stateMachine = StateMachine(initialState, config)</span>
+<span class="nc" id="L187">        stateMachine.onUnhandledTrigger { _, _ -&gt; /* ignore unhandled event */ }</span>
+<span class="nc" id="L188">    }</span>
+
+    private fun immediateTransition() {
+<span class="nc" id="L191">        stateMachine.fire(Event.IMMEDIATE_TRANSITION)</span>
+<span class="nc" id="L192">    }</span>
+
+    private fun onAudioFocusGain(t: Transition&lt;State, Event&gt;) {
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (t.source == State.AWAIT_FOCUS) {</span>
+<span class="nc" id="L196">            delegate.onStartPlayback()</span>
+        }
+<span class="nc" id="L198">    }</span>
+
+    /**
+     * Check if state machine is in a given state.
+     * Contrary to [PlayerStateMachine.state] attribute, this method checks for
+     * parent states.
+     */
+    fun isInState(state: State): Boolean {
+<span class="nc" id="L206">        return stateMachine.isInState(state)</span>
+    }
+
+    /**
+     * Post state machine event to internal queue.
+     *
+     * This design ensures that we're not triggering multiple events
+     * from state machines callbacks before the transition is fully
+     * completed.
+     *
+     * Method is re-entrant.
+     */
+    fun post(event: Event) {
+<span class="nc" id="L219">        pendingEvents.addLast(event)</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (!isProcessing) {</span>
+<span class="nc" id="L221">            isProcessing = true</span>
+<span class="nc bnc" id="L222" title="All 4 branches missed.">            while (pendingEvents.isNotEmpty()) {</span>
+<span class="nc" id="L223">                val processedEvent = pendingEvents.removeFirst()</span>
+<span class="nc" id="L224">                stateMachine.fire(processedEvent)</span>
+            }
+<span class="nc" id="L226">            isProcessing = false</span>
+        }
+<span class="nc" id="L228">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

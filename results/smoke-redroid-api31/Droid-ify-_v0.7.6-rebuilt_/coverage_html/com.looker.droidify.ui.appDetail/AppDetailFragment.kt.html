@@ -1,0 +1,638 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AppDetailFragment.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.ui.appDetail</a> &gt; <span class="el_source">AppDetailFragment.kt</span></div><h1>AppDetailFragment.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.ui.appDetail
+
+import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.provider.Settings
+import android.view.MenuItem
+import android.view.View
+import androidx.appcompat.app.AlertDialog
+import androidx.core.net.toUri
+import androidx.core.os.bundleOf
+import androidx.fragment.app.DialogFragment
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.SimpleItemAnimator
+import coil3.load
+import coil3.request.allowHardware
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.looker.droidify.content.ProductPreferences
+import com.looker.droidify.installer.installers.launchShizuku
+import com.looker.droidify.installer.model.InstallState
+import com.looker.droidify.installer.model.isCancellable
+import com.looker.droidify.model.InstalledItem
+import com.looker.droidify.model.Product
+import com.looker.droidify.model.ProductPreference
+import com.looker.droidify.model.Release
+import com.looker.droidify.model.Repository
+import com.looker.droidify.model.findSuggested
+import com.looker.droidify.service.Connection
+import com.looker.droidify.service.DownloadService
+import com.looker.droidify.ui.Message
+import com.looker.droidify.ui.MessageDialog
+import com.looker.droidify.ui.ScreenFragment
+import com.looker.droidify.ui.appDetail.AppDetailViewModel.Companion.ARG_PACKAGE_NAME
+import com.looker.droidify.ui.appDetail.AppDetailViewModel.Companion.ARG_REPO_ADDRESS
+import com.looker.droidify.utility.common.cache.Cache
+import com.looker.droidify.utility.common.extension.getLauncherActivities
+import com.looker.droidify.utility.common.extension.getMutatedIcon
+import com.looker.droidify.utility.common.extension.isFirstItemVisible
+import com.looker.droidify.utility.common.extension.isSystemApplication
+import com.looker.droidify.utility.common.extension.openLink
+import com.looker.droidify.utility.common.extension.systemBarsPadding
+import com.looker.droidify.utility.common.extension.updateAsMutable
+import com.looker.droidify.utility.common.shareUrl
+import com.looker.droidify.utility.extension.android.Android.name
+import com.looker.droidify.utility.extension.android.Android.primaryPlatform
+import com.looker.droidify.utility.extension.mainActivity
+import com.looker.droidify.utility.extension.startUpdate
+import com.stfalcon.imageviewer.StfalconImageViewer
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import com.looker.droidify.R.string as stringRes
+
+<span class="nc" id="L63">@AndroidEntryPoint</span>
+<span class="nc" id="L64">class AppDetailFragment() : ScreenFragment(), AppDetailAdapter.Callbacks {</span>
+    companion object {
+        private const val STATE_LAYOUT_MANAGER = &quot;layoutManager&quot;
+        private const val STATE_ADAPTER = &quot;adapter&quot;
+    }
+
+<span class="nc" id="L70">    constructor(packageName: String, repoAddress: String? = null) : this() {</span>
+<span class="nc" id="L71">        arguments = bundleOf(</span>
+<span class="nc" id="L72">            ARG_PACKAGE_NAME to packageName,</span>
+<span class="nc" id="L73">            ARG_REPO_ADDRESS to repoAddress,</span>
+        )
+<span class="nc" id="L75">    }</span>
+
+<span class="nc" id="L77">    private enum class Action(</span>
+<span class="nc" id="L78">        val id: Int,</span>
+<span class="nc" id="L79">        val adapterAction: AppDetailAdapter.Action,</span>
+    ) {
+<span class="nc" id="L81">        INSTALL(1, AppDetailAdapter.Action.INSTALL),</span>
+<span class="nc" id="L82">        UPDATE(2, AppDetailAdapter.Action.UPDATE),</span>
+<span class="nc" id="L83">        LAUNCH(3, AppDetailAdapter.Action.LAUNCH),</span>
+<span class="nc" id="L84">        DETAILS(4, AppDetailAdapter.Action.DETAILS),</span>
+<span class="nc" id="L85">        UNINSTALL(5, AppDetailAdapter.Action.UNINSTALL),</span>
+<span class="nc" id="L86">        SOURCE(6, AppDetailAdapter.Action.SOURCE),</span>
+<span class="nc" id="L87">        SHARE(7, AppDetailAdapter.Action.SHARE),</span>
+    }
+
+<span class="nc" id="L90">    private class Installed(</span>
+<span class="nc" id="L91">        val installedItem: InstalledItem,</span>
+<span class="nc" id="L92">        val isSystem: Boolean,</span>
+<span class="nc" id="L93">        val launcherActivities: List&lt;Pair&lt;String, String&gt;&gt;,</span>
+    )
+
+<span class="nc" id="L96">    private val viewModel: AppDetailViewModel by viewModels()</span>
+
+    @SuppressLint(&quot;RestrictedApi&quot;)
+    private var layoutManagerState: LinearLayoutManager.SavedState? = null
+
+<span class="nc" id="L101">    private var actions = Pair(emptySet&lt;Action&gt;(), null as Action?)</span>
+<span class="nc" id="L102">    private var products = emptyList&lt;Pair&lt;Product, Repository&gt;&gt;()</span>
+    private var installed: Installed? = null
+    private var downloading = false
+    private var installing: InstallState? = null
+
+    private var recyclerView: RecyclerView? = null
+    private var detailAdapter: AppDetailAdapter? = null
+    private var imageViewer: StfalconImageViewer.Builder&lt;Product.Screenshot&gt;? = null
+
+<span class="nc" id="L111">    private val downloadConnection = Connection(</span>
+<span class="nc" id="L112">        serviceClass = DownloadService::class.java,</span>
+<span class="nc" id="L113">        onBind = { _, binder -&gt;</span>
+<span class="nc" id="L114">            lifecycleScope.launch {</span>
+<span class="nc" id="L115">                binder.downloadState.collect(::updateDownloadState)</span>
+            }
+<span class="nc" id="L117">        },</span>
+    )
+
+    @SuppressLint(&quot;RestrictedApi&quot;)
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+<span class="nc" id="L122">        super.onViewCreated(view, savedInstanceState)</span>
+
+<span class="nc" id="L124">        detailAdapter = AppDetailAdapter(this@AppDetailFragment)</span>
+<span class="nc" id="L125">        mainActivity.onToolbarCreated(toolbar)</span>
+<span class="nc" id="L126">        toolbar.menu.apply {</span>
+<span class="nc" id="L127">            Action.entries.forEach { action -&gt;</span>
+<span class="nc" id="L128">                add(0, action.id, 0, action.adapterAction.titleResId)</span>
+<span class="nc" id="L129">                    .setIcon(toolbar.context.getMutatedIcon(action.adapterAction.iconResId))</span>
+<span class="nc" id="L130">                    .setVisible(false)</span>
+<span class="nc" id="L131">                    .setShowAsActionFlags(MenuItem.SHOW_AS_ACTION_ALWAYS)</span>
+<span class="nc" id="L132">                    .setOnMenuItemClickListener {</span>
+<span class="nc" id="L133">                        onActionClick(action.adapterAction)</span>
+<span class="nc" id="L134">                        true</span>
+                    }
+<span class="nc" id="L136">            }</span>
+<span class="nc" id="L137">        }</span>
+
+<span class="nc" id="L139">        val content = fragmentBinding.fragmentContent</span>
+<span class="nc" id="L140">        content.addView(</span>
+<span class="nc" id="L141">            RecyclerView(content.context).apply {</span>
+<span class="nc" id="L142">                id = android.R.id.list</span>
+<span class="nc" id="L143">                this.layoutManager = LinearLayoutManager(</span>
+<span class="nc" id="L144">                    context,</span>
+<span class="nc" id="L145">                    LinearLayoutManager.VERTICAL,</span>
+<span class="nc" id="L146">                    false,</span>
+                )
+<span class="nc" id="L148">                isMotionEventSplittingEnabled = false</span>
+<span class="nc" id="L149">                isVerticalScrollBarEnabled = false</span>
+<span class="nc" id="L150">                adapter = detailAdapter</span>
+<span class="nc" id="L151">                (itemAnimator as SimpleItemAnimator).supportsChangeAnimations = false</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                if (detailAdapter != null) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                    savedInstanceState?.getParcelable&lt;AppDetailAdapter.SavedState&gt;(STATE_ADAPTER)</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                        ?.let(detailAdapter!!::restoreState)</span>
+                }
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                layoutManagerState = savedInstanceState?.getParcelable(STATE_LAYOUT_MANAGER)</span>
+<span class="nc" id="L157">                recyclerView = this</span>
+<span class="nc" id="L158">                systemBarsPadding(fabPadding = 0)</span>
+<span class="nc" id="L159">            },</span>
+        )
+<span class="nc" id="L161">        viewLifecycleOwner.lifecycleScope.launch {</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            repeatOnLifecycle(Lifecycle.State.CREATED) {</span>
+<span class="nc" id="L163">                launch {</span>
+<span class="nc bnc" id="L164" title="All 3 branches missed.">                    viewModel.state.collectLatest { state -&gt;</span>
+<span class="nc" id="L165">                        products = state.products.mapNotNull { product -&gt;</span>
+<span class="nc bnc" id="L166" title="All 6 branches missed.">                            val requiredRepo = state.repos.find { it.id == product.repositoryId }</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                            requiredRepo?.let { product to it }</span>
+                        }
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                        layoutManagerState?.let {</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                            recyclerView?.layoutManager!!.onRestoreInstanceState(it)</span>
+<span class="nc" id="L171">                        }</span>
+<span class="nc" id="L172">                        layoutManagerState = null</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                        installed = state.installedItem?.let {</span>
+<span class="nc" id="L174">                            with(requireContext().packageManager) {</span>
+<span class="nc" id="L175">                                val isSystem = isSystemApplication(viewModel.packageName)</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                                val launcherActivities = if (state.isSelf) {</span>
+<span class="nc" id="L177">                                    emptyList()</span>
+                                } else {
+<span class="nc" id="L179">                                    getLauncherActivities(viewModel.packageName)</span>
+                                }
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                                Installed(it, isSystem, launcherActivities)</span>
+<span class="nc" id="L182">                            }</span>
+                        }
+<span class="nc bnc" id="L184" title="All 4 branches missed.">                        val adapter = recyclerView?.adapter as? AppDetailAdapter</span>
+
+                        // `delay` is cancellable hence it waits for 50 milliseconds to show empty page
+<span class="nc bnc" id="L187" title="All 4 branches missed.">                        if (products.isEmpty()) delay(50)</span>
+
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                        adapter?.setProducts(</span>
+<span class="nc" id="L190">                            context = requireContext(),</span>
+<span class="nc" id="L191">                            packageName = viewModel.packageName,</span>
+<span class="nc" id="L192">                            suggestedRepo = state.addressIfUnavailable,</span>
+<span class="nc" id="L193">                            products = products,</span>
+<span class="nc" id="L194">                            rblogs = state.rblogs,</span>
+<span class="nc" id="L195">                            downloads = state.downloads,</span>
+<span class="nc" id="L196">                            installedItem = state.installedItem,</span>
+<span class="nc" id="L197">                            isFavourite = state.isFavourite,</span>
+<span class="nc" id="L198">                            allowIncompatibleVersion = state.allowIncompatibleVersions,</span>
+                        )
+<span class="nc" id="L200">                        updateButtons()</span>
+<span class="nc" id="L201">                    }</span>
+<span class="nc" id="L202">                }</span>
+<span class="nc" id="L203">                launch {</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                    viewModel.customButtons.collectLatest { buttons -&gt;</span>
+<span class="nc bnc" id="L205" title="All 6 branches missed.">                        (recyclerView?.adapter as? AppDetailAdapter)?.setCustomButtons(buttons)</span>
+<span class="nc" id="L206">                    }</span>
+<span class="nc" id="L207">                }</span>
+<span class="nc" id="L208">                launch {</span>
+<span class="nc" id="L209">                    viewModel.installerState.collect(::updateInstallState)</span>
+                }
+<span class="nc" id="L211">                launch {</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">                    recyclerView?.isFirstItemVisible?.collect(::updateToolbarButtons)</span>
+<span class="nc" id="L213">                }</span>
+<span class="nc" id="L214">            }</span>
+<span class="nc" id="L215">        }</span>
+
+<span class="nc" id="L217">        downloadConnection.bind(requireContext())</span>
+<span class="nc" id="L218">    }</span>
+
+    override fun onDestroyView() {
+<span class="nc" id="L221">        super.onDestroyView()</span>
+<span class="nc" id="L222">        recyclerView = null</span>
+<span class="nc" id="L223">        detailAdapter = null</span>
+<span class="nc" id="L224">        imageViewer = null</span>
+
+<span class="nc" id="L226">        downloadConnection.unbind(requireContext())</span>
+<span class="nc" id="L227">    }</span>
+
+    @SuppressLint(&quot;RestrictedApi&quot;)
+    override fun onSaveInstanceState(outState: Bundle) {
+<span class="nc" id="L231">        super.onSaveInstanceState(outState)</span>
+
+<span class="nc" id="L233">        val layoutManagerState =</span>
+<span class="nc bnc" id="L234" title="All 6 branches missed.">            layoutManagerState ?: recyclerView?.layoutManager?.onSaveInstanceState()</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        layoutManagerState?.let { outState.putParcelable(STATE_LAYOUT_MANAGER, it) }</span>
+<span class="nc bnc" id="L236" title="All 6 branches missed.">        val adapterState = (recyclerView?.adapter as? AppDetailAdapter)?.saveState()</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        adapterState?.let { outState.putParcelable(STATE_ADAPTER, it) }</span>
+<span class="nc" id="L238">    }</span>
+
+<span class="nc" id="L240">    private fun updateButtons(</span>
+<span class="nc" id="L241">        preference: ProductPreference = ProductPreferences[viewModel.packageName],</span>
+    ) {
+<span class="nc" id="L243">        val installed = installed</span>
+<span class="nc bnc" id="L244" title="All 4 branches missed.">        val product = products.findSuggested(installed?.installedItem)?.first</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        val compatible = product != null &amp;&amp; product.selectedReleases.firstOrNull()</span>
+<span class="nc bnc" id="L246" title="All 6 branches missed.">            .let { it != null &amp;&amp; it.incompatibilities.isEmpty() }</span>
+<span class="nc bnc" id="L247" title="All 6 branches missed.">        val canInstall = product != null &amp;&amp; installed == null &amp;&amp; compatible</span>
+<span class="nc" id="L248">        val canUpdate =</span>
+<span class="nc bnc" id="L249" title="All 8 branches missed.">            product != null &amp;&amp; compatible &amp;&amp; product.canUpdate(installed?.installedItem) &amp;&amp;</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">                !preference.shouldIgnoreUpdate(product.versionCode)</span>
+<span class="nc bnc" id="L251" title="All 6 branches missed.">        val canUninstall = product != null &amp;&amp; installed != null &amp;&amp; !installed.isSystem</span>
+<span class="nc" id="L252">        val canLaunch =</span>
+<span class="nc bnc" id="L253" title="All 8 branches missed.">            product != null &amp;&amp; installed != null &amp;&amp; installed.launcherActivities.isNotEmpty()</span>
+
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        val incompatibilityReason = if (product != null) {</span>
+<span class="nc" id="L256">            val selectedRelease = product.selectedReleases.firstOrNull()</span>
+<span class="nc bnc" id="L257" title="All 4 branches missed.">            val incompatibility = selectedRelease?.incompatibilities?.firstOrNull()</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            val installedItem = installed?.installedItem</span>
+
+<span class="nc" id="L260">            when {</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                incompatibility != null -&gt; {</span>
+<span class="nc" id="L262">                    when (incompatibility) {</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                        is Release.Incompatibility.MinSdk,</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                        is Release.Incompatibility.MaxSdk,</span>
+<span class="nc" id="L265">                            -&gt; getString(</span>
+<span class="nc" id="L266">                            stringRes.incompatible_with_FORMAT,</span>
+<span class="nc" id="L267">                            name,</span>
+                        )
+
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                        is Release.Incompatibility.Platform -&gt; getString(</span>
+<span class="nc" id="L271">                            stringRes.incompatible_with_FORMAT,</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                            primaryPlatform ?: getString(stringRes.unknown),</span>
+                        )
+
+<span class="nc" id="L275">                        is Release.Incompatibility.Feature -&gt; getString(</span>
+<span class="nc" id="L276">                            stringRes.requires_FORMAT,</span>
+<span class="nc" id="L277">                            incompatibility.feature,</span>
+                        )
+                    }
+                }
+
+<span class="nc bnc" id="L282" title="All 6 branches missed.">                installedItem != null &amp;&amp; selectedRelease != null &amp;&amp; installedItem.signature != selectedRelease.signature -&gt; {</span>
+<span class="nc" id="L283">                    getString(stringRes.incompatible_signature_DESC)</span>
+                }
+
+<span class="nc" id="L286">                else -&gt; null</span>
+            }
+        } else {
+<span class="nc" id="L289">            null</span>
+        }
+
+<span class="nc bnc" id="L292" title="All 6 branches missed.">        (recyclerView?.adapter as? AppDetailAdapter)?.incompatibilityReason = incompatibilityReason</span>
+
+<span class="nc" id="L294">        val actions = buildSet {</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            if (canInstall) add(Action.INSTALL)</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (canUpdate) add(Action.UPDATE)</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">            if (canLaunch) add(Action.LAUNCH)</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (installed != null) add(Action.DETAILS)</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">            if (canUninstall) add(Action.UNINSTALL)</span>
+<span class="nc" id="L300">            add(Action.SHARE)</span>
+<span class="nc" id="L301">            add(Action.SOURCE)</span>
+<span class="nc" id="L302">        }</span>
+
+<span class="nc" id="L304">        val primaryAction = when {</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">            canUpdate -&gt; Action.UPDATE</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            canLaunch -&gt; Action.LAUNCH</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">            canInstall -&gt; Action.INSTALL</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            installed != null -&gt; Action.DETAILS</span>
+<span class="nc" id="L309">            else -&gt; Action.SHARE</span>
+        }
+
+<span class="nc" id="L312">        val adapterAction = when {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            installing == InstallState.Installing -&gt; null</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">            installing == InstallState.Pending -&gt; AppDetailAdapter.Action.CANCEL</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">            downloading -&gt; AppDetailAdapter.Action.CANCEL</span>
+<span class="nc" id="L316">            else -&gt; primaryAction.adapterAction</span>
+        }
+
+<span class="nc bnc" id="L319" title="All 6 branches missed.">        (recyclerView?.adapter as? AppDetailAdapter)?.action = adapterAction</span>
+
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        for (action in sequenceOf(</span>
+<span class="nc" id="L322">            Action.INSTALL,</span>
+<span class="nc" id="L323">            Action.UPDATE,</span>
+        )) {
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            toolbar.menu.findItem(action.id).isEnabled = !downloading</span>
+        }
+<span class="nc" id="L327">        this.actions = Pair(actions, primaryAction)</span>
+<span class="nc" id="L328">        updateToolbarButtons()</span>
+<span class="nc" id="L329">    }</span>
+
+<span class="nc" id="L331">    private fun updateToolbarButtons(</span>
+<span class="nc bnc" id="L332" title="All 4 branches missed.">        isActionVisible: Boolean = (recyclerView?.layoutManager as LinearLayoutManager)</span>
+<span class="nc" id="L333">            .findFirstVisibleItemPosition() == 0,</span>
+    ) {
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        toolbar.title = if (isActionVisible) {</span>
+<span class="nc" id="L336">            getString(stringRes.application)</span>
+        } else {
+<span class="nc bnc" id="L338" title="All 6 branches missed.">            products.firstOrNull()?.first?.name ?: getString(stringRes.application)</span>
+        }
+<span class="nc" id="L340">        val (actions, primaryAction) = actions</span>
+<span class="nc" id="L341">        val displayActions = actions.updateAsMutable {</span>
+<span class="nc bnc" id="L342" title="All 4 branches missed.">            if (isActionVisible &amp;&amp; primaryAction != null) {</span>
+<span class="nc" id="L343">                remove(primaryAction)</span>
+            }
+<span class="nc bnc" id="L345" title="All 4 branches missed.">            if (size &gt;= 4 &amp;&amp; resources.configuration.screenWidthDp &lt; 400) {</span>
+<span class="nc" id="L346">                remove(Action.DETAILS)</span>
+            }
+<span class="nc" id="L348">        }</span>
+<span class="nc" id="L349">        Action.entries.forEach { action -&gt;</span>
+<span class="nc" id="L350">            toolbar.menu.findItem(action.id).isVisible = action in displayActions</span>
+<span class="nc" id="L351">        }</span>
+<span class="nc" id="L352">    }</span>
+
+    private fun updateInstallState(installerState: InstallState?) {
+<span class="nc bnc" id="L355" title="All 3 branches missed.">        val status = when (installerState) {</span>
+<span class="nc" id="L356">            InstallState.Pending -&gt; AppDetailAdapter.Status.PendingInstall</span>
+<span class="nc" id="L357">            InstallState.Installing -&gt; AppDetailAdapter.Status.Installing</span>
+<span class="nc" id="L358">            else -&gt; AppDetailAdapter.Status.Idle</span>
+        }
+<span class="nc bnc" id="L360" title="All 6 branches missed.">        (recyclerView?.adapter as? AppDetailAdapter)?.status = status</span>
+<span class="nc" id="L361">        installing = installerState</span>
+<span class="nc" id="L362">        updateButtons()</span>
+<span class="nc" id="L363">    }</span>
+
+    private fun updateDownloadState(state: DownloadService.DownloadState) {
+<span class="nc" id="L366">        val packageName = viewModel.packageName</span>
+<span class="nc" id="L367">        val isPending = packageName in state.queue</span>
+<span class="nc" id="L368">        val isDownloading = state isDownloading packageName</span>
+<span class="nc" id="L369">        val isCompleted = state isComplete packageName</span>
+<span class="nc bnc" id="L370" title="All 4 branches missed.">        val isActive = isPending || isDownloading</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">        if (isPending) {</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            detailAdapter?.status = AppDetailAdapter.Status.Pending</span>
+        }
+<span class="nc bnc" id="L374" title="All 2 branches missed.">        if (isDownloading) {</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">            detailAdapter?.status = when (state.currentItem) {</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                is DownloadService.State.Connecting -&gt; AppDetailAdapter.Status.Connecting</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">                is DownloadService.State.Downloading -&gt; AppDetailAdapter.Status.Downloading(</span>
+<span class="nc" id="L378">                    state.currentItem.read,</span>
+<span class="nc" id="L379">                    state.currentItem.total,</span>
+                )
+
+<span class="nc" id="L382">                else -&gt; AppDetailAdapter.Status.Idle</span>
+            }
+        }
+<span class="nc bnc" id="L385" title="All 2 branches missed.">        if (isCompleted) {</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            detailAdapter?.status = AppDetailAdapter.Status.Idle</span>
+        }
+<span class="nc bnc" id="L388" title="All 2 branches missed.">        if (this.downloading != isActive) {</span>
+<span class="nc" id="L389">            this.downloading = isActive</span>
+<span class="nc" id="L390">            updateButtons()</span>
+        }
+<span class="nc bnc" id="L392" title="All 4 branches missed.">        if (state.currentItem is DownloadService.State.Success &amp;&amp; isResumed) {</span>
+<span class="nc" id="L393">            viewModel.installPackage(</span>
+<span class="nc" id="L394">                state.currentItem.packageName,</span>
+<span class="nc" id="L395">                state.currentItem.release.cacheFileName,</span>
+            )
+        }
+<span class="nc" id="L398">    }</span>
+
+    override fun onActionClick(action: AppDetailAdapter.Action) {
+<span class="nc bnc" id="L401" title="All 7 branches missed.">        when (action) {</span>
+            AppDetailAdapter.Action.INSTALL,
+            AppDetailAdapter.Action.UPDATE,
+                -&gt; {
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                if (Cache.getEmptySpace(requireContext()) &lt; products.first().first.releases.first().size) {</span>
+<span class="nc" id="L406">                    MessageDialog(Message.InsufficientStorage).show(childFragmentManager)</span>
+<span class="nc" id="L407">                    return</span>
+                }
+<span class="nc" id="L409">                val shizukuState = viewModel.shizukuState(requireContext())</span>
+<span class="nc bnc" id="L410" title="All 4 branches missed.">                if (shizukuState != null &amp;&amp; shizukuState.check) {</span>
+<span class="nc" id="L411">                    shizukuDialog(</span>
+<span class="nc" id="L412">                        context = requireContext(),</span>
+<span class="nc" id="L413">                        shizukuState = shizukuState,</span>
+<span class="nc" id="L414">                        openShizuku = { launchShizuku(requireContext()) },</span>
+<span class="nc" id="L415">                        switchInstaller = { viewModel.setDefaultInstaller() },</span>
+<span class="nc" id="L416">                    ).show()</span>
+<span class="nc" id="L417">                    return</span>
+                }
+<span class="nc" id="L419">                downloadConnection.startUpdate(</span>
+<span class="nc" id="L420">                    packageName = viewModel.packageName,</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">                    installedItem = installed?.installedItem,</span>
+<span class="nc" id="L422">                    products = products,</span>
+                )
+            }
+
+            AppDetailAdapter.Action.LAUNCH -&gt; {
+<span class="nc bnc" id="L427" title="All 4 branches missed.">                val launcherActivities = installed?.launcherActivities.orEmpty()</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">                if (launcherActivities.size &gt;= 2) {</span>
+<span class="nc" id="L429">                    LaunchDialog(launcherActivities).show(</span>
+<span class="nc" id="L430">                        childFragmentManager,</span>
+<span class="nc" id="L431">                        LaunchDialog::class.java.name,</span>
+                    )
+                } else {
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                    launcherActivities.firstOrNull()?.let { startLauncherActivity(it.first) }</span>
+                }
+            }
+
+            AppDetailAdapter.Action.DETAILS -&gt; {
+<span class="nc" id="L439">                startActivity(</span>
+<span class="nc" id="L440">                    Intent(</span>
+<span class="nc" id="L441">                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,</span>
+<span class="nc" id="L442">                        &quot;package:${viewModel.packageName}&quot;.toUri(),</span>
+                    ),
+                )
+            }
+
+<span class="nc" id="L447">            AppDetailAdapter.Action.UNINSTALL -&gt; viewModel.uninstallPackage()</span>
+
+            AppDetailAdapter.Action.CANCEL -&gt; {
+<span class="nc" id="L450">                val binder = downloadConnection.binder</span>
+<span class="nc bnc" id="L451" title="All 6 branches missed.">                if (installing?.isCancellable == true) {</span>
+<span class="nc" id="L452">                    viewModel.removeQueue()</span>
+<span class="nc bnc" id="L453" title="All 4 branches missed.">                } else if (downloading &amp;&amp; binder != null) {</span>
+<span class="nc" id="L454">                    binder.cancel(viewModel.packageName)</span>
+                }
+            }
+
+            AppDetailAdapter.Action.SHARE -&gt; {
+<span class="nc" id="L459">                val repo = products[0].second</span>
+<span class="nc" id="L460">                val address = when {</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">                    &quot;https://f-droid.org/repo&quot; in repo.mirrors -&gt;</span>
+<span class="nc" id="L462">                        &quot;https://f-droid.org/packages/${viewModel.packageName}/&quot;</span>
+
+<span class="nc bnc" id="L464" title="All 2 branches missed.">                    &quot;https://f-droid.org/archive/repo&quot; in repo.mirrors -&gt;</span>
+<span class="nc" id="L465">                        &quot;https://f-droid.org/packages/${viewModel.packageName}/&quot;</span>
+
+<span class="nc bnc" id="L467" title="All 2 branches missed.">                    &quot;https://apt.izzysoft.de/fdroid/repo&quot; in repo.mirrors -&gt;</span>
+<span class="nc" id="L468">                        &quot;https://apt.izzysoft.de/fdroid/index/apk/${viewModel.packageName}&quot;</span>
+
+<span class="nc" id="L470">                    else -&gt; shareUrl(viewModel.packageName, repo.address)</span>
+                }
+<span class="nc" id="L472">                val sendIntent = Intent(Intent.ACTION_SEND)</span>
+<span class="nc" id="L473">                    .putExtra(Intent.EXTRA_TEXT, address)</span>
+<span class="nc" id="L474">                    .setType(&quot;text/plain&quot;)</span>
+<span class="nc" id="L475">                startActivity(Intent.createChooser(sendIntent, null))</span>
+            }
+
+            AppDetailAdapter.Action.SOURCE -&gt; {
+<span class="nc" id="L479">                val link = products[0].first.source</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">                context?.openLink(link)</span>
+            }
+        }
+<span class="nc" id="L483">    }</span>
+
+    override fun onFavouriteClicked() {
+<span class="nc" id="L486">        viewModel.setFavouriteState()</span>
+<span class="nc" id="L487">    }</span>
+
+    override fun onCustomButtonClick(url: String) {
+<span class="nc bnc" id="L490" title="All 2 branches missed.">        context?.openLink(url)</span>
+<span class="nc" id="L491">    }</span>
+
+    private fun startLauncherActivity(name: String) {
+<span class="nc" id="L494">        try {</span>
+<span class="nc" id="L495">            startActivity(</span>
+<span class="nc" id="L496">                Intent(Intent.ACTION_MAIN)</span>
+<span class="nc" id="L497">                    .addCategory(Intent.CATEGORY_LAUNCHER)</span>
+<span class="nc" id="L498">                    .setComponent(ComponentName(viewModel.packageName, name))</span>
+<span class="nc" id="L499">                    .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK),</span>
+            )
+<span class="nc" id="L501">        } catch (e: Exception) {</span>
+<span class="nc" id="L502">            e.printStackTrace()</span>
+        }
+<span class="nc" id="L504">    }</span>
+
+    override fun onPreferenceChanged(preference: ProductPreference) {
+<span class="nc" id="L507">        updateButtons(preference)</span>
+<span class="nc" id="L508">    }</span>
+
+    override fun onPermissionsClick(group: String?, permissions: List&lt;String&gt;) {
+<span class="nc" id="L511">        MessageDialog(Message.Permissions(group, permissions))</span>
+<span class="nc" id="L512">            .show(childFragmentManager)</span>
+<span class="nc" id="L513">    }</span>
+
+    override fun onScreenshotClick(position: Int) {
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        if (imageViewer == null) {</span>
+<span class="nc bnc" id="L517" title="All 4 branches missed.">            val productRepository = products.findSuggested(installed?.installedItem) ?: return</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">            val isRTL = requireContext().resources.configuration.layoutDirection ==</span>
+<span class="nc" id="L519">                View.LAYOUT_DIRECTION_RTL</span>
+<span class="nc" id="L520">            val screenshots = productRepository.first.screenshots</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">                .filterNot { it.type == Product.Screenshot.Type.VIDEO }</span>
+<span class="nc bnc" id="L522" title="All 2 branches missed.">                .run { if (isRTL) reversed() else this }</span>
+<span class="nc" id="L523">            imageViewer = StfalconImageViewer</span>
+<span class="nc" id="L524">                .Builder(context, screenshots) { view, current -&gt;</span>
+<span class="nc" id="L525">                    val screenshotUrl = current.url(</span>
+<span class="nc" id="L526">                        context = requireContext(),</span>
+<span class="nc" id="L527">                        repository = productRepository.second,</span>
+<span class="nc" id="L528">                        packageName = viewModel.packageName,</span>
+                    )
+<span class="nc" id="L530">                    view.load(screenshotUrl) {</span>
+<span class="nc" id="L531">                        allowHardware(false)</span>
+<span class="nc" id="L532">                    }</span>
+<span class="nc" id="L533">                }</span>
+        }
+<span class="nc bnc" id="L535" title="All 2 branches missed.">        imageViewer?.withStartPosition(position)</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        imageViewer?.show()</span>
+<span class="nc" id="L537">    }</span>
+
+    override fun onReleaseClick(release: Release) {
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        val installedItem = installed?.installedItem</span>
+<span class="nc" id="L541">        when {</span>
+<span class="nc bnc" id="L542" title="All 4 branches missed.">            release.incompatibilities.isNotEmpty() -&gt; {</span>
+<span class="nc" id="L543">                MessageDialog(</span>
+<span class="nc" id="L544">                    Message.ReleaseIncompatible(</span>
+<span class="nc" id="L545">                        release.incompatibilities,</span>
+<span class="nc" id="L546">                        release.platforms,</span>
+<span class="nc" id="L547">                        release.minSdkVersion,</span>
+<span class="nc" id="L548">                        release.maxSdkVersion,</span>
+                    ),
+<span class="nc" id="L550">                ).show(childFragmentManager)</span>
+            }
+
+<span class="nc bnc" id="L553" title="All 2 branches missed.">            Cache.getEmptySpace(requireContext()) &lt; release.size -&gt; {</span>
+<span class="nc" id="L554">                MessageDialog(Message.InsufficientStorage).show(childFragmentManager)</span>
+            }
+
+<span class="nc bnc" id="L557" title="All 4 branches missed.">            installedItem != null &amp;&amp; installedItem.versionCode &gt; release.versionCode -&gt; {</span>
+<span class="nc" id="L558">                MessageDialog(Message.ReleaseOlder).show(childFragmentManager)</span>
+            }
+
+<span class="nc bnc" id="L561" title="All 4 branches missed.">            installedItem != null &amp;&amp; installedItem.signature != release.signature -&gt; {</span>
+<span class="nc" id="L562">                lifecycleScope.launch {</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">                    if (viewModel.shouldIgnoreSignature()) {</span>
+<span class="nc" id="L564">                        queueReleaseInstall(release, installedItem)</span>
+                    } else {
+<span class="nc" id="L566">                        MessageDialog(Message.ReleaseSignatureMismatch).show(childFragmentManager)</span>
+                    }
+<span class="nc" id="L568">                }</span>
+            }
+
+            else -&gt; {
+<span class="nc" id="L572">                queueReleaseInstall(release, installedItem)</span>
+            }
+        }
+<span class="nc" id="L575">    }</span>
+
+    private fun queueReleaseInstall(release: Release, installedItem: InstalledItem?) {
+<span class="nc" id="L578">        val productRepository = products.firstOrNull { (product, _) -&gt;</span>
+<span class="nc" id="L579">            product.releases.any { it == release }</span>
+        }
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        if (productRepository != null) {</span>
+<span class="nc bnc" id="L582" title="All 2 branches missed.">            downloadConnection.binder?.enqueue(</span>
+<span class="nc" id="L583">                viewModel.packageName,</span>
+<span class="nc" id="L584">                productRepository.first.name,</span>
+<span class="nc" id="L585">                productRepository.second,</span>
+<span class="nc" id="L586">                release,</span>
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                installedItem != null,</span>
+            )
+        }
+<span class="nc" id="L590">    }</span>
+
+    override fun onRequestAddRepository(address: String) {
+<span class="nc" id="L593">        mainActivity.navigateAddRepository(address)</span>
+<span class="nc" id="L594">    }</span>
+
+    override fun onUriClick(uri: Uri, shouldConfirm: Boolean): Boolean {
+<span class="nc bnc" id="L597" title="All 6 branches missed.">        return if (shouldConfirm &amp;&amp; (uri.scheme == &quot;http&quot; || uri.scheme == &quot;https&quot;)) {</span>
+<span class="nc" id="L598">            MessageDialog(Message.Link(uri)).show(childFragmentManager)</span>
+<span class="nc" id="L599">            true</span>
+        } else {
+<span class="nc" id="L601">            try {</span>
+<span class="nc" id="L602">                startActivity(Intent(Intent.ACTION_VIEW, uri))</span>
+<span class="nc" id="L603">                true</span>
+<span class="nc" id="L604">            } catch (e: ActivityNotFoundException) {</span>
+<span class="nc" id="L605">                e.printStackTrace()</span>
+<span class="nc" id="L606">                false</span>
+            }
+        }
+    }
+
+<span class="nc" id="L611">    class LaunchDialog() : DialogFragment() {</span>
+        companion object {
+            private const val EXTRA_NAMES = &quot;names&quot;
+            private const val EXTRA_LABELS = &quot;labels&quot;
+        }
+
+<span class="nc" id="L617">        constructor(launcherActivities: List&lt;Pair&lt;String, String&gt;&gt;) : this() {</span>
+<span class="nc" id="L618">            arguments = Bundle().apply {</span>
+<span class="nc" id="L619">                putStringArrayList(EXTRA_NAMES, ArrayList(launcherActivities.map { it.first }))</span>
+<span class="nc" id="L620">                putStringArrayList(EXTRA_LABELS, ArrayList(launcherActivities.map { it.second }))</span>
+<span class="nc" id="L621">            }</span>
+<span class="nc" id="L622">        }</span>
+
+        override fun onCreateDialog(savedInstanceState: Bundle?): AlertDialog {
+<span class="nc" id="L625">            val names = requireArguments().getStringArrayList(EXTRA_NAMES)!!</span>
+<span class="nc" id="L626">            val labels = requireArguments().getStringArrayList(EXTRA_LABELS)!!</span>
+<span class="nc" id="L627">            return MaterialAlertDialogBuilder(requireContext())</span>
+<span class="nc" id="L628">                .setTitle(stringRes.launch)</span>
+<span class="nc" id="L629">                .setItems(labels.toTypedArray()) { _, position -&gt;</span>
+<span class="nc" id="L630">                    (parentFragment as AppDetailFragment)</span>
+<span class="nc" id="L631">                        .startLauncherActivity(names[position])</span>
+<span class="nc" id="L632">                }</span>
+<span class="nc" id="L633">                .setNegativeButton(stringRes.cancel, null)</span>
+<span class="nc" id="L634">                .create()</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

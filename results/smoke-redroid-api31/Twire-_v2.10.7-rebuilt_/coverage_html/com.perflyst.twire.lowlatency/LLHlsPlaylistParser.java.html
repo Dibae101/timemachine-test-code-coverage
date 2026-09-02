@@ -1,0 +1,1343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LLHlsPlaylistParser.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Twire</a> &gt; <a href="index.source.html" class="el_package">com.perflyst.twire.lowlatency</a> &gt; <span class="el_source">LLHlsPlaylistParser.java</span></div><h1>LLHlsPlaylistParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2016 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.perflyst.twire.lowlatency;
+
+import static com.google.android.exoplayer2.util.Assertions.checkNotNull;
+import static com.google.android.exoplayer2.util.Assertions.checkState;
+import static com.google.android.exoplayer2.util.Util.castNonNull;
+
+import android.net.Uri;
+import android.text.TextUtils;
+import android.util.Base64;
+
+import androidx.annotation.Nullable;
+
+import com.google.android.exoplayer2.C;
+import com.google.android.exoplayer2.Format;
+import com.google.android.exoplayer2.ParserException;
+import com.google.android.exoplayer2.drm.DrmInitData;
+import com.google.android.exoplayer2.drm.DrmInitData.SchemeData;
+import com.google.android.exoplayer2.extractor.mp4.PsshAtomUtil;
+import com.google.android.exoplayer2.metadata.Metadata;
+import com.google.android.exoplayer2.source.hls.HlsTrackMetadataEntry;
+import com.google.android.exoplayer2.source.hls.HlsTrackMetadataEntry.VariantInfo;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMediaPlaylist;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMediaPlaylist.Part;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMediaPlaylist.RenditionReport;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMediaPlaylist.Segment;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMultivariantPlaylist;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMultivariantPlaylist.Rendition;
+import com.google.android.exoplayer2.source.hls.playlist.HlsMultivariantPlaylist.Variant;
+import com.google.android.exoplayer2.source.hls.playlist.HlsPlaylist;
+import com.google.android.exoplayer2.upstream.ParsingLoadable;
+import com.google.android.exoplayer2.util.Assertions;
+import com.google.android.exoplayer2.util.Log;
+import com.google.android.exoplayer2.util.MimeTypes;
+import com.google.android.exoplayer2.util.UriUtil;
+import com.google.android.exoplayer2.util.Util;
+import com.google.common.collect.Iterables;
+
+import org.checkerframework.checker.nullness.qual.EnsuresNonNullIf;
+import org.checkerframework.checker.nullness.qual.PolyNull;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.math.BigDecimal;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Queue;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** HLS playlists parsing logic. */
+public final class LLHlsPlaylistParser implements ParsingLoadable.Parser&lt;HlsPlaylist&gt; {
+
+    /** Exception thrown when merging a delta update fails. */
+<span class="nc" id="L78">    public static final class DeltaUpdateException extends IOException {}</span>
+
+    private static final String LOG_TAG = &quot;HlsPlaylistParser&quot;;
+
+    private static final String PLAYLIST_HEADER = &quot;#EXTM3U&quot;;
+
+    private static final String TAG_PREFIX = &quot;#EXT&quot;;
+
+    private static final String TAG_VERSION = &quot;#EXT-X-VERSION&quot;;
+    private static final String TAG_PLAYLIST_TYPE = &quot;#EXT-X-PLAYLIST-TYPE&quot;;
+    private static final String TAG_DEFINE = &quot;#EXT-X-DEFINE&quot;;
+    private static final String TAG_SERVER_CONTROL = &quot;#EXT-X-SERVER-CONTROL&quot;;
+    private static final String TAG_STREAM_INF = &quot;#EXT-X-STREAM-INF&quot;;
+    private static final String TAG_PART_INF = &quot;#EXT-X-PART-INF&quot;;
+    private static final String TAG_PART = &quot;#EXT-X-PART&quot;;
+    private static final String TAG_I_FRAME_STREAM_INF = &quot;#EXT-X-I-FRAME-STREAM-INF&quot;;
+    private static final String TAG_IFRAME = &quot;#EXT-X-I-FRAMES-ONLY&quot;;
+    private static final String TAG_MEDIA = &quot;#EXT-X-MEDIA&quot;;
+    private static final String TAG_TARGET_DURATION = &quot;#EXT-X-TARGETDURATION&quot;;
+    private static final String TAG_DISCONTINUITY = &quot;#EXT-X-DISCONTINUITY&quot;;
+    private static final String TAG_DISCONTINUITY_SEQUENCE = &quot;#EXT-X-DISCONTINUITY-SEQUENCE&quot;;
+    private static final String TAG_PROGRAM_DATE_TIME = &quot;#EXT-X-PROGRAM-DATE-TIME&quot;;
+    private static final String TAG_INIT_SEGMENT = &quot;#EXT-X-MAP&quot;;
+    private static final String TAG_INDEPENDENT_SEGMENTS = &quot;#EXT-X-INDEPENDENT-SEGMENTS&quot;;
+    private static final String TAG_MEDIA_DURATION = &quot;#EXTINF&quot;;
+    private static final String TAG_MEDIA_SEQUENCE = &quot;#EXT-X-MEDIA-SEQUENCE&quot;;
+    private static final String TAG_START = &quot;#EXT-X-START&quot;;
+    private static final String TAG_ENDLIST = &quot;#EXT-X-ENDLIST&quot;;
+    private static final String TAG_KEY = &quot;#EXT-X-KEY&quot;;
+    private static final String TAG_SESSION_KEY = &quot;#EXT-X-SESSION-KEY&quot;;
+    private static final String TAG_BYTERANGE = &quot;#EXT-X-BYTERANGE&quot;;
+    private static final String TAG_GAP = &quot;#EXT-X-GAP&quot;;
+    private static final String TAG_PREFETCH = &quot;#EXT-X-TWITCH-PREFETCH&quot;;
+    private static final String TAG_SKIP = &quot;#EXT-X-SKIP&quot;;
+    private static final String TAG_PRELOAD_HINT = &quot;#EXT-X-PRELOAD-HINT&quot;;
+    private static final String TAG_RENDITION_REPORT = &quot;#EXT-X-RENDITION-REPORT&quot;;
+
+    private static final String TYPE_AUDIO = &quot;AUDIO&quot;;
+    private static final String TYPE_VIDEO = &quot;VIDEO&quot;;
+    private static final String TYPE_SUBTITLES = &quot;SUBTITLES&quot;;
+    private static final String TYPE_CLOSED_CAPTIONS = &quot;CLOSED-CAPTIONS&quot;;
+    private static final String TYPE_PART = &quot;PART&quot;;
+    private static final String TYPE_MAP = &quot;MAP&quot;;
+
+    private static final String METHOD_NONE = &quot;NONE&quot;;
+    private static final String METHOD_AES_128 = &quot;AES-128&quot;;
+    private static final String METHOD_SAMPLE_AES = &quot;SAMPLE-AES&quot;;
+    // Replaced by METHOD_SAMPLE_AES_CTR. Keep for backward compatibility.
+    private static final String METHOD_SAMPLE_AES_CENC = &quot;SAMPLE-AES-CENC&quot;;
+    private static final String METHOD_SAMPLE_AES_CTR = &quot;SAMPLE-AES-CTR&quot;;
+    private static final String KEYFORMAT_PLAYREADY = &quot;com.microsoft.playready&quot;;
+    private static final String KEYFORMAT_IDENTITY = &quot;identity&quot;;
+    private static final String KEYFORMAT_WIDEVINE_PSSH_BINARY =
+            &quot;urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed&quot;;
+    private static final String KEYFORMAT_WIDEVINE_PSSH_JSON = &quot;com.widevine&quot;;
+
+    private static final String BOOLEAN_TRUE = &quot;YES&quot;;
+    private static final String BOOLEAN_FALSE = &quot;NO&quot;;
+
+    private static final String ATTR_CLOSED_CAPTIONS_NONE = &quot;CLOSED-CAPTIONS=NONE&quot;;
+
+<span class="nc" id="L139">    private static final Pattern REGEX_AVERAGE_BANDWIDTH =</span>
+<span class="nc" id="L140">            Pattern.compile(&quot;AVERAGE-BANDWIDTH=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L141">    private static final Pattern REGEX_VIDEO = Pattern.compile(&quot;VIDEO=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L142">    private static final Pattern REGEX_AUDIO = Pattern.compile(&quot;AUDIO=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L143">    private static final Pattern REGEX_SUBTITLES = Pattern.compile(&quot;SUBTITLES=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L144">    private static final Pattern REGEX_CLOSED_CAPTIONS = Pattern.compile(&quot;CLOSED-CAPTIONS=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L145">    private static final Pattern REGEX_BANDWIDTH = Pattern.compile(&quot;[^-]BANDWIDTH=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L146">    private static final Pattern REGEX_CHANNELS = Pattern.compile(&quot;CHANNELS=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L147">    private static final Pattern REGEX_CODECS = Pattern.compile(&quot;CODECS=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L148">    private static final Pattern REGEX_RESOLUTION = Pattern.compile(&quot;RESOLUTION=(\\d+x\\d+)&quot;);</span>
+<span class="nc" id="L149">    private static final Pattern REGEX_FRAME_RATE = Pattern.compile(&quot;FRAME-RATE=([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L150">    private static final Pattern REGEX_TARGET_DURATION =</span>
+<span class="nc" id="L151">            Pattern.compile(TAG_TARGET_DURATION + &quot;:(\\d+)\\b&quot;);</span>
+<span class="nc" id="L152">    private static final Pattern REGEX_ATTR_DURATION = Pattern.compile(&quot;DURATION=([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L153">    private static final Pattern REGEX_PART_TARGET_DURATION =</span>
+<span class="nc" id="L154">            Pattern.compile(&quot;PART-TARGET=([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L155">    private static final Pattern REGEX_VERSION = Pattern.compile(TAG_VERSION + &quot;:(\\d+)\\b&quot;);</span>
+<span class="nc" id="L156">    private static final Pattern REGEX_PLAYLIST_TYPE =</span>
+<span class="nc" id="L157">            Pattern.compile(TAG_PLAYLIST_TYPE + &quot;:(.+)\\b&quot;);</span>
+<span class="nc" id="L158">    private static final Pattern REGEX_CAN_SKIP_UNTIL =</span>
+<span class="nc" id="L159">            Pattern.compile(&quot;CAN-SKIP-UNTIL=([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L160">    private static final Pattern REGEX_CAN_SKIP_DATE_RANGES =</span>
+<span class="nc" id="L161">            compileBooleanAttrPattern(&quot;CAN-SKIP-DATERANGES&quot;);</span>
+<span class="nc" id="L162">    private static final Pattern REGEX_SKIPPED_SEGMENTS =</span>
+<span class="nc" id="L163">            Pattern.compile(&quot;SKIPPED-SEGMENTS=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L164">    private static final Pattern REGEX_HOLD_BACK = Pattern.compile(&quot;[:|,]HOLD-BACK=([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L165">    private static final Pattern REGEX_PART_HOLD_BACK =</span>
+<span class="nc" id="L166">            Pattern.compile(&quot;PART-HOLD-BACK=([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L167">    private static final Pattern REGEX_CAN_BLOCK_RELOAD =</span>
+<span class="nc" id="L168">            compileBooleanAttrPattern(&quot;CAN-BLOCK-RELOAD&quot;);</span>
+<span class="nc" id="L169">    private static final Pattern REGEX_MEDIA_SEQUENCE =</span>
+<span class="nc" id="L170">            Pattern.compile(TAG_MEDIA_SEQUENCE + &quot;:(\\d+)\\b&quot;);</span>
+<span class="nc" id="L171">    private static final Pattern REGEX_MEDIA_DURATION =</span>
+<span class="nc" id="L172">            Pattern.compile(TAG_MEDIA_DURATION + &quot;:([\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L173">    private static final Pattern REGEX_MEDIA_TITLE =</span>
+<span class="nc" id="L174">            Pattern.compile(TAG_MEDIA_DURATION + &quot;:[\\d\\.]+\\b,(.+)&quot;);</span>
+<span class="nc" id="L175">    private static final Pattern REGEX_LAST_MSN = Pattern.compile(&quot;LAST-MSN&quot; + &quot;=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L176">    private static final Pattern REGEX_LAST_PART = Pattern.compile(&quot;LAST-PART&quot; + &quot;=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L177">    private static final Pattern REGEX_TIME_OFFSET = Pattern.compile(&quot;TIME-OFFSET=(-?[\\d\\.]+)\\b&quot;);</span>
+<span class="nc" id="L178">    private static final Pattern REGEX_BYTERANGE =</span>
+<span class="nc" id="L179">            Pattern.compile(TAG_BYTERANGE + &quot;:(\\d+(?:@\\d+)?)\\b&quot;);</span>
+<span class="nc" id="L180">    private static final Pattern REGEX_ATTR_BYTERANGE =</span>
+<span class="nc" id="L181">            Pattern.compile(&quot;BYTERANGE=\&quot;(\\d+(?:@\\d+)?)\\b\&quot;&quot;);</span>
+<span class="nc" id="L182">    private static final Pattern REGEX_BYTERANGE_START = Pattern.compile(&quot;BYTERANGE-START=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L183">    private static final Pattern REGEX_BYTERANGE_LENGTH =</span>
+<span class="nc" id="L184">            Pattern.compile(&quot;BYTERANGE-LENGTH=(\\d+)\\b&quot;);</span>
+<span class="nc" id="L185">    private static final Pattern REGEX_METHOD =</span>
+<span class="nc" id="L186">            Pattern.compile(</span>
+                    &quot;METHOD=(&quot;
+                            + METHOD_NONE
+                            + &quot;|&quot;
+                            + METHOD_AES_128
+                            + &quot;|&quot;
+                            + METHOD_SAMPLE_AES
+                            + &quot;|&quot;
+                            + METHOD_SAMPLE_AES_CENC
+                            + &quot;|&quot;
+                            + METHOD_SAMPLE_AES_CTR
+                            + &quot;)&quot;
+                            + &quot;\\s*(?:,|$)&quot;);
+<span class="nc" id="L199">    private static final Pattern REGEX_KEYFORMAT = Pattern.compile(&quot;KEYFORMAT=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L200">    private static final Pattern REGEX_KEYFORMATVERSIONS =</span>
+<span class="nc" id="L201">            Pattern.compile(&quot;KEYFORMATVERSIONS=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L202">    private static final Pattern REGEX_URI = Pattern.compile(&quot;URI=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L203">    private static final Pattern REGEX_IV = Pattern.compile(&quot;IV=([^,.*]+)&quot;);</span>
+<span class="nc" id="L204">    private static final Pattern REGEX_TYPE =</span>
+<span class="nc" id="L205">            Pattern.compile(</span>
+                    &quot;TYPE=(&quot;
+                            + TYPE_AUDIO
+                            + &quot;|&quot;
+                            + TYPE_VIDEO
+                            + &quot;|&quot;
+                            + TYPE_SUBTITLES
+                            + &quot;|&quot;
+                            + TYPE_CLOSED_CAPTIONS
+                            + &quot;)&quot;);
+<span class="nc" id="L215">    private static final Pattern REGEX_PRELOAD_HINT_TYPE =</span>
+<span class="nc" id="L216">            Pattern.compile(&quot;TYPE=(&quot; + TYPE_PART + &quot;|&quot; + TYPE_MAP + &quot;)&quot;);</span>
+<span class="nc" id="L217">    private static final Pattern REGEX_LANGUAGE = Pattern.compile(&quot;LANGUAGE=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L218">    private static final Pattern REGEX_NAME = Pattern.compile(&quot;NAME=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L219">    private static final Pattern REGEX_GROUP_ID = Pattern.compile(&quot;GROUP-ID=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L220">    private static final Pattern REGEX_CHARACTERISTICS = Pattern.compile(&quot;CHARACTERISTICS=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L221">    private static final Pattern REGEX_INSTREAM_ID =</span>
+<span class="nc" id="L222">            Pattern.compile(&quot;INSTREAM-ID=\&quot;((?:CC|SERVICE)\\d+)\&quot;&quot;);</span>
+<span class="nc" id="L223">    private static final Pattern REGEX_AUTOSELECT = compileBooleanAttrPattern(&quot;AUTOSELECT&quot;);</span>
+<span class="nc" id="L224">    private static final Pattern REGEX_DEFAULT = compileBooleanAttrPattern(&quot;DEFAULT&quot;);</span>
+<span class="nc" id="L225">    private static final Pattern REGEX_FORCED = compileBooleanAttrPattern(&quot;FORCED&quot;);</span>
+<span class="nc" id="L226">    private static final Pattern REGEX_INDEPENDENT = compileBooleanAttrPattern(&quot;INDEPENDENT&quot;);</span>
+<span class="nc" id="L227">    private static final Pattern REGEX_GAP = compileBooleanAttrPattern(&quot;GAP&quot;);</span>
+<span class="nc" id="L228">    private static final Pattern REGEX_PRECISE = compileBooleanAttrPattern(&quot;PRECISE&quot;);</span>
+<span class="nc" id="L229">    private static final Pattern REGEX_VALUE = Pattern.compile(&quot;VALUE=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L230">    private static final Pattern REGEX_IMPORT = Pattern.compile(&quot;IMPORT=\&quot;(.+?)\&quot;&quot;);</span>
+<span class="nc" id="L231">    private static final Pattern REGEX_VARIABLE_REFERENCE =</span>
+<span class="nc" id="L232">            Pattern.compile(&quot;\\{\\$([a-zA-Z0-9\\-_]+)\\}&quot;);</span>
+
+    private final HlsMultivariantPlaylist multivariantPlaylist;
+    @Nullable private final HlsMediaPlaylist previousMediaPlaylist;
+
+    /**
+     * Creates an instance where media playlists are parsed without inheriting attributes from a
+     * multivariant playlist.
+     */
+    public LLHlsPlaylistParser() {
+<span class="nc" id="L242">        this(HlsMultivariantPlaylist.EMPTY, /* previousMediaPlaylist= */ null);</span>
+<span class="nc" id="L243">    }</span>
+
+    /**
+     * Creates an instance where parsed media playlists inherit attributes from the given master
+     * playlist.
+     *
+     * @param multivariantPlaylist The multivariant playlist from which media playlists will inherit
+     *     attributes.
+     * @param previousMediaPlaylist The previous media playlist from which the new media playlist may
+     *     inherit skipped segments.
+     */
+    public LLHlsPlaylistParser(
+            HlsMultivariantPlaylist multivariantPlaylist,
+<span class="nc" id="L256">            @Nullable HlsMediaPlaylist previousMediaPlaylist) {</span>
+<span class="nc" id="L257">        this.multivariantPlaylist = multivariantPlaylist;</span>
+<span class="nc" id="L258">        this.previousMediaPlaylist = previousMediaPlaylist;</span>
+<span class="nc" id="L259">    }</span>
+
+    @Override
+    public HlsPlaylist parse(Uri uri, InputStream inputStream) throws IOException {
+<span class="nc" id="L263">        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));</span>
+<span class="nc" id="L264">        Queue&lt;String&gt; extraLines = new ArrayDeque&lt;&gt;();</span>
+        String line;
+        try {
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            if (!checkPlaylistHeader(reader)) {</span>
+<span class="nc" id="L268">                throw ParserException.createForMalformedManifest(</span>
+                        /* message= */ &quot;Input does not start with the #EXTM3U header.&quot;, /* cause= */ null);
+            }
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            while ((line = reader.readLine()) != null) {</span>
+<span class="nc" id="L272">                line = line.trim();</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">                if (line.isEmpty()) {</span>
+                    // Do nothing.
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                } else if (line.startsWith(TAG_STREAM_INF)) {</span>
+<span class="nc" id="L276">                    extraLines.add(line);</span>
+<span class="nc" id="L277">                    return parseMultivariantPlaylist(new LineIterator(extraLines, reader), uri.toString());</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">                } else if (line.startsWith(TAG_TARGET_DURATION)</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                        || line.startsWith(TAG_MEDIA_SEQUENCE)</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                        || line.startsWith(TAG_MEDIA_DURATION)</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                        || line.startsWith(TAG_KEY)</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                        || line.startsWith(TAG_BYTERANGE)</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">                        || line.equals(TAG_DISCONTINUITY)</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                        || line.equals(TAG_DISCONTINUITY_SEQUENCE)</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                        || line.equals(TAG_ENDLIST)) {</span>
+<span class="nc" id="L286">                    extraLines.add(line);</span>
+<span class="nc" id="L287">                    return parseMediaPlaylist(</span>
+                            multivariantPlaylist,
+                            previousMediaPlaylist,
+                            new LineIterator(extraLines, reader),
+<span class="nc" id="L291">                            uri.toString());</span>
+                } else {
+<span class="nc" id="L293">                    extraLines.add(line);</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L297">            Util.closeQuietly(reader);</span>
+        }
+<span class="nc" id="L299">        throw ParserException.createForMalformedManifest(</span>
+                &quot;Failed to parse the playlist, could not identify any tags.&quot;, /* cause= */ null);
+    }
+
+    private static boolean checkPlaylistHeader(BufferedReader reader) throws IOException {
+<span class="nc" id="L304">        int last = reader.read();</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        if (last == 0xEF) {</span>
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            if (reader.read() != 0xBB || reader.read() != 0xBF) {</span>
+<span class="nc" id="L307">                return false;</span>
+            }
+            // The playlist contains a Byte Order Mark, which gets discarded.
+<span class="nc" id="L310">            last = reader.read();</span>
+        }
+<span class="nc" id="L312">        last = skipIgnorableWhitespace(reader, true, last);</span>
+<span class="nc" id="L313">        int playlistHeaderLength = PLAYLIST_HEADER.length();</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        for (int i = 0; i &lt; playlistHeaderLength; i++) {</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">            if (last != PLAYLIST_HEADER.charAt(i)) {</span>
+<span class="nc" id="L316">                return false;</span>
+            }
+<span class="nc" id="L318">            last = reader.read();</span>
+        }
+<span class="nc" id="L320">        last = skipIgnorableWhitespace(reader, false, last);</span>
+<span class="nc" id="L321">        return Util.isLinebreak(last);</span>
+    }
+
+    private static int skipIgnorableWhitespace(BufferedReader reader, boolean skipLinebreaks, int c)
+            throws IOException {
+<span class="nc bnc" id="L326" title="All 8 branches missed.">        while (c != -1 &amp;&amp; Character.isWhitespace(c) &amp;&amp; (skipLinebreaks || !Util.isLinebreak(c))) {</span>
+<span class="nc" id="L327">            c = reader.read();</span>
+        }
+<span class="nc" id="L329">        return c;</span>
+    }
+
+    private static HlsMultivariantPlaylist parseMultivariantPlaylist(
+            LineIterator iterator, String baseUri) throws IOException {
+<span class="nc" id="L334">        HashMap&lt;Uri, ArrayList&lt;VariantInfo&gt;&gt; urlToVariantInfos = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L335">        HashMap&lt;String, String&gt; variableDefinitions = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L336">        ArrayList&lt;Variant&gt; variants = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L337">        ArrayList&lt;Rendition&gt; videos = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L338">        ArrayList&lt;Rendition&gt; audios = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L339">        ArrayList&lt;Rendition&gt; subtitles = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L340">        ArrayList&lt;Rendition&gt; closedCaptions = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L341">        ArrayList&lt;String&gt; mediaTags = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L342">        ArrayList&lt;DrmInitData&gt; sessionKeyDrmInitData = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L343">        ArrayList&lt;String&gt; tags = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L344">        Format muxedAudioFormat = null;</span>
+<span class="nc" id="L345">        List&lt;Format&gt; muxedCaptionFormats = null;</span>
+<span class="nc" id="L346">        boolean noClosedCaptions = false;</span>
+<span class="nc" id="L347">        boolean hasIndependentSegmentsTag = false;</span>
+
+        String line;
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        while (iterator.hasNext()) {</span>
+<span class="nc" id="L351">            line = iterator.next();</span>
+
+<span class="nc bnc" id="L353" title="All 2 branches missed.">            if (line.startsWith(TAG_PREFIX)) {</span>
+                // We expose all tags through the playlist.
+<span class="nc" id="L355">                tags.add(line);</span>
+            }
+<span class="nc" id="L357">            boolean isIFrameOnlyVariant = line.startsWith(TAG_I_FRAME_STREAM_INF);</span>
+
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            if (line.startsWith(TAG_DEFINE)) {</span>
+<span class="nc" id="L360">                variableDefinitions.put(</span>
+<span class="nc" id="L361">                        /* key= */ parseStringAttr(line, REGEX_NAME, variableDefinitions),</span>
+<span class="nc" id="L362">                        /* value= */ parseStringAttr(line, REGEX_VALUE, variableDefinitions));</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">            } else if (line.equals(TAG_INDEPENDENT_SEGMENTS)) {</span>
+<span class="nc" id="L364">                hasIndependentSegmentsTag = true;</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            } else if (line.startsWith(TAG_MEDIA)) {</span>
+                // Media tags are parsed at the end to include codec information from #EXT-X-STREAM-INF
+                // tags.
+<span class="nc" id="L368">                mediaTags.add(line);</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">            } else if (line.startsWith(TAG_SESSION_KEY)) {</span>
+<span class="nc" id="L370">                String keyFormat =</span>
+<span class="nc" id="L371">                        parseOptionalStringAttr(line, REGEX_KEYFORMAT, KEYFORMAT_IDENTITY, variableDefinitions);</span>
+<span class="nc" id="L372">                SchemeData schemeData = parseDrmSchemeData(line, keyFormat, variableDefinitions);</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                if (schemeData != null) {</span>
+<span class="nc" id="L374">                    String method = parseStringAttr(line, REGEX_METHOD, variableDefinitions);</span>
+<span class="nc" id="L375">                    String scheme = parseEncryptionScheme(method);</span>
+<span class="nc" id="L376">                    sessionKeyDrmInitData.add(new DrmInitData(scheme, schemeData));</span>
+                }
+<span class="nc bnc" id="L378" title="All 4 branches missed.">            } else if (line.startsWith(TAG_STREAM_INF) || isIFrameOnlyVariant) {</span>
+<span class="nc" id="L379">                noClosedCaptions |= line.contains(ATTR_CLOSED_CAPTIONS_NONE);</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">                int roleFlags = isIFrameOnlyVariant ? C.ROLE_FLAG_TRICK_PLAY : 0;</span>
+<span class="nc" id="L381">                int peakBitrate = parseIntAttr(line, REGEX_BANDWIDTH);</span>
+<span class="nc" id="L382">                int averageBitrate = parseOptionalIntAttr(line, REGEX_AVERAGE_BANDWIDTH, -1);</span>
+<span class="nc" id="L383">                String codecs = parseOptionalStringAttr(line, REGEX_CODECS, variableDefinitions);</span>
+<span class="nc" id="L384">                String resolutionString =</span>
+<span class="nc" id="L385">                        parseOptionalStringAttr(line, REGEX_RESOLUTION, variableDefinitions);</span>
+                int width;
+                int height;
+<span class="nc bnc" id="L388" title="All 2 branches missed.">                if (resolutionString != null) {</span>
+<span class="nc" id="L389">                    String[] widthAndHeight = Util.split(resolutionString, &quot;x&quot;);</span>
+<span class="nc" id="L390">                    width = Integer.parseInt(widthAndHeight[0]);</span>
+<span class="nc" id="L391">                    height = Integer.parseInt(widthAndHeight[1]);</span>
+<span class="nc bnc" id="L392" title="All 4 branches missed.">                    if (width &lt;= 0 || height &lt;= 0) {</span>
+                        // Resolution string is invalid.
+<span class="nc" id="L394">                        width = Format.NO_VALUE;</span>
+<span class="nc" id="L395">                        height = Format.NO_VALUE;</span>
+                    }
+<span class="nc" id="L397">                } else {</span>
+<span class="nc" id="L398">                    width = Format.NO_VALUE;</span>
+<span class="nc" id="L399">                    height = Format.NO_VALUE;</span>
+                }
+<span class="nc" id="L401">                float frameRate = Format.NO_VALUE;</span>
+<span class="nc" id="L402">                String frameRateString =</span>
+<span class="nc" id="L403">                        parseOptionalStringAttr(line, REGEX_FRAME_RATE, variableDefinitions);</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                if (frameRateString != null) {</span>
+<span class="nc" id="L405">                    frameRate = Float.parseFloat(frameRateString);</span>
+                }
+<span class="nc" id="L407">                String videoGroupId = parseOptionalStringAttr(line, REGEX_VIDEO, variableDefinitions);</span>
+<span class="nc" id="L408">                String audioGroupId = parseOptionalStringAttr(line, REGEX_AUDIO, variableDefinitions);</span>
+<span class="nc" id="L409">                String subtitlesGroupId =</span>
+<span class="nc" id="L410">                        parseOptionalStringAttr(line, REGEX_SUBTITLES, variableDefinitions);</span>
+<span class="nc" id="L411">                String closedCaptionsGroupId =</span>
+<span class="nc" id="L412">                        parseOptionalStringAttr(line, REGEX_CLOSED_CAPTIONS, variableDefinitions);</span>
+                Uri uri;
+<span class="nc bnc" id="L414" title="All 2 branches missed.">                if (isIFrameOnlyVariant) {</span>
+<span class="nc" id="L415">                    uri =</span>
+<span class="nc" id="L416">                            UriUtil.resolveToUri(baseUri, parseStringAttr(line, REGEX_URI, variableDefinitions));</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                } else if (!iterator.hasNext()) {</span>
+<span class="nc" id="L418">                    throw ParserException.createForMalformedManifest(</span>
+                            &quot;#EXT-X-STREAM-INF must be followed by another line&quot;, /* cause= */ null);
+                } else {
+                    // The following line contains #EXT-X-STREAM-INF's URI.
+<span class="nc" id="L422">                    line = replaceVariableReferences(iterator.next(), variableDefinitions);</span>
+<span class="nc" id="L423">                    uri = UriUtil.resolveToUri(baseUri, line);</span>
+                }
+
+<span class="nc" id="L426">                Format format =</span>
+                        new Format.Builder()
+<span class="nc" id="L428">                                .setId(variants.size())</span>
+<span class="nc" id="L429">                                .setContainerMimeType(MimeTypes.APPLICATION_M3U8)</span>
+<span class="nc" id="L430">                                .setCodecs(codecs)</span>
+<span class="nc" id="L431">                                .setAverageBitrate(averageBitrate)</span>
+<span class="nc" id="L432">                                .setPeakBitrate(peakBitrate)</span>
+<span class="nc" id="L433">                                .setWidth(width)</span>
+<span class="nc" id="L434">                                .setHeight(height)</span>
+<span class="nc" id="L435">                                .setFrameRate(frameRate)</span>
+<span class="nc" id="L436">                                .setRoleFlags(roleFlags)</span>
+<span class="nc" id="L437">                                .build();</span>
+<span class="nc" id="L438">                Variant variant =</span>
+                        new Variant(
+                                uri, format, videoGroupId, audioGroupId, subtitlesGroupId, closedCaptionsGroupId);
+<span class="nc" id="L441">                variants.add(variant);</span>
+<span class="nc" id="L442">                @Nullable ArrayList&lt;VariantInfo&gt; variantInfosForUrl = urlToVariantInfos.get(uri);</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                if (variantInfosForUrl == null) {</span>
+<span class="nc" id="L444">                    variantInfosForUrl = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L445">                    urlToVariantInfos.put(uri, variantInfosForUrl);</span>
+                }
+<span class="nc" id="L447">                variantInfosForUrl.add(</span>
+                        new VariantInfo(
+                                averageBitrate,
+                                peakBitrate,
+                                videoGroupId,
+                                audioGroupId,
+                                subtitlesGroupId,
+                                closedCaptionsGroupId));
+            }
+<span class="nc" id="L456">        }</span>
+
+        // TODO: Don't deduplicate variants by URL.
+<span class="nc" id="L459">        ArrayList&lt;Variant&gt; deduplicatedVariants = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L460">        HashSet&lt;Uri&gt; urlsInDeduplicatedVariants = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">        for (int i = 0; i &lt; variants.size(); i++) {</span>
+<span class="nc" id="L462">            Variant variant = variants.get(i);</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">            if (urlsInDeduplicatedVariants.add(variant.url)) {</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">                Assertions.checkState(variant.format.metadata == null);</span>
+<span class="nc" id="L465">                HlsTrackMetadataEntry hlsMetadataEntry =</span>
+                        new HlsTrackMetadataEntry(
+                                /* groupId= */ null,
+                                /* name= */ null,
+<span class="nc" id="L469">                                checkNotNull(urlToVariantInfos.get(variant.url)));</span>
+<span class="nc" id="L470">                Metadata metadata = new Metadata(hlsMetadataEntry);</span>
+<span class="nc" id="L471">                Format format = variant.format.buildUpon().setMetadata(metadata).build();</span>
+<span class="nc" id="L472">                deduplicatedVariants.add(variant.copyWithFormat(format));</span>
+            }
+        }
+
+<span class="nc bnc" id="L476" title="All 2 branches missed.">        for (int i = 0; i &lt; mediaTags.size(); i++) {</span>
+<span class="nc" id="L477">            line = mediaTags.get(i);</span>
+<span class="nc" id="L478">            String groupId = parseStringAttr(line, REGEX_GROUP_ID, variableDefinitions);</span>
+<span class="nc" id="L479">            String name = parseStringAttr(line, REGEX_NAME, variableDefinitions);</span>
+<span class="nc" id="L480">            Format.Builder formatBuilder =</span>
+                    new Format.Builder()
+<span class="nc" id="L482">                            .setId(groupId + &quot;:&quot; + name)</span>
+<span class="nc" id="L483">                            .setLabel(name)</span>
+<span class="nc" id="L484">                            .setContainerMimeType(MimeTypes.APPLICATION_M3U8)</span>
+<span class="nc" id="L485">                            .setSelectionFlags(parseSelectionFlags(line))</span>
+<span class="nc" id="L486">                            .setRoleFlags(parseRoleFlags(line, variableDefinitions))</span>
+<span class="nc" id="L487">                            .setLanguage(parseOptionalStringAttr(line, REGEX_LANGUAGE, variableDefinitions));</span>
+
+<span class="nc" id="L489">            @Nullable String referenceUri = parseOptionalStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">            @Nullable Uri uri = referenceUri == null ? null : UriUtil.resolveToUri(baseUri, referenceUri);</span>
+<span class="nc" id="L491">            Metadata metadata =</span>
+<span class="nc" id="L492">                    new Metadata(new HlsTrackMetadataEntry(groupId, name, Collections.emptyList()));</span>
+<span class="nc bnc" id="L493" title="All 5 branches missed.">            switch (parseStringAttr(line, REGEX_TYPE, variableDefinitions)) {</span>
+                case TYPE_VIDEO:
+<span class="nc" id="L495">                    @Nullable Variant variant = getVariantWithVideoGroup(variants, groupId);</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">                    if (variant != null) {</span>
+<span class="nc" id="L497">                        Format variantFormat = variant.format;</span>
+                        @Nullable
+<span class="nc" id="L499">                        String codecs = Util.getCodecsOfType(variantFormat.codecs, C.TRACK_TYPE_VIDEO);</span>
+<span class="nc" id="L500">                        formatBuilder</span>
+<span class="nc" id="L501">                                .setCodecs(codecs)</span>
+<span class="nc" id="L502">                                .setSampleMimeType(MimeTypes.getMediaMimeType(codecs))</span>
+<span class="nc" id="L503">                                .setWidth(variantFormat.width)</span>
+<span class="nc" id="L504">                                .setHeight(variantFormat.height)</span>
+<span class="nc" id="L505">                                .setFrameRate(variantFormat.frameRate);</span>
+                    }
+<span class="nc bnc" id="L507" title="All 2 branches missed.">                    if (uri == null) {</span>
+                        // TODO: Remove this case and add a Rendition with a null uri to videos.
+                    } else {
+<span class="nc" id="L510">                        formatBuilder.setMetadata(metadata);</span>
+<span class="nc" id="L511">                        videos.add(new Rendition(uri, formatBuilder.build(), groupId, name));</span>
+                    }
+<span class="nc" id="L513">                    break;</span>
+                case TYPE_AUDIO:
+<span class="nc" id="L515">                    @Nullable String sampleMimeType = null;</span>
+<span class="nc" id="L516">                    variant = getVariantWithAudioGroup(variants, groupId);</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">                    if (variant != null) {</span>
+                        @Nullable
+<span class="nc" id="L519">                        String codecs = Util.getCodecsOfType(variant.format.codecs, C.TRACK_TYPE_AUDIO);</span>
+<span class="nc" id="L520">                        formatBuilder.setCodecs(codecs);</span>
+<span class="nc" id="L521">                        sampleMimeType = MimeTypes.getMediaMimeType(codecs);</span>
+                    }
+                    @Nullable
+<span class="nc" id="L524">                    String channelsString =</span>
+<span class="nc" id="L525">                            parseOptionalStringAttr(line, REGEX_CHANNELS, variableDefinitions);</span>
+<span class="nc bnc" id="L526" title="All 2 branches missed.">                    if (channelsString != null) {</span>
+<span class="nc" id="L527">                        int channelCount = Integer.parseInt(Util.splitAtFirst(channelsString, &quot;/&quot;)[0]);</span>
+<span class="nc" id="L528">                        formatBuilder.setChannelCount(channelCount);</span>
+<span class="nc bnc" id="L529" title="All 4 branches missed.">                        if (MimeTypes.AUDIO_E_AC3.equals(sampleMimeType) &amp;&amp; channelsString.endsWith(&quot;/JOC&quot;)) {</span>
+<span class="nc" id="L530">                            sampleMimeType = MimeTypes.AUDIO_E_AC3_JOC;</span>
+<span class="nc" id="L531">                            formatBuilder.setCodecs(MimeTypes.CODEC_E_AC3_JOC);</span>
+                        }
+                    }
+<span class="nc" id="L534">                    formatBuilder.setSampleMimeType(sampleMimeType);</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">                    if (uri != null) {</span>
+<span class="nc" id="L536">                        formatBuilder.setMetadata(metadata);</span>
+<span class="nc" id="L537">                        audios.add(new Rendition(uri, formatBuilder.build(), groupId, name));</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">                    } else if (variant != null) {</span>
+                        // TODO: Remove muxedAudioFormat and add a Rendition with a null uri to audios.
+<span class="nc" id="L540">                        muxedAudioFormat = formatBuilder.build();</span>
+                    }
+                    break;
+                case TYPE_SUBTITLES:
+<span class="nc" id="L544">                    sampleMimeType = null;</span>
+<span class="nc" id="L545">                    variant = getVariantWithSubtitleGroup(variants, groupId);</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">                    if (variant != null) {</span>
+                        @Nullable
+<span class="nc" id="L548">                        String codecs = Util.getCodecsOfType(variant.format.codecs, C.TRACK_TYPE_TEXT);</span>
+<span class="nc" id="L549">                        formatBuilder.setCodecs(codecs);</span>
+<span class="nc" id="L550">                        sampleMimeType = MimeTypes.getMediaMimeType(codecs);</span>
+                    }
+<span class="nc bnc" id="L552" title="All 2 branches missed.">                    if (sampleMimeType == null) {</span>
+<span class="nc" id="L553">                        sampleMimeType = MimeTypes.TEXT_VTT;</span>
+                    }
+<span class="nc" id="L555">                    formatBuilder.setSampleMimeType(sampleMimeType).setMetadata(metadata);</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">                    if (uri != null) {</span>
+<span class="nc" id="L557">                        subtitles.add(new Rendition(uri, formatBuilder.build(), groupId, name));</span>
+                    } else {
+<span class="nc" id="L559">                        Log.w(LOG_TAG, &quot;EXT-X-MEDIA tag with missing mandatory URI attribute: skipping&quot;);</span>
+                    }
+<span class="nc" id="L561">                    break;</span>
+                case TYPE_CLOSED_CAPTIONS:
+<span class="nc" id="L563">                    String instreamId = parseStringAttr(line, REGEX_INSTREAM_ID, variableDefinitions);</span>
+                    int accessibilityChannel;
+<span class="nc bnc" id="L565" title="All 2 branches missed.">                    if (instreamId.startsWith(&quot;CC&quot;)) {</span>
+<span class="nc" id="L566">                        sampleMimeType = MimeTypes.APPLICATION_CEA608;</span>
+<span class="nc" id="L567">                        accessibilityChannel = Integer.parseInt(instreamId.substring(2));</span>
+                    } else /* starts with SERVICE */ {
+<span class="nc" id="L569">                        sampleMimeType = MimeTypes.APPLICATION_CEA708;</span>
+<span class="nc" id="L570">                        accessibilityChannel = Integer.parseInt(instreamId.substring(7));</span>
+                    }
+<span class="nc bnc" id="L572" title="All 2 branches missed.">                    if (muxedCaptionFormats == null) {</span>
+<span class="nc" id="L573">                        muxedCaptionFormats = new ArrayList&lt;&gt;();</span>
+                    }
+<span class="nc" id="L575">                    formatBuilder</span>
+<span class="nc" id="L576">                            .setSampleMimeType(sampleMimeType)</span>
+<span class="nc" id="L577">                            .setAccessibilityChannel(accessibilityChannel);</span>
+<span class="nc" id="L578">                    muxedCaptionFormats.add(formatBuilder.build());</span>
+                    // TODO: Remove muxedCaptionFormats and add a Rendition with a null uri to closedCaptions.
+<span class="nc" id="L580">                    break;</span>
+                default:
+                    // Do nothing.
+                    break;
+            }
+        }
+
+<span class="nc bnc" id="L587" title="All 2 branches missed.">        if (noClosedCaptions) {</span>
+<span class="nc" id="L588">            muxedCaptionFormats = Collections.emptyList();</span>
+        }
+
+<span class="nc" id="L591">        return new HlsMultivariantPlaylist(</span>
+                baseUri,
+                tags,
+                deduplicatedVariants,
+                videos,
+                audios,
+                subtitles,
+                closedCaptions,
+                muxedAudioFormat,
+                muxedCaptionFormats,
+                hasIndependentSegmentsTag,
+                variableDefinitions,
+                sessionKeyDrmInitData);
+    }
+
+    @Nullable
+    private static Variant getVariantWithAudioGroup(ArrayList&lt;Variant&gt; variants, String groupId) {
+<span class="nc bnc" id="L608" title="All 2 branches missed.">        for (int i = 0; i &lt; variants.size(); i++) {</span>
+<span class="nc" id="L609">            Variant variant = variants.get(i);</span>
+<span class="nc bnc" id="L610" title="All 2 branches missed.">            if (groupId.equals(variant.audioGroupId)) {</span>
+<span class="nc" id="L611">                return variant;</span>
+            }
+        }
+<span class="nc" id="L614">        return null;</span>
+    }
+
+    @Nullable
+    private static Variant getVariantWithVideoGroup(ArrayList&lt;Variant&gt; variants, String groupId) {
+<span class="nc bnc" id="L619" title="All 2 branches missed.">        for (int i = 0; i &lt; variants.size(); i++) {</span>
+<span class="nc" id="L620">            Variant variant = variants.get(i);</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">            if (groupId.equals(variant.videoGroupId)) {</span>
+<span class="nc" id="L622">                return variant;</span>
+            }
+        }
+<span class="nc" id="L625">        return null;</span>
+    }
+
+    @Nullable
+    private static Variant getVariantWithSubtitleGroup(ArrayList&lt;Variant&gt; variants, String groupId) {
+<span class="nc bnc" id="L630" title="All 2 branches missed.">        for (int i = 0; i &lt; variants.size(); i++) {</span>
+<span class="nc" id="L631">            Variant variant = variants.get(i);</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">            if (groupId.equals(variant.subtitleGroupId)) {</span>
+<span class="nc" id="L633">                return variant;</span>
+            }
+        }
+<span class="nc" id="L636">        return null;</span>
+    }
+
+    private static HlsMediaPlaylist parseMediaPlaylist(
+            HlsMultivariantPlaylist multivariantPlaylist,
+            @Nullable HlsMediaPlaylist previousMediaPlaylist,
+            LineIterator iterator,
+            String baseUri)
+            throws IOException {
+<span class="nc" id="L645">        @HlsMediaPlaylist.PlaylistType int playlistType = HlsMediaPlaylist.PLAYLIST_TYPE_UNKNOWN;</span>
+<span class="nc" id="L646">        long startOffsetUs = C.TIME_UNSET;</span>
+<span class="nc" id="L647">        long mediaSequence = 0;</span>
+<span class="nc" id="L648">        int version = 1; // Default version == 1.</span>
+<span class="nc" id="L649">        long targetDurationUs = C.TIME_UNSET;</span>
+<span class="nc" id="L650">        long partTargetDurationUs = C.TIME_UNSET;</span>
+<span class="nc" id="L651">        boolean hasIndependentSegmentsTag = multivariantPlaylist.hasIndependentSegments;</span>
+<span class="nc" id="L652">        boolean hasEndTag = false;</span>
+<span class="nc" id="L653">        @Nullable Segment initializationSegment = null;</span>
+<span class="nc" id="L654">        HashMap&lt;String, String&gt; variableDefinitions = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L655">        HashMap&lt;String, Segment&gt; urlToInferredInitSegment = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L656">        List&lt;Segment&gt; segments = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L657">        List&lt;Part&gt; trailingParts = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L658">        @Nullable Part preloadPart = null;</span>
+<span class="nc" id="L659">        List&lt;RenditionReport&gt; renditionReports = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L660">        List&lt;String&gt; tags = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L662">        long segmentDurationUs = 0;</span>
+<span class="nc" id="L663">        String segmentTitle = &quot;&quot;;</span>
+<span class="nc" id="L664">        boolean hasDiscontinuitySequence = false;</span>
+<span class="nc" id="L665">        int playlistDiscontinuitySequence = 0;</span>
+<span class="nc" id="L666">        int relativeDiscontinuitySequence = 0;</span>
+<span class="nc" id="L667">        long playlistStartTimeUs = 0;</span>
+<span class="nc" id="L668">        long segmentStartTimeUs = 0;</span>
+<span class="nc" id="L669">        boolean preciseStart = false;</span>
+<span class="nc" id="L670">        long segmentByteRangeOffset = 0;</span>
+<span class="nc" id="L671">        long segmentByteRangeLength = C.LENGTH_UNSET;</span>
+<span class="nc" id="L672">        long partStartTimeUs = 0;</span>
+<span class="nc" id="L673">        long partByteRangeOffset = 0;</span>
+<span class="nc" id="L674">        boolean isIFrameOnly = false;</span>
+<span class="nc" id="L675">        long segmentMediaSequence = 0;</span>
+<span class="nc" id="L676">        boolean hasGapTag = false;</span>
+<span class="nc" id="L677">        HlsMediaPlaylist.ServerControl serverControl =</span>
+                new HlsMediaPlaylist.ServerControl(
+                        /* skipUntilUs= */ C.TIME_UNSET,
+                        /* canSkipDateRanges= */ false,
+                        /* holdBackUs= */ C.TIME_UNSET,
+                        /* partHoldBackUs= */ C.TIME_UNSET,
+                        /* canBlockReload= */ false);
+
+<span class="nc" id="L685">        @Nullable DrmInitData playlistProtectionSchemes = null;</span>
+<span class="nc" id="L686">        @Nullable String fullSegmentEncryptionKeyUri = null;</span>
+<span class="nc" id="L687">        @Nullable String fullSegmentEncryptionIV = null;</span>
+<span class="nc" id="L688">        TreeMap&lt;String, SchemeData&gt; currentSchemeDatas = new TreeMap&lt;&gt;();</span>
+<span class="nc" id="L689">        @Nullable String encryptionScheme = null;</span>
+<span class="nc" id="L690">        @Nullable DrmInitData cachedDrmInitData = null;</span>
+
+        String line;
+<span class="nc bnc" id="L693" title="All 2 branches missed.">        while (iterator.hasNext()) {</span>
+<span class="nc" id="L694">            line = iterator.next();</span>
+
+<span class="nc bnc" id="L696" title="All 2 branches missed.">            if (line.startsWith(TAG_PREFIX)) {</span>
+                // We expose all tags through the playlist.
+<span class="nc" id="L698">                tags.add(line);</span>
+            }
+
+<span class="nc bnc" id="L701" title="All 2 branches missed.">            if (line.startsWith(TAG_PLAYLIST_TYPE)) {</span>
+<span class="nc" id="L702">                String playlistTypeString = parseStringAttr(line, REGEX_PLAYLIST_TYPE, variableDefinitions);</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">                if (&quot;VOD&quot;.equals(playlistTypeString)) {</span>
+<span class="nc" id="L704">                    playlistType = HlsMediaPlaylist.PLAYLIST_TYPE_VOD;</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">                } else if (&quot;EVENT&quot;.equals(playlistTypeString)) {</span>
+<span class="nc" id="L706">                    playlistType = HlsMediaPlaylist.PLAYLIST_TYPE_EVENT;</span>
+                }
+<span class="nc bnc" id="L708" title="All 2 branches missed.">            } else if (line.equals(TAG_IFRAME)) {</span>
+<span class="nc" id="L709">                isIFrameOnly = true;</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">            } else if (line.startsWith(TAG_START)) {</span>
+<span class="nc" id="L711">                startOffsetUs = (long) (parseDoubleAttr(line, REGEX_TIME_OFFSET) * C.MICROS_PER_SECOND);</span>
+<span class="nc" id="L712">                preciseStart =</span>
+<span class="nc" id="L713">                        parseOptionalBooleanAttribute(line, REGEX_PRECISE, /* defaultValue= */ false);</span>
+<span class="nc bnc" id="L714" title="All 2 branches missed.">            } else if (line.startsWith(TAG_SERVER_CONTROL)) {</span>
+<span class="nc" id="L715">                serverControl = parseServerControl(line);</span>
+<span class="nc bnc" id="L716" title="All 2 branches missed.">            } else if (line.startsWith(TAG_PART_INF)) {</span>
+<span class="nc" id="L717">                double partTargetDurationSeconds = parseDoubleAttr(line, REGEX_PART_TARGET_DURATION);</span>
+<span class="nc" id="L718">                partTargetDurationUs = (long) (partTargetDurationSeconds * C.MICROS_PER_SECOND);</span>
+<span class="nc bnc" id="L719" title="All 2 branches missed.">            } else if (line.startsWith(TAG_INIT_SEGMENT)) {</span>
+<span class="nc" id="L720">                String uri = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc" id="L721">                String byteRange = parseOptionalStringAttr(line, REGEX_ATTR_BYTERANGE, variableDefinitions);</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">                if (byteRange != null) {</span>
+<span class="nc" id="L723">                    String[] splitByteRange = Util.split(byteRange, &quot;@&quot;);</span>
+<span class="nc" id="L724">                    segmentByteRangeLength = Long.parseLong(splitByteRange[0]);</span>
+<span class="nc bnc" id="L725" title="All 2 branches missed.">                    if (splitByteRange.length &gt; 1) {</span>
+<span class="nc" id="L726">                        segmentByteRangeOffset = Long.parseLong(splitByteRange[1]);</span>
+                    }
+                }
+<span class="nc bnc" id="L729" title="All 2 branches missed.">                if (segmentByteRangeLength == C.LENGTH_UNSET) {</span>
+                    // The segment has no byte range defined.
+<span class="nc" id="L731">                    segmentByteRangeOffset = 0;</span>
+                }
+<span class="nc bnc" id="L733" title="All 4 branches missed.">                if (fullSegmentEncryptionKeyUri != null &amp;&amp; fullSegmentEncryptionIV == null) {</span>
+                    // See RFC 8216, Section 4.3.2.5.
+<span class="nc" id="L735">                    throw ParserException.createForMalformedManifest(</span>
+                            &quot;The encryption IV attribute must be present when an initialization segment is&quot;
+                                    + &quot; encrypted with METHOD=AES-128.&quot;,
+                            /* cause= */ null);
+                }
+<span class="nc" id="L740">                initializationSegment =</span>
+                        new Segment(
+                                uri,
+                                segmentByteRangeOffset,
+                                segmentByteRangeLength,
+                                fullSegmentEncryptionKeyUri,
+                                fullSegmentEncryptionIV);
+<span class="nc bnc" id="L747" title="All 2 branches missed.">                if (segmentByteRangeLength != C.LENGTH_UNSET) {</span>
+<span class="nc" id="L748">                    segmentByteRangeOffset += segmentByteRangeLength;</span>
+                }
+<span class="nc" id="L750">                segmentByteRangeLength = C.LENGTH_UNSET;</span>
+<span class="nc bnc" id="L751" title="All 2 branches missed.">            } else if (line.startsWith(TAG_TARGET_DURATION)) {</span>
+                // The correct target duration is 2 seconds in low latency.
+<span class="nc" id="L753">                targetDurationUs = 2 * C.MICROS_PER_SECOND;</span>
+                //targetDurationUs = parseIntAttr(line, REGEX_TARGET_DURATION) * C.MICROS_PER_SECOND;
+<span class="nc bnc" id="L755" title="All 2 branches missed.">            } else if (line.startsWith(TAG_MEDIA_SEQUENCE)) {</span>
+<span class="nc" id="L756">                mediaSequence = parseLongAttr(line, REGEX_MEDIA_SEQUENCE);</span>
+<span class="nc" id="L757">                segmentMediaSequence = mediaSequence;</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">            } else if (line.startsWith(TAG_VERSION)) {</span>
+<span class="nc" id="L759">                version = parseIntAttr(line, REGEX_VERSION);</span>
+<span class="nc bnc" id="L760" title="All 2 branches missed.">            } else if (line.startsWith(TAG_DEFINE)) {</span>
+<span class="nc" id="L761">                String importName = parseOptionalStringAttr(line, REGEX_IMPORT, variableDefinitions);</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">                if (importName != null) {</span>
+<span class="nc" id="L763">                    String value = multivariantPlaylist.variableDefinitions.get(importName);</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">                    if (value != null) {</span>
+<span class="nc" id="L765">                        variableDefinitions.put(importName, value);</span>
+                    } else {
+                        // The multivariant playlist does not declare the imported variable. Ignore.
+                    }
+<span class="nc" id="L769">                } else {</span>
+<span class="nc" id="L770">                    variableDefinitions.put(</span>
+<span class="nc" id="L771">                            parseStringAttr(line, REGEX_NAME, variableDefinitions),</span>
+<span class="nc" id="L772">                            parseStringAttr(line, REGEX_VALUE, variableDefinitions));</span>
+                }
+<span class="nc bnc" id="L774" title="All 2 branches missed.">            } else if (line.startsWith(TAG_MEDIA_DURATION)) {</span>
+<span class="nc" id="L775">                segmentDurationUs = parseTimeSecondsToUs(line, REGEX_MEDIA_DURATION);</span>
+<span class="nc" id="L776">                segmentTitle = parseOptionalStringAttr(line, REGEX_MEDIA_TITLE, &quot;&quot;, variableDefinitions);</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">            } else if (line.startsWith(TAG_SKIP)) {</span>
+<span class="nc" id="L778">                int skippedSegmentCount = parseIntAttr(line, REGEX_SKIPPED_SEGMENTS);</span>
+<span class="nc bnc" id="L779" title="All 4 branches missed.">                checkState(previousMediaPlaylist != null &amp;&amp; segments.isEmpty());</span>
+<span class="nc" id="L780">                int startIndex = (int) (mediaSequence - castNonNull(previousMediaPlaylist).mediaSequence);</span>
+<span class="nc" id="L781">                int endIndex = startIndex + skippedSegmentCount;</span>
+<span class="nc bnc" id="L782" title="All 4 branches missed.">                if (startIndex &lt; 0 || endIndex &gt; previousMediaPlaylist.segments.size()) {</span>
+                    // Throw to force a reload if not all segments are available in the previous playlist.
+<span class="nc" id="L784">                    throw new DeltaUpdateException();</span>
+                }
+<span class="nc bnc" id="L786" title="All 2 branches missed.">                for (int i = startIndex; i &lt; endIndex; i++) {</span>
+<span class="nc" id="L787">                    Segment segment = previousMediaPlaylist.segments.get(i);</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">                    if (mediaSequence != previousMediaPlaylist.mediaSequence) {</span>
+                        // If the media sequences of the playlists are not the same, we need to recreate the
+                        // object with the updated relative start time and the relative discontinuity
+                        // sequence. With identical playlist media sequences these values do not change.
+<span class="nc" id="L792">                        int newRelativeDiscontinuitySequence =</span>
+                                previousMediaPlaylist.discontinuitySequence
+                                        - playlistDiscontinuitySequence
+                                        + segment.relativeDiscontinuitySequence;
+<span class="nc" id="L796">                        segment = segment.copyWith(segmentStartTimeUs, newRelativeDiscontinuitySequence);</span>
+                    }
+<span class="nc" id="L798">                    segments.add(segment);</span>
+<span class="nc" id="L799">                    segmentStartTimeUs += segment.durationUs;</span>
+<span class="nc" id="L800">                    partStartTimeUs = segmentStartTimeUs;</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">                    if (segment.byteRangeLength != C.LENGTH_UNSET) {</span>
+<span class="nc" id="L802">                        segmentByteRangeOffset = segment.byteRangeOffset + segment.byteRangeLength;</span>
+                    }
+<span class="nc" id="L804">                    relativeDiscontinuitySequence = segment.relativeDiscontinuitySequence;</span>
+<span class="nc" id="L805">                    initializationSegment = segment.initializationSegment;</span>
+<span class="nc" id="L806">                    cachedDrmInitData = segment.drmInitData;</span>
+<span class="nc" id="L807">                    fullSegmentEncryptionKeyUri = segment.fullSegmentEncryptionKeyUri;</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">                    if (segment.encryptionIV == null</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">                            || !segment.encryptionIV.equals(Long.toHexString(segmentMediaSequence))) {</span>
+<span class="nc" id="L810">                        fullSegmentEncryptionIV = segment.encryptionIV;</span>
+                    }
+<span class="nc" id="L812">                    segmentMediaSequence++;</span>
+                }
+<span class="nc bnc" id="L814" title="All 2 branches missed.">            } else if (line.startsWith(TAG_KEY)) {</span>
+<span class="nc" id="L815">                String method = parseStringAttr(line, REGEX_METHOD, variableDefinitions);</span>
+<span class="nc" id="L816">                String keyFormat =</span>
+<span class="nc" id="L817">                        parseOptionalStringAttr(line, REGEX_KEYFORMAT, KEYFORMAT_IDENTITY, variableDefinitions);</span>
+<span class="nc" id="L818">                fullSegmentEncryptionKeyUri = null;</span>
+<span class="nc" id="L819">                fullSegmentEncryptionIV = null;</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">                if (METHOD_NONE.equals(method)) {</span>
+<span class="nc" id="L821">                    currentSchemeDatas.clear();</span>
+<span class="nc" id="L822">                    cachedDrmInitData = null;</span>
+                } else /* !METHOD_NONE.equals(method) */ {
+<span class="nc" id="L824">                    fullSegmentEncryptionIV = parseOptionalStringAttr(line, REGEX_IV, variableDefinitions);</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">                    if (KEYFORMAT_IDENTITY.equals(keyFormat)) {</span>
+<span class="nc bnc" id="L826" title="All 2 branches missed.">                        if (METHOD_AES_128.equals(method)) {</span>
+                            // The segment is fully encrypted using an identity key.
+<span class="nc" id="L828">                            fullSegmentEncryptionKeyUri = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+                        } else {
+                            // Do nothing. Samples are encrypted using an identity key, but this is not supported.
+                            // Hopefully, a traditional DRM alternative is also provided.
+                        }
+                    } else {
+<span class="nc bnc" id="L834" title="All 2 branches missed.">                        if (encryptionScheme == null) {</span>
+<span class="nc" id="L835">                            encryptionScheme = parseEncryptionScheme(method);</span>
+                        }
+<span class="nc" id="L837">                        SchemeData schemeData = parseDrmSchemeData(line, keyFormat, variableDefinitions);</span>
+<span class="nc bnc" id="L838" title="All 2 branches missed.">                        if (schemeData != null) {</span>
+<span class="nc" id="L839">                            cachedDrmInitData = null;</span>
+<span class="nc" id="L840">                            currentSchemeDatas.put(keyFormat, schemeData);</span>
+                        }
+                    }
+                }
+<span class="nc bnc" id="L844" title="All 2 branches missed.">            } else if (line.startsWith(TAG_BYTERANGE)) {</span>
+<span class="nc" id="L845">                String byteRange = parseStringAttr(line, REGEX_BYTERANGE, variableDefinitions);</span>
+<span class="nc" id="L846">                String[] splitByteRange = Util.split(byteRange, &quot;@&quot;);</span>
+<span class="nc" id="L847">                segmentByteRangeLength = Long.parseLong(splitByteRange[0]);</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">                if (splitByteRange.length &gt; 1) {</span>
+<span class="nc" id="L849">                    segmentByteRangeOffset = Long.parseLong(splitByteRange[1]);</span>
+                }
+<span class="nc bnc" id="L851" title="All 2 branches missed.">            } else if (line.startsWith(TAG_DISCONTINUITY_SEQUENCE)) {</span>
+<span class="nc" id="L852">                hasDiscontinuitySequence = true;</span>
+<span class="nc" id="L853">                playlistDiscontinuitySequence = Integer.parseInt(line.substring(line.indexOf(':') + 1));</span>
+<span class="nc bnc" id="L854" title="All 2 branches missed.">            } else if (line.equals(TAG_DISCONTINUITY)) {</span>
+<span class="nc" id="L855">                relativeDiscontinuitySequence++;</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">            } else if (line.startsWith(TAG_PROGRAM_DATE_TIME)) {</span>
+<span class="nc bnc" id="L857" title="All 2 branches missed.">                if (playlistStartTimeUs == 0) {</span>
+<span class="nc" id="L858">                    long programDatetimeUs =</span>
+<span class="nc" id="L859">                            Util.msToUs(Util.parseXsDateTime(line.substring(line.indexOf(':') + 1)));</span>
+<span class="nc" id="L860">                    playlistStartTimeUs = programDatetimeUs - segmentStartTimeUs;</span>
+<span class="nc" id="L861">                }</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">            } else if (line.equals(TAG_GAP)) {</span>
+<span class="nc" id="L863">                hasGapTag = true;</span>
+<span class="nc bnc" id="L864" title="All 2 branches missed.">            } else if (line.equals(TAG_INDEPENDENT_SEGMENTS)) {</span>
+<span class="nc" id="L865">                hasIndependentSegmentsTag = true;</span>
+<span class="nc bnc" id="L866" title="All 2 branches missed.">            } else if (line.equals(TAG_ENDLIST)) {</span>
+<span class="nc" id="L867">                hasEndTag = true;</span>
+<span class="nc bnc" id="L868" title="All 2 branches missed.">            } else if (line.startsWith(TAG_RENDITION_REPORT)) {</span>
+<span class="nc" id="L869">                long lastMediaSequence = parseOptionalLongAttr(line, REGEX_LAST_MSN, C.INDEX_UNSET);</span>
+<span class="nc" id="L870">                int lastPartIndex = parseOptionalIntAttr(line, REGEX_LAST_PART, C.INDEX_UNSET);</span>
+<span class="nc" id="L871">                String uri = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc" id="L872">                Uri playlistUri = Uri.parse(UriUtil.resolve(baseUri, uri));</span>
+<span class="nc" id="L873">                renditionReports.add(new RenditionReport(playlistUri, lastMediaSequence, lastPartIndex));</span>
+<span class="nc bnc" id="L874" title="All 2 branches missed.">            } else if (line.startsWith(TAG_PRELOAD_HINT)) {</span>
+<span class="nc bnc" id="L875" title="All 2 branches missed.">                if (preloadPart != null) {</span>
+<span class="nc" id="L876">                    continue;</span>
+                }
+<span class="nc" id="L878">                String type = parseStringAttr(line, REGEX_PRELOAD_HINT_TYPE, variableDefinitions);</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">                if (!TYPE_PART.equals(type)) {</span>
+<span class="nc" id="L880">                    continue;</span>
+                }
+<span class="nc" id="L882">                String url = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc" id="L883">                long byteRangeStart =</span>
+<span class="nc" id="L884">                        parseOptionalLongAttr(line, REGEX_BYTERANGE_START, /* defaultValue= */ C.LENGTH_UNSET);</span>
+<span class="nc" id="L885">                long byteRangeLength =</span>
+<span class="nc" id="L886">                        parseOptionalLongAttr(line, REGEX_BYTERANGE_LENGTH, /* defaultValue= */ C.LENGTH_UNSET);</span>
+                @Nullable
+<span class="nc" id="L888">                String segmentEncryptionIV =</span>
+<span class="nc" id="L889">                        getSegmentEncryptionIV(</span>
+                                segmentMediaSequence, fullSegmentEncryptionKeyUri, fullSegmentEncryptionIV);
+<span class="nc bnc" id="L891" title="All 4 branches missed.">                if (cachedDrmInitData == null &amp;&amp; !currentSchemeDatas.isEmpty()) {</span>
+<span class="nc" id="L892">                    SchemeData[] schemeDatas = currentSchemeDatas.values().toArray(new SchemeData[0]);</span>
+<span class="nc" id="L893">                    cachedDrmInitData = new DrmInitData(encryptionScheme, schemeDatas);</span>
+<span class="nc bnc" id="L894" title="All 2 branches missed.">                    if (playlistProtectionSchemes == null) {</span>
+<span class="nc" id="L895">                        playlistProtectionSchemes = getPlaylistProtectionSchemes(encryptionScheme, schemeDatas);</span>
+                    }
+                }
+<span class="nc bnc" id="L898" title="All 4 branches missed.">                if (byteRangeStart == C.LENGTH_UNSET || byteRangeLength != C.LENGTH_UNSET) {</span>
+                    // Skip preload part if it is an unbounded range request.
+<span class="nc" id="L900">                    preloadPart =</span>
+                            new Part(
+                                    url,
+                                    initializationSegment,
+                                    /* durationUs= */ 0,
+                                    relativeDiscontinuitySequence,
+                                    partStartTimeUs,
+                                    cachedDrmInitData,
+                                    fullSegmentEncryptionKeyUri,
+                                    segmentEncryptionIV,
+<span class="nc bnc" id="L910" title="All 2 branches missed.">                                    byteRangeStart != C.LENGTH_UNSET ? byteRangeStart : 0,</span>
+                                    byteRangeLength,
+                                    /* hasGapTag= */ false,
+                                    /* isIndependent= */ false,
+                                    /* isPreload= */ true);
+                }
+<span class="nc bnc" id="L916" title="All 2 branches missed.">            } else if (line.startsWith(TAG_PART)) {</span>
+                @Nullable
+<span class="nc" id="L918">                String segmentEncryptionIV =</span>
+<span class="nc" id="L919">                        getSegmentEncryptionIV(</span>
+                                segmentMediaSequence, fullSegmentEncryptionKeyUri, fullSegmentEncryptionIV);
+<span class="nc" id="L921">                String url = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc" id="L922">                long partDurationUs =</span>
+<span class="nc" id="L923">                        (long) (parseDoubleAttr(line, REGEX_ATTR_DURATION) * C.MICROS_PER_SECOND);</span>
+<span class="nc" id="L924">                boolean isIndependent =</span>
+<span class="nc" id="L925">                        parseOptionalBooleanAttribute(line, REGEX_INDEPENDENT, /* defaultValue= */ false);</span>
+                // The first part of a segment is always independent if the segments are independent.
+<span class="nc bnc" id="L927" title="All 4 branches missed.">                isIndependent |= hasIndependentSegmentsTag &amp;&amp; trailingParts.isEmpty();</span>
+<span class="nc" id="L928">                boolean isGap = parseOptionalBooleanAttribute(line, REGEX_GAP, /* defaultValue= */ false);</span>
+                @Nullable
+<span class="nc" id="L930">                String byteRange = parseOptionalStringAttr(line, REGEX_ATTR_BYTERANGE, variableDefinitions);</span>
+<span class="nc" id="L931">                long partByteRangeLength = C.LENGTH_UNSET;</span>
+<span class="nc bnc" id="L932" title="All 2 branches missed.">                if (byteRange != null) {</span>
+<span class="nc" id="L933">                    String[] splitByteRange = Util.split(byteRange, &quot;@&quot;);</span>
+<span class="nc" id="L934">                    partByteRangeLength = Long.parseLong(splitByteRange[0]);</span>
+<span class="nc bnc" id="L935" title="All 2 branches missed.">                    if (splitByteRange.length &gt; 1) {</span>
+<span class="nc" id="L936">                        partByteRangeOffset = Long.parseLong(splitByteRange[1]);</span>
+                    }
+                }
+<span class="nc bnc" id="L939" title="All 2 branches missed.">                if (partByteRangeLength == C.LENGTH_UNSET) {</span>
+<span class="nc" id="L940">                    partByteRangeOffset = 0;</span>
+                }
+<span class="nc bnc" id="L942" title="All 4 branches missed.">                if (cachedDrmInitData == null &amp;&amp; !currentSchemeDatas.isEmpty()) {</span>
+<span class="nc" id="L943">                    SchemeData[] schemeDatas = currentSchemeDatas.values().toArray(new SchemeData[0]);</span>
+<span class="nc" id="L944">                    cachedDrmInitData = new DrmInitData(encryptionScheme, schemeDatas);</span>
+<span class="nc bnc" id="L945" title="All 2 branches missed.">                    if (playlistProtectionSchemes == null) {</span>
+<span class="nc" id="L946">                        playlistProtectionSchemes = getPlaylistProtectionSchemes(encryptionScheme, schemeDatas);</span>
+                    }
+                }
+<span class="nc" id="L949">                trailingParts.add(</span>
+                        new Part(
+                                url,
+                                initializationSegment,
+                                partDurationUs,
+                                relativeDiscontinuitySequence,
+                                partStartTimeUs,
+                                cachedDrmInitData,
+                                fullSegmentEncryptionKeyUri,
+                                segmentEncryptionIV,
+                                partByteRangeOffset,
+                                partByteRangeLength,
+                                isGap,
+                                isIndependent,
+                                /* isPreload= */ false));
+<span class="nc" id="L964">                partStartTimeUs += partDurationUs;</span>
+<span class="nc bnc" id="L965" title="All 2 branches missed.">                if (partByteRangeLength != C.LENGTH_UNSET) {</span>
+<span class="nc" id="L966">                    partByteRangeOffset += partByteRangeLength;</span>
+                }
+<span class="nc bnc" id="L968" title="All 4 branches missed.">            } else if (!line.startsWith(&quot;#&quot;) || line.startsWith(TAG_PREFETCH)) {</span>
+                @Nullable
+<span class="nc" id="L970">                String segmentEncryptionIV =</span>
+<span class="nc" id="L971">                        getSegmentEncryptionIV(</span>
+                                segmentMediaSequence, fullSegmentEncryptionKeyUri, fullSegmentEncryptionIV);
+<span class="nc" id="L973">                segmentMediaSequence++;</span>
+
+<span class="nc bnc" id="L975" title="All 2 branches missed.">                if (line.startsWith(TAG_PREFETCH)) {</span>
+<span class="nc" id="L976">                    segmentDurationUs = targetDurationUs;</span>
+<span class="nc" id="L977">                    line = line.substring(line.indexOf(':') + 1);</span>
+                }
+
+<span class="nc" id="L980">                String segmentUri = replaceVariableReferences(line, variableDefinitions);</span>
+<span class="nc" id="L981">                @Nullable Segment inferredInitSegment = urlToInferredInitSegment.get(segmentUri);</span>
+<span class="nc bnc" id="L982" title="All 2 branches missed.">                if (segmentByteRangeLength == C.LENGTH_UNSET) {</span>
+                    // The segment has no byte range defined.
+<span class="nc" id="L984">                    segmentByteRangeOffset = 0;</span>
+<span class="nc bnc" id="L985" title="All 6 branches missed.">                } else if (isIFrameOnly &amp;&amp; initializationSegment == null &amp;&amp; inferredInitSegment == null) {</span>
+                    // The segment is a resource byte range without an initialization segment.
+                    // As per RFC 8216, Section 4.3.3.6, we assume the initialization section exists in the
+                    // bytes preceding the first segment in this segment's URL.
+                    // We assume the implicit initialization segment is unencrypted, since there's no way for
+                    // the playlist to provide an initialization vector for it.
+<span class="nc" id="L991">                    inferredInitSegment =</span>
+                            new Segment(
+                                    segmentUri,
+                                    /* byteRangeOffset= */ 0,
+                                    segmentByteRangeOffset,
+                                    /* fullSegmentEncryptionKeyUri= */ null,
+                                    /* encryptionIV= */ null);
+<span class="nc" id="L998">                    urlToInferredInitSegment.put(segmentUri, inferredInitSegment);</span>
+                }
+
+<span class="nc bnc" id="L1001" title="All 4 branches missed.">                if (cachedDrmInitData == null &amp;&amp; !currentSchemeDatas.isEmpty()) {</span>
+<span class="nc" id="L1002">                    SchemeData[] schemeDatas = currentSchemeDatas.values().toArray(new SchemeData[0]);</span>
+<span class="nc" id="L1003">                    cachedDrmInitData = new DrmInitData(encryptionScheme, schemeDatas);</span>
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">                    if (playlistProtectionSchemes == null) {</span>
+<span class="nc" id="L1005">                        playlistProtectionSchemes = getPlaylistProtectionSchemes(encryptionScheme, schemeDatas);</span>
+                    }
+                }
+
+<span class="nc" id="L1009">                segments.add(</span>
+                        new Segment(
+                                segmentUri,
+<span class="nc bnc" id="L1012" title="All 2 branches missed.">                                initializationSegment != null ? initializationSegment : inferredInitSegment,</span>
+                                segmentTitle,
+                                segmentDurationUs,
+                                relativeDiscontinuitySequence,
+                                segmentStartTimeUs,
+                                cachedDrmInitData,
+                                fullSegmentEncryptionKeyUri,
+                                segmentEncryptionIV,
+                                segmentByteRangeOffset,
+                                segmentByteRangeLength,
+                                hasGapTag,
+                                trailingParts));
+<span class="nc" id="L1024">                segmentStartTimeUs += segmentDurationUs;</span>
+<span class="nc" id="L1025">                partStartTimeUs = segmentStartTimeUs;</span>
+<span class="nc" id="L1026">                segmentDurationUs = 0;</span>
+<span class="nc" id="L1027">                segmentTitle = &quot;&quot;;</span>
+<span class="nc" id="L1028">                trailingParts = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1029" title="All 2 branches missed.">                if (segmentByteRangeLength != C.LENGTH_UNSET) {</span>
+<span class="nc" id="L1030">                    segmentByteRangeOffset += segmentByteRangeLength;</span>
+                }
+<span class="nc" id="L1032">                segmentByteRangeLength = C.LENGTH_UNSET;</span>
+<span class="nc" id="L1033">                hasGapTag = false;</span>
+<span class="nc" id="L1034">            }</span>
+        }
+
+<span class="nc" id="L1037">        Map&lt;Uri, RenditionReport&gt; renditionReportMap = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">        for (int i = 0; i &lt; renditionReports.size(); i++) {</span>
+<span class="nc" id="L1039">            RenditionReport renditionReport = renditionReports.get(i);</span>
+<span class="nc" id="L1040">            long lastMediaSequence = renditionReport.lastMediaSequence;</span>
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">            if (lastMediaSequence == C.INDEX_UNSET) {</span>
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">                lastMediaSequence = mediaSequence + segments.size() - (trailingParts.isEmpty() ? 1 : 0);</span>
+            }
+<span class="nc" id="L1044">            int lastPartIndex = renditionReport.lastPartIndex;</span>
+<span class="nc bnc" id="L1045" title="All 4 branches missed.">            if (lastPartIndex == C.INDEX_UNSET &amp;&amp; partTargetDurationUs != C.TIME_UNSET) {</span>
+                List&lt;Part&gt; lastParts =
+<span class="nc bnc" id="L1047" title="All 2 branches missed.">                        trailingParts.isEmpty() ? Iterables.getLast(segments).parts : trailingParts;</span>
+<span class="nc" id="L1048">                lastPartIndex = lastParts.size() - 1;</span>
+            }
+<span class="nc" id="L1050">            renditionReportMap.put(</span>
+                    renditionReport.playlistUri,
+                    new RenditionReport(renditionReport.playlistUri, lastMediaSequence, lastPartIndex));
+        }
+
+<span class="nc bnc" id="L1055" title="All 2 branches missed.">        if (preloadPart != null) {</span>
+<span class="nc" id="L1056">            trailingParts.add(preloadPart);</span>
+        }
+
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">        return new HlsMediaPlaylist(</span>
+                playlistType,
+                baseUri,
+                tags,
+                startOffsetUs,
+                preciseStart,
+                playlistStartTimeUs,
+                hasDiscontinuitySequence,
+                playlistDiscontinuitySequence,
+                mediaSequence,
+                version,
+                targetDurationUs,
+                partTargetDurationUs,
+                hasIndependentSegmentsTag,
+                hasEndTag,
+                /* hasProgramDateTime= */ playlistStartTimeUs != 0,
+                playlistProtectionSchemes,
+                segments,
+                trailingParts,
+                serverControl,
+                renditionReportMap);
+    }
+
+    private static DrmInitData getPlaylistProtectionSchemes(
+            @Nullable String encryptionScheme, SchemeData[] schemeDatas) {
+<span class="nc" id="L1084">        SchemeData[] playlistSchemeDatas = new SchemeData[schemeDatas.length];</span>
+<span class="nc bnc" id="L1085" title="All 2 branches missed.">        for (int i = 0; i &lt; schemeDatas.length; i++) {</span>
+<span class="nc" id="L1086">            playlistSchemeDatas[i] = schemeDatas[i].copyWithData(null);</span>
+        }
+<span class="nc" id="L1088">        return new DrmInitData(encryptionScheme, playlistSchemeDatas);</span>
+    }
+
+    @Nullable
+    private static String getSegmentEncryptionIV(
+            long segmentMediaSequence,
+            @Nullable String fullSegmentEncryptionKeyUri,
+            @Nullable String fullSegmentEncryptionIV) {
+<span class="nc bnc" id="L1096" title="All 2 branches missed.">        if (fullSegmentEncryptionKeyUri == null) {</span>
+<span class="nc" id="L1097">            return null;</span>
+<span class="nc bnc" id="L1098" title="All 2 branches missed.">        } else if (fullSegmentEncryptionIV != null) {</span>
+<span class="nc" id="L1099">            return fullSegmentEncryptionIV;</span>
+        }
+<span class="nc" id="L1101">        return Long.toHexString(segmentMediaSequence);</span>
+    }
+
+    private static @C.SelectionFlags int parseSelectionFlags(String line) {
+<span class="nc" id="L1105">        int flags = 0;</span>
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">        if (parseOptionalBooleanAttribute(line, REGEX_DEFAULT, false)) {</span>
+<span class="nc" id="L1107">            flags |= C.SELECTION_FLAG_DEFAULT;</span>
+        }
+<span class="nc bnc" id="L1109" title="All 2 branches missed.">        if (parseOptionalBooleanAttribute(line, REGEX_FORCED, false)) {</span>
+<span class="nc" id="L1110">            flags |= C.SELECTION_FLAG_FORCED;</span>
+        }
+<span class="nc bnc" id="L1112" title="All 2 branches missed.">        if (parseOptionalBooleanAttribute(line, REGEX_AUTOSELECT, false)) {</span>
+<span class="nc" id="L1113">            flags |= C.SELECTION_FLAG_AUTOSELECT;</span>
+        }
+<span class="nc" id="L1115">        return flags;</span>
+    }
+
+    private static @C.RoleFlags int parseRoleFlags(
+            String line, Map&lt;String, String&gt; variableDefinitions) {
+<span class="nc" id="L1120">        String concatenatedCharacteristics =</span>
+<span class="nc" id="L1121">                parseOptionalStringAttr(line, REGEX_CHARACTERISTICS, variableDefinitions);</span>
+<span class="nc bnc" id="L1122" title="All 2 branches missed.">        if (TextUtils.isEmpty(concatenatedCharacteristics)) {</span>
+<span class="nc" id="L1123">            return 0;</span>
+        }
+<span class="nc" id="L1125">        String[] characteristics = Util.split(concatenatedCharacteristics, &quot;,&quot;);</span>
+<span class="nc" id="L1126">        @C.RoleFlags int roleFlags = 0;</span>
+<span class="nc bnc" id="L1127" title="All 2 branches missed.">        if (Util.contains(characteristics, &quot;public.accessibility.describes-video&quot;)) {</span>
+<span class="nc" id="L1128">            roleFlags |= C.ROLE_FLAG_DESCRIBES_VIDEO;</span>
+        }
+<span class="nc bnc" id="L1130" title="All 2 branches missed.">        if (Util.contains(characteristics, &quot;public.accessibility.transcribes-spoken-dialog&quot;)) {</span>
+<span class="nc" id="L1131">            roleFlags |= C.ROLE_FLAG_TRANSCRIBES_DIALOG;</span>
+        }
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">        if (Util.contains(characteristics, &quot;public.accessibility.describes-music-and-sound&quot;)) {</span>
+<span class="nc" id="L1134">            roleFlags |= C.ROLE_FLAG_DESCRIBES_MUSIC_AND_SOUND;</span>
+        }
+<span class="nc bnc" id="L1136" title="All 2 branches missed.">        if (Util.contains(characteristics, &quot;public.easy-to-read&quot;)) {</span>
+<span class="nc" id="L1137">            roleFlags |= C.ROLE_FLAG_EASY_TO_READ;</span>
+        }
+<span class="nc" id="L1139">        return roleFlags;</span>
+    }
+
+    @Nullable
+    private static SchemeData parseDrmSchemeData(
+            String line, String keyFormat, Map&lt;String, String&gt; variableDefinitions)
+            throws ParserException {
+<span class="nc" id="L1146">        String keyFormatVersions =</span>
+<span class="nc" id="L1147">                parseOptionalStringAttr(line, REGEX_KEYFORMATVERSIONS, &quot;1&quot;, variableDefinitions);</span>
+<span class="nc bnc" id="L1148" title="All 2 branches missed.">        if (KEYFORMAT_WIDEVINE_PSSH_BINARY.equals(keyFormat)) {</span>
+<span class="nc" id="L1149">            String uriString = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc" id="L1150">            return new SchemeData(</span>
+                    C.WIDEVINE_UUID,
+                    MimeTypes.VIDEO_MP4,
+<span class="nc" id="L1153">                    Base64.decode(uriString.substring(uriString.indexOf(',')), Base64.DEFAULT));</span>
+<span class="nc bnc" id="L1154" title="All 2 branches missed.">        } else if (KEYFORMAT_WIDEVINE_PSSH_JSON.equals(keyFormat)) {</span>
+<span class="nc" id="L1155">            return new SchemeData(C.WIDEVINE_UUID, &quot;hls&quot;, Util.getUtf8Bytes(line));</span>
+<span class="nc bnc" id="L1156" title="All 4 branches missed.">        } else if (KEYFORMAT_PLAYREADY.equals(keyFormat) &amp;&amp; &quot;1&quot;.equals(keyFormatVersions)) {</span>
+<span class="nc" id="L1157">            String uriString = parseStringAttr(line, REGEX_URI, variableDefinitions);</span>
+<span class="nc" id="L1158">            byte[] data = Base64.decode(uriString.substring(uriString.indexOf(',')), Base64.DEFAULT);</span>
+<span class="nc" id="L1159">            byte[] psshData = PsshAtomUtil.buildPsshAtom(C.PLAYREADY_UUID, data);</span>
+<span class="nc" id="L1160">            return new SchemeData(C.PLAYREADY_UUID, MimeTypes.VIDEO_MP4, psshData);</span>
+        }
+<span class="nc" id="L1162">        return null;</span>
+    }
+
+    private static HlsMediaPlaylist.ServerControl parseServerControl(String line) {
+<span class="nc" id="L1166">        double skipUntilSeconds =</span>
+<span class="nc" id="L1167">                parseOptionalDoubleAttr(line, REGEX_CAN_SKIP_UNTIL, /* defaultValue= */ C.TIME_UNSET);</span>
+        long skipUntilUs =
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">                skipUntilSeconds == C.TIME_UNSET</span>
+<span class="nc" id="L1170">                        ? C.TIME_UNSET</span>
+<span class="nc" id="L1171">                        : (long) (skipUntilSeconds * C.MICROS_PER_SECOND);</span>
+<span class="nc" id="L1172">        boolean canSkipDateRanges =</span>
+<span class="nc" id="L1173">                parseOptionalBooleanAttribute(line, REGEX_CAN_SKIP_DATE_RANGES, /* defaultValue= */ false);</span>
+<span class="nc" id="L1174">        double holdBackSeconds =</span>
+<span class="nc" id="L1175">                parseOptionalDoubleAttr(line, REGEX_HOLD_BACK, /* defaultValue= */ C.TIME_UNSET);</span>
+        long holdBackUs =
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">                holdBackSeconds == C.TIME_UNSET</span>
+<span class="nc" id="L1178">                        ? C.TIME_UNSET</span>
+<span class="nc" id="L1179">                        : (long) (holdBackSeconds * C.MICROS_PER_SECOND);</span>
+<span class="nc" id="L1180">        double partHoldBackSeconds = parseOptionalDoubleAttr(line, REGEX_PART_HOLD_BACK, C.TIME_UNSET);</span>
+        long partHoldBackUs =
+<span class="nc bnc" id="L1182" title="All 2 branches missed.">                partHoldBackSeconds == C.TIME_UNSET</span>
+<span class="nc" id="L1183">                        ? C.TIME_UNSET</span>
+<span class="nc" id="L1184">                        : (long) (partHoldBackSeconds * C.MICROS_PER_SECOND);</span>
+<span class="nc" id="L1185">        boolean canBlockReload =</span>
+<span class="nc" id="L1186">                parseOptionalBooleanAttribute(line, REGEX_CAN_BLOCK_RELOAD, /* defaultValue= */ false);</span>
+
+<span class="nc" id="L1188">        return new HlsMediaPlaylist.ServerControl(</span>
+                skipUntilUs, canSkipDateRanges, holdBackUs, partHoldBackUs, canBlockReload);
+    }
+
+    private static String parseEncryptionScheme(String method) {
+<span class="nc bnc" id="L1193" title="All 4 branches missed.">        return METHOD_SAMPLE_AES_CENC.equals(method) || METHOD_SAMPLE_AES_CTR.equals(method)</span>
+<span class="nc" id="L1194">                ? C.CENC_TYPE_cenc</span>
+<span class="nc" id="L1195">                : C.CENC_TYPE_cbcs;</span>
+    }
+
+    private static int parseIntAttr(String line, Pattern pattern) throws ParserException {
+<span class="nc" id="L1199">        return Integer.parseInt(parseStringAttr(line, pattern, Collections.emptyMap()));</span>
+    }
+
+    private static int parseOptionalIntAttr(String line, Pattern pattern, int defaultValue) {
+<span class="nc" id="L1203">        Matcher matcher = pattern.matcher(line);</span>
+<span class="nc bnc" id="L1204" title="All 2 branches missed.">        if (matcher.find()) {</span>
+<span class="nc" id="L1205">            return Integer.parseInt(checkNotNull(matcher.group(1)));</span>
+        }
+<span class="nc" id="L1207">        return defaultValue;</span>
+    }
+
+    private static long parseLongAttr(String line, Pattern pattern) throws ParserException {
+<span class="nc" id="L1211">        return Long.parseLong(parseStringAttr(line, pattern, Collections.emptyMap()));</span>
+    }
+
+    private static long parseOptionalLongAttr(String line, Pattern pattern, long defaultValue) {
+<span class="nc" id="L1215">        Matcher matcher = pattern.matcher(line);</span>
+<span class="nc bnc" id="L1216" title="All 2 branches missed.">        if (matcher.find()) {</span>
+<span class="nc" id="L1217">            return Long.parseLong(checkNotNull(matcher.group(1)));</span>
+        }
+<span class="nc" id="L1219">        return defaultValue;</span>
+    }
+
+    private static long parseTimeSecondsToUs(String line, Pattern pattern) throws ParserException {
+<span class="nc" id="L1223">        String timeValueSeconds = parseStringAttr(line, pattern, Collections.emptyMap());</span>
+<span class="nc" id="L1224">        BigDecimal timeValue = new BigDecimal(timeValueSeconds);</span>
+<span class="nc" id="L1225">        return timeValue.multiply(new BigDecimal(C.MICROS_PER_SECOND)).longValue();</span>
+    }
+
+    private static double parseDoubleAttr(String line, Pattern pattern) throws ParserException {
+<span class="nc" id="L1229">        return Double.parseDouble(parseStringAttr(line, pattern, Collections.emptyMap()));</span>
+    }
+
+    private static String parseStringAttr(
+            String line, Pattern pattern, Map&lt;String, String&gt; variableDefinitions)
+            throws ParserException {
+<span class="nc" id="L1235">        String value = parseOptionalStringAttr(line, pattern, variableDefinitions);</span>
+<span class="nc bnc" id="L1236" title="All 2 branches missed.">        if (value != null) {</span>
+<span class="nc" id="L1237">            return value;</span>
+        } else {
+<span class="nc" id="L1239">            throw ParserException.createForMalformedManifest(</span>
+<span class="nc" id="L1240">                    &quot;Couldn't match &quot; + pattern.pattern() + &quot; in &quot; + line, /* cause= */ null);</span>
+        }
+    }
+
+    @Nullable
+    private static String parseOptionalStringAttr(
+            String line, Pattern pattern, Map&lt;String, String&gt; variableDefinitions) {
+<span class="nc" id="L1247">        return parseOptionalStringAttr(line, pattern, null, variableDefinitions);</span>
+    }
+
+    private static @PolyNull String parseOptionalStringAttr(
+            String line,
+            Pattern pattern,
+            @PolyNull String defaultValue,
+            Map&lt;String, String&gt; variableDefinitions) {
+<span class="nc" id="L1255">        Matcher matcher = pattern.matcher(line);</span>
+<span class="nc bnc" id="L1256" title="All 2 branches missed.">        @PolyNull String value = matcher.find() ? checkNotNull(matcher.group(1)) : defaultValue;</span>
+<span class="nc bnc" id="L1257" title="All 4 branches missed.">        return variableDefinitions.isEmpty() || value == null</span>
+<span class="nc" id="L1258">                ? value</span>
+<span class="nc" id="L1259">                : replaceVariableReferences(value, variableDefinitions);</span>
+    }
+
+    private static double parseOptionalDoubleAttr(String line, Pattern pattern, double defaultValue) {
+<span class="nc" id="L1263">        Matcher matcher = pattern.matcher(line);</span>
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">        if (matcher.find()) {</span>
+<span class="nc" id="L1265">            return Double.parseDouble(checkNotNull(matcher.group(1)));</span>
+        }
+<span class="nc" id="L1267">        return defaultValue;</span>
+    }
+
+    private static String replaceVariableReferences(
+            String string, Map&lt;String, String&gt; variableDefinitions) {
+<span class="nc" id="L1272">        Matcher matcher = REGEX_VARIABLE_REFERENCE.matcher(string);</span>
+        // TODO: Replace StringBuffer with StringBuilder once Java 9 is available.
+<span class="nc" id="L1274">        StringBuffer stringWithReplacements = new StringBuffer();</span>
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">        while (matcher.find()) {</span>
+<span class="nc" id="L1276">            String groupName = matcher.group(1);</span>
+<span class="nc bnc" id="L1277" title="All 2 branches missed.">            if (variableDefinitions.containsKey(groupName)) {</span>
+<span class="nc" id="L1278">                matcher.appendReplacement(</span>
+<span class="nc" id="L1279">                        stringWithReplacements, Matcher.quoteReplacement(variableDefinitions.get(groupName)));</span>
+            } else {
+                // The variable is not defined. The value is ignored.
+            }
+<span class="nc" id="L1283">        }</span>
+<span class="nc" id="L1284">        matcher.appendTail(stringWithReplacements);</span>
+<span class="nc" id="L1285">        return stringWithReplacements.toString();</span>
+    }
+
+    private static boolean parseOptionalBooleanAttribute(
+            String line, Pattern pattern, boolean defaultValue) {
+<span class="nc" id="L1290">        Matcher matcher = pattern.matcher(line);</span>
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">        if (matcher.find()) {</span>
+<span class="nc" id="L1292">            return BOOLEAN_TRUE.equals(matcher.group(1));</span>
+        }
+<span class="nc" id="L1294">        return defaultValue;</span>
+    }
+
+    private static Pattern compileBooleanAttrPattern(String attribute) {
+<span class="nc" id="L1298">        return Pattern.compile(attribute + &quot;=(&quot; + BOOLEAN_FALSE + &quot;|&quot; + BOOLEAN_TRUE + &quot;)&quot;);</span>
+    }
+
+    private static class LineIterator {
+
+        private final BufferedReader reader;
+        private final Queue&lt;String&gt; extraLines;
+
+        @Nullable private String next;
+
+<span class="nc" id="L1308">        public LineIterator(Queue&lt;String&gt; extraLines, BufferedReader reader) {</span>
+<span class="nc" id="L1309">            this.extraLines = extraLines;</span>
+<span class="nc" id="L1310">            this.reader = reader;</span>
+<span class="nc" id="L1311">        }</span>
+
+        @EnsuresNonNullIf(expression = &quot;next&quot;, result = true)
+        public boolean hasNext() throws IOException {
+<span class="nc bnc" id="L1315" title="All 2 branches missed.">            if (next != null) {</span>
+<span class="nc" id="L1316">                return true;</span>
+            }
+<span class="nc bnc" id="L1318" title="All 2 branches missed.">            if (!extraLines.isEmpty()) {</span>
+<span class="nc" id="L1319">                next = checkNotNull(extraLines.poll());</span>
+<span class="nc" id="L1320">                return true;</span>
+            }
+<span class="nc bnc" id="L1322" title="All 2 branches missed.">            while ((next = reader.readLine()) != null) {</span>
+<span class="nc" id="L1323">                next = next.trim();</span>
+<span class="nc bnc" id="L1324" title="All 2 branches missed.">                if (!next.isEmpty()) {</span>
+<span class="nc" id="L1325">                    return true;</span>
+                }
+            }
+<span class="nc" id="L1328">            return false;</span>
+        }
+
+        /** Return the next line, or throw {@link NoSuchElementException} if none. */
+        public String next() throws IOException {
+<span class="nc bnc" id="L1333" title="All 2 branches missed.">            if (hasNext()) {</span>
+<span class="nc" id="L1334">                String result = next;</span>
+<span class="nc" id="L1335">                next = null;</span>
+<span class="nc" id="L1336">                return result;</span>
+            } else {
+<span class="nc" id="L1338">                throw new NoSuchElementException();</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

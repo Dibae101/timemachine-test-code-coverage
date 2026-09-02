@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AndOtpImporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Aegis</a> &gt; <a href="index.source.html" class="el_package">com.beemdevelopment.aegis.importers</a> &gt; <span class="el_source">AndOtpImporter.java</span></div><h1>AndOtpImporter.java</h1><pre class="source lang-java linenums">package com.beemdevelopment.aegis.importers;
+
+import android.content.Context;
+
+import androidx.appcompat.app.AlertDialog;
+import androidx.lifecycle.Lifecycle;
+
+import com.beemdevelopment.aegis.R;
+import com.beemdevelopment.aegis.crypto.CryptParameters;
+import com.beemdevelopment.aegis.crypto.CryptResult;
+import com.beemdevelopment.aegis.crypto.CryptoUtils;
+import com.beemdevelopment.aegis.encoding.Base32;
+import com.beemdevelopment.aegis.encoding.EncodingException;
+import com.beemdevelopment.aegis.helpers.ContextHelper;
+import com.beemdevelopment.aegis.otp.HotpInfo;
+import com.beemdevelopment.aegis.otp.OtpInfo;
+import com.beemdevelopment.aegis.otp.OtpInfoException;
+import com.beemdevelopment.aegis.otp.SteamInfo;
+import com.beemdevelopment.aegis.otp.TotpInfo;
+import com.beemdevelopment.aegis.ui.dialogs.Dialogs;
+import com.beemdevelopment.aegis.ui.tasks.PBKDFTask;
+import com.beemdevelopment.aegis.util.IOUtils;
+import com.beemdevelopment.aegis.vault.VaultEntry;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.topjohnwu.superuser.io.SuFile;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Locale;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+
+public class AndOtpImporter extends DatabaseImporter {
+    private static final int INT_SIZE = 4;
+    private static final int NONCE_SIZE = 12;
+    private static final int TAG_SIZE = 16;
+    private static final int SALT_SIZE = 12;
+    private static final int KEY_SIZE = 256; // bits
+
+    public AndOtpImporter(Context context) {
+<span class="nc" id="L57">        super(context);</span>
+<span class="nc" id="L58">    }</span>
+
+    @Override
+    protected SuFile getAppPath() {
+<span class="nc" id="L62">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public State read(InputStream stream, boolean isInternal) throws DatabaseImporterException {
+        byte[] bytes;
+        try {
+<span class="nc" id="L69">            bytes = IOUtils.readAll(stream);</span>
+<span class="nc" id="L70">        } catch (IOException e) {</span>
+<span class="nc" id="L71">            throw new DatabaseImporterException(e);</span>
+<span class="nc" id="L72">        }</span>
+
+        try {
+<span class="nc" id="L75">            return read(bytes);</span>
+<span class="nc" id="L76">        } catch (JSONException e) {</span>
+            // andOTP doesn't have a proper way to indicate whether a file is encrypted
+            // so, if we can't parse it as JSON, we'll have to assume it is
+<span class="nc" id="L79">            return new EncryptedState(bytes);</span>
+        }
+    }
+
+    private static DecryptedState read(byte[] bytes) throws JSONException {
+<span class="nc" id="L84">        JSONArray array = new JSONArray(new String(bytes, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L85">        return new DecryptedState(array);</span>
+    }
+
+    public static class EncryptedState extends DatabaseImporter.State {
+        private byte[] _data;
+
+        public EncryptedState(byte[] data) {
+<span class="nc" id="L92">            super(true);</span>
+<span class="nc" id="L93">            _data = data;</span>
+<span class="nc" id="L94">        }</span>
+
+        private DecryptedState decryptContent(SecretKey key, int offset) throws DatabaseImporterException {
+<span class="nc" id="L97">            byte[] nonce = Arrays.copyOfRange(_data, offset, offset + NONCE_SIZE);</span>
+<span class="nc" id="L98">            byte[] tag = Arrays.copyOfRange(_data, _data.length - TAG_SIZE, _data.length);</span>
+<span class="nc" id="L99">            CryptParameters params = new CryptParameters(nonce, tag);</span>
+
+            try {
+<span class="nc" id="L102">                Cipher cipher = CryptoUtils.createDecryptCipher(key, nonce);</span>
+<span class="nc" id="L103">                int len = _data.length - offset - NONCE_SIZE - TAG_SIZE;</span>
+<span class="nc" id="L104">                CryptResult result = CryptoUtils.decrypt(_data, offset + NONCE_SIZE, len, cipher, params);</span>
+<span class="nc" id="L105">                return read(result.getData());</span>
+<span class="nc" id="L106">            } catch (IOException | BadPaddingException | JSONException e) {</span>
+<span class="nc" id="L107">                throw new DatabaseImporterException(e);</span>
+<span class="nc" id="L108">            } catch (NoSuchAlgorithmException</span>
+                    | InvalidAlgorithmParameterException
+                    | InvalidKeyException
+                    | NoSuchPaddingException
+                    | IllegalBlockSizeException e) {
+<span class="nc" id="L113">                throw new RuntimeException(e);</span>
+            }
+        }
+
+        private PBKDFTask.Params getKeyDerivationParams(char[] password) throws DatabaseImporterException {
+<span class="nc" id="L118">            byte[] iterBytes = Arrays.copyOfRange(_data, 0, INT_SIZE);</span>
+<span class="nc" id="L119">            int iterations = ByteBuffer.wrap(iterBytes).getInt();</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            if (iterations &lt; 1) {</span>
+<span class="nc" id="L121">                throw new DatabaseImporterException(String.format(&quot;Invalid number of iterations for PBKDF: %d&quot;, iterations));</span>
+            }
+            // If number of iterations is this high, it's probably not an andOTP file, so
+            // abort early in order to prevent having to wait for an extremely long key derivation
+            // process, only to find out that the user picked the wrong file
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (iterations &gt; 10_000_000L) {</span>
+<span class="nc" id="L127">                throw new DatabaseImporterException(String.format(&quot;Unexpectedly high number of iterations: %d&quot;, iterations));</span>
+            }
+
+<span class="nc" id="L130">            byte[] salt = Arrays.copyOfRange(_data, INT_SIZE, INT_SIZE + SALT_SIZE);</span>
+<span class="nc" id="L131">            return new PBKDFTask.Params(&quot;PBKDF2WithHmacSHA1&quot;, KEY_SIZE, password, salt, iterations);</span>
+        }
+
+        protected DecryptedState decryptOldFormat(char[] password) throws DatabaseImporterException {
+            // WARNING: DON'T DO THIS IN YOUR OWN CODE
+            // this exists solely to support the old andOTP backup format
+            // it is not a secure way to derive a key from a password
+            MessageDigest hash;
+            try {
+<span class="nc" id="L140">                hash = MessageDigest.getInstance(&quot;SHA-256&quot;);</span>
+<span class="nc" id="L141">            } catch (NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L142">                throw new RuntimeException(e);</span>
+<span class="nc" id="L143">            }</span>
+<span class="nc" id="L144">            byte[] keyBytes = hash.digest(CryptoUtils.toBytes(password));</span>
+<span class="nc" id="L145">            SecretKey key = new SecretKeySpec(keyBytes, &quot;AES&quot;);</span>
+<span class="nc" id="L146">            return decryptContent(key, 0);</span>
+        }
+
+        protected DecryptedState decryptNewFormat(SecretKey key) throws DatabaseImporterException {
+<span class="nc" id="L150">            return decryptContent(key, INT_SIZE + SALT_SIZE);</span>
+        }
+
+        protected DecryptedState decryptNewFormat(char[] password)
+            throws DatabaseImporterException {
+<span class="nc" id="L155">            PBKDFTask.Params params = getKeyDerivationParams(password);</span>
+<span class="nc" id="L156">            SecretKey key = PBKDFTask.deriveKey(params);</span>
+<span class="nc" id="L157">            return decryptNewFormat(key);</span>
+        }
+
+        private void decrypt(Context context, char[] password, boolean oldFormat, DecryptListener listener) throws DatabaseImporterException {
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            if (oldFormat) {</span>
+<span class="nc" id="L162">                DecryptedState state = decryptOldFormat(password);</span>
+<span class="nc" id="L163">                listener.onStateDecrypted(state);</span>
+<span class="nc" id="L164">            } else {</span>
+<span class="nc" id="L165">                PBKDFTask.Params params = getKeyDerivationParams(password);</span>
+<span class="nc" id="L166">                PBKDFTask task = new PBKDFTask(context, key -&gt; {</span>
+                    try {
+<span class="nc" id="L168">                        DecryptedState state = decryptNewFormat(key);</span>
+<span class="nc" id="L169">                        listener.onStateDecrypted(state);</span>
+<span class="nc" id="L170">                    } catch (DatabaseImporterException e) {</span>
+<span class="nc" id="L171">                        listener.onError(e);</span>
+<span class="nc" id="L172">                    }</span>
+<span class="nc" id="L173">                });</span>
+<span class="nc" id="L174">                Lifecycle lifecycle = ContextHelper.getLifecycle(context);</span>
+<span class="nc" id="L175">                task.execute(lifecycle, params);</span>
+            }
+<span class="nc" id="L177">        }</span>
+
+        @Override
+        public void decrypt(Context context, DecryptListener listener) {
+<span class="nc" id="L181">            String[] choices = new String[]{</span>
+<span class="nc" id="L182">                    context.getResources().getString(R.string.andotp_new_format),</span>
+<span class="nc" id="L183">                    context.getResources().getString(R.string.andotp_old_format)</span>
+            };
+
+<span class="nc" id="L186">            Dialogs.showSecureDialog(new MaterialAlertDialogBuilder(context)</span>
+<span class="nc" id="L187">                    .setTitle(R.string.choose_andotp_importer)</span>
+<span class="nc" id="L188">                    .setSingleChoiceItems(choices, 0, null)</span>
+<span class="nc" id="L189">                    .setPositiveButton(android.R.string.ok, (dialog, which) -&gt; {</span>
+<span class="nc" id="L190">                        int i = ((AlertDialog) dialog).getListView().getCheckedItemPosition();</span>
+<span class="nc" id="L191">                        Dialogs.showPasswordInputDialog(context, password -&gt; {</span>
+                            try {
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                                decrypt(context, password, i != 0, listener);</span>
+<span class="nc" id="L194">                            } catch (DatabaseImporterException e) {</span>
+<span class="nc" id="L195">                                listener.onError(e);</span>
+<span class="nc" id="L196">                            }</span>
+<span class="nc" id="L197">                        }, dialog1 -&gt; listener.onCanceled());</span>
+<span class="nc" id="L198">                    })</span>
+<span class="nc" id="L199">                    .create());</span>
+<span class="nc" id="L200">        }</span>
+    }
+
+    public static class DecryptedState extends DatabaseImporter.State {
+        private JSONArray _obj;
+
+        private DecryptedState(JSONArray obj) {
+<span class="nc" id="L207">            super(false);</span>
+<span class="nc" id="L208">            _obj = obj;</span>
+<span class="nc" id="L209">        }</span>
+
+        @Override
+        public Result convert() throws DatabaseImporterException {
+<span class="nc" id="L213">            Result result = new Result();</span>
+
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            for (int i = 0; i &lt; _obj.length(); i++) {</span>
+                try {
+<span class="nc" id="L217">                    JSONObject obj = _obj.getJSONObject(i);</span>
+<span class="nc" id="L218">                    VaultEntry entry = convertEntry(obj);</span>
+<span class="nc" id="L219">                    result.addEntry(entry);</span>
+<span class="nc" id="L220">                } catch (JSONException e) {</span>
+<span class="nc" id="L221">                    throw new DatabaseImporterException(e);</span>
+<span class="nc" id="L222">                } catch (DatabaseImporterEntryException e) {</span>
+<span class="nc" id="L223">                    result.addError(e);</span>
+<span class="nc" id="L224">                }</span>
+            }
+
+<span class="nc" id="L227">            return result;</span>
+        }
+
+        private static VaultEntry convertEntry(JSONObject obj) throws DatabaseImporterEntryException {
+            try {
+<span class="nc" id="L232">                String type = obj.getString(&quot;type&quot;).toLowerCase(Locale.ROOT);</span>
+<span class="nc" id="L233">                String algo = obj.getString(&quot;algorithm&quot;);</span>
+<span class="nc" id="L234">                int digits = obj.getInt(&quot;digits&quot;);</span>
+<span class="nc" id="L235">                byte[] secret = Base32.decode(obj.getString(&quot;secret&quot;));</span>
+
+                OtpInfo info;
+<span class="nc bnc" id="L238" title="All 4 branches missed.">                switch (type) {</span>
+                    case &quot;hotp&quot;:
+<span class="nc" id="L240">                        info = new HotpInfo(secret, algo, digits, obj.getLong(&quot;counter&quot;));</span>
+<span class="nc" id="L241">                        break;</span>
+                    case &quot;totp&quot;:
+<span class="nc" id="L243">                        info = new TotpInfo(secret, algo, digits, obj.getInt(&quot;period&quot;));</span>
+<span class="nc" id="L244">                        break;</span>
+                    case &quot;steam&quot;:
+<span class="nc" id="L246">                        info = new SteamInfo(secret, algo, digits, obj.optInt(&quot;period&quot;, TotpInfo.DEFAULT_PERIOD));</span>
+<span class="nc" id="L247">                        break;</span>
+                    default:
+<span class="nc" id="L249">                        throw new DatabaseImporterException(&quot;unsupported otp type: &quot; + type);</span>
+                }
+
+                String name;
+<span class="nc" id="L253">                String issuer = &quot;&quot;;</span>
+
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                if (obj.has(&quot;issuer&quot;)) {</span>
+<span class="nc" id="L256">                    name = obj.getString(&quot;label&quot;);</span>
+<span class="nc" id="L257">                    issuer = obj.getString(&quot;issuer&quot;);</span>
+                } else {
+<span class="nc" id="L259">                    String[] parts = obj.getString(&quot;label&quot;).split(&quot; - &quot;);</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                    if (parts.length &gt; 1) {</span>
+<span class="nc" id="L261">                        issuer = parts[0];</span>
+<span class="nc" id="L262">                        name = parts[1];</span>
+                    } else {
+<span class="nc" id="L264">                        name = parts[0];</span>
+                    }
+                }
+
+<span class="nc" id="L268">                return new VaultEntry(info, name, issuer);</span>
+<span class="nc" id="L269">            } catch (DatabaseImporterException | EncodingException | OtpInfoException |</span>
+                     JSONException e) {
+<span class="nc" id="L271">                throw new DatabaseImporterEntryException(e, obj.toString());</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

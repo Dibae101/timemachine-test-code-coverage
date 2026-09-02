@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MapTilesDownloader.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.data.maptiles</a> &gt; <span class="el_source">MapTilesDownloader.kt</span></div><h1>MapTilesDownloader.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.data.maptiles
+
+import android.util.Log
+import de.westnordost.streetcomplete.ApplicationConstants
+import de.westnordost.streetcomplete.data.download.tiles.enclosingTilesRect
+import de.westnordost.streetcomplete.data.osm.mapdata.BoundingBox
+import de.westnordost.streetcomplete.screens.main.map.VectorTileProvider
+import de.westnordost.streetcomplete.util.ktx.format
+import de.westnordost.streetcomplete.util.ktx.nowAsEpochMilliseconds
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.HttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.internal.Version
+import java.io.IOException
+import kotlin.coroutines.resume
+
+<span class="nc" id="L25">class MapTilesDownloader(</span>
+<span class="nc" id="L26">    private val vectorTileProvider: VectorTileProvider,</span>
+<span class="nc" id="L27">    private val cacheConfig: MapTilesDownloadCacheConfig</span>
+) {
+<span class="nc" id="L29">    private val okHttpClient = OkHttpClient.Builder().cache(cacheConfig.cache).build()</span>
+
+<span class="nc" id="L31">    data class Tile(val zoom: Int, val x: Int, val y: Int)</span>
+
+<span class="nc" id="L33">    suspend fun download(bbox: BoundingBox) = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L34">        var tileCount = 0</span>
+<span class="nc" id="L35">        var failureCount = 0</span>
+<span class="nc" id="L36">        var downloadedSize = 0</span>
+<span class="nc" id="L37">        var cachedSize = 0</span>
+<span class="nc" id="L38">        val time = nowAsEpochMilliseconds()</span>
+
+<span class="nc" id="L40">        coroutineScope {</span>
+<span class="nc bnc" id="L41" title="All 2 branches missed.">            for (tile in getDownloadTileSequence(bbox)) {</span>
+<span class="nc" id="L42">                launch {</span>
+<span class="nc" id="L43">                    val result = try {</span>
+<span class="nc" id="L44">                        downloadTile(tile.zoom, tile.x, tile.y)</span>
+<span class="nc" id="L45">                    } catch (e: Exception) {</span>
+<span class="nc" id="L46">                        DownloadFailure</span>
+                    }
+<span class="nc" id="L48">                    ++tileCount</span>
+<span class="nc" id="L49">                    when (result) {</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">                        is DownloadFailure -&gt; ++failureCount</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">                        is DownloadSuccess -&gt; {</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">                            if (result.alreadyCached) cachedSize += result.size</span>
+<span class="nc" id="L53">                            else downloadedSize += result.size</span>
+                        }
+                    }
+<span class="nc" id="L56">                }</span>
+            }
+<span class="nc" id="L58">        }</span>
+<span class="nc" id="L59">        val seconds = (nowAsEpochMilliseconds() - time) / 1000.0</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        val failureText = if (failureCount &gt; 0) &quot;. $failureCount tiles failed to download&quot; else &quot;&quot;</span>
+<span class="nc" id="L61">        Log.i(TAG, &quot;Downloaded $tileCount tiles (${downloadedSize / 1000}kB downloaded, ${cachedSize / 1000}kB already cached) in ${seconds.format(1)}s$failureText&quot;)</span>
+<span class="nc" id="L62">    }</span>
+
+    private fun getDownloadTileSequence(bbox: BoundingBox): Sequence&lt;Tile&gt; =
+        /* tiles for the highest zoom (=likely current or near current zoom) first,
+           because those are the tiles that are likely to be useful first */
+<span class="nc" id="L67">        (vectorTileProvider.maxZoom downTo 0).asSequence().flatMap { zoom -&gt;</span>
+<span class="nc" id="L68">            bbox.enclosingTilesRect(zoom).asTilePosSequence().map { Tile(zoom, it.x, it.y) }</span>
+<span class="nc" id="L69">        }</span>
+
+<span class="nc" id="L71">    private suspend fun downloadTile(zoom: Int, x: Int, y: Int): DownloadResult = suspendCancellableCoroutine { cont -&gt;</span>
+        /* adding trailing &quot;&amp;&quot; because Tangram-ES also puts this at the end and the URL needs to be
+           identical in order for the cache to work */
+<span class="nc" id="L74">        val url = vectorTileProvider.getTileUrl(zoom, x, y) + &quot;&amp;&quot;</span>
+<span class="nc" id="L75">        val httpUrl = HttpUrl.parse(url)</span>
+<span class="nc bnc" id="L76" title="All 4 branches missed.">        require(httpUrl != null) { &quot;Invalid URL: $url&quot; }</span>
+
+<span class="nc" id="L78">        val builder = Request.Builder()</span>
+<span class="nc" id="L79">            .url(httpUrl)</span>
+<span class="nc" id="L80">            .cacheControl(cacheConfig.cacheControl)</span>
+<span class="nc" id="L81">        builder.header(&quot;User-Agent&quot;, ApplicationConstants.USER_AGENT + &quot; / &quot; + Version.userAgent())</span>
+<span class="nc" id="L82">        val call = okHttpClient.newCall(builder.build())</span>
+
+        /* since we use coroutines and this is in the background anyway, why not use call.execute()?
+        *  Because we want to let the OkHttp dispatcher control how many HTTP requests are made in
+        *  parallel */
+<span class="nc" id="L87">        val callback = object : Callback {</span>
+            override fun onFailure(call: Call, e: IOException) {
+<span class="nc" id="L89">                Log.w(TAG, &quot;Error retrieving tile $zoom/$x/$y: ${e.message}&quot;)</span>
+<span class="nc" id="L90">                cont.resume(DownloadFailure)</span>
+<span class="nc" id="L91">            }</span>
+
+            override fun onResponse(call: Call, response: Response) {
+<span class="nc" id="L94">                var size = 0</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                response.body()?.use { body -&gt;</span>
+                    // just get the bytes and let the cache magic do the rest...
+<span class="nc" id="L97">                    size = body.bytes().size</span>
+<span class="nc" id="L98">                }</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                val alreadyCached = response.cacheResponse() != null</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">                val logText = if (alreadyCached) &quot;in cache&quot; else &quot;downloaded&quot;</span>
+<span class="nc" id="L101">                Log.v(TAG, &quot;Tile $zoom/$x/$y $logText&quot;)</span>
+<span class="nc" id="L102">                cont.resume(DownloadSuccess(alreadyCached, size))</span>
+<span class="nc" id="L103">            }</span>
+        }
+<span class="nc" id="L105">        cont.invokeOnCancellation { call.cancel() }</span>
+<span class="nc" id="L106">        call.enqueue(callback)</span>
+<span class="nc" id="L107">    }</span>
+
+    companion object {
+        private const val TAG = &quot;MapTilesDownload&quot;
+    }
+}
+
+private sealed class DownloadResult
+<span class="nc" id="L115">private data class DownloadSuccess(val alreadyCached: Boolean, val size: Int) : DownloadResult()</span>
+<span class="nc" id="L116">private object DownloadFailure : DownloadResult()</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

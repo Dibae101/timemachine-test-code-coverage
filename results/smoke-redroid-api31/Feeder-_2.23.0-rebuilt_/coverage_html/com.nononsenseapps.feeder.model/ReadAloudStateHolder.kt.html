@@ -1,0 +1,450 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReadAloudStateHolder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.model</a> &gt; <span class="el_source">ReadAloudStateHolder.kt</span></div><h1>ReadAloudStateHolder.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.model
+
+import android.content.Context
+import android.os.Build
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Log
+import android.view.textclassifier.TextClassificationManager
+import android.view.textclassifier.TextLanguage
+import android.widget.Toast
+import androidx.annotation.RequiresApi
+import androidx.compose.runtime.Immutable
+import androidx.compose.ui.text.AnnotatedString
+import com.nononsenseapps.feeder.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.util.Locale
+
+/**
+ * Any callers must call #shutdown when shutting down
+ */
+<span class="fc" id="L32">class TTSStateHolder(</span>
+<span class="pc" id="L33">    val context: Context,</span>
+<span class="pc" id="L34">    val coroutineScope: CoroutineScope,</span>
+) : TextToSpeech.OnInitListener {
+<span class="fc" id="L36">    private val mutex: Mutex = Mutex()</span>
+    private var textToSpeech: TextToSpeech? = null
+<span class="pc" id="L38">    private val speechListener: UtteranceProgressListener by lazy {</span>
+<span class="nc" id="L39">        object : UtteranceProgressListener() {</span>
+            override fun onDone(utteranceId: String) {
+<span class="nc" id="L41">                textToSpeechQueue.removeFirstOrNull()</span>
+<span class="nc bnc" id="L42" title="All 2 branches missed.">                if (textToSpeechQueue.isEmpty()) {</span>
+<span class="nc" id="L43">                    coroutineScope.launch {</span>
+<span class="nc" id="L44">                        delay(100)</span>
+<span class="nc bnc" id="L45" title="All 2 branches missed.">                        if (textToSpeechQueue.isEmpty()) {</span>
+                            // If still empty after the delay
+<span class="nc" id="L47">                            _ttsState.value = PlaybackStatus.STOPPED</span>
+                        }
+<span class="nc" id="L49">                    }</span>
+                } else {
+<span class="nc" id="L51">                    speakNext()</span>
+                }
+<span class="nc" id="L53">            }</span>
+
+            override fun onStart(utteranceId: String) {
+<span class="nc" id="L56">            }</span>
+
+            override fun onError(
+                utteranceId: String?,
+                errorCode: Int,
+            ) {
+<span class="nc" id="L62">                Log.e(LOG_TAG, &quot;onError utteranceId $utteranceId, errorCode $errorCode&quot;)</span>
+
+<span class="nc bnc" id="L64" title="All 2 branches missed.">                if (utteranceId != null) {</span>
+<span class="nc" id="L65">                    textToSpeechQueue.removeFirstOrNull()</span>
+                }
+<span class="nc" id="L67">            }</span>
+
+            @Deprecated(
+                &quot;Deprecated in super class&quot;,
+                replaceWith = ReplaceWith(&quot;onError(utteranceId, errorCode)&quot;),
+            )
+            override fun onError(utteranceId: String) {
+<span class="nc" id="L74">                Log.e(LOG_TAG, &quot;onError utteranceId $utteranceId&quot;)</span>
+<span class="nc" id="L75">                textToSpeechQueue.removeFirstOrNull()</span>
+<span class="nc" id="L76">            }</span>
+<span class="nc" id="L77">        }</span>
+    }
+<span class="fc" id="L79">    private val textToSpeechQueue = mutableListOf&lt;CharSequence&gt;()</span>
+    private var queuedArticleId: Long? = null
+    private var initializedState: Int? = null
+    private var startJob: Job? = null
+
+<span class="fc" id="L84">    private var useDetectLanguage: Boolean = true</span>
+
+<span class="fc" id="L86">    private val _ttsState = MutableStateFlow(PlaybackStatus.STOPPED)</span>
+<span class="fc" id="L87">    val ttsState: StateFlow&lt;PlaybackStatus&gt; = _ttsState.asStateFlow()</span>
+
+    @Suppress(&quot;ktlint:standard:property-naming&quot;)
+<span class="fc" id="L90">    private val _language = MutableStateFlow&lt;LocaleOverride&gt;(AppSetting)</span>
+<span class="pc" id="L91">    val language: StateFlow&lt;LocaleOverride&gt; = _language.asStateFlow()</span>
+
+<span class="fc" id="L93">    private val _availableLanguages = MutableStateFlow&lt;List&lt;Locale&gt;&gt;(emptyList())</span>
+<span class="fc" id="L94">    val availableLanguages: StateFlow&lt;List&lt;Locale&gt;&gt; = _availableLanguages.asStateFlow()</span>
+
+<span class="fc" id="L96">    private var allAvailableLanguages: Set&lt;Locale&gt; = emptySet()</span>
+
+    private fun speakNext() {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        textToSpeechQueue.firstOrNull()?.let { text -&gt;</span>
+<span class="nc" id="L100">            val lang = _language.value</span>
+<span class="nc" id="L101">            val localesToUse: Sequence&lt;Locale&gt; =</span>
+<span class="nc" id="L102">                when (lang) {</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                    is ForcedAuto -&gt; {</span>
+<span class="nc" id="L104">                        context</span>
+<span class="nc" id="L105">                            .detectLocaleFromText(text)</span>
+<span class="nc" id="L106">                            .sortedByDescending { it.confidence }</span>
+<span class="nc" id="L107">                            .map { it.locale }</span>
+<span class="nc" id="L108">                            .plus(_availableLanguages.value)</span>
+                    }
+
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                    is ForcedLocale -&gt; {</span>
+<span class="nc" id="L112">                        sequenceOf(</span>
+<span class="nc" id="L113">                            lang.locale,</span>
+                        )
+                    }
+
+                    else -&gt; {
+                        // Use app setting
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                        if (useDetectLanguage) {</span>
+<span class="nc" id="L120">                            context</span>
+<span class="nc" id="L121">                                .detectLocaleFromText(text)</span>
+<span class="nc" id="L122">                                .sortedByDescending { it.confidence }</span>
+<span class="nc" id="L123">                                .map { it.locale }</span>
+<span class="nc" id="L124">                                .plus(_availableLanguages.value)</span>
+                        } else {
+                            // User has requested un-dynamic so for context locales first
+<span class="nc" id="L127">                            context</span>
+<span class="nc" id="L128">                                .getLocales()</span>
+<span class="nc" id="L129">                                .plus(_availableLanguages.value)</span>
+                        }
+                    }
+                }
+
+<span class="nc" id="L134">            setFirstBestLocale(localesToUse)</span>
+
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            textToSpeech?.speak(</span>
+<span class="nc" id="L137">                text,</span>
+<span class="nc" id="L138">                TextToSpeech.QUEUE_ADD,</span>
+<span class="nc" id="L139">                null,</span>
+<span class="nc" id="L140">                &quot;0&quot;,</span>
+<span class="nc" id="L141">            )</span>
+        }
+<span class="nc" id="L143">    }</span>
+
+    /**
+     * Resumes the paused queue when it already holds [articleId], so pressing play on the
+     * article being read continues it instead of re-reading it from the top. Returns false
+     * when the caller still has to build a queue.
+     */
+    fun resumeIfPausedOn(articleId: Long): Boolean {
+<span class="nc bnc" id="L151" title="All 6 branches missed.">        if (_ttsState.value != PlaybackStatus.PAUSED || queuedArticleId != articleId) {</span>
+<span class="nc" id="L152">            return false</span>
+        }
+<span class="nc" id="L154">        play()</span>
+<span class="nc" id="L155">        return true</span>
+    }
+
+    fun tts(
+        textArray: List&lt;AnnotatedString&gt;,
+        useDetectLanguage: Boolean,
+        articleId: Long,
+    ) {
+<span class="nc" id="L163">        this.useDetectLanguage = useDetectLanguage</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        startJob?.cancel()</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        textToSpeech?.stop()</span>
+<span class="nc" id="L166">        textToSpeechQueue.clear()</span>
+<span class="nc" id="L167">        queuedArticleId = articleId</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        for (text in textArray) {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (text.isBlank()) {</span>
+<span class="nc" id="L170">                continue</span>
+            }
+<span class="nc" id="L172">            textToSpeechQueue.add(text)</span>
+        }
+<span class="nc" id="L174">        play()</span>
+<span class="nc" id="L175">    }</span>
+
+    fun play() {
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        startJob?.cancel()</span>
+<span class="nc" id="L179">        startJob =</span>
+<span class="nc" id="L180">            coroutineScope.launch {</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                if (mutex.isLocked) {</span>
+                    // Oops, I was double clicked
+<span class="nc" id="L183">                    return@launch</span>
+                }
+<span class="nc" id="L185">                mutex.withLock {</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                    if (textToSpeech == null) {</span>
+<span class="nc" id="L187">                        initializedState = null</span>
+<span class="nc" id="L188">                        textToSpeech =</span>
+<span class="nc" id="L189">                            TextToSpeech(</span>
+<span class="nc" id="L190">                                context,</span>
+<span class="nc" id="L191">                                this@TTSStateHolder,</span>
+                            )
+                    }
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                    while (initializedState == null) {</span>
+<span class="nc" id="L195">                        delay(100)</span>
+                    }
+<span class="nc bnc" id="L197" title="All 4 branches missed.">                    if (initializedState != TextToSpeech.SUCCESS) {</span>
+<span class="nc" id="L198">                        withContext(Dispatchers.Main) {</span>
+                            Toast
+<span class="nc" id="L200">                                .makeText(</span>
+<span class="nc" id="L201">                                    context,</span>
+<span class="nc" id="L202">                                    R.string.failed_to_load_text_to_speech,</span>
+<span class="nc" id="L203">                                    Toast.LENGTH_SHORT,</span>
+<span class="nc" id="L204">                                ).show()</span>
+<span class="nc" id="L205">                        }</span>
+<span class="nc" id="L206">                        return@launch</span>
+                    }
+<span class="nc" id="L208">                    _ttsState.value = PlaybackStatus.PLAYING</span>
+
+                    // Can only set this once engine has been initialized
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                    textToSpeech?.setOnUtteranceProgressListener(speechListener)</span>
+<span class="nc" id="L212">                    try {</span>
+<span class="nc" id="L213">                        updateAvailableLanguages()</span>
+<span class="nc" id="L214">                        speakNext()</span>
+<span class="nc" id="L215">                    } catch (e: ConcurrentModificationException) {</span>
+<span class="nc" id="L216">                        Log.e(LOG_TAG, &quot;User probably double clicked play&quot;, e)</span>
+                        // State will be weird. But mutex should prevent it happening
+                    }
+<span class="nc" id="L219">                }</span>
+<span class="nc" id="L220">            }</span>
+<span class="nc" id="L221">    }</span>
+
+    fun pause() {
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        startJob?.cancel()</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        textToSpeech?.stop()</span>
+<span class="nc" id="L226">        _ttsState.value = PlaybackStatus.PAUSED</span>
+<span class="nc" id="L227">    }</span>
+
+    fun stop() {
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        startJob?.cancel()</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        textToSpeech?.stop()</span>
+<span class="nc" id="L232">        textToSpeechQueue.clear()</span>
+<span class="nc" id="L233">        queuedArticleId = null</span>
+<span class="nc" id="L234">        _ttsState.value = PlaybackStatus.STOPPED</span>
+<span class="nc" id="L235">        textToSpeech = null</span>
+<span class="nc" id="L236">    }</span>
+
+    fun skipNext() {
+<span class="nc" id="L239">        coroutineScope.launch {</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">            startJob?.cancel()</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            textToSpeech?.stop()</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">            startJob?.join()</span>
+<span class="nc" id="L243">            textToSpeechQueue.removeFirstOrNull()</span>
+<span class="nc" id="L244">            when (textToSpeechQueue.isEmpty()) {</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                true -&gt; stop()</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                false -&gt; play()</span>
+            }
+<span class="nc" id="L248">        }</span>
+<span class="nc" id="L249">    }</span>
+
+    fun setLanguage(lang: LocaleOverride) {
+<span class="nc" id="L252">        coroutineScope.launch {</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            startJob?.cancel()</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">            textToSpeech?.stop()</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            startJob?.join()</span>
+<span class="nc" id="L256">            _language.update { lang }</span>
+<span class="nc" id="L257">            play()</span>
+<span class="nc" id="L258">        }</span>
+<span class="nc" id="L259">    }</span>
+
+    override fun onInit(status: Int) {
+<span class="nc" id="L262">        initializedState = status</span>
+
+<span class="nc bnc" id="L264" title="All 2 branches missed.">        if (status != TextToSpeech.SUCCESS) {</span>
+<span class="nc" id="L265">            Log.e(LOG_TAG, &quot;Failed to load TextToSpeech object: $status&quot;)</span>
+        }
+<span class="nc" id="L267">    }</span>
+
+    fun updateAvailableLanguages() {
+<span class="nc bnc" id="L270" title="All 4 branches missed.">        allAvailableLanguages = textToSpeech?.availableLanguages ?: emptySet()</span>
+
+<span class="nc" id="L272">        val sortedLanguages =</span>
+<span class="nc" id="L273">            context</span>
+<span class="nc" id="L274">                .detectLocaleFromText(</span>
+<span class="nc" id="L275">                    textToSpeechQueue.joinToString(&quot;\n\n&quot;),</span>
+<span class="nc" id="L276">                    minConfidence = 0f,</span>
+<span class="nc" id="L277">                ).sortedByDescending { it.confidence }</span>
+<span class="nc" id="L278">                .map { it.locale }</span>
+<span class="nc" id="L279">                .plus(</span>
+<span class="nc" id="L280">                    context</span>
+<span class="nc" id="L281">                        .getLocales()</span>
+<span class="nc" id="L282">                        .sortedBy { it.getDisplayName(it).lowercase(it) },</span>
+<span class="nc" id="L283">                ).plus(</span>
+<span class="nc" id="L284">                    allAvailableLanguages</span>
+<span class="nc" id="L285">                        .asSequence()</span>
+<span class="nc" id="L286">                        .sortedBy { it.getDisplayName(it).lowercase(it) },</span>
+<span class="nc" id="L287">                ).distinctBy { it.toLanguageTag() }</span>
+<span class="nc" id="L288">                .toList()</span>
+
+<span class="nc" id="L290">        _availableLanguages.update {</span>
+<span class="nc" id="L291">            sortedLanguages</span>
+        }
+<span class="nc" id="L293">    }</span>
+
+    fun setFirstBestLocale(localesToUse: Sequence&lt;Locale&gt;) {
+<span class="nc" id="L296">        val selectedLocale =</span>
+<span class="nc" id="L297">            localesToUse</span>
+<span class="nc" id="L298">                .firstOrNull { locale -&gt;</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                    when (textToSpeech?.setLanguage(locale)) {</span>
+<span class="nc bnc" id="L300" title="All 4 branches missed.">                        TextToSpeech.SUCCESS -&gt; {</span>
+<span class="nc" id="L301">                            true</span>
+                        }
+
+                        else -&gt; {
+                            // In this case, try without region because the TTS engine lies about
+                            // what locales are available
+<span class="nc bnc" id="L307" title="All 2 branches missed.">                            when (textToSpeech?.setLanguage(Locale.forLanguageTag(locale.language))) {</span>
+<span class="nc bnc" id="L308" title="All 4 branches missed.">                                TextToSpeech.SUCCESS -&gt; {</span>
+<span class="nc" id="L309">                                    true</span>
+                                }
+
+                                else -&gt; {
+<span class="nc" id="L313">                                    Log.e(LOG_TAG, &quot;${locale.toLanguageTag()} is not supported&quot;)</span>
+<span class="nc" id="L314">                                    false</span>
+                                }
+                            }
+                        }
+<span class="nc" id="L318">                    }</span>
+                }
+
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (selectedLocale == null) {</span>
+<span class="nc" id="L322">            Log.e(LOG_TAG, &quot;None of the locales were supported by text to speech&quot;)</span>
+        }
+<span class="nc" id="L324">    }</span>
+
+    fun shutdown() {
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        textToSpeech?.shutdown()</span>
+<span class="nc" id="L328">    }</span>
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_TTS&quot;
+        private val PUNCTUATION =
+<span class="fc" id="L333">            arrayOf(</span>
+                // New-lines
+<span class="fc" id="L335">                &quot;\n&quot;,</span>
+                // Very useful: https://unicodelookup.com/
+                // Full stop
+<span class="fc" id="L338">                &quot;.&quot;,</span>
+<span class="fc" id="L339">                &quot;։&quot;,</span>
+<span class="fc" id="L340">                &quot;۔&quot;,</span>
+<span class="fc" id="L341">                &quot;܁&quot;,</span>
+<span class="fc" id="L342">                &quot;܂&quot;,</span>
+<span class="fc" id="L343">                &quot;。&quot;,</span>
+<span class="fc" id="L344">                &quot;︒&quot;,</span>
+<span class="fc" id="L345">                &quot;﹒&quot;,</span>
+<span class="fc" id="L346">                &quot;．&quot;,</span>
+<span class="fc" id="L347">                &quot;｡&quot;,</span>
+                // Question mark
+<span class="fc" id="L349">                &quot;?&quot;,</span>
+<span class="fc" id="L350">                &quot;;&quot;,</span>
+<span class="fc" id="L351">                &quot;՞&quot;,</span>
+<span class="fc" id="L352">                &quot;؟&quot;,</span>
+<span class="fc" id="L353">                &quot;⁇&quot;,</span>
+<span class="fc" id="L354">                &quot;⁈&quot;,</span>
+<span class="fc" id="L355">                &quot;⁉&quot;,</span>
+<span class="fc" id="L356">                &quot;︖&quot;,</span>
+<span class="fc" id="L357">                &quot;﹖&quot;,</span>
+<span class="fc" id="L358">                &quot;？&quot;,</span>
+                // Exclamation mark
+<span class="fc" id="L360">                &quot;!&quot;,</span>
+<span class="fc" id="L361">                &quot;՜&quot;,</span>
+<span class="fc" id="L362">                &quot;‼&quot;,</span>
+<span class="fc" id="L363">                &quot;︕&quot;,</span>
+<span class="fc" id="L364">                &quot;﹗&quot;,</span>
+<span class="fc" id="L365">                &quot;！&quot;,</span>
+                // Colon and semi-colon
+<span class="fc" id="L367">                &quot;:&quot;,</span>
+<span class="fc" id="L368">                &quot;;&quot;,</span>
+<span class="fc" id="L369">                &quot;؛&quot;,</span>
+<span class="fc" id="L370">                &quot;︓&quot;,</span>
+<span class="fc" id="L371">                &quot;︔&quot;,</span>
+<span class="fc" id="L372">                &quot;﹔&quot;,</span>
+<span class="fc" id="L373">                &quot;﹕&quot;,</span>
+<span class="fc" id="L374">                &quot;：&quot;,</span>
+<span class="fc" id="L375">                &quot;；&quot;,</span>
+                // Ellipsis
+<span class="fc" id="L377">                &quot;...&quot;,</span>
+<span class="fc" id="L378">                &quot;…&quot;,</span>
+<span class="fc" id="L379">                &quot;⋯&quot;,</span>
+<span class="fc" id="L380">                &quot;⋮&quot;,</span>
+<span class="fc" id="L381">                &quot;︙&quot;,</span>
+                // Dash
+<span class="fc" id="L383">                &quot;—&quot;,</span>
+<span class="fc" id="L384">                &quot;〜&quot;,</span>
+<span class="fc" id="L385">                &quot;〰&quot;,</span>
+            )
+    }
+}
+
+fun Context.getLocales(): Sequence&lt;Locale&gt; =
+<span class="nc bnc" id="L391" title="All 3 branches missed.">    sequence {</span>
+<span class="nc" id="L392">        val locales = resources.configuration.locales</span>
+
+<span class="nc bnc" id="L394" title="All 2 branches missed.">        for (i in 0 until locales.size()) {</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">            yield(locales[i])</span>
+        }
+<span class="nc" id="L397">    }</span>
+
+@RequiresApi(Build.VERSION_CODES.Q)
+<span class="nc" id="L400">fun Context.detectLocaleFromText(</span>
+    text: CharSequence,
+<span class="nc" id="L402">    minConfidence: Float = 80.0f,</span>
+): Sequence&lt;LocaleWithConfidence&gt; {
+<span class="nc" id="L404">    val textClassificationManager = getSystemService(TextClassificationManager::class.java)</span>
+<span class="nc" id="L405">    val textClassifier = textClassificationManager.textClassifier</span>
+
+<span class="nc" id="L407">    val textRequest = TextLanguage.Request.Builder(text).build()</span>
+<span class="nc" id="L408">    val detectedLanguage = textClassifier.detectLanguage(textRequest)</span>
+
+<span class="nc bnc" id="L410" title="All 3 branches missed.">    return sequence {</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">        for (i in 0 until detectedLanguage.localeHypothesisCount) {</span>
+<span class="nc" id="L412">            val localeDetected = detectedLanguage.getLocale(i)</span>
+<span class="nc" id="L413">            val confidence = detectedLanguage.getConfidenceScore(localeDetected) * 100.0f</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            if (confidence &gt;= minConfidence) {</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">                yield(</span>
+<span class="nc" id="L416">                    LocaleWithConfidence(</span>
+<span class="nc" id="L417">                        locale = localeDetected.toLocale(),</span>
+<span class="nc" id="L418">                        confidence = confidence,</span>
+                    ),
+                )
+            }
+        }
+<span class="nc" id="L423">    }</span>
+}
+
+<span class="nc" id="L426">data class LocaleWithConfidence(</span>
+<span class="nc" id="L427">    val locale: Locale,</span>
+<span class="nc" id="L428">    val confidence: Float,</span>
+)
+
+enum class PlaybackStatus {
+<span class="fc" id="L432">    STOPPED,</span>
+<span class="fc" id="L433">    PAUSED,</span>
+<span class="fc" id="L434">    PLAYING,</span>
+}
+
+@Immutable
+sealed class LocaleOverride
+
+<span class="fc" id="L440">@Immutable</span>
+object AppSetting : LocaleOverride()
+
+<span class="nc" id="L443">@Immutable</span>
+object ForcedAuto : LocaleOverride()
+
+<span class="nc" id="L446">@Immutable</span>
+<span class="nc" id="L447">data class ForcedLocale(</span>
+<span class="nc" id="L448">    val locale: Locale,</span>
+) : LocaleOverride()
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

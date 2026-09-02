@@ -1,0 +1,887 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlarmCore.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AlarmClock</a> &gt; <a href="index.source.html" class="el_package">com.better.alarm.model</a> &gt; <span class="el_source">AlarmCore.kt</span></div><h1>AlarmCore.kt</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2009 The Android Open Source Project
+ * Copyright (C) 2012 Yuriy Kulikov yuriy.kulikov.87@gmail.com
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.better.alarm.model
+
+import com.better.alarm.BuildConfig
+import com.better.alarm.configuration.Prefs
+import com.better.alarm.configuration.Store
+import com.better.alarm.interfaces.Alarm
+import com.better.alarm.interfaces.Intents
+import com.better.alarm.logger.Logger
+import com.better.alarm.statemachine.ComplexTransition
+import com.better.alarm.statemachine.State
+import com.better.alarm.statemachine.StateMachine
+import io.reactivex.Observable
+import io.reactivex.disposables.CompositeDisposable
+import java.text.DateFormat
+import java.text.SimpleDateFormat
+import java.util.*
+
+sealed class Event {
+<span class="nc" id="L36">  override fun toString(): String = javaClass.simpleName</span>
+}
+
+<span class="nc" id="L39">data class Snooze(val hour: Int?, val minute: Int?) : Event()</span>
+
+<span class="fc" id="L41">data class Change(val value: AlarmValue) : Event()</span>
+
+<span class="nc" id="L43">object PrealarmDurationChanged : Event()</span>
+
+<span class="nc" id="L45">object Dismiss : Event()</span>
+
+<span class="nc" id="L47">object RequestSkip : Event()</span>
+
+<span class="nc" id="L49">object Fired : Event()</span>
+
+<span class="nc" id="L51">object Enable : Event()</span>
+
+<span class="nc" id="L53">object Disable : Event()</span>
+
+<span class="nc" id="L55">object Refresh : Event()</span>
+
+<span class="nc" id="L57">object TimeSet : Event()</span>
+
+<span class="nc" id="L59">object InexactFired : Event()</span>
+
+<span class="nc" id="L61">object Delete : Event()</span>
+
+<span class="fc" id="L63">object Create : Event()</span>
+
+/**
+ * Alarm is a class which models a real word alarm. It is a simple state machine. External events
+ * (e.g. user input [snooze] or [dismiss]) or timer events [onAlarmFired] trigger transitions. Alarm
+ * notifies listeners when transitions happen by broadcasting Intents listed in [Intents], e.g.
+ * [Intents.ALARM_PREALARM_ACTION] or [Intents.ALARM_DISMISS_ACTION]
+ *
+ * State and properties of the alarm are stored in the database and are updated every time when
+ * changes to alarm happen.
+ *
+ * ```
+ * @startuml
+ * State DISABLED
+ * State RESCHEDULE
+ * State ENABLE
+ * State ENABLED {
+ * State PREALARM_SET
+ * State SET
+ * State FIRED
+ * State PREALARM_FIRED
+ * State SNOOZED
+ * State PREALARM_SNOOZED
+ * RESCHEDULE :Complex transitiontran
+ * PREALARM_FIRED :timer
+ * SNOOZED :timer
+ * PREALARM_SNOOZED :timer
+ * PREALARM_SET :timer
+ * SET :timer
+ *
+ * DISABLED -down-&gt; ENABLE :enable\nchange
+ * ENABLED -up-&gt; DISABLED :disable
+ * ENABLED -up-&gt; RESCHEDULE :dismiss
+ * ENABLED -up-&gt; ENABLE :change\nrefresh
+ *
+ * PREALARM_SET -down-&gt; PREALARM_FIRED :fired
+ * PREALARM_FIRED -down-&gt; PREALARM_SNOOZED :snooze
+ * PREALARM_SNOOZED -up-&gt; FIRED
+ * SET -down-&gt; FIRED :fired
+ * PREALARM_FIRED --right--&gt; FIRED :fired
+ * FIRED -down-&gt;  SNOOZED :snooze
+ * SNOOZED -up-&gt; FIRED :fired
+ *
+ * RESCHEDULE -up-&gt; DISABLED :disabled
+ *
+ * RESCHEDULE -down-&gt; PREALARM_SET :PA
+ * RESCHEDULE -down-&gt; SET :nPA
+ * ENABLE -down-&gt; PREALARM_SET :PA
+ * ENABLE -down-&gt; SET :nPA
+ * }
+ * @enduml
+ * ```
+ */
+<span class="fc" id="L116">class AlarmCore(</span>
+<span class="fc" id="L117">    private val alarmStore: AlarmStore,</span>
+<span class="fc" id="L118">    private val log: Logger,</span>
+<span class="fc" id="L119">    private val mAlarmsScheduler: IAlarmsScheduler,</span>
+<span class="fc" id="L120">    private val broadcaster: IStateNotifier,</span>
+<span class="fc" id="L121">    private val prefs: Prefs,</span>
+<span class="fc" id="L122">    private val store: Store,</span>
+<span class="fc" id="L123">    private val calendars: Calendars,</span>
+<span class="fc" id="L124">    private val onDelete: (Int) -&gt; Unit,</span>
+) : Alarm {
+  private val stateMachine: StateMachine&lt;Event&gt;
+  private val df: DateFormat
+  private val container: AlarmValue
+<span class="fc" id="L129">    get() = alarmStore.value</span>
+
+  private val preAlarmDuration: Observable&lt;Int&gt;
+  private val snoozeDuration: Observable&lt;Int&gt;
+  private val autoSilence: Observable&lt;Int&gt;
+
+<span class="fc" id="L135">  private val disposable = CompositeDisposable()</span>
+
+<span class="fc" id="L137">  init {</span>
+<span class="fc" id="L138">    this.df = SimpleDateFormat(&quot;dd-MM-yy HH:mm:ss&quot;, Locale.GERMANY)</span>
+
+<span class="fc" id="L140">    this.preAlarmDuration = prefs.preAlarmDuration.observe()</span>
+<span class="fc" id="L141">    this.snoozeDuration = prefs.snoozeDuration.observe()</span>
+<span class="fc" id="L142">    this.autoSilence = prefs.autoSilence.observe()</span>
+
+<span class="fc" id="L144">    stateMachine = StateMachine(&quot;Alarm &quot; + container.id, log)</span>
+
+<span class="fc" id="L146">    preAlarmDuration</span>
+<span class="fc" id="L147">        .skip(1) // not interested in the first update on startup</span>
+<span class="pc" id="L148">        .subscribe { stateMachine.sendEvent(PrealarmDurationChanged) }</span>
+<span class="fc" id="L149">        .let { disposable.add(it) }</span>
+<span class="fc" id="L150">  }</span>
+
+  /** Strategy used to notify other components about alarm state. */
+  interface IStateNotifier {
+<span class="nc" id="L154">    fun broadcastAlarmState(id: Int, action: String, calendar: Calendar? = null)</span>
+
+    fun broadcastAlarmState(id: Int, action: String)
+  }
+
+<span class="fc" id="L159">  private val disabledState = DisabledState()</span>
+<span class="fc" id="L160">  private val rescheduleTransition = RescheduleTransition()</span>
+<span class="fc" id="L161">  private val enableTransition = EnableTransition()</span>
+<span class="fc" id="L162">  private val enabledState = EnabledState()</span>
+<span class="fc" id="L163">  private val set = enabledState.SetState()</span>
+<span class="fc" id="L164">  private val normalSet = set.NormalSetState()</span>
+<span class="fc" id="L165">  private val preAlarmSet = set.PreAlarmSetState()</span>
+<span class="fc" id="L166">  private val skipping = enabledState.SkippingSetState()</span>
+<span class="fc" id="L167">  private val snoozed = enabledState.SnoozedState()</span>
+<span class="fc" id="L168">  private val preAlarmFired = enabledState.PreAlarmFiredState()</span>
+<span class="fc" id="L169">  private val preAlarmSnoozed = enabledState.PreAlarmSnoozedState()</span>
+<span class="fc" id="L170">  private val fired = enabledState.FiredState()</span>
+<span class="fc" id="L171">  private val deletedState = DeletedState()</span>
+
+  fun start() {
+<span class="fc" id="L174">    stateMachine.start {</span>
+<span class="fc" id="L175">      val root = RootState()</span>
+<span class="fc" id="L176">      addState(root)</span>
+<span class="fc" id="L177">      addState(disabledState, root)</span>
+<span class="fc" id="L178">      addState(enabledState, root)</span>
+<span class="fc" id="L179">      addState(deletedState, root)</span>
+<span class="fc" id="L180">      addState(rescheduleTransition, root)</span>
+<span class="fc" id="L181">      addState(enableTransition, root)</span>
+
+<span class="fc" id="L183">      addState(set, enabledState)</span>
+<span class="fc" id="L184">      addState(preAlarmSet, set)</span>
+<span class="fc" id="L185">      addState(normalSet, set)</span>
+<span class="fc" id="L186">      addState(snoozed, enabledState)</span>
+<span class="fc" id="L187">      addState(skipping, enabledState)</span>
+<span class="fc" id="L188">      addState(preAlarmFired, enabledState)</span>
+<span class="fc" id="L189">      addState(fired, enabledState)</span>
+<span class="fc" id="L190">      addState(preAlarmSnoozed, enabledState)</span>
+
+<span class="fc" id="L192">      val initial = mutableTree.keys.firstOrNull { it.name == alarmStore.value.state }</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">      setInitialState(initial ?: disabledState)</span>
+<span class="fc" id="L194">    }</span>
+
+<span class="fc" id="L196">    updateListInStore()</span>
+<span class="fc" id="L197">  }</span>
+
+<span class="fc" id="L199">  private inner class RootState : AlarmState() {</span>
+    override fun onEvent(event: Event): Boolean {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">      if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L202">        throw RuntimeException(&quot;Unhandled event: $event&quot;)</span>
+      } else {
+<span class="nc" id="L204">        log.warning { &quot;Unhandled event: $event&quot; }</span>
+<span class="nc" id="L205">        return true</span>
+      }
+    }
+  }
+
+<span class="fc" id="L210">  private inner class DeletedState : AlarmState() {</span>
+    override fun onEnter(reason: Event) {
+<span class="nc" id="L212">      removeAlarm()</span>
+<span class="nc" id="L213">      removeFromStore()</span>
+<span class="nc" id="L214">      onDelete(id)</span>
+<span class="nc" id="L215">      alarmStore.delete()</span>
+<span class="nc" id="L216">      disposable.dispose()</span>
+<span class="nc" id="L217">    }</span>
+  }
+
+<span class="fc" id="L220">  private inner class DisabledState : AlarmState() {</span>
+    override fun onEnter(reason: Event) {
+<span class="nc" id="L222">      updateListInStore()</span>
+<span class="nc" id="L223">    }</span>
+
+    override fun onChange(alarmValue: AlarmValue) {
+<span class="fc" id="L226">      writeChangeData(alarmValue)</span>
+<span class="fc" id="L227">      updateListInStore()</span>
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">      if (container.isEnabled) {</span>
+<span class="nc" id="L229">        stateMachine.transitionTo(enableTransition)</span>
+      }
+<span class="fc" id="L231">    }</span>
+
+    override fun onEnable() {
+<span class="nc" id="L234">      alarmStore.modify { withIsEnabled(true) }</span>
+<span class="nc" id="L235">      stateMachine.transitionTo(enableTransition)</span>
+<span class="nc" id="L236">    }</span>
+
+    override fun onDelete() {
+<span class="nc" id="L239">      stateMachine.transitionTo(deletedState)</span>
+<span class="nc" id="L240">    }</span>
+
+    override fun onRefresh() {
+      // NOP
+<span class="nc" id="L244">    }</span>
+
+    override fun onTimeSet() {
+      // NOP
+<span class="nc" id="L248">    }</span>
+
+    override fun onPreAlarmDurationChanged() {
+      // NOP
+<span class="nc" id="L252">    }</span>
+
+    override fun onSnooze(snooze: Snooze) {
+<span class="nc" id="L255">      log.warning { &quot;$this is in DisabledState&quot; }</span>
+<span class="nc" id="L256">    }</span>
+
+    override fun onDismiss() {
+<span class="nc" id="L259">      log.warning { &quot;$this is in DisabledState&quot; }</span>
+<span class="nc" id="L260">    }</span>
+
+    override fun onDisable() {
+<span class="nc" id="L263">      log.warning { &quot;$this is in DisabledState&quot; }</span>
+<span class="nc" id="L264">    }</span>
+  }
+
+<span class="fc" id="L267">  private inner class RescheduleTransition : ComplexTransition&lt;Event&gt;() {</span>
+    override fun performComplexTransition() {
+<span class="nc bnc" id="L269" title="All 2 branches missed.">      if (container.isRepeatSet) {</span>
+<span class="nc bnc" id="L270" title="All 6 branches missed.">        if (container.isPrealarm &amp;&amp; preAlarmDuration.blockingFirst() != -1) {</span>
+<span class="nc" id="L271">          stateMachine.transitionTo(preAlarmSet)</span>
+        } else {
+<span class="nc" id="L273">          stateMachine.transitionTo(normalSet)</span>
+        }
+<span class="nc bnc" id="L275" title="All 2 branches missed.">      } else if (container.isDeleteAfterDismiss) {</span>
+<span class="nc" id="L276">        log.debug { &quot;Delete after dismiss!&quot; }</span>
+<span class="nc" id="L277">        stateMachine.transitionTo(deletedState)</span>
+      } else {
+<span class="nc" id="L279">        log.debug { &quot;Repeating is not set, disabling the alarm&quot; }</span>
+<span class="nc" id="L280">        alarmStore.modify { withIsEnabled(false) }</span>
+<span class="nc" id="L281">        stateMachine.transitionTo(disabledState)</span>
+      }
+<span class="nc" id="L283">    }</span>
+  }
+
+  /**
+   * Transition checks if preAlarm for the next alarm is in the future. This is required to prevent
+   * the situation when user sets alarm in time which is less than preAlarm duration. In this case
+   * main alarm should be set.
+   */
+<span class="fc" id="L291">  private inner class EnableTransition : ComplexTransition&lt;Event&gt;() {</span>
+    override fun performComplexTransition() {
+<span class="nc" id="L293">      val preAlarm = calculateNextTime()</span>
+<span class="nc" id="L294">      val preAlarmMinutes = preAlarmDuration.blockingFirst()</span>
+<span class="nc" id="L295">      preAlarm.add(Calendar.MINUTE, -1 * preAlarmMinutes!!)</span>
+<span class="nc bnc" id="L296" title="All 6 branches missed.">      if (container.isPrealarm &amp;&amp; preAlarm.after(calendars.now()) &amp;&amp; preAlarmMinutes != -1) {</span>
+<span class="nc" id="L297">        stateMachine.transitionTo(preAlarmSet)</span>
+      } else {
+<span class="nc" id="L299">        stateMachine.transitionTo(normalSet)</span>
+      }
+<span class="nc" id="L301">    }</span>
+  }
+
+  /** Master state for all enabled states. Handles disable and delete */
+<span class="fc" id="L305">  private inner class EnabledState : AlarmState() {</span>
+    override fun onEnter(reason: Event) {
+<span class="nc bnc" id="L307" title="All 2 branches missed.">      if (!container.isEnabled) {</span>
+        // if due to an exception during development an alarm is not enabled but the state is
+<span class="nc" id="L309">        alarmStore.modify { withIsEnabled(true) }</span>
+      }
+<span class="nc" id="L311">      updateListInStore()</span>
+<span class="nc" id="L312">    }</span>
+
+    override fun onChange(alarmValue: AlarmValue) {
+<span class="nc" id="L315">      writeChangeData(alarmValue)</span>
+<span class="nc" id="L316">      updateListInStore()</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">      if (container.isEnabled) {</span>
+<span class="nc" id="L318">        stateMachine.transitionTo(enableTransition)</span>
+      } else {
+<span class="nc" id="L320">        stateMachine.transitionTo(disabledState)</span>
+      }
+<span class="nc" id="L322">    }</span>
+
+    override fun onDismiss() {
+<span class="nc" id="L325">      stateMachine.transitionTo(rescheduleTransition)</span>
+<span class="nc" id="L326">    }</span>
+
+    override fun onDisable() {
+<span class="nc" id="L329">      alarmStore.modify { withIsEnabled(false) }</span>
+<span class="nc" id="L330">      stateMachine.transitionTo(disabledState)</span>
+<span class="nc" id="L331">    }</span>
+
+    override fun onRefresh() {
+<span class="nc" id="L334">      stateMachine.transitionTo(enableTransition)</span>
+<span class="nc" id="L335">    }</span>
+
+    override fun onTimeSet() {
+      // nothing to do
+<span class="nc" id="L339">    }</span>
+
+    override fun onDelete() {
+<span class="nc" id="L342">      stateMachine.transitionTo(deletedState)</span>
+<span class="nc" id="L343">    }</span>
+
+<span class="fc" id="L345">    inner class SetState : AlarmState() {</span>
+
+<span class="fc" id="L347">      inner class NormalSetState : AlarmState() {</span>
+        override fun onEnter(reason: Event) {
+<span class="nc" id="L349">          broadcastAlarmSetWithNormalTime(</span>
+<span class="nc" id="L350">              calculateNextTime().timeInMillis, reason.isUserInteraction())</span>
+<span class="nc" id="L351">        }</span>
+
+        override fun onResume() {
+<span class="nc" id="L354">          val nextTime = calculateNextTime()</span>
+<span class="nc" id="L355">          setAlarm(nextTime, CalendarType.NORMAL)</span>
+<span class="nc" id="L356">          showSkipNotification(nextTime)</span>
+<span class="nc" id="L357">        }</span>
+
+        override fun onFired() {
+<span class="nc" id="L360">          stateMachine.transitionTo(fired)</span>
+<span class="nc" id="L361">        }</span>
+
+        override fun onPreAlarmDurationChanged() {
+<span class="nc" id="L364">          stateMachine.transitionTo(enableTransition)</span>
+<span class="nc" id="L365">        }</span>
+      }
+
+<span class="fc" id="L368">      inner class PreAlarmSetState : AlarmState() {</span>
+        override fun onEnter(reason: Event) {
+<span class="nc" id="L370">          broadcastAlarmSetWithNormalTime(</span>
+<span class="nc" id="L371">              calculateNextPrealarmTime().timeInMillis, reason.isUserInteraction())</span>
+<span class="nc" id="L372">        }</span>
+
+        override fun onResume() {
+<span class="nc" id="L375">          val nextPrealarmTime = calculateNextPrealarmTime()</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">          if (nextPrealarmTime.after(calendars.now())) {</span>
+<span class="nc" id="L377">            setAlarm(nextPrealarmTime, CalendarType.PREALARM)</span>
+<span class="nc" id="L378">            showSkipNotification(nextPrealarmTime)</span>
+          } else {
+            // TODO this should never happen
+<span class="nc" id="L381">            log.e(&quot;PreAlarm is still in the past!&quot;)</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            stateMachine.transitionTo(if (container.isEnabled) enableTransition else disabledState)</span>
+          }
+<span class="nc" id="L384">        }</span>
+
+        private fun calculateNextPrealarmTime(): Calendar {
+<span class="nc" id="L387">          return calculateNextTime().apply {</span>
+<span class="nc" id="L388">            add(Calendar.MINUTE, -1 * preAlarmDuration.blockingFirst())</span>
+            // since prealarm is before main alarm, it can be already in the
+            // past, so it has to be adjusted.
+<span class="nc" id="L391">            advanceCalendar()</span>
+<span class="nc" id="L392">          }</span>
+        }
+
+        override fun onFired() {
+<span class="nc" id="L396">          stateMachine.transitionTo(preAlarmFired)</span>
+<span class="nc" id="L397">        }</span>
+
+        override fun onPreAlarmDurationChanged() {
+<span class="nc" id="L400">          stateMachine.transitionTo(enableTransition)</span>
+<span class="nc" id="L401">        }</span>
+      }
+
+      private fun showSkipNotification(c: Calendar) {
+<span class="nc" id="L405">        val skipTime = prefs.skipDuration.value</span>
+<span class="nc" id="L406">        val toShowSkip = (c.clone() as Calendar).apply { add(Calendar.MINUTE, -skipTime) }</span>
+<span class="nc" id="L407">        when {</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">          skipTime == -1 -&gt; {</span>
+            // switched off
+          }
+<span class="nc bnc" id="L411" title="All 2 branches missed.">          toShowSkip.after(calendars.now()) -&gt; {</span>
+<span class="nc" id="L412">            mAlarmsScheduler.setInexactAlarm(id, toShowSkip)</span>
+          }
+          else -&gt; {
+<span class="nc" id="L415">            log.debug { &quot;Alarm $id is due in less than $skipTime minutes - show notification&quot; }</span>
+<span class="nc" id="L416">            broadcastAlarmState(Intents.ALARM_SHOW_SKIP)</span>
+          }
+        }
+<span class="nc" id="L419">      }</span>
+
+      override fun onEnter(reason: Event) {
+<span class="nc" id="L422">        updateListInStore()</span>
+<span class="nc" id="L423">      }</span>
+
+      override fun onInexactFired() {
+<span class="nc" id="L426">        broadcastAlarmState(Intents.ALARM_SHOW_SKIP)</span>
+<span class="nc" id="L427">      }</span>
+
+      override fun onRequestSkip() {
+<span class="nc" id="L430">        when {</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">          container.isRepeatSet -&gt; stateMachine.transitionTo(skipping)</span>
+<span class="nc" id="L432">          else -&gt; stateMachine.transitionTo(rescheduleTransition)</span>
+        }
+<span class="nc" id="L434">      }</span>
+
+      override fun exit(reason: Event?) {
+<span class="nc" id="L437">        broadcastAlarmState(Intents.ALARM_REMOVE_SKIP)</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (!alarmWillBeRescheduled(reason)) {</span>
+<span class="nc" id="L439">          removeAlarm()</span>
+        }
+<span class="nc" id="L441">        mAlarmsScheduler.removeInexactAlarm(id)</span>
+<span class="nc" id="L442">      }</span>
+
+      override fun onTimeSet() {
+<span class="nc" id="L445">        stateMachine.transitionTo(enableTransition)</span>
+<span class="nc" id="L446">      }</span>
+    }
+
+<span class="fc" id="L449">    inner class SkippingSetState : AlarmState() {</span>
+      override fun onEnter(reason: Event) {
+<span class="nc" id="L451">        updateListInStore()</span>
+<span class="nc" id="L452">      }</span>
+
+      override fun onResume() {
+<span class="nc" id="L455">        val nextTime = calculateNextTime()</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        if (nextTime.after(calendars.now())) {</span>
+<span class="nc" id="L457">          mAlarmsScheduler.setInexactAlarm(id, nextTime)</span>
+
+<span class="nc" id="L459">          val nextAfterSkip = calculateNextTime()</span>
+<span class="nc" id="L460">          nextAfterSkip.add(Calendar.DAY_OF_YEAR, 1)</span>
+<span class="nc" id="L461">          val addDays = container.daysOfWeek.getNextAlarm(nextAfterSkip)</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">          if (addDays &gt; 0) {</span>
+<span class="nc" id="L463">            nextAfterSkip.add(Calendar.DAY_OF_WEEK, addDays)</span>
+          }
+
+          // this will never (hopefully) fire, but in order to display it everywhere...
+<span class="nc" id="L467">          setAlarm(nextAfterSkip, CalendarType.NORMAL)</span>
+        } else {
+<span class="nc bnc" id="L469" title="All 2 branches missed.">          stateMachine.transitionTo(if (container.isEnabled) enableTransition else disabledState)</span>
+        }
+<span class="nc" id="L471">      }</span>
+
+      override fun onFired() {
+        // yeah should never happen
+<span class="nc" id="L475">        stateMachine.transitionTo(fired)</span>
+<span class="nc" id="L476">      }</span>
+
+      override fun onInexactFired() {
+<span class="nc" id="L479">        stateMachine.transitionTo(enableTransition)</span>
+<span class="nc" id="L480">      }</span>
+
+      override fun exit(reason: Event?) {
+<span class="nc" id="L483">        mAlarmsScheduler.removeInexactAlarm(id)</span>
+        // avoids flicker of the icon
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        if (reason !is RequestSkip) {</span>
+<span class="nc" id="L486">          removeAlarm()</span>
+        }
+<span class="nc" id="L488">      }</span>
+    }
+
+    /** handles both snoozed and main for now */
+<span class="fc" id="L492">    inner class FiredState : AlarmState() {</span>
+      override fun onEnter(reason: Event) {
+<span class="nc" id="L494">        broadcastAlarmState(Intents.ALARM_ALERT_ACTION)</span>
+<span class="nc" id="L495">        val autoSilenceMinutes = autoSilence.blockingFirst()</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">        if (autoSilenceMinutes &gt; 0) {</span>
+          // -1 means OFF
+<span class="nc" id="L498">          val nextTime = calendars.now()</span>
+<span class="nc" id="L499">          nextTime.add(Calendar.MINUTE, autoSilenceMinutes)</span>
+<span class="nc" id="L500">          setAlarm(nextTime, CalendarType.AUTOSILENCE)</span>
+        }
+<span class="nc" id="L502">      }</span>
+
+      override fun onFired() {
+<span class="nc" id="L505">        broadcastAlarmState(Intents.ACTION_SOUND_EXPIRED)</span>
+        // this is like a dismiss but we show an additional notification
+<span class="nc" id="L507">        stateMachine.transitionTo(rescheduleTransition)</span>
+<span class="nc" id="L508">      }</span>
+
+      override fun onSnooze(snooze: Snooze) {
+<span class="nc" id="L511">        stateMachine.transitionTo(snoozed)</span>
+<span class="nc" id="L512">      }</span>
+
+      override fun exit(reason: Event?) {
+<span class="nc" id="L515">        broadcastAlarmState(Intents.ALARM_DISMISS_ACTION)</span>
+<span class="nc" id="L516">        removeAlarm()</span>
+<span class="nc" id="L517">      }</span>
+    }
+
+<span class="fc" id="L520">    inner class PreAlarmFiredState : AlarmState() {</span>
+      override fun onEnter(reason: Event) {
+<span class="nc" id="L522">        broadcastAlarmState(Intents.ALARM_PREALARM_ACTION)</span>
+<span class="nc" id="L523">        setAlarm(calculateNextTime(), CalendarType.NORMAL)</span>
+<span class="nc" id="L524">      }</span>
+
+      override fun onFired() {
+<span class="nc" id="L527">        stateMachine.transitionTo(fired)</span>
+<span class="nc" id="L528">      }</span>
+
+      override fun onSnooze(snooze: Snooze) {
+<span class="nc bnc" id="L531" title="All 2 branches missed.">        if (snooze.minute != null) {</span>
+          // snooze to time with prealarm -&gt; go to snoozed
+<span class="nc" id="L533">          stateMachine.transitionTo(snoozed)</span>
+        } else {
+<span class="nc" id="L535">          stateMachine.transitionTo(preAlarmSnoozed)</span>
+        }
+<span class="nc" id="L537">      }</span>
+
+      override fun exit(reason: Event?) {
+<span class="nc" id="L540">        removeAlarm()</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">        if (reason !is Fired) {</span>
+          // do not dismiss because we will immediately fire another event at the service
+<span class="nc" id="L543">          broadcastAlarmState(Intents.ALARM_DISMISS_ACTION)</span>
+        }
+<span class="nc" id="L545">      }</span>
+    }
+
+<span class="fc" id="L548">    inner class SnoozedState : AlarmState() {</span>
+<span class="nc" id="L549">      internal var nextTime: Calendar? = null</span>
+
+      private fun nextRegualarSnoozeCalendar(): Calendar {
+<span class="nc" id="L552">        val nextTime = calendars.now()</span>
+<span class="nc" id="L553">        val snoozeMinutes = snoozeDuration.blockingFirst()</span>
+<span class="nc" id="L554">        nextTime.add(Calendar.MINUTE, snoozeMinutes)</span>
+<span class="nc" id="L555">        return nextTime</span>
+      }
+
+      override fun onEnter(reason: Event) {
+<span class="nc" id="L559">        val now = calendars.now()</span>
+<span class="nc" id="L560">        nextTime =</span>
+<span class="nc" id="L561">            when {</span>
+<span class="nc bnc" id="L562" title="All 6 branches missed.">              reason is Snooze &amp;&amp; reason.hour != null &amp;&amp; reason.minute != null -&gt; {</span>
+<span class="nc" id="L563">                log.debug { &quot;Enter snooze $reason&quot; }</span>
+<span class="nc" id="L564">                val customTime =</span>
+<span class="nc" id="L565">                    calendars.now().apply {</span>
+<span class="nc" id="L566">                      set(Calendar.HOUR_OF_DAY, reason.hour)</span>
+<span class="nc" id="L567">                      set(Calendar.MINUTE, reason.minute)</span>
+<span class="nc" id="L568">                    }</span>
+<span class="nc" id="L569">                when {</span>
+<span class="nc bnc" id="L570" title="All 2 branches missed.">                  customTime.after(now) -&gt; customTime</span>
+<span class="nc" id="L571">                  else -&gt; nextRegualarSnoozeCalendar()</span>
+                }
+              }
+<span class="nc" id="L574">              else -&gt; nextRegualarSnoozeCalendar()</span>
+            }
+        // change the next time to show notification properly
+<span class="nc" id="L577">        alarmStore.modify { withNextTime(nextTime) }</span>
+        // updateListInStore()
+<span class="nc" id="L579">        broadcastAlarmState(Intents.ALARM_SNOOZE_ACTION, nextTime) // Yar. 18.08</span>
+<span class="nc" id="L580">      }</span>
+
+      override fun onResume() {
+        // alarm was started again while snoozed alarm was hanging in there
+<span class="nc bnc" id="L584" title="All 2 branches missed.">        if (nextTime == null) {</span>
+<span class="nc" id="L585">          nextTime = nextRegualarSnoozeCalendar()</span>
+        }
+
+<span class="nc" id="L588">        setAlarm(nextTime!!, CalendarType.NORMAL)</span>
+<span class="nc" id="L589">      }</span>
+
+      override fun onFired() {
+<span class="nc" id="L592">        stateMachine.transitionTo(fired)</span>
+<span class="nc" id="L593">      }</span>
+
+      override fun onSnooze(snooze: Snooze) {
+        // reschedule from notification
+<span class="nc" id="L597">        enter(snooze)</span>
+<span class="nc" id="L598">        onResume()</span>
+<span class="nc" id="L599">      }</span>
+
+      override fun exit(reason: Event?) {
+<span class="nc" id="L602">        removeAlarm()</span>
+<span class="nc" id="L603">        broadcastAlarmState(Intents.ACTION_CANCEL_SNOOZE)</span>
+<span class="nc" id="L604">      }</span>
+    }
+
+<span class="fc" id="L607">    inner class PreAlarmSnoozedState : AlarmState() {</span>
+      override fun onEnter(reason: Event) {
+        // Yar 18.08: setAlarm -&gt; resume; setAlarm(calculateNextTime(), CalendarType.NORMAL);
+<span class="nc" id="L610">        broadcastAlarmState(Intents.ALARM_SNOOZE_ACTION, calculateNextTime())</span>
+<span class="nc" id="L611">      }</span>
+
+      override fun onFired() {
+<span class="nc" id="L614">        stateMachine.transitionTo(fired)</span>
+<span class="nc" id="L615">      }</span>
+
+      override fun onSnooze(snooze: Snooze) {
+        // reschedule from notification
+<span class="nc" id="L619">        stateMachine.transitionTo(snoozed)</span>
+<span class="nc" id="L620">      }</span>
+
+      override fun exit(reason: Event?) {
+<span class="nc" id="L623">        removeAlarm()</span>
+<span class="nc" id="L624">        broadcastAlarmState(Intents.ACTION_CANCEL_SNOOZE)</span>
+<span class="nc" id="L625">      }</span>
+
+      override fun onResume() {
+<span class="nc" id="L628">        setAlarm(calculateNextTime(), CalendarType.NORMAL)</span>
+<span class="nc" id="L629">      }</span>
+    }
+  }
+
+<span class="nc" id="L633">  private fun broadcastAlarmState(action: String, calendar: Calendar? = null) {</span>
+<span class="nc" id="L634">    log.trace { &quot;[Alarm ${container.id}] broadcastAlarmState($action)&quot; }</span>
+<span class="nc" id="L635">    when {</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">      calendar != null -&gt; broadcaster.broadcastAlarmState(container.id, action, calendar)</span>
+<span class="nc" id="L637">      else -&gt; broadcaster.broadcastAlarmState(container.id, action)</span>
+    }
+<span class="nc" id="L639">    updateListInStore()</span>
+<span class="nc" id="L640">  }</span>
+
+  private fun broadcastAlarmSetWithNormalTime(millis: Long, fromUserInteraction: Boolean) {
+<span class="nc" id="L643">    store.sets().onNext(Store.AlarmSet(container, millis, fromUserInteraction))</span>
+<span class="nc" id="L644">    updateListInStore()</span>
+<span class="nc" id="L645">  }</span>
+
+  private fun setAlarm(calendar: Calendar, calendarType: CalendarType) {
+<span class="nc" id="L648">    mAlarmsScheduler.setAlarm(container.id, calendarType, calendar, container)</span>
+<span class="nc" id="L649">    alarmStore.modify { withNextTime(calendar) }</span>
+<span class="nc" id="L650">  }</span>
+
+  private fun removeAlarm() {
+<span class="nc" id="L653">    mAlarmsScheduler.removeAlarm(container.id)</span>
+<span class="nc" id="L654">  }</span>
+
+  private fun removeFromStore() {
+<span class="nc" id="L657">    store</span>
+<span class="nc" id="L658">        .alarms()</span>
+<span class="nc" id="L659">        .firstOrError()</span>
+<span class="nc" id="L660">        .subscribe { alarmValues -&gt;</span>
+<span class="nc" id="L661">          val withoutId = removeWithId(alarmValues, container.id)</span>
+<span class="nc" id="L662">          store.alarmsSubject().onNext(withoutId)</span>
+<span class="nc" id="L663">        }</span>
+<span class="nc" id="L664">        .let { disposable.add(it) }</span>
+<span class="nc" id="L665">  }</span>
+
+  private fun writeChangeData(data: AlarmValue) {
+<span class="fc" id="L668">    alarmStore.modify { withChangeData(data) }</span>
+<span class="fc" id="L669">  }</span>
+
+  private fun calculateNextTime(): Calendar {
+<span class="nc" id="L672">    val date = container.date</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">    return if (date != null) {</span>
+<span class="nc" id="L674">      calendars.now().apply {</span>
+<span class="nc" id="L675">        timeInMillis = date.timeInMillis</span>
+<span class="nc" id="L676">        set(Calendar.HOUR_OF_DAY, container.hour)</span>
+<span class="nc" id="L677">        set(Calendar.MINUTE, container.minutes)</span>
+<span class="nc" id="L678">        set(Calendar.SECOND, 0)</span>
+<span class="nc" id="L679">        set(Calendar.MILLISECOND, 0)</span>
+<span class="nc" id="L680">      }</span>
+<span class="nc" id="L681">    } else {</span>
+<span class="nc" id="L682">      calendars.now().apply {</span>
+<span class="nc" id="L683">        set(Calendar.HOUR_OF_DAY, container.hour)</span>
+<span class="nc" id="L684">        set(Calendar.MINUTE, container.minutes)</span>
+<span class="nc" id="L685">        set(Calendar.SECOND, 0)</span>
+<span class="nc" id="L686">        set(Calendar.MILLISECOND, 0)</span>
+<span class="nc" id="L687">        advanceCalendar()</span>
+<span class="nc" id="L688">      }</span>
+    }
+  }
+
+  private fun Calendar.advanceCalendar() {
+<span class="nc" id="L693">    val now = calendars.now()</span>
+    // if alarm is behind current time, advance one day
+<span class="nc bnc" id="L695" title="All 2 branches missed.">    if (before(now)) {</span>
+<span class="nc" id="L696">      add(Calendar.DAY_OF_YEAR, 1)</span>
+    }
+<span class="nc" id="L698">    val addDays = container.daysOfWeek.getNextAlarm(this)</span>
+<span class="nc bnc" id="L699" title="All 2 branches missed.">    if (addDays &gt; 0) {</span>
+<span class="nc" id="L700">      add(Calendar.DAY_OF_WEEK, addDays)</span>
+    }
+<span class="nc" id="L702">  }</span>
+
+  private fun alarmWillBeRescheduled(reason: Event?): Boolean {
+<span class="nc bnc" id="L705" title="All 4 branches missed.">    return reason is Change &amp;&amp; reason.value.isEnabled</span>
+  }
+
+<span class="fc" id="L708">  private abstract inner class AlarmState : State&lt;Event&gt;() {</span>
+    private var handled: Boolean = false
+
+    final override fun enter(reason: Event?) {
+<span class="fc" id="L712">      when (reason) {</span>
+<span class="pc bpc" id="L713" title="1 of 2 branches missed.">        null -&gt; onResume()</span>
+        else -&gt; {
+<span class="nc bnc" id="L715" title="All 4 branches missed.">          if (this !is EnabledState &amp;&amp; this !is ComplexTransition&lt;*&gt;) {</span>
+<span class="nc" id="L716">            alarmStore.modify { withState(name) }</span>
+          }
+<span class="nc" id="L718">          onEnter(reason)</span>
+<span class="nc" id="L719">          onResume()</span>
+        }
+      }
+<span class="fc" id="L722">    }</span>
+
+<span class="nc" id="L724">    open fun onEnter(reason: Event) {}</span>
+
+<span class="fc" id="L726">    open fun onResume() {}</span>
+
+<span class="nc" id="L728">    override fun exit(reason: Event?) {}</span>
+
+    override fun onEvent(event: Event): Boolean {
+<span class="fc" id="L731">      handled = true</span>
+<span class="fc" id="L732">      when (event) {</span>
+<span class="pc bpc" id="L733" title="1 of 2 branches missed.">        Create -&gt; Unit</span>
+<span class="pc bpc" id="L734" title="1 of 2 branches missed.">        is Enable -&gt; onEnable()</span>
+<span class="pc bpc" id="L735" title="1 of 2 branches missed.">        is Disable -&gt; onDisable()</span>
+<span class="pc bpc" id="L736" title="1 of 2 branches missed.">        is Snooze -&gt; onSnooze(event)</span>
+<span class="pc bpc" id="L737" title="1 of 2 branches missed.">        is Dismiss -&gt; onDismiss()</span>
+<span class="pc bpc" id="L738" title="1 of 2 branches missed.">        is Change -&gt; onChange(event.value)</span>
+<span class="nc bnc" id="L739" title="All 2 branches missed.">        is Fired -&gt; onFired()</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">        is PrealarmDurationChanged -&gt; onPreAlarmDurationChanged()</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">        is Refresh -&gt; onRefresh()</span>
+<span class="nc bnc" id="L742" title="All 2 branches missed.">        is TimeSet -&gt; onTimeSet()</span>
+<span class="nc bnc" id="L743" title="All 2 branches missed.">        is InexactFired -&gt; onInexactFired()</span>
+<span class="nc bnc" id="L744" title="All 2 branches missed.">        is RequestSkip -&gt; onRequestSkip()</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        is Delete -&gt; onDelete()</span>
+<span class="nc bnc" id="L746" title="All 2 branches missed.">        Create -&gt; {</span>
+<span class="nc bnc" id="L747" title="All 4 branches missed.">          check(!BuildConfig.DEBUG) { &quot;Unexpected $event&quot; }</span>
+        }
+      }
+<span class="fc" id="L750">      return handled</span>
+    }
+
+    protected fun markNotHandled() {
+<span class="nc" id="L754">      handled = false</span>
+<span class="nc" id="L755">    }</span>
+
+<span class="nc" id="L757">    protected open fun onEnable() = markNotHandled()</span>
+
+<span class="nc" id="L759">    protected open fun onDisable() = markNotHandled()</span>
+
+<span class="nc" id="L761">    protected open fun onSnooze(snooze: Snooze) = markNotHandled()</span>
+
+<span class="nc" id="L763">    protected open fun onDismiss() = markNotHandled()</span>
+
+<span class="nc" id="L765">    protected open fun onChange(alarmValue: AlarmValue) = markNotHandled()</span>
+
+<span class="nc" id="L767">    protected open fun onFired() = markNotHandled()</span>
+
+<span class="nc" id="L769">    protected open fun onInexactFired() = markNotHandled()</span>
+
+<span class="nc" id="L771">    protected open fun onRequestSkip() = markNotHandled()</span>
+
+<span class="nc" id="L773">    protected open fun onPreAlarmDurationChanged() = markNotHandled()</span>
+
+<span class="nc" id="L775">    protected open fun onRefresh() = markNotHandled()</span>
+
+<span class="nc" id="L777">    protected open fun onTimeSet() = markNotHandled()</span>
+
+<span class="nc" id="L779">    protected open fun onDelete() = markNotHandled()</span>
+  }
+
+  private fun updateListInStore() {
+<span class="fc" id="L783">    store</span>
+<span class="fc" id="L784">        .alarms()</span>
+<span class="fc" id="L785">        .take(1)</span>
+<span class="fc" id="L786">        .subscribe { alarmValues -&gt;</span>
+<span class="fc" id="L787">          val copy = addOrReplace(alarmValues, container)</span>
+<span class="fc" id="L788">          store.alarmsSubject().onNext(copy)</span>
+<span class="fc" id="L789">        }</span>
+<span class="fc" id="L790">        .let { disposable.add(it) }</span>
+<span class="fc" id="L791">  }</span>
+
+  fun onAlarmFired() {
+<span class="nc" id="L794">    stateMachine.sendEvent(Fired)</span>
+<span class="nc" id="L795">  }</span>
+
+  fun onInexactAlarmFired() {
+<span class="nc" id="L798">    stateMachine.sendEvent(InexactFired)</span>
+<span class="nc" id="L799">  }</span>
+
+  override fun requestSkip() {
+<span class="nc" id="L802">    stateMachine.sendEvent(RequestSkip)</span>
+<span class="nc" id="L803">  }</span>
+
+<span class="nc" id="L805">  override fun isSkipping(): Boolean = container.skipping</span>
+
+  fun refresh() {
+<span class="nc" id="L808">    stateMachine.sendEvent(Refresh)</span>
+<span class="nc" id="L809">  }</span>
+
+  fun onTimeSet() {
+<span class="nc" id="L812">    stateMachine.sendEvent(TimeSet)</span>
+<span class="nc" id="L813">  }</span>
+
+  fun change(data: AlarmValue) {
+<span class="fc" id="L816">    stateMachine.sendEvent(Change(data))</span>
+<span class="fc" id="L817">  }</span>
+
+  override fun enable(enable: Boolean) {
+<span class="nc bnc" id="L820" title="All 2 branches missed.">    stateMachine.sendEvent(if (enable) Enable else Disable)</span>
+<span class="nc" id="L821">  }</span>
+
+  override fun snooze() {
+<span class="nc" id="L824">    stateMachine.sendEvent(Snooze(null, null))</span>
+<span class="nc" id="L825">  }</span>
+
+  override fun snooze(hourOfDay: Int, minute: Int) {
+<span class="nc" id="L828">    stateMachine.sendEvent(Snooze(hourOfDay, minute))</span>
+<span class="nc" id="L829">  }</span>
+
+  override fun dismiss() {
+<span class="nc" id="L832">    stateMachine.sendEvent(Dismiss)</span>
+<span class="nc" id="L833">  }</span>
+
+  override fun delete() {
+<span class="nc" id="L836">    stateMachine.sendEvent(Delete)</span>
+<span class="nc" id="L837">  }</span>
+
+  // ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  // ++++++ getters for GUI +++++++++++++++++++++++++++++++
+  // ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+  override val id: Int
+<span class="fc" id="L844">    get() = container.id</span>
+
+  override val labelOrDefault: String
+<span class="nc" id="L847">    get() = container.label</span>
+
+  override val alarmtone: Alarmtone
+<span class="nc" id="L850">    get() = container.alarmtone</span>
+
+  override fun toString(): String {
+<span class="nc" id="L853">    return &quot;AlarmCore ${container.id} $stateMachine on ${df.format(container.nextTime.time)}&quot;</span>
+  }
+
+  override fun edit(func: AlarmValue.() -&gt; AlarmValue) {
+<span class="fc" id="L857">    val prev = container</span>
+<span class="fc" id="L858">    change(</span>
+<span class="fc" id="L859">        func(prev).also {</span>
+<span class="pc bpc" id="L860" title="2 of 4 branches missed.">          require(prev.id == it.id)</span>
+<span class="pc bpc" id="L861" title="1 of 2 branches missed.">          require(prev.state == it.state)</span>
+<span class="pc bpc" id="L862" title="1 of 2 branches missed.">          require(prev.nextTime == it.nextTime)</span>
+<span class="fc" id="L863">        })</span>
+<span class="fc" id="L864">  }</span>
+
+  override val data: AlarmValue
+<span class="nc" id="L867">    get() = container</span>
+}
+
+private fun Event.isUserInteraction(): Boolean {
+<span class="nc" id="L871">  return when (this) {</span>
+<span class="nc bnc" id="L872" title="All 2 branches missed.">    is Enable -&gt; true</span>
+<span class="nc bnc" id="L873" title="All 2 branches missed.">    is Change -&gt; true</span>
+<span class="nc bnc" id="L874" title="All 2 branches missed.">    Create -&gt; true</span>
+<span class="nc bnc" id="L875" title="All 2 branches missed.">    Delete -&gt; true</span>
+<span class="nc bnc" id="L876" title="All 2 branches missed.">    Disable -&gt; true</span>
+<span class="nc bnc" id="L877" title="All 2 branches missed.">    Dismiss -&gt; true</span>
+<span class="nc bnc" id="L878" title="All 2 branches missed.">    RequestSkip -&gt; true</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">    is Snooze -&gt; true</span>
+<span class="nc bnc" id="L880" title="All 2 branches missed.">    Fired -&gt; false</span>
+<span class="nc bnc" id="L881" title="All 2 branches missed.">    InexactFired -&gt; false</span>
+<span class="nc bnc" id="L882" title="All 2 branches missed.">    PrealarmDurationChanged -&gt; false</span>
+<span class="nc bnc" id="L883" title="All 2 branches missed.">    Refresh -&gt; false</span>
+<span class="nc" id="L884">    TimeSet -&gt; false</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

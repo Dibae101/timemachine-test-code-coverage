@@ -1,0 +1,507 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EditRepositoryFragment.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.ui.repository</a> &gt; <span class="el_source">EditRepositoryFragment.kt</span></div><h1>EditRepositoryFragment.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.ui.repository
+
+import android.os.Bundle
+import android.text.Selection
+import android.util.Base64
+import android.view.MenuItem
+import android.view.View
+import android.view.ViewGroup
+import androidx.appcompat.app.AlertDialog
+import androidx.core.net.toUri
+import androidx.core.os.bundleOf
+import androidx.core.view.isVisible
+import androidx.core.widget.doAfterTextChanged
+import androidx.fragment.app.DialogFragment
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.snackbar.Snackbar
+import com.looker.droidify.R
+import com.looker.droidify.database.Database
+import com.looker.droidify.databinding.EditRepositoryBinding
+import com.looker.droidify.model.Repository
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.NetworkResponse
+import com.looker.droidify.network.header.authentication
+import com.looker.droidify.service.Connection
+import com.looker.droidify.service.SyncService
+import com.looker.droidify.ui.Message
+import com.looker.droidify.ui.MessageDialog
+import com.looker.droidify.ui.ScreenFragment
+import com.looker.droidify.utility.common.extension.clipboardManager
+import com.looker.droidify.utility.common.extension.exceptCancellation
+import com.looker.droidify.utility.common.extension.get
+import com.looker.droidify.utility.common.extension.getMutatedIcon
+import com.looker.droidify.utility.common.nullIfEmpty
+import com.looker.droidify.utility.extension.mainActivity
+import dagger.hilt.android.AndroidEntryPoint
+import java.net.URI
+import java.net.URISyntaxException
+import java.net.URL
+import java.net.URLDecoder
+import java.nio.charset.Charset
+import java.util.*
+import javax.inject.Inject
+import kotlin.math.min
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import com.looker.droidify.R.string as stringRes
+
+<span class="nc" id="L51">@AndroidEntryPoint</span>
+<span class="nc" id="L52">class EditRepositoryFragment() : ScreenFragment() {</span>
+
+<span class="nc" id="L54">    constructor(repositoryId: Long?, repoAddress: String?) : this() {</span>
+<span class="nc" id="L55">        arguments =</span>
+<span class="nc" id="L56">            bundleOf(EXTRA_REPOSITORY_ID to repositoryId, EXTRA_REPOSITORY_ADDRESS to repoAddress)</span>
+<span class="nc" id="L57">    }</span>
+
+    private var _binding: EditRepositoryBinding? = null
+<span class="nc" id="L60">    private val binding get() = _binding!!</span>
+
+    private val repoId: Long?
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        get() = arguments?.getLong(EXTRA_REPOSITORY_ID)</span>
+
+    private val repoAddress: String?
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        get() = arguments?.getString(EXTRA_REPOSITORY_ADDRESS)</span>
+
+    private var saveMenuItem: MenuItem? = null
+
+<span class="nc" id="L70">    private val syncConnection = Connection(SyncService::class.java)</span>
+    private var checkInProgress = false
+    private var checkJob: Job? = null
+
+<span class="nc" id="L74">    private var takenAddresses = emptySet&lt;String&gt;()</span>
+
+    @Inject
+<span class="nc" id="L77">    lateinit var downloader: Downloader</span>
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+<span class="nc" id="L80">        super.onViewCreated(view, savedInstanceState)</span>
+
+<span class="nc" id="L82">        _binding = EditRepositoryBinding.inflate(layoutInflater)</span>
+
+<span class="nc" id="L84">        syncConnection.bind(requireContext())</span>
+
+<span class="nc" id="L86">        mainActivity.onToolbarCreated(toolbar)</span>
+<span class="nc" id="L87">        toolbar.title =</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            getString(if (repoId != null) stringRes.edit_repository else stringRes.add_repository)</span>
+
+<span class="nc" id="L90">        saveMenuItem = toolbar.menu.add(stringRes.save)</span>
+<span class="nc" id="L91">            .setIcon(toolbar.context.getMutatedIcon(R.drawable.ic_save))</span>
+<span class="nc" id="L92">            .setEnabled(false)</span>
+<span class="nc" id="L93">            .setShowAsActionFlags(MenuItem.SHOW_AS_ACTION_ALWAYS).setOnMenuItemClickListener {</span>
+<span class="nc" id="L94">                onSaveRepositoryClick(true)</span>
+<span class="nc" id="L95">                true</span>
+            }
+
+<span class="nc" id="L98">        val content = fragmentBinding.fragmentContent</span>
+
+<span class="nc" id="L100">        content.addView(binding.root)</span>
+
+<span class="nc bnc" id="L102" title="All 18 branches missed.">        val validChar: (Char) -&gt; Boolean = { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }</span>
+
+<span class="nc" id="L104">        binding.fingerprint.doAfterTextChanged { text -&gt;</span>
+            fun logicalPosition(text: String, position: Int): Int {
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                return if (position &gt; 0) {</span>
+<span class="nc" id="L107">                    text.asSequence().take(position)</span>
+<span class="nc" id="L108">                        .count(validChar)</span>
+                } else {
+<span class="nc" id="L110">                    position</span>
+                }
+            }
+
+            fun realPosition(text: String, position: Int): Int {
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                return if (position &gt; 0) {</span>
+<span class="nc" id="L116">                    var left = position</span>
+<span class="nc" id="L117">                    val index = text.indexOfFirst {</span>
+<span class="nc bnc" id="L118" title="All 4 branches missed.">                        validChar(it) &amp;&amp; run {</span>
+<span class="nc" id="L119">                            left -= 1</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                            left &lt;= 0</span>
+<span class="nc" id="L121">                        }</span>
+                    }
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                    if (index &gt;= 0) min(index + 1, text.length) else text.length</span>
+                } else {
+<span class="nc" id="L125">                    position</span>
+                }
+            }
+
+<span class="nc" id="L129">            val inputString = text.toString()</span>
+<span class="nc" id="L130">            val outputString = inputString</span>
+<span class="nc" id="L131">                .uppercase(Locale.US)</span>
+<span class="nc" id="L132">                .filter(validChar)</span>
+<span class="nc" id="L133">                .windowed(2, 2, true).take(32)</span>
+<span class="nc" id="L134">                .joinToString(separator = &quot; &quot;)</span>
+<span class="nc" id="L135">            if (inputString != outputString) {</span>
+<span class="nc" id="L136">                val inputStart = logicalPosition(inputString, Selection.getSelectionStart(text))</span>
+<span class="nc" id="L137">                val inputEnd = logicalPosition(inputString, Selection.getSelectionEnd(text))</span>
+<span class="nc" id="L138">                text?.replace(0, text.length, outputString)</span>
+<span class="nc" id="L139">                Selection.setSelection(</span>
+<span class="nc" id="L140">                    text,</span>
+<span class="nc" id="L141">                    realPosition(outputString, inputStart),</span>
+<span class="nc" id="L142">                    realPosition(outputString, inputEnd),</span>
+                )
+            }
+<span class="nc" id="L145">        }</span>
+
+<span class="nc" id="L147">        binding.authSwitch.setOnCheckedChangeListener { _, isChecked -&gt;</span>
+<span class="nc" id="L148">            binding.authFields.isVisible = isChecked</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            if (!isChecked) {</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                binding.username.text?.clear()</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                binding.password.text?.clear()</span>
+            }
+<span class="nc" id="L153">            invalidateUsernamePassword()</span>
+<span class="nc" id="L154">        }</span>
+
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (savedInstanceState == null) {</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            val repository = repoId?.let(Database.RepositoryAdapter::get)</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if (repository == null) {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">                val text = repoAddress ?: kotlin.run {</span>
+<span class="nc bnc" id="L160" title="All 10 branches missed.">                    context?.clipboardManager?.primaryClip?.takeIf { it.itemCount &gt; 0 }</span>
+<span class="nc bnc" id="L161" title="All 8 branches missed.">                        ?.getItemAt(0)?.text?.toString().orEmpty()</span>
+                }
+<span class="nc" id="L163">                val (addressText, fingerprintText) = parseRepoUrl(text)</span>
+<span class="nc" id="L164">                binding.address.setText(addressText)</span>
+<span class="nc" id="L165">                binding.fingerprint.setText(fingerprintText)</span>
+            } else {
+<span class="nc" id="L167">                binding.address.setText(repository.address)</span>
+<span class="nc" id="L168">                val mirrors = repository.mirrors.map { it.withoutKnownPath }</span>
+<span class="nc" id="L169">                binding.addressContainer.apply {</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                    isEndIconVisible = mirrors.isNotEmpty()</span>
+<span class="nc" id="L171">                    setEndIconDrawable(R.drawable.ic_arrow_down)</span>
+<span class="nc" id="L172">                    setEndIconOnClickListener {</span>
+<span class="nc" id="L173">                        SelectMirrorDialog(mirrors).show(</span>
+<span class="nc" id="L174">                            childFragmentManager,</span>
+<span class="nc" id="L175">                            SelectMirrorDialog::class.java.name,</span>
+                        )
+<span class="nc" id="L177">                    }</span>
+<span class="nc" id="L178">                }</span>
+<span class="nc" id="L179">                binding.fingerprint.setText(repository.fingerprint)</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                val (usernameText, passwordText) = repository.authentication.nullIfEmpty()</span>
+<span class="nc bnc" id="L181" title="All 6 branches missed.">                    ?.let { if (it.startsWith(&quot;Basic &quot;)) it.substring(6) else null }?.let {</span>
+<span class="nc" id="L182">                        try {</span>
+<span class="nc" id="L183">                            Base64.decode(it, Base64.NO_WRAP).toString(Charset.defaultCharset())</span>
+<span class="nc" id="L184">                        } catch (e: Exception) {</span>
+<span class="nc" id="L185">                            e.printStackTrace()</span>
+<span class="nc" id="L186">                            null</span>
+<span class="nc" id="L187">                        }</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                    }?.let {</span>
+<span class="nc" id="L189">                        val index = it.indexOf(':')</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                        if (index &gt;= 0) {</span>
+<span class="nc" id="L191">                            Pair(</span>
+<span class="nc" id="L192">                                it.substring(0, index),</span>
+<span class="nc" id="L193">                                it.substring(index + 1),</span>
+                            )
+                        } else {
+<span class="nc" id="L196">                            null</span>
+<span class="nc" id="L197">                        }</span>
+<span class="nc" id="L198">                    } ?: Pair(null, null)</span>
+<span class="nc bnc" id="L199" title="All 12 branches missed.">                val hasAuth = !usernameText.isNullOrEmpty() &amp;&amp; !passwordText.isNullOrEmpty()</span>
+<span class="nc" id="L200">                binding.authSwitch.isChecked = hasAuth</span>
+<span class="nc" id="L201">                binding.authFields.isVisible = hasAuth</span>
+<span class="nc" id="L202">                binding.username.setText(usernameText)</span>
+<span class="nc" id="L203">                binding.password.setText(passwordText)</span>
+            }
+        }
+
+<span class="nc" id="L207">        binding.address.doAfterTextChanged { invalidateAddress() }</span>
+<span class="nc" id="L208">        binding.fingerprint.doAfterTextChanged { invalidateFingerprint() }</span>
+<span class="nc" id="L209">        binding.username.doAfterTextChanged { invalidateUsernamePassword() }</span>
+<span class="nc" id="L210">        binding.password.doAfterTextChanged { invalidateUsernamePassword() }</span>
+
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        (binding.overlay.parent as ViewGroup).layoutTransition?.setDuration(200L)</span>
+<span class="nc" id="L213">        binding.overlay.background!!.apply {</span>
+<span class="nc" id="L214">            mutate()</span>
+<span class="nc" id="L215">            alpha = 0xcc</span>
+<span class="nc" id="L216">        }</span>
+<span class="nc" id="L217">        binding.skip.setOnClickListener {</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (checkInProgress) {</span>
+<span class="nc" id="L219">                checkInProgress = false</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                checkJob?.cancel()</span>
+<span class="nc" id="L221">                onSaveRepositoryClick(false)</span>
+            }
+<span class="nc" id="L223">        }</span>
+
+<span class="nc" id="L225">        viewLifecycleOwner.lifecycleScope.launch {</span>
+<span class="nc" id="L226">            val list = Database.RepositoryAdapter.getAll()</span>
+<span class="nc bnc" id="L227" title="All 4 branches missed.">            takenAddresses = list.asSequence().filter { it.id != repoId }</span>
+<span class="nc" id="L228">                .flatMap { (it.mirrors + it.address).asSequence() }</span>
+<span class="nc" id="L229">                .map { it.withoutKnownPath }</span>
+<span class="nc" id="L230">                .toSet()</span>
+<span class="nc" id="L231">            invalidateAddress()</span>
+<span class="nc" id="L232">        }</span>
+<span class="nc" id="L233">        invalidateAddress()</span>
+<span class="nc" id="L234">        invalidateFingerprint()</span>
+<span class="nc" id="L235">        invalidateUsernamePassword()</span>
+<span class="nc" id="L236">    }</span>
+
+    override fun onDestroyView() {
+<span class="nc" id="L239">        super.onDestroyView()</span>
+
+<span class="nc" id="L241">        saveMenuItem = null</span>
+<span class="nc" id="L242">        syncConnection.unbind(requireContext())</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        checkJob?.cancel()</span>
+<span class="nc" id="L244">        checkJob = null</span>
+<span class="nc" id="L245">        _binding = null</span>
+<span class="nc" id="L246">    }</span>
+
+    private var addressError = false
+    private var fingerprintError = false
+    private var usernamePasswordError = false
+
+    private fun invalidateAddress() {
+<span class="nc" id="L253">        invalidateAddress(binding.address.text.toString())</span>
+<span class="nc" id="L254">    }</span>
+
+    private fun invalidateAddress(addressText: String) {
+<span class="nc" id="L257">        val normalizedAddress = normalizeAddress(addressText)</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        val addressErrorResId = if (normalizedAddress != null) {</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">            if (normalizedAddress.withoutKnownPath in takenAddresses) {</span>
+<span class="nc" id="L260">                stringRes.already_exists</span>
+            } else {
+<span class="nc" id="L262">                null</span>
+            }
+        } else {
+<span class="nc" id="L265">            stringRes.invalid_address</span>
+        }
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        addressError = addressErrorResId != null</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        addressErrorResId?.let { binding.address.error = getString(it) }</span>
+<span class="nc" id="L269">        invalidateState()</span>
+<span class="nc" id="L270">    }</span>
+
+    private fun invalidateFingerprint() {
+<span class="nc" id="L273">        val fingerprint = binding.fingerprint.text.toString().replace(&quot; &quot;, &quot;&quot;)</span>
+<span class="nc bnc" id="L274" title="All 6 branches missed.">        val fingerprintInvalid = fingerprint.isNotEmpty() &amp;&amp; fingerprint.length != 64</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        if (fingerprintInvalid) {</span>
+<span class="nc" id="L276">            binding.fingerprint.error = getString(stringRes.invalid_fingerprint_format)</span>
+        }
+<span class="nc" id="L278">        fingerprintError = fingerprintInvalid</span>
+<span class="nc" id="L279">        invalidateState()</span>
+<span class="nc" id="L280">    }</span>
+
+    private fun invalidateUsernamePassword() {
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (!binding.authSwitch.isChecked) {</span>
+<span class="nc" id="L284">            usernamePasswordError = false</span>
+<span class="nc" id="L285">            invalidateState()</span>
+<span class="nc" id="L286">            return</span>
+        }
+<span class="nc" id="L288">        val username = binding.username.text.toString()</span>
+<span class="nc" id="L289">        val password = binding.password.text.toString()</span>
+<span class="nc" id="L290">        val usernameInvalid = username.contains(':')</span>
+<span class="nc bnc" id="L291" title="All 8 branches missed.">        val usernameEmpty = username.isEmpty() &amp;&amp; password.isNotEmpty()</span>
+<span class="nc bnc" id="L292" title="All 8 branches missed.">        val passwordEmpty = username.isNotEmpty() &amp;&amp; password.isEmpty()</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (usernameEmpty) {</span>
+<span class="nc" id="L294">            binding.username.error = getString(stringRes.username_missing)</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        } else if (passwordEmpty) {</span>
+<span class="nc" id="L296">            binding.password.error = getString(stringRes.password_missing)</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        } else if (usernameInvalid) {</span>
+<span class="nc" id="L298">            binding.username.error = getString(stringRes.invalid_username_format)</span>
+        }
+<span class="nc bnc" id="L300" title="All 6 branches missed.">        usernamePasswordError = usernameInvalid || usernameEmpty || passwordEmpty</span>
+<span class="nc" id="L301">        invalidateState()</span>
+<span class="nc" id="L302">    }</span>
+
+    private fun invalidateState() {
+<span class="nc" id="L305">        saveMenuItem!!.isEnabled =</span>
+<span class="nc bnc" id="L306" title="All 8 branches missed.">            !addressError &amp;&amp; !fingerprintError &amp;&amp; !usernamePasswordError &amp;&amp; !checkInProgress</span>
+<span class="nc" id="L307">        binding.apply {</span>
+<span class="nc" id="L308">            sequenceOf(address, fingerprint, username, password).forEach {</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                it.isEnabled = !checkInProgress</span>
+<span class="nc" id="L310">            }</span>
+<span class="nc" id="L311">        }</span>
+<span class="nc" id="L312">        binding.overlay.isVisible = checkInProgress</span>
+<span class="nc" id="L313">    }</span>
+
+    private val String.pathCropped: String
+        get() {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            val index = indexOfLast { it != '/' }</span>
+<span class="nc bnc" id="L318" title="All 4 branches missed.">            return if (index &gt;= 0 &amp;&amp; index &lt; length - 1) substring(0, index + 1) else this</span>
+        }
+
+    private val String.withoutKnownPath: String
+        get() {
+<span class="nc" id="L323">            val cropped = pathCropped</span>
+<span class="nc" id="L324">            val endsWith =</span>
+<span class="nc" id="L325">                addressSuffixes.asSequence()</span>
+<span class="nc" id="L326">                    .sortedByDescending { it.length }</span>
+<span class="nc bnc" id="L327" title="All 4 branches missed.">                    .find { cropped.endsWith(&quot;/$it&quot;) }</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">            return if (endsWith != null) {</span>
+<span class="nc" id="L329">                cropped.substring(</span>
+<span class="nc" id="L330">                    0,</span>
+<span class="nc" id="L331">                    cropped.length - endsWith.length - 1,</span>
+                )
+            } else {
+<span class="nc" id="L334">                cropped</span>
+            }
+        }
+
+    private fun normalizeAddress(address: String): String? {
+<span class="nc" id="L339">        val uri = try {</span>
+<span class="nc" id="L340">            val uri = URI(address)</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            if (uri.isAbsolute) uri.normalize() else null</span>
+<span class="nc" id="L342">        } catch (_: URISyntaxException) {</span>
+<span class="nc" id="L343">            return null</span>
+        }
+<span class="nc" id="L345">        return try {</span>
+<span class="nc bnc" id="L346" title="All 8 branches missed.">            uri?.toURL()?.toURI()?.toString()?.removeSuffix(&quot;/&quot;)</span>
+<span class="nc" id="L347">        } catch (_: Exception) {</span>
+<span class="nc" id="L348">            null</span>
+        }
+    }
+
+    private fun parseRepoUrl(text: String): Pair&lt;String?, String?&gt; {
+<span class="nc" id="L353">        return try {</span>
+<span class="nc" id="L354">            val uri = URL(text).toString().toUri()</span>
+<span class="nc bnc" id="L355" title="All 8 branches missed.">            val repoUri = if (uri.host?.contains(&quot;fdroid.link&quot;) == true &amp;&amp; uri.fragment != null) {</span>
+<span class="nc" id="L356">                val decodedFragment = URLDecoder.decode(uri.fragment, &quot;UTF-8&quot;)</span>
+<span class="nc" id="L357">                URL(decodedFragment).toString().toUri()</span>
+            } else {
+<span class="nc" id="L359">                uri</span>
+            }
+<span class="nc bnc" id="L361" title="All 4 branches missed.">            val fingerprint = repoUri[&quot;fingerprint&quot;]?.nullIfEmpty()</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                ?: repoUri[&quot;FINGERPRINT&quot;]?.nullIfEmpty()</span>
+<span class="nc" id="L363">            val address = repoUri.buildUpon()</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                .path(repoUri.path?.pathCropped)</span>
+<span class="nc" id="L365">                .query(null)</span>
+<span class="nc" id="L366">                .fragment(null)</span>
+<span class="nc" id="L367">                .build()</span>
+<span class="nc" id="L368">                .toString()</span>
+<span class="nc" id="L369">            Pair(address, fingerprint)</span>
+<span class="nc" id="L370">        } catch (_: Exception) {</span>
+<span class="nc" id="L371">            Pair(null, null)</span>
+        }
+    }
+
+    private fun setMirror(address: String) {
+<span class="nc" id="L376">        binding.address.setText(address)</span>
+<span class="nc" id="L377">    }</span>
+
+    private fun onSaveRepositoryClick(check: Boolean) {
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (!checkInProgress) {</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">            val address = normalizeAddress(binding.address.text.toString()) ?: kotlin.run {</span>
+<span class="nc" id="L382">                failedAddressCheck()</span>
+<span class="nc" id="L383">                return</span>
+            }
+<span class="nc" id="L385">            val fingerprint = binding.fingerprint.text.toString().replace(&quot; &quot;, &quot;&quot;)</span>
+<span class="nc" id="L386">            val username = binding.username.text.toString().nullIfEmpty()</span>
+<span class="nc" id="L387">            val password = binding.password.text.toString().nullIfEmpty()</span>
+<span class="nc bnc" id="L388" title="All 4 branches missed.">            val authentication = if (username != null &amp;&amp; password != null) {</span>
+<span class="nc" id="L389">                &quot;Basic &quot; + Base64.encodeToString(</span>
+<span class="nc" id="L390">                    &quot;$username:$password&quot;.toByteArray(Charset.defaultCharset()),</span>
+<span class="nc" id="L391">                    Base64.NO_WRAP,</span>
+                )
+<span class="nc" id="L393">            } else &quot;&quot;</span>
+
+<span class="nc bnc" id="L395" title="All 2 branches missed.">            if (check) {</span>
+<span class="nc bnc" id="L396" title="All 3 branches missed.">                checkJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Main) {</span>
+<span class="nc" id="L397">                    val resultAddress = try {</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">                        checkAddress(address, authentication)</span>
+<span class="nc" id="L399">                    } catch (e: Exception) {</span>
+<span class="nc" id="L400">                        e.exceptCancellation()</span>
+<span class="nc" id="L401">                        failedAddressCheck()</span>
+<span class="nc" id="L402">                        null</span>
+                    }
+<span class="nc bnc" id="L404" title="All 4 branches missed.">                    val allow = resultAddress == address || run {</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                        if (resultAddress == null) return@run false</span>
+<span class="nc" id="L406">                        binding.address.setText(resultAddress)</span>
+<span class="nc" id="L407">                        invalidateAddress(resultAddress)</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                        !addressError</span>
+                    }
+<span class="nc bnc" id="L410" title="All 4 branches missed.">                    if (allow &amp;&amp; resultAddress != null) {</span>
+<span class="nc" id="L411">                        onSaveRepositoryProceedInvalidate(</span>
+<span class="nc" id="L412">                            resultAddress,</span>
+<span class="nc" id="L413">                            fingerprint,</span>
+<span class="nc" id="L414">                            authentication,</span>
+                        )
+                    } else {
+<span class="nc" id="L417">                        invalidateState()</span>
+                    }
+<span class="nc" id="L419">                    invalidateState()</span>
+<span class="nc" id="L420">                }</span>
+            } else {
+<span class="nc" id="L422">                onSaveRepositoryProceedInvalidate(address, fingerprint, authentication)</span>
+            }
+        }
+<span class="nc" id="L425">    }</span>
+
+    private suspend fun checkAddress(
+        rawAddress: String,
+        authentication: String,
+<span class="nc" id="L430">    ): String? = coroutineScope {</span>
+<span class="nc" id="L431">        checkInProgress = true</span>
+<span class="nc" id="L432">        invalidateState()</span>
+<span class="nc" id="L433">        val allAddresses = addressSuffixes.map { &quot;$rawAddress/$it&quot; } + rawAddress</span>
+<span class="nc" id="L434">        allAddresses</span>
+<span class="nc" id="L435">            .sortedBy { it.length }</span>
+<span class="nc" id="L436">            .forEach { address -&gt;</span>
+<span class="nc" id="L437">                val response = downloader.headCall(</span>
+<span class="nc" id="L438">                    url = &quot;$address/index-v1.jar&quot;,</span>
+<span class="nc" id="L439">                    headers = { authentication(authentication) },</span>
+                )
+<span class="nc bnc" id="L441" title="All 2 branches missed.">                if (response is NetworkResponse.Success) return@coroutineScope address</span>
+<span class="nc" id="L442">            }</span>
+<span class="nc" id="L443">        null</span>
+<span class="nc" id="L444">    }</span>
+
+    private fun onSaveRepositoryProceedInvalidate(
+        address: String,
+        fingerprint: String,
+        authentication: String,
+    ) {
+<span class="nc" id="L451">        val binder = syncConnection.binder</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if (binder != null) {</span>
+<span class="nc" id="L453">            val repositoryId = repoId</span>
+<span class="nc bnc" id="L454" title="All 4 branches missed.">            if (repositoryId != null &amp;&amp; binder.isCurrentlySyncing(repositoryId)) {</span>
+<span class="nc" id="L455">                MessageDialog(Message.CantEditSyncing).show(childFragmentManager)</span>
+<span class="nc" id="L456">                invalidateState()</span>
+            } else {
+<span class="nc bnc" id="L458" title="All 4 branches missed.">                val repository = repositoryId?.let(Database.RepositoryAdapter::get)</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">                    ?.edit(address, fingerprint, authentication)</span>
+<span class="nc" id="L460">                    ?: Repository.newRepository(address, fingerprint, authentication)</span>
+<span class="nc" id="L461">                val changedRepository = Database.RepositoryAdapter.put(repository)</span>
+<span class="nc bnc" id="L462" title="All 4 branches missed.">                if (repositoryId == null &amp;&amp; changedRepository.enabled) {</span>
+<span class="nc" id="L463">                    binder.sync(changedRepository)</span>
+                }
+<span class="nc" id="L465">                mainActivity.onBackPressedDispatcher.onBackPressed()</span>
+            }
+        } else {
+<span class="nc" id="L468">            invalidateState()</span>
+        }
+<span class="nc" id="L470">    }</span>
+
+    private fun failedAddressCheck() {
+<span class="nc" id="L473">        checkInProgress = false</span>
+<span class="nc" id="L474">        invalidateState()</span>
+<span class="nc" id="L475">        Snackbar.make(</span>
+<span class="nc" id="L476">            requireView(),</span>
+<span class="nc" id="L477">            R.string.repository_unreachable,</span>
+<span class="nc" id="L478">            Snackbar.LENGTH_SHORT,</span>
+<span class="nc" id="L479">        ).show()</span>
+<span class="nc" id="L480">    }</span>
+
+<span class="nc" id="L482">    class SelectMirrorDialog() : DialogFragment() {</span>
+<span class="nc" id="L483">        constructor(mirrors: List&lt;String&gt;) : this() {</span>
+<span class="nc" id="L484">            arguments = bundleOf(EXTRA_MIRRORS to ArrayList(mirrors))</span>
+<span class="nc" id="L485">        }</span>
+
+        override fun onCreateDialog(savedInstanceState: Bundle?): AlertDialog {
+<span class="nc" id="L488">            val mirrors = requireArguments().getStringArrayList(EXTRA_MIRRORS)!!</span>
+<span class="nc" id="L489">            return MaterialAlertDialogBuilder(requireContext()).setTitle(stringRes.select_mirror)</span>
+<span class="nc" id="L490">                .setItems(mirrors.toTypedArray()) { _, position -&gt;</span>
+<span class="nc" id="L491">                    (parentFragment as EditRepositoryFragment).setMirror(mirrors[position])</span>
+<span class="nc" id="L492">                }.setNegativeButton(stringRes.cancel, null).create()</span>
+        }
+
+        private companion object {
+            const val EXTRA_MIRRORS = &quot;mirrors&quot;
+        }
+    }
+
+    private companion object {
+        const val EXTRA_REPOSITORY_ID = &quot;repositoryId&quot;
+        const val EXTRA_REPOSITORY_ADDRESS = &quot;repositoryAddress&quot;
+
+<span class="nc" id="L504">        val addressSuffixes = arrayOf(&quot;fdroid/repo&quot;, &quot;repo&quot;)</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

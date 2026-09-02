@@ -1,0 +1,906 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SwipeableState.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.ui.compose.material3</a> &gt; <span class="el_source">SwipeableState.kt</span></div><h1>SwipeableState.kt</h1><pre class="source lang-java linenums">/*
+ * Copyright 2021 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.nononsenseapps.feeder.ui.compose.material3
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.foundation.gestures.DraggableState
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.dp
+import com.nononsenseapps.feeder.ui.compose.material3.SwipeableDefaults.AnimationSpec
+import com.nononsenseapps.feeder.ui.compose.material3.SwipeableDefaults.STANDARD_RESISTANCE_FACTOR
+import com.nononsenseapps.feeder.ui.compose.material3.SwipeableDefaults.VelocityThreshold
+import com.nononsenseapps.feeder.ui.compose.material3.SwipeableDefaults.resistanceConfig
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.sign
+import kotlin.math.sin
+
+/**
+ * State of the [swipeable] modifier.
+ *
+ * This contains necessary information about any ongoing swipe or animation and provides methods
+ * to change the state either immediately or by starting an animation. To create and remember a
+ * [SwipeableState] with the default animation clock, use [rememberSwipeableState].
+ *
+ * @param initialValue The initial value of the state.
+ * @param animationSpec The default animation that will be used to animate to a new state.
+ * @param confirmStateChange Optional callback invoked to confirm or veto a pending state change.
+ */
+<span class="fc" id="L76">@Stable</span>
+@ExperimentalMaterial3Api
+<span class="pc" id="L78">internal open class SwipeableState&lt;T&gt;(</span>
+    initialValue: T,
+<span class="pc" id="L80">    internal val animationSpec: AnimationSpec&lt;Float&gt; = AnimationSpec,</span>
+<span class="pc" id="L81">    internal val confirmStateChange: (newValue: T) -&gt; Boolean = { true },</span>
+<span class="nc" id="L82">) {</span>
+    /**
+     * The current value of the state.
+     *
+     * If no swipe or animation is in progress, this corresponds to the anchor at which the
+     * [swipeable] is currently settled. If a swipe or animation is in progress, this corresponds
+     * the last anchor at which the [swipeable] was settled before the swipe or animation started.
+     */
+<span class="pc" id="L90">    var currentValue: T by mutableStateOf(initialValue)</span>
+        private set
+
+    /**
+     * Whether the state is currently animating.
+     */
+<span class="pc" id="L96">    var isAnimationRunning: Boolean by mutableStateOf(false)</span>
+        private set
+
+    /**
+     * The current position (in pixels) of the [swipeable].
+     *
+     * You should use this state to offset your content accordingly. The recommended way is to
+     * use `Modifier.offsetPx`. This includes the resistance by default, if resistance is enabled.
+     */
+<span class="fc" id="L105">    val offset: State&lt;Float&gt; get() = offsetState</span>
+
+    /**
+     * The amount by which the [swipeable] has been swiped past its bounds.
+     */
+<span class="nc" id="L110">    val overflow: State&lt;Float&gt; get() = overflowState</span>
+
+    // Use `Float.NaN` as a placeholder while the state is uninitialised.
+<span class="fc" id="L113">    private val offsetState = mutableFloatStateOf(0f)</span>
+<span class="fc" id="L114">    private val overflowState = mutableFloatStateOf(0f)</span>
+
+    // the source of truth for the &quot;real&quot;(non ui) position
+    // basically position in bounds + overflow
+<span class="fc" id="L118">    private val absoluteOffset = mutableFloatStateOf(0f)</span>
+
+    // current animation target, if animating, otherwise null
+<span class="fc" id="L121">    private val animationTarget = mutableStateOf&lt;Float?&gt;(null)</span>
+
+<span class="fc" id="L123">    internal var anchors by mutableStateOf(emptyMap&lt;Float, T&gt;())</span>
+
+    private val latestNonEmptyAnchorsFlow: Flow&lt;Map&lt;Float, T&gt;&gt; =
+<span class="pc" id="L126">        snapshotFlow { anchors }</span>
+<span class="fc" id="L127">            .filter { it.isNotEmpty() }</span>
+<span class="fc" id="L128">            .take(1)</span>
+
+<span class="pc" id="L130">    internal var minBound = Float.NEGATIVE_INFINITY</span>
+<span class="pc" id="L131">    internal var maxBound = Float.POSITIVE_INFINITY</span>
+
+    internal fun ensureInit(newAnchors: Map&lt;Float, T&gt;) {
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        if (anchors.isEmpty()) {</span>
+            // need to do initial synchronization synchronously :(
+<span class="fc" id="L136">            val initialOffset = newAnchors.getOffset(currentValue)</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">            requireNotNull(initialOffset) {</span>
+<span class="nc" id="L138">                &quot;The initial value must have an associated anchor.&quot;</span>
+            }
+<span class="fc" id="L140">            offsetState.value = initialOffset</span>
+<span class="fc" id="L141">            absoluteOffset.value = initialOffset</span>
+        }
+<span class="fc" id="L143">    }</span>
+
+    internal suspend fun processNewAnchors(
+        oldAnchors: Map&lt;Float, T&gt;,
+        newAnchors: Map&lt;Float, T&gt;,
+    ) {
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">        if (oldAnchors.isEmpty()) {</span>
+            // If this is the first time that we receive anchors, then we need to initialise
+            // the state so we snap to the offset associated to the initial value.
+<span class="fc" id="L152">            minBound = newAnchors.keys.minOrNull()!!</span>
+<span class="fc" id="L153">            maxBound = newAnchors.keys.maxOrNull()!!</span>
+<span class="fc" id="L154">            val initialOffset = newAnchors.getOffset(currentValue)</span>
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">            requireNotNull(initialOffset) {</span>
+<span class="nc" id="L156">                &quot;The initial value must have an associated anchor.&quot;</span>
+            }
+<span class="fc" id="L158">            snapInternalToOffset(initialOffset)</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        } else if (newAnchors != oldAnchors) {</span>
+            // If we have received new anchors, then the offset of the current value might
+            // have changed, so we need to animate to the new offset. If the current value
+            // has been removed from the anchors then we animate to the closest anchor
+            // instead. Note that this stops any ongoing animation.
+<span class="nc" id="L164">            minBound = Float.NEGATIVE_INFINITY</span>
+<span class="nc" id="L165">            maxBound = Float.POSITIVE_INFINITY</span>
+<span class="nc" id="L166">            val animationTargetValue = animationTarget.value</span>
+            // if we're in the animation already, let's find it a new home
+<span class="nc" id="L168">            val targetOffset =</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                if (animationTargetValue != null) {</span>
+                    // first, try to map old state to the new state
+<span class="nc" id="L171">                    val oldState = oldAnchors[animationTargetValue]</span>
+<span class="nc" id="L172">                    val newState = newAnchors.getOffset(oldState)</span>
+                    // return new state if exists, or find the closes one among new anchors
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                    newState ?: newAnchors.keys.minByOrNull { abs(it - animationTargetValue) }!!</span>
+                } else {
+                    // we're not animating, proceed by finding the new anchors for an old value
+<span class="nc" id="L177">                    val actualOldValue = oldAnchors[offset.value]</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                    val value = if (actualOldValue == currentValue) currentValue else actualOldValue</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                    newAnchors.getOffset(value) ?: newAnchors</span>
+<span class="nc" id="L180">                        .keys</span>
+<span class="nc" id="L181">                        .minByOrNull { abs(it - offset.value) }!!</span>
+                }
+<span class="nc" id="L183">            try {</span>
+<span class="nc" id="L184">                animateInternalToOffset(targetOffset, animationSpec)</span>
+<span class="nc" id="L185">            } catch (c: CancellationException) {</span>
+                // If the animation was interrupted for any reason, snap as a last resort.
+<span class="nc" id="L187">                snapInternalToOffset(targetOffset)</span>
+            } finally {
+<span class="nc" id="L189">                currentValue = newAnchors.getValue(targetOffset)</span>
+<span class="nc" id="L190">                minBound = newAnchors.keys.minOrNull()!!</span>
+<span class="nc" id="L191">                maxBound = newAnchors.keys.maxOrNull()!!</span>
+            }
+        }
+<span class="pc" id="L194">    }</span>
+
+<span class="pc" id="L196">    internal var thresholds: (Float, Float) -&gt; Float by mutableStateOf({ _, _ -&gt; 0f })</span>
+
+<span class="pc" id="L198">    internal var velocityThreshold by mutableFloatStateOf(0f)</span>
+
+<span class="fc" id="L200">    internal var resistance: ResistanceConfig? by mutableStateOf(null)</span>
+
+<span class="fc" id="L202">    internal val draggableState =</span>
+<span class="fc" id="L203">        DraggableState {</span>
+<span class="fc" id="L204">            val newAbsolute = absoluteOffset.value + it</span>
+<span class="fc" id="L205">            val clamped = newAbsolute.coerceIn(minBound, maxBound)</span>
+<span class="fc" id="L206">            val overflow = newAbsolute - clamped</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">            val resistanceDelta = resistance?.computeResistance(overflow) ?: 0f</span>
+<span class="fc" id="L208">            offsetState.value = clamped + resistanceDelta</span>
+<span class="fc" id="L209">            overflowState.value = overflow</span>
+<span class="fc" id="L210">            absoluteOffset.value = newAbsolute</span>
+<span class="fc" id="L211">        }</span>
+
+    private suspend fun snapInternalToOffset(target: Float) {
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">        draggableState.drag {</span>
+<span class="fc" id="L215">            dragBy(target - absoluteOffset.value)</span>
+<span class="fc" id="L216">        }</span>
+<span class="fc" id="L217">    }</span>
+
+    private suspend fun animateInternalToOffset(
+        target: Float,
+        spec: AnimationSpec&lt;Float&gt;,
+    ) {
+<span class="nc bnc" id="L223" title="All 3 branches missed.">        draggableState.drag {</span>
+<span class="nc" id="L224">            var prevValue = absoluteOffset.value</span>
+<span class="nc" id="L225">            animationTarget.value = target</span>
+<span class="nc" id="L226">            isAnimationRunning = true</span>
+<span class="nc" id="L227">            try {</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                Animatable(prevValue).animateTo(target, spec) {</span>
+<span class="nc" id="L229">                    dragBy(this.value - prevValue)</span>
+<span class="nc" id="L230">                    prevValue = this.value</span>
+<span class="nc" id="L231">                }</span>
+            } finally {
+<span class="nc" id="L233">                animationTarget.value = null</span>
+<span class="nc" id="L234">                isAnimationRunning = false</span>
+            }
+<span class="nc" id="L236">        }</span>
+<span class="nc" id="L237">    }</span>
+
+    /**
+     * The target value of the state.
+     *
+     * If a swipe is in progress, this is the value that the [swipeable] would animate to if the
+     * swipe finished. If an animation is running, this is the target value of that animation.
+     * Finally, if no swipe or animation is in progress, this is the same as the [currentValue].
+     */
+    @ExperimentalMaterial3Api
+    internal val targetValue: T
+        get() {
+            // TODO(calintat): Track current velocity (b/149549482) and use that here.
+<span class="nc" id="L250">            val target =</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                animationTarget.value ?: computeTarget(</span>
+<span class="nc" id="L252">                    offset = offset.value,</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                    lastValue = anchors.getOffset(currentValue) ?: offset.value,</span>
+<span class="nc" id="L254">                    anchors = anchors.keys,</span>
+<span class="nc" id="L255">                    thresholds = thresholds,</span>
+<span class="nc" id="L256">                    velocity = 0f,</span>
+<span class="nc" id="L257">                    velocityThreshold = Float.POSITIVE_INFINITY,</span>
+                )
+<span class="nc bnc" id="L259" title="All 2 branches missed.">            return anchors[target] ?: currentValue</span>
+        }
+
+    /**
+     * Information about the ongoing swipe or animation, if any. See [SwipeProgress] for details.
+     *
+     * If no swipe or animation is in progress, this returns `SwipeProgress(value, value, 1f)`.
+     */
+    @ExperimentalMaterial3Api
+    internal val progress: SwipeProgress&lt;T&gt;
+        get() {
+<span class="nc" id="L270">            val bounds = findBounds(offset.value, anchors.keys)</span>
+<span class="nc" id="L271">            val from: T</span>
+<span class="nc" id="L272">            val to: T</span>
+<span class="nc" id="L273">            val fraction: Float</span>
+<span class="nc bnc" id="L274" title="All 3 branches missed.">            when (bounds.size) {</span>
+                0 -&gt; {
+<span class="nc" id="L276">                    from = currentValue</span>
+<span class="nc" id="L277">                    to = currentValue</span>
+<span class="nc" id="L278">                    fraction = 1f</span>
+                }
+
+                1 -&gt; {
+<span class="nc" id="L282">                    from = anchors.getValue(bounds[0])</span>
+<span class="nc" id="L283">                    to = anchors.getValue(bounds[0])</span>
+<span class="nc" id="L284">                    fraction = 1f</span>
+                }
+
+                else -&gt; {
+<span class="nc" id="L288">                    val (a, b) =</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                        if (direction &gt; 0f) {</span>
+<span class="nc" id="L290">                            bounds[0] to bounds[1]</span>
+                        } else {
+<span class="nc" id="L292">                            bounds[1] to bounds[0]</span>
+                        }
+<span class="nc" id="L294">                    from = anchors.getValue(a)</span>
+<span class="nc" id="L295">                    to = anchors.getValue(b)</span>
+<span class="nc" id="L296">                    fraction = (offset.value - a) / (b - a)</span>
+                }
+            }
+<span class="nc" id="L299">            return SwipeProgress(from, to, fraction)</span>
+        }
+
+    /**
+     * The direction in which the [swipeable] is moving, relative to the current [currentValue].
+     *
+     * This will be either 1f if it is is moving from left to right or top to bottom, -1f if it is
+     * moving from right to left or bottom to top, or 0f if no swipe or animation is in progress.
+     */
+    @ExperimentalMaterial3Api
+    internal val direction: Float
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        get() = anchors.getOffset(currentValue)?.let { sign(offset.value - it) } ?: 0f</span>
+
+    /**
+     * Set the state without any animation and suspend until it's set
+     *
+     * @param targetValue The new target value to set [currentValue] to.
+     */
+    @ExperimentalMaterial3Api
+    internal suspend fun snapTo(targetValue: T) {
+<span class="nc" id="L319">        latestNonEmptyAnchorsFlow.collect { anchors -&gt;</span>
+<span class="nc" id="L320">            val targetOffset = anchors.getOffset(targetValue)</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">            requireNotNull(targetOffset) {</span>
+<span class="nc" id="L322">                &quot;The target value must have an associated anchor.&quot;</span>
+            }
+<span class="nc" id="L324">            snapInternalToOffset(targetOffset)</span>
+<span class="nc" id="L325">            currentValue = targetValue</span>
+<span class="nc" id="L326">        }</span>
+<span class="nc" id="L327">    }</span>
+
+    /**
+     * Set the state to the target value by starting an animation.
+     *
+     * @param targetValue The new value to animate to.
+     * @param anim The animation that will be used to animate to the new value.
+     */
+    @ExperimentalMaterial3Api
+<span class="nc" id="L336">    internal suspend fun animateTo(</span>
+        targetValue: T,
+<span class="nc" id="L338">        anim: AnimationSpec&lt;Float&gt; = animationSpec,</span>
+    ) {
+<span class="nc" id="L340">        latestNonEmptyAnchorsFlow.collect { anchors -&gt;</span>
+<span class="nc" id="L341">            try {</span>
+<span class="nc" id="L342">                val targetOffset = anchors.getOffset(targetValue)</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                requireNotNull(targetOffset) {</span>
+<span class="nc" id="L344">                    &quot;The target value must have an associated anchor.&quot;</span>
+                }
+<span class="nc" id="L346">                animateInternalToOffset(targetOffset, anim)</span>
+            } finally {
+<span class="nc" id="L348">                val endOffset = absoluteOffset.value</span>
+<span class="nc" id="L349">                val endValue =</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                    anchors</span>
+                        // fighting rounding error once again, anchor should be as close as 0.5 pixels
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                        .filterKeys { anchorOffset -&gt; abs(anchorOffset - endOffset) &lt; 0.5f }</span>
+<span class="nc" id="L353">                        .values</span>
+<span class="nc" id="L354">                        .firstOrNull() ?: currentValue</span>
+<span class="nc" id="L355">                currentValue = endValue</span>
+            }
+<span class="nc" id="L357">        }</span>
+<span class="nc" id="L358">    }</span>
+
+    /**
+     * Perform fling with settling to one of the anchors which is determined by the given
+     * [velocity]. Fling with settling [swipeable] will always consume all the velocity provided
+     * since it will settle at the anchor.
+     *
+     * In general cases, [swipeable] flings by itself when being swiped. This method is to be
+     * used for nested scroll logic that wraps the [swipeable]. In nested scroll developer may
+     * want to trigger settling fling when the child scroll container reaches the bound.
+     *
+     * @param velocity velocity to fling and settle with
+     *
+     * @return the reason fling ended
+     */
+    internal suspend fun performFling(velocity: Float) {
+<span class="nc" id="L374">        latestNonEmptyAnchorsFlow.collect { anchors -&gt;</span>
+<span class="nc" id="L375">            val lastAnchor = anchors.getOffset(currentValue)!!</span>
+<span class="nc" id="L376">            val targetValue =</span>
+<span class="nc" id="L377">                computeTarget(</span>
+<span class="nc" id="L378">                    offset = offset.value,</span>
+<span class="nc" id="L379">                    lastValue = lastAnchor,</span>
+<span class="nc" id="L380">                    anchors = anchors.keys,</span>
+<span class="nc" id="L381">                    thresholds = thresholds,</span>
+<span class="nc" id="L382">                    velocity = velocity,</span>
+<span class="nc" id="L383">                    velocityThreshold = velocityThreshold,</span>
+                )
+<span class="nc" id="L385">            val targetState = anchors[targetValue]</span>
+<span class="nc bnc" id="L386" title="All 4 branches missed.">            if (targetState != null &amp;&amp; confirmStateChange(targetState)) {</span>
+<span class="nc" id="L387">                animateTo(targetState)</span>
+            } else {
+                // If the user vetoed the state change, rollback to the previous state.
+<span class="nc" id="L390">                animateInternalToOffset(lastAnchor, animationSpec)</span>
+            }
+<span class="nc" id="L392">        }</span>
+<span class="nc" id="L393">    }</span>
+
+    /**
+     * Force [swipeable] to consume drag delta provided from outside of the regular [swipeable]
+     * gesture flow.
+     *
+     * Note: This method performs generic drag and it won't settle to any particular anchor, *
+     * leaving swipeable in between anchors. When done dragging, [performFling] must be
+     * called as well to ensure swipeable will settle at the anchor.
+     *
+     * In general cases, [swipeable] drags by itself when being swiped. This method is to be
+     * used for nested scroll logic that wraps the [swipeable]. In nested scroll developer may
+     * want to force drag when the child scroll container reaches the bound.
+     *
+     * @param delta delta in pixels to drag by
+     *
+     * @return the amount of [delta] consumed
+     */
+    internal fun performDrag(delta: Float): Float {
+<span class="nc" id="L412">        val potentiallyConsumed = absoluteOffset.value + delta</span>
+<span class="nc" id="L413">        val clamped = potentiallyConsumed.coerceIn(minBound, maxBound)</span>
+<span class="nc" id="L414">        val deltaToConsume = clamped - absoluteOffset.value</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">        if (abs(deltaToConsume) &gt; 0) {</span>
+<span class="nc" id="L416">            draggableState.dispatchRawDelta(deltaToConsume)</span>
+        }
+<span class="nc" id="L418">        return deltaToConsume</span>
+    }
+
+    companion object {
+        /**
+         * The default [Saver] implementation for [SwipeableState].
+         */
+        fun &lt;T : Any&gt; saver(
+            animationSpec: AnimationSpec&lt;Float&gt;,
+            confirmStateChange: (T) -&gt; Boolean,
+<span class="nc" id="L428">        ) = Saver&lt;SwipeableState&lt;T&gt;, T&gt;(</span>
+<span class="nc" id="L429">            save = { it.currentValue },</span>
+<span class="nc" id="L430">            restore = { SwipeableState(it, animationSpec, confirmStateChange) },</span>
+<span class="nc" id="L431">        )</span>
+    }
+}
+
+/**
+ * Collects information about the ongoing swipe or animation in [swipeable].
+ *
+ * To access this information, use [SwipeableState.progress].
+ *
+ * @param from The state corresponding to the anchor we are moving away from.
+ * @param to The state corresponding to the anchor we are moving towards.
+ * @param fraction The fraction that the current position represents between [from] and [to].
+ * Must be between `0` and `1`.
+ */
+<span class="nc" id="L445">@Immutable</span>
+@ExperimentalMaterial3Api
+<span class="nc" id="L447">internal class SwipeProgress&lt;T&gt;(</span>
+<span class="nc" id="L448">    val from: T,</span>
+<span class="nc" id="L449">    val to: T,</span>
+    // @FloatRange(from = 0.0, to = 1.0)
+<span class="nc" id="L451">    val fraction: Float,</span>
+) {
+    override fun equals(other: Any?): Boolean {
+<span class="nc bnc" id="L454" title="All 2 branches missed.">        if (this === other) return true</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">        if (other !is SwipeProgress&lt;*&gt;) return false</span>
+
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (from != other.from) return false</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">        if (to != other.to) return false</span>
+<span class="nc bnc" id="L459" title="All 4 branches missed.">        if (fraction != other.fraction) return false</span>
+
+<span class="nc" id="L461">        return true</span>
+    }
+
+    override fun hashCode(): Int {
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        var result = from?.hashCode() ?: 0</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">        result = 31 * result + (to?.hashCode() ?: 0)</span>
+<span class="nc" id="L467">        result = 31 * result + fraction.hashCode()</span>
+<span class="nc" id="L468">        return result</span>
+    }
+
+<span class="nc" id="L471">    override fun toString(): String = &quot;SwipeProgress(from=$from, to=$to, fraction=$fraction)&quot;</span>
+}
+
+/**
+ * Create and [remember] a [SwipeableState] with the default animation clock.
+ *
+ * @param initialValue The initial value of the state.
+ * @param animationSpec The default animation that will be used to animate to a new state.
+ * @param confirmStateChange Optional callback invoked to confirm or veto a pending state change.
+ */
+@Composable
+@ExperimentalMaterial3Api
+internal fun &lt;T : Any&gt; rememberSwipeableState(
+    initialValue: T,
+<span class="nc bnc" id="L485" title="All 2 branches missed.">    animationSpec: AnimationSpec&lt;Float&gt; = AnimationSpec,</span>
+<span class="nc" id="L486">    confirmStateChange: (newValue: T) -&gt; Boolean = { true },</span>
+): SwipeableState&lt;T&gt; =
+<span class="nc bnc" id="L488" title="All 2 branches missed.">    rememberSaveable(</span>
+        saver =
+<span class="nc" id="L490">            SwipeableState.saver(</span>
+<span class="nc" id="L491">                animationSpec = animationSpec,</span>
+<span class="nc" id="L492">                confirmStateChange = confirmStateChange,</span>
+            ),
+<span class="nc bnc" id="L494" title="All 12 branches missed.">    ) {</span>
+<span class="nc" id="L495">        SwipeableState(</span>
+<span class="nc" id="L496">            initialValue = initialValue,</span>
+<span class="nc" id="L497">            animationSpec = animationSpec,</span>
+<span class="nc" id="L498">            confirmStateChange = confirmStateChange,</span>
+<span class="nc" id="L499">        )</span>
+    }
+
+/**
+ * Create and [remember] a [SwipeableState] which is kept in sync with another state, i.e.:
+ *  1. Whenever the [value] changes, the [SwipeableState] will be animated to that new value.
+ *  2. Whenever the value of the [SwipeableState] changes (e.g. after a swipe), the owner of the
+ *  [value] will be notified to update their state to the new value of the [SwipeableState] by
+ *  invoking [onValueChange]. If the owner does not update their state to the provided value for
+ *  some reason, then the [SwipeableState] will perform a rollback to the previous, correct value.
+ */
+@Composable
+@ExperimentalMaterial3Api
+internal fun &lt;T : Any&gt; rememberSwipeableStateFor(
+    value: T,
+    onValueChange: (T) -&gt; Unit,
+<span class="nc" id="L515">    animationSpec: AnimationSpec&lt;Float&gt; = AnimationSpec,</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">): SwipeableState&lt;T&gt; {</span>
+<span class="nc" id="L517">    val swipeableState =</span>
+<span class="nc" id="L518">        remember {</span>
+<span class="nc" id="L519">            SwipeableState(</span>
+<span class="nc" id="L520">                initialValue = value,</span>
+<span class="nc" id="L521">                animationSpec = animationSpec,</span>
+<span class="nc" id="L522">                confirmStateChange = { true },</span>
+<span class="nc" id="L523">            )</span>
+        }
+<span class="nc" id="L525">    val forceAnimationCheck = remember { mutableStateOf(false) }</span>
+<span class="nc bnc" id="L526" title="All 6 branches missed.">    LaunchedEffect(value, forceAnimationCheck.value) {</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">        if (value != swipeableState.currentValue) {</span>
+<span class="nc" id="L528">            swipeableState.animateTo(value)</span>
+        }
+<span class="nc" id="L530">    }</span>
+<span class="nc" id="L531">    val onValueChangCallback by rememberUpdatedState(newValue = onValueChange)</span>
+<span class="nc bnc" id="L532" title="All 6 branches missed.">    DisposableEffect(swipeableState.currentValue) {</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if (value != swipeableState.currentValue) {</span>
+<span class="nc" id="L534">            onValueChangCallback(swipeableState.currentValue)</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">            forceAnimationCheck.value = !forceAnimationCheck.value</span>
+        }
+<span class="nc" id="L537">        onDispose { }</span>
+    }
+<span class="nc" id="L539">    return swipeableState</span>
+}
+
+/**
+ * Enable swipe gestures between a set of predefined states.
+ *
+ * To use this, you must provide a map of anchors (in pixels) to states (of type [T]).
+ * Note that this map cannot be empty and cannot have two anchors mapped to the same state.
+ *
+ * When a swipe is detected, the offset of the [SwipeableState] will be updated with the swipe
+ * delta. You should use this offset to move your content accordingly (see `Modifier.offsetPx`).
+ * When the swipe ends, the offset will be animated to one of the anchors and when that anchor is
+ * reached, the value of the [SwipeableState] will also be updated to the state corresponding to
+ * the new anchor. The target anchor is calculated based on the provided positional [thresholds].
+ *
+ * Swiping is constrained between the minimum and maximum anchors. If the user attempts to swipe
+ * past these bounds, a resistance effect will be applied by default. The amount of resistance at
+ * each edge is specified by the [resistance] config. To disable all resistance, set it to `null`.
+ *
+ * @param T The type of the state.
+ * @param state The state of the [swipeable].
+ * @param anchors Pairs of anchors and states, used to map anchors to states and vice versa.
+ * @param thresholds Specifies where the thresholds between the states are. The thresholds will be
+ * used to determine which state to animate to when swiping stops. This is represented as a lambda
+ * that takes two states and returns the threshold between them in the form of a [ThresholdConfig].
+ * Note that the order of the states corresponds to the swipe direction.
+ * @param orientation The orientation in which the [swipeable] can be swiped.
+ * @param enabled Whether this [swipeable] is enabled and should react to the user's input.
+ * @param reverseDirection Whether to reverse the direction of the swipe, so a top to bottom
+ * swipe will behave like bottom to top, and a left to right swipe will behave like right to left.
+ * @param interactionSource Optional [MutableInteractionSource] that will passed on to
+ * the internal [Modifier.draggable].
+ * @param resistance Controls how much resistance will be applied when swiping past the bounds.
+ * @param velocityThreshold The threshold (in dp per second) that the end velocity has to exceed
+ * in order to animate to the next state, even if the positional [thresholds] have not been reached.
+ */
+@ExperimentalMaterial3Api
+@Composable
+// @Suppress(&quot;ktlint:compose:modifier-composable-check&quot;)
+internal fun &lt;T&gt; Modifier.swipeable(
+    state: SwipeableState&lt;T&gt;,
+    anchors: Map&lt;Float, T&gt;,
+    orientation: Orientation,
+<span class="pc bpc" id="L582" title="1 of 2 branches missed.">    enabled: Boolean = true,</span>
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">    reverseDirection: Boolean = false,</span>
+<span class="pc bpc" id="L584" title="1 of 2 branches missed.">    interactionSource: MutableInteractionSource? = null,</span>
+<span class="pc bpc" id="L585" title="1 of 2 branches missed.">    thresholds: (from: T, to: T) -&gt; ThresholdConfig = { _, _ -&gt; FixedThreshold(56.dp) },</span>
+<span class="pc bpc" id="L586" title="1 of 2 branches missed.">    resistance: ResistanceConfig? = resistanceConfig(anchors.keys),</span>
+<span class="pc" id="L587">    velocityThreshold: Dp = VelocityThreshold,</span>
+<span class="pc bpc" id="L588" title="1 of 2 branches missed.">): Modifier {</span>
+<span class="pc bpc" id="L589" title="2 of 4 branches missed.">    require(anchors.isNotEmpty()) {</span>
+<span class="nc" id="L590">        &quot;You must have at least one anchor.&quot;</span>
+    }
+<span class="pc bpc" id="L592" title="2 of 4 branches missed.">    require(anchors.values.distinct().count() == anchors.size) {</span>
+<span class="nc" id="L593">        &quot;You cannot have two anchors mapped to the same state.&quot;</span>
+    }
+<span class="pc" id="L595">    val thresholdsCallback by rememberUpdatedState(thresholds)</span>
+<span class="fc" id="L596">    val density = LocalDensity.current</span>
+<span class="fc" id="L597">    state.ensureInit(anchors)</span>
+<span class="pc bpc" id="L598" title="10 of 18 branches missed.">    LaunchedEffect(anchors, state) {</span>
+<span class="fc" id="L599">        val oldAnchors = state.anchors</span>
+<span class="fc" id="L600">        state.anchors = anchors</span>
+<span class="fc" id="L601">        state.resistance = resistance</span>
+<span class="fc" id="L602">        state.thresholds = { a, b -&gt;</span>
+<span class="nc" id="L603">            val from = anchors.getValue(a)</span>
+<span class="nc" id="L604">            val to = anchors.getValue(b)</span>
+<span class="nc" id="L605">            with(thresholdsCallback(from, to)) { density.computeThreshold(a, b) }</span>
+        }
+<span class="fc" id="L607">        with(density) {</span>
+<span class="fc" id="L608">            state.velocityThreshold = velocityThreshold.toPx()</span>
+<span class="fc" id="L609">        }</span>
+<span class="fc" id="L610">        state.processNewAnchors(oldAnchors, anchors)</span>
+<span class="fc" id="L611">    }</span>
+
+<span class="fc" id="L613">    return this.then(</span>
+<span class="fc" id="L614">        Modifier.draggable(</span>
+<span class="fc" id="L615">            orientation = orientation,</span>
+<span class="fc" id="L616">            enabled = enabled,</span>
+<span class="fc" id="L617">            reverseDirection = reverseDirection,</span>
+<span class="fc" id="L618">            interactionSource = interactionSource,</span>
+<span class="fc" id="L619">            startDragImmediately = state.isAnimationRunning,</span>
+<span class="pc bpc" id="L620" title="4 of 8 branches missed.">            onDragStopped = { velocity -&gt; launch { state.performFling(velocity) } },</span>
+<span class="fc" id="L621">            state = state.draggableState,</span>
+        ),
+    )
+}
+
+/**
+ * Interface to compute a threshold between two anchors/states in a [swipeable].
+ *
+ * To define a [ThresholdConfig], consider using [FixedThreshold] and [FractionalThreshold].
+ */
+@Stable
+@ExperimentalMaterial3Api
+internal interface ThresholdConfig {
+    /**
+     * Compute the value of the threshold (in pixels), once the values of the anchors are known.
+     */
+    fun Density.computeThreshold(
+        fromValue: Float,
+        toValue: Float,
+    ): Float
+}
+
+/**
+ * A fixed threshold will be at an [offset] away from the first anchor.
+ *
+ * @param offset The offset (in dp) that the threshold will be at.
+ */
+<span class="nc" id="L648">@Immutable</span>
+@ExperimentalMaterial3Api
+<span class="nc" id="L650">internal data class FixedThreshold(</span>
+<span class="nc" id="L651">    private val offset: Dp,</span>
+) : ThresholdConfig {
+    override fun Density.computeThreshold(
+        fromValue: Float,
+        toValue: Float,
+<span class="nc" id="L656">    ): Float = fromValue + offset.toPx() * sign(toValue - fromValue)</span>
+}
+
+/**
+ * A fractional threshold will be at a [fraction] of the way between the two anchors.
+ *
+ * @param fraction The fraction (between 0 and 1) that the threshold will be at.
+ */
+<span class="nc" id="L664">@Immutable</span>
+@ExperimentalMaterial3Api
+<span class="nc" id="L666">internal data class FractionalThreshold(</span>
+    // @FloatRange(from = 0.0, to = 1.0)
+<span class="nc" id="L668">    private val fraction: Float,</span>
+) : ThresholdConfig {
+    override fun Density.computeThreshold(
+        fromValue: Float,
+        toValue: Float,
+<span class="nc" id="L673">    ): Float = lerp(fromValue, toValue, fraction)</span>
+}
+
+/**
+ * Specifies how resistance is calculated in [swipeable].
+ *
+ * There are two things needed to calculate resistance: the resistance basis determines how much
+ * overflow will be consumed to achieve maximum resistance, and the resistance factor determines
+ * the amount of resistance (the larger the resistance factor, the stronger the resistance).
+ *
+ * The resistance basis is usually either the size of the component which [swipeable] is applied
+ * to, or the distance between the minimum and maximum anchors. For a constructor in which the
+ * resistance basis defaults to the latter, consider using [resistanceConfig].
+ *
+ * You may specify different resistance factors for each bound. Consider using one of the default
+ * resistance factors in [SwipeableDefaults]: `StandardResistanceFactor` to convey that the user
+ * has run out of things to see, and `StiffResistanceFactor` to convey that the user cannot swipe
+ * this right now. Also, you can set either factor to 0 to disable resistance at that bound.
+ *
+ * @param basis Specifies the maximum amount of overflow that will be consumed. Must be positive.
+ * @param factorAtMin The factor by which to scale the resistance at the minimum bound.
+ * Must not be negative.
+ * @param factorAtMax The factor by which to scale the resistance at the maximum bound.
+ * Must not be negative.
+ */
+<span class="nc" id="L698">@Immutable</span>
+<span class="nc" id="L699">internal class ResistanceConfig(</span>
+    // @FloatRange(from = 0.0, fromInclusive = false)
+<span class="nc" id="L701">    val basis: Float,</span>
+    // @FloatRange(from = 0.0)
+<span class="nc" id="L703">    val factorAtMin: Float = STANDARD_RESISTANCE_FACTOR,</span>
+    // @FloatRange(from = 0.0)
+<span class="nc" id="L705">    val factorAtMax: Float = STANDARD_RESISTANCE_FACTOR,</span>
+<span class="nc" id="L706">) {</span>
+    fun computeResistance(overflow: Float): Float {
+<span class="nc bnc" id="L708" title="All 2 branches missed.">        val factor = if (overflow &lt; 0) factorAtMin else factorAtMax</span>
+<span class="nc bnc" id="L709" title="All 4 branches missed.">        if (factor == 0f) return 0f</span>
+<span class="nc" id="L710">        val progress = (overflow / basis).coerceIn(-1f, 1f)</span>
+<span class="nc" id="L711">        return basis / factor * sin(progress * PI.toFloat() / 2)</span>
+    }
+
+    override fun equals(other: Any?): Boolean {
+<span class="nc bnc" id="L715" title="All 2 branches missed.">        if (this === other) return true</span>
+<span class="nc bnc" id="L716" title="All 2 branches missed.">        if (other !is ResistanceConfig) return false</span>
+
+<span class="nc bnc" id="L718" title="All 4 branches missed.">        if (basis != other.basis) return false</span>
+<span class="nc bnc" id="L719" title="All 4 branches missed.">        if (factorAtMin != other.factorAtMin) return false</span>
+<span class="nc bnc" id="L720" title="All 4 branches missed.">        if (factorAtMax != other.factorAtMax) return false</span>
+
+<span class="nc" id="L722">        return true</span>
+    }
+
+    override fun hashCode(): Int {
+<span class="nc" id="L726">        var result = basis.hashCode()</span>
+<span class="nc" id="L727">        result = 31 * result + factorAtMin.hashCode()</span>
+<span class="nc" id="L728">        result = 31 * result + factorAtMax.hashCode()</span>
+<span class="nc" id="L729">        return result</span>
+    }
+
+<span class="nc" id="L732">    override fun toString(): String = &quot;ResistanceConfig(basis=$basis, factorAtMin=$factorAtMin, factorAtMax=$factorAtMax)&quot;</span>
+}
+
+/**
+ *  Given an offset x and a set of anchors, return a list of anchors:
+ *   1. [ ] if the set of anchors is empty,
+ *   2. [ x' ] if x is equal to one of the anchors, accounting for a small rounding error, where x'
+ *      is x rounded to the exact value of the matching anchor,
+ *   3. [ min ] if min is the minimum anchor and x &lt; min,
+ *   4. [ max ] if max is the maximum anchor and x &gt; max, or
+ *   5. [ a , b ] if a and b are anchors such that a &lt; x &lt; b and b - a is minimal.
+ */
+private fun findBounds(
+    offset: Float,
+    anchors: Set&lt;Float&gt;,
+): List&lt;Float&gt; {
+    // Find the anchors the target lies between with a little bit of rounding error.
+<span class="nc bnc" id="L749" title="All 2 branches missed.">    val a = anchors.filter { it &lt;= offset + 0.001 }.maxOrNull()</span>
+<span class="nc bnc" id="L750" title="All 2 branches missed.">    val b = anchors.filter { it &gt;= offset - 0.001 }.minOrNull()</span>
+
+<span class="nc" id="L752">    return when {</span>
+<span class="nc bnc" id="L753" title="All 2 branches missed.">        a == null -&gt;</span>
+            // case 1 or 3
+<span class="nc" id="L755">            listOfNotNull(b)</span>
+
+<span class="nc bnc" id="L757" title="All 2 branches missed.">        b == null -&gt;</span>
+            // case 4
+<span class="nc" id="L759">            listOf(a)</span>
+
+<span class="nc bnc" id="L761" title="All 2 branches missed.">        a == b -&gt;</span>
+            // case 2
+            // Can't return offset itself here since it might not be exactly equal
+            // to the anchor, despite being considered an exact match.
+<span class="nc" id="L765">            listOf(a)</span>
+
+        else -&gt;
+            // case 5
+<span class="nc" id="L769">            listOf(a, b)</span>
+    }
+}
+
+private fun computeTarget(
+    offset: Float,
+    lastValue: Float,
+    anchors: Set&lt;Float&gt;,
+    thresholds: (Float, Float) -&gt; Float,
+    velocity: Float,
+    velocityThreshold: Float,
+): Float {
+<span class="nc" id="L781">    val bounds = findBounds(offset, anchors)</span>
+<span class="nc bnc" id="L782" title="All 3 branches missed.">    return when (bounds.size) {</span>
+<span class="nc" id="L783">        0 -&gt; lastValue</span>
+<span class="nc" id="L784">        1 -&gt; bounds[0]</span>
+        else -&gt; {
+<span class="nc" id="L786">            val lower = bounds[0]</span>
+<span class="nc" id="L787">            val upper = bounds[1]</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">            if (lastValue &lt;= offset) {</span>
+                // Swiping from lower to upper (positive).
+<span class="nc bnc" id="L790" title="All 2 branches missed.">                if (velocity &gt;= velocityThreshold) {</span>
+<span class="nc" id="L791">                    return upper</span>
+                } else {
+<span class="nc" id="L793">                    val threshold = thresholds(lower, upper)</span>
+<span class="nc bnc" id="L794" title="All 2 branches missed.">                    if (offset &lt; threshold) lower else upper</span>
+                }
+            } else {
+                // Swiping from upper to lower (negative).
+<span class="nc bnc" id="L798" title="All 2 branches missed.">                if (velocity &lt;= -velocityThreshold) {</span>
+<span class="nc" id="L799">                    return lower</span>
+                } else {
+<span class="nc" id="L801">                    val threshold = thresholds(upper, lower)</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">                    if (offset &gt; threshold) upper else lower</span>
+                }
+            }
+        }
+    }
+}
+
+<span class="pc bpc" id="L809" title="1 of 2 branches missed.">private fun &lt;T&gt; Map&lt;Float, T&gt;.getOffset(state: T): Float? = entries.firstOrNull { it.value == state }?.key</span>
+
+/**
+ * Contains useful defaults for [swipeable] and [SwipeableState].
+ */
+internal object SwipeableDefaults {
+    /**
+     * The default animation used by [SwipeableState].
+     */
+<span class="nc" id="L818">    internal val AnimationSpec = SpringSpec&lt;Float&gt;()</span>
+
+    /**
+     * The default velocity threshold (1.8 dp per millisecond) used by [swipeable].
+     */
+<span class="nc" id="L823">    internal val VelocityThreshold = 125.dp</span>
+
+    /**
+     * A stiff resistance factor which indicates that swiping isn't available right now.
+     */
+    const val STIFF_RESISTANCE_FACTOR = 20f
+
+    /**
+     * A standard resistance factor which indicates that the user has run out of things to see.
+     */
+    const val STANDARD_RESISTANCE_FACTOR = 10f
+
+    /**
+     * The default resistance config used by [swipeable].
+     *
+     * This returns `null` if there is one anchor. If there are at least two anchors, it returns
+     * a [ResistanceConfig] with the resistance basis equal to the distance between the two bounds.
+     */
+<span class="nc" id="L841">    internal fun resistanceConfig(</span>
+        anchors: Set&lt;Float&gt;,
+<span class="nc" id="L843">        factorAtMin: Float = STANDARD_RESISTANCE_FACTOR,</span>
+<span class="nc" id="L844">        factorAtMax: Float = STANDARD_RESISTANCE_FACTOR,</span>
+    ): ResistanceConfig? =
+<span class="nc bnc" id="L846" title="All 2 branches missed.">        if (anchors.size &lt;= 1) {</span>
+<span class="nc" id="L847">            null</span>
+        } else {
+<span class="nc" id="L849">            val basis = anchors.maxOrNull()!! - anchors.minOrNull()!!</span>
+<span class="nc" id="L850">            ResistanceConfig(basis, factorAtMin, factorAtMax)</span>
+<span class="nc" id="L851">        }</span>
+}
+
+// temp default nested scroll connection for swipeables which desire as an opt in
+// revisit in b/174756744 as all types will have their own specific connection probably
+@ExperimentalMaterial3Api
+internal val &lt;T&gt; SwipeableState&lt;T&gt;.PreUpPostDownNestedScrollConnection: NestedScrollConnection
+    get() =
+<span class="nc" id="L859">        object : NestedScrollConnection {</span>
+            override fun onPreScroll(
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+<span class="nc" id="L864">                val delta = available.toFloat()</span>
+<span class="nc bnc" id="L865" title="All 4 branches missed.">                return if (delta &lt; 0 &amp;&amp; source == NestedScrollSource.Drag) {</span>
+<span class="nc" id="L866">                    performDrag(delta).toOffset()</span>
+                } else {
+<span class="nc" id="L868">                    Offset.Zero</span>
+                }
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset =
+<span class="nc bnc" id="L877" title="All 2 branches missed.">                if (source == NestedScrollSource.Drag) {</span>
+<span class="nc" id="L878">                    performDrag(available.toFloat()).toOffset()</span>
+                } else {
+<span class="nc" id="L880">                    Offset.Zero</span>
+<span class="nc" id="L881">                }</span>
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+<span class="nc" id="L884">                val toFling = Offset(available.x, available.y).toFloat()</span>
+<span class="nc bnc" id="L885" title="All 4 branches missed.">                return if (toFling &lt; 0 &amp;&amp; offset.value &gt; minBound) {</span>
+<span class="nc" id="L886">                    performFling(velocity = toFling)</span>
+                    // since we go to the anchor with tween settling, consume all for the best UX
+<span class="nc" id="L888">                    available</span>
+                } else {
+<span class="nc" id="L890">                    Velocity.Zero</span>
+                }
+            }
+
+            override suspend fun onPostFling(
+                consumed: Velocity,
+                available: Velocity,
+            ): Velocity {
+<span class="nc" id="L898">                performFling(velocity = Offset(available.x, available.y).toFloat())</span>
+<span class="nc" id="L899">                return available</span>
+            }
+
+<span class="nc" id="L902">            private fun Float.toOffset(): Offset = Offset(0f, this)</span>
+
+<span class="nc" id="L904">            private fun Offset.toFloat(): Float = this.y</span>
+<span class="nc" id="L905">        }</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

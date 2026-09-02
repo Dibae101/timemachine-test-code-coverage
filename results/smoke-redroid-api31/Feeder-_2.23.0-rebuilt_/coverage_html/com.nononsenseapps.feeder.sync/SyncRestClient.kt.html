@@ -1,0 +1,668 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncRestClient.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.sync</a> &gt; <span class="el_source">SyncRestClient.kt</span></div><h1>SyncRestClient.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.sync
+
+import android.util.Log
+import androidx.annotation.VisibleForTesting
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.crypto.AesCbcWithIntegrity
+import com.nononsenseapps.feeder.crypto.SecretKeys
+import com.nononsenseapps.feeder.db.room.DEFAULT_SERVER_ADDRESS
+import com.nononsenseapps.feeder.db.room.DEPRECATED_SYNC_HOSTS
+import com.nononsenseapps.feeder.db.room.Feed
+import com.nononsenseapps.feeder.db.room.FeedItemForReadMark
+import com.nononsenseapps.feeder.db.room.RemoteFeed
+import com.nononsenseapps.feeder.db.room.SyncDevice
+import com.nononsenseapps.feeder.db.room.SyncRemote
+import com.nononsenseapps.feeder.db.room.generateDeviceName
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.logDebug
+import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import retrofit2.Response
+import java.net.URL
+import java.time.Instant
+
+<span class="fc" id="L27">class SyncRestClient(</span>
+<span class="fc" id="L28">    override val di: DI,</span>
+) : DIAware {
+<span class="fc" id="L30">    private val repository: Repository by instance()</span>
+<span class="pc" id="L31">    private val okHttpClient: OkHttpClient by instance()</span>
+    private var feederSync: FeederSync? = null
+    private var secretKey: SecretKeys? = null
+<span class="fc" id="L34">    private val moshi = getMoshi()</span>
+<span class="fc" id="L35">    private val readMarkAdapter = moshi.adapter&lt;ReadMarkContent&gt;()</span>
+<span class="fc" id="L36">    private val feedsAdapter = moshi.adapter&lt;EncryptedFeeds&gt;()</span>
+
+<span class="fc" id="L38">    init {</span>
+<span class="fc" id="L39">        runBlocking {</span>
+<span class="fc" id="L40">            initialize()</span>
+<span class="fc" id="L41">        }</span>
+<span class="fc" id="L42">    }</span>
+
+    val isConfigured: Boolean
+<span class="nc" id="L45">        get() = isInitialized</span>
+
+    private val isInitialized: Boolean
+<span class="pc bpc" id="L48" title="3 of 4 branches missed.">        get() = feederSync != null &amp;&amp; secretKey != null</span>
+    private val isNotInitialized
+<span class="pc bpc" id="L50" title="1 of 2 branches missed.">        get() = !isInitialized</span>
+
+<span class="fc" id="L52">    internal suspend fun initialize() {</span>
+<span class="pc bpc" id="L53" title="1 of 2 branches missed.">        if (isNotInitialized) {</span>
+<span class="fc" id="L54">            try {</span>
+<span class="fc" id="L55">                var syncRemote = repository.getSyncRemote()</span>
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">                if (DEPRECATED_SYNC_HOSTS.any { host -&gt; host in &quot;${syncRemote.url}&quot; }) {</span>
+<span class="nc" id="L57">                    logDebug(</span>
+<span class="nc" id="L58">                        LOG_TAG,</span>
+<span class="nc" id="L59">                        &quot;Updating to latest sync host: $DEFAULT_SERVER_ADDRESS&quot;,</span>
+                    )
+<span class="nc" id="L61">                    syncRemote =</span>
+<span class="nc" id="L62">                        syncRemote.copy(</span>
+<span class="nc" id="L63">                            url = URL(DEFAULT_SERVER_ADDRESS),</span>
+                        )
+<span class="nc" id="L65">                    repository.updateSyncRemote(syncRemote)</span>
+                }
+<span class="pc bpc" id="L67" title="1 of 2 branches missed.">                if (syncRemote.hasSyncChain()) {</span>
+<span class="nc" id="L68">                    secretKey = AesCbcWithIntegrity.decodeKey(syncRemote.secretKey)</span>
+<span class="nc" id="L69">                    feederSync =</span>
+<span class="nc" id="L70">                        getFeederSyncClient(</span>
+<span class="nc" id="L71">                            syncRemote = syncRemote,</span>
+<span class="nc" id="L72">                            okHttpClient = okHttpClient,</span>
+                        )
+                }
+<span class="nc" id="L75">            } catch (e: Exception) {</span>
+<span class="nc" id="L76">                Log.e(LOG_TAG, &quot;Failed to initialize&quot;, e)</span>
+            }
+        }
+<span class="fc" id="L79">    }</span>
+
+<span class="fc" id="L81">    private suspend fun &lt;A&gt; safeBlock(block: suspend (SyncRemote, FeederSync, SecretKeys) -&gt; Either&lt;ErrorResponse, A&gt;): Either&lt;ErrorResponse, A&gt; {</span>
+<span class="fc" id="L82">        repository.getSyncRemote().let { syncRemote -&gt;</span>
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">            if (syncRemote.hasSyncChain()) {</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                feederSync?.let { feederSync -&gt;</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                    secretKey?.let { secretKey -&gt;</span>
+<span class="nc" id="L86">                        return block(syncRemote, feederSync, secretKey)</span>
+<span class="nc" id="L87">                    }</span>
+                }
+            }
+<span class="fc" id="L90">        }</span>
+<span class="fc" id="L91">        return Either.Left(</span>
+<span class="fc" id="L92">            ErrorResponse(</span>
+<span class="fc" id="L93">                code = 1001,</span>
+<span class="fc" id="L94">                body = null,</span>
+            ),
+        )
+    }
+
+<span class="nc" id="L99">    suspend fun create(): Either&lt;ErrorResponse, String&gt; {</span>
+<span class="nc" id="L100">        logDebug(LOG_TAG, &quot;create&quot;)</span>
+        // To ensure always uses correct client, manually set remote here ALWAYS
+<span class="nc" id="L102">        val syncRemote = repository.getSyncRemote()</span>
+
+<span class="nc" id="L104">        val secretKey = AesCbcWithIntegrity.decodeKey(syncRemote.secretKey)</span>
+<span class="nc" id="L105">        this.secretKey = secretKey</span>
+
+<span class="nc" id="L107">        val feederSync =</span>
+<span class="nc" id="L108">            getFeederSyncClient(</span>
+<span class="nc" id="L109">                syncRemote = syncRemote,</span>
+<span class="nc" id="L110">                okHttpClient = okHttpClient,</span>
+            )
+<span class="nc" id="L112">        this.feederSync = feederSync</span>
+
+<span class="nc" id="L114">        val deviceName = generateDeviceName()</span>
+
+<span class="nc" id="L116">        return feederSync</span>
+<span class="nc" id="L117">            .create(</span>
+<span class="nc" id="L118">                CreateRequest(</span>
+<span class="nc" id="L119">                    deviceName = AesCbcWithIntegrity.encryptString(deviceName, secretKey),</span>
+                ),
+<span class="nc" id="L121">            ).toEither()</span>
+<span class="nc" id="L122">            .onRight { response -&gt;</span>
+<span class="nc" id="L123">                repository.updateSyncRemote(</span>
+<span class="nc" id="L124">                    syncRemote.copy(</span>
+<span class="nc" id="L125">                        syncChainId = response.syncCode,</span>
+<span class="nc" id="L126">                        deviceId = response.deviceId,</span>
+<span class="nc" id="L127">                        deviceName = deviceName,</span>
+<span class="nc" id="L128">                        latestMessageTimestamp = Instant.EPOCH,</span>
+                    ),
+                )
+<span class="nc" id="L131">            }.map { response -&gt;</span>
+<span class="nc" id="L132">                response.syncCode</span>
+            }
+    }
+
+<span class="nc" id="L136">    suspend fun join(</span>
+        syncCode: String,
+        remoteSecretKey: String,
+    ): Either&lt;ErrorResponse, String&gt; {
+<span class="nc" id="L140">        logDebug(LOG_TAG, &quot;join&quot;)</span>
+<span class="nc" id="L141">        try {</span>
+<span class="nc" id="L142">            logDebug(LOG_TAG, &quot;Really joining&quot;)</span>
+            // To ensure always uses correct client, manually set remote here ALWAYS
+<span class="nc" id="L144">            val syncRemote = repository.getSyncRemote()</span>
+<span class="nc" id="L145">            syncRemote.secretKey = remoteSecretKey</span>
+<span class="nc" id="L146">            syncRemote.deviceName = generateDeviceName()</span>
+<span class="nc" id="L147">            repository.updateSyncRemote(syncRemote)</span>
+
+<span class="nc" id="L149">            val secretKey = AesCbcWithIntegrity.decodeKey(syncRemote.secretKey)</span>
+<span class="nc" id="L150">            this.secretKey = secretKey</span>
+
+<span class="nc" id="L152">            val feederSync =</span>
+<span class="nc" id="L153">                getFeederSyncClient(</span>
+<span class="nc" id="L154">                    syncRemote = syncRemote,</span>
+<span class="nc" id="L155">                    okHttpClient = okHttpClient,</span>
+                )
+<span class="nc" id="L157">            this.feederSync = feederSync</span>
+
+<span class="nc" id="L159">            logDebug(LOG_TAG, &quot;Updated objects&quot;)</span>
+
+<span class="nc" id="L161">            return feederSync</span>
+<span class="nc" id="L162">                .join(</span>
+<span class="nc" id="L163">                    syncChainId = syncCode,</span>
+                    request =
+<span class="nc" id="L165">                        JoinRequest(</span>
+                            deviceName =
+<span class="nc" id="L167">                                AesCbcWithIntegrity.encryptString(</span>
+<span class="nc" id="L168">                                    syncRemote.deviceName,</span>
+<span class="nc" id="L169">                                    secretKey,</span>
+                                ),
+                        ),
+<span class="nc" id="L172">                ).toEither()</span>
+<span class="nc" id="L173">                .onRight { response -&gt;</span>
+<span class="nc" id="L174">                    logDebug(LOG_TAG, &quot;Join response: $response&quot;)</span>
+
+<span class="nc" id="L176">                    repository.updateSyncRemote(</span>
+<span class="nc" id="L177">                        syncRemote.copy(</span>
+<span class="nc" id="L178">                            syncChainId = response.syncCode,</span>
+<span class="nc" id="L179">                            deviceId = response.deviceId,</span>
+<span class="nc" id="L180">                            latestMessageTimestamp = Instant.EPOCH,</span>
+                        ),
+                    )
+
+<span class="nc" id="L184">                    logDebug(LOG_TAG, &quot;Updated sync remote&quot;)</span>
+<span class="nc" id="L185">                }.map { response -&gt;</span>
+<span class="nc" id="L186">                    response.syncCode</span>
+                }
+<span class="nc" id="L188">        } catch (e: Exception) {</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (e is retrofit2.HttpException) {</span>
+<span class="nc" id="L190">                Log.e(</span>
+<span class="nc" id="L191">                    LOG_TAG,</span>
+<span class="nc" id="L192">                    &quot;Error during leave: msg: code: ${e.code()}, error: ${</span>
+<span class="nc bnc" id="L193" title="All 4 branches missed.">                        e.response()?.errorBody()?.string()</span>
+                    }&quot;,
+<span class="nc" id="L195">                    e,</span>
+                )
+            } else {
+<span class="nc" id="L198">                Log.e(LOG_TAG, &quot;Error during leave&quot;, e)</span>
+            }
+<span class="nc" id="L200">            return Either.Left(ErrorResponse(999, e.message))</span>
+        }
+    }
+
+<span class="nc" id="L204">    suspend fun leave(): Either&lt;ErrorResponse, Unit&gt; {</span>
+<span class="nc" id="L205">        logDebug(LOG_TAG, &quot;leave&quot;)</span>
+<span class="nc" id="L206">        return try {</span>
+<span class="nc bnc" id="L207" title="All 3 branches missed.">            safeBlock { syncRemote, feederSync, _ -&gt;</span>
+<span class="nc" id="L208">                logDebug(LOG_TAG, &quot;Really leaving&quot;)</span>
+<span class="nc" id="L209">                feederSync</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">                    .removeDevice(</span>
+<span class="nc" id="L211">                        syncChainId = syncRemote.syncChainId,</span>
+<span class="nc" id="L212">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L213">                        deviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L214">                    ).toEither()</span>
+<span class="nc" id="L215">                    .onLeft {</span>
+<span class="nc" id="L216">                        Log.e(LOG_TAG, &quot;Error during leave: ${it.code}, ${it.body}&quot;, it.throwable)</span>
+<span class="nc" id="L217">                    }.map {</span>
+<span class="nc" id="L218">                    }.also {</span>
+<span class="nc" id="L219">                        this.feederSync = null</span>
+<span class="nc" id="L220">                        this.secretKey = null</span>
+<span class="nc" id="L221">                    }</span>
+            }
+<span class="nc" id="L223">        } catch (e: Exception) {</span>
+<span class="nc" id="L224">            Log.e(LOG_TAG, &quot;Error during leave&quot;, e)</span>
+<span class="nc" id="L225">            Either.Left(</span>
+<span class="nc" id="L226">                ErrorResponse(1000, e.message, e),</span>
+            )
+        } finally {
+<span class="nc" id="L229">            repository.replaceWithDefaultSyncRemote()</span>
+<span class="nc" id="L230">        }</span>
+    }
+
+    suspend fun removeDevice(deviceId: Long): Either&lt;ErrorResponse, DeviceListResponse&gt; =
+<span class="nc" id="L234">        try {</span>
+<span class="nc bnc" id="L235" title="All 5 branches missed.">            safeBlock { syncRemote, feederSync, secretKey -&gt;</span>
+<span class="nc" id="L236">                logDebug(LOG_TAG, &quot;removeDevice&quot;)</span>
+<span class="nc" id="L237">                feederSync</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                    .removeDevice(</span>
+<span class="nc" id="L239">                        syncChainId = syncRemote.syncChainId,</span>
+<span class="nc" id="L240">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L241">                        deviceId = deviceId,</span>
+<span class="nc" id="L242">                    ).toEither()</span>
+<span class="nc" id="L243">                    .onRight { deviceListResponse -&gt;</span>
+<span class="nc" id="L244">                        logDebug(LOG_TAG, &quot;Updating device list: $deviceListResponse&quot;)</span>
+
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                        repository.replaceDevices(</span>
+<span class="nc" id="L247">                            deviceListResponse.devices.map {</span>
+<span class="nc" id="L248">                                SyncDevice(</span>
+<span class="nc" id="L249">                                    deviceId = it.deviceId,</span>
+                                    deviceName =
+<span class="nc" id="L251">                                        AesCbcWithIntegrity.decryptString(</span>
+<span class="nc" id="L252">                                            it.deviceName,</span>
+<span class="nc" id="L253">                                            secretKey,</span>
+                                        ),
+<span class="nc" id="L255">                                    syncRemote = syncRemote.id,</span>
+<span class="nc" id="L256">                                )</span>
+                            },
+                        )
+<span class="nc" id="L259">                    }.onLeft {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                        it.leaveChainIfKickedOutElseLog()</span>
+<span class="nc" id="L261">                    }</span>
+            }
+<span class="nc" id="L263">        } catch (e: Exception) {</span>
+<span class="nc" id="L264">            Log.e(LOG_TAG, &quot;Error in removeDevice&quot;, e)</span>
+<span class="nc" id="L265">            Either.Left(</span>
+<span class="nc" id="L266">                ErrorResponse(1000, e.message, e),</span>
+            )
+<span class="nc" id="L268">        }</span>
+
+    private suspend fun sendReadMarksBatch(feedItems: List&lt;FeedItemForReadMark&gt;): Either&lt;ErrorResponse, SendReadMarkResponse&gt; =
+<span class="nc" id="L271">        try {</span>
+<span class="nc bnc" id="L272" title="All 5 branches missed.">            safeBlock { syncRemote, feederSync, secretKey -&gt;</span>
+<span class="nc" id="L273">                logDebug(LOG_TAG, &quot;markAsRead: ${feedItems.size} items&quot;)</span>
+<span class="nc" id="L274">                feederSync</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                    .sendEncryptedReadMarks(</span>
+<span class="nc" id="L276">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L277">                        syncChainId = syncRemote.syncChainId,</span>
+                        request =
+<span class="nc" id="L279">                            SendEncryptedReadMarkBulkRequest(</span>
+                                items =
+<span class="nc" id="L281">                                    feedItems.map { feedItem -&gt;</span>
+<span class="nc" id="L282">                                        SendEncryptedReadMarkRequest(</span>
+                                            encrypted =
+<span class="nc" id="L284">                                                AesCbcWithIntegrity.encryptString(</span>
+<span class="nc" id="L285">                                                    secretKeys = secretKey,</span>
+                                                    plaintext =
+<span class="nc" id="L287">                                                        readMarkAdapter.toJson(</span>
+<span class="nc" id="L288">                                                            ReadMarkContent(</span>
+<span class="nc" id="L289">                                                                feedUrl = feedItem.feedUrl,</span>
+<span class="nc" id="L290">                                                                articleGuid = feedItem.guid,</span>
+                                                            ),
+                                                        ),
+                                                ),
+<span class="nc" id="L294">                                        )</span>
+                                    },
+                            ),
+<span class="nc" id="L297">                    ).toEither()</span>
+<span class="nc" id="L298">                    .onRight {</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                        for (feedItem in feedItems) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                            repository.setSynced(feedItemId = feedItem.id)</span>
+                        }
+<span class="nc" id="L302">                    }.onLeft {</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                        it.leaveChainIfKickedOutElseLog()</span>
+<span class="nc" id="L304">                    }</span>
+
+                // Should not set latest timestamp here because we cant be sure to retrieved them
+            }
+<span class="nc" id="L308">        } catch (e: Exception) {</span>
+<span class="nc" id="L309">            Log.e(LOG_TAG, &quot;Error in markAsRead&quot;, e)</span>
+<span class="nc" id="L310">            Either.Left(</span>
+<span class="nc" id="L311">                ErrorResponse(1000, e.message, e),</span>
+            )
+<span class="nc" id="L313">        }</span>
+
+    suspend fun markAsRead(): Either&lt;ErrorResponse, Unit&gt; =
+<span class="fc" id="L316">        try {</span>
+<span class="pc" id="L317">            safeBlock { _, _, _ -&gt;</span>
+<span class="nc" id="L318">                val readItems = repository.getFeedItemsWithoutSyncedReadMark()</span>
+
+<span class="nc bnc" id="L320" title="All 4 branches missed.">                if (readItems.isNotEmpty()) {</span>
+<span class="nc" id="L321">                    logDebug(LOG_TAG, &quot;markAsReadBatch: ${readItems.size} items&quot;)</span>
+
+<span class="nc" id="L323">                    readItems</span>
+<span class="nc" id="L324">                        .asSequence()</span>
+<span class="nc" id="L325">                        .chunked(100)</span>
+<span class="nc" id="L326">                        .forEach { feedItems -&gt;</span>
+<span class="nc" id="L327">                            sendReadMarksBatch(feedItems)</span>
+<span class="nc" id="L328">                        }</span>
+                }
+<span class="nc" id="L330">                Either.Right(Unit)</span>
+            }
+<span class="nc" id="L332">        } catch (e: Exception) {</span>
+<span class="nc" id="L333">            Log.e(LOG_TAG, &quot;Error in markAsRead&quot;, e)</span>
+<span class="pc" id="L334">            Either.Left(</span>
+<span class="nc" id="L335">                ErrorResponse(1000, e.message, e),</span>
+            )
+<span class="fc" id="L337">        }</span>
+
+    internal suspend fun getDevices(): Either&lt;ErrorResponse, DeviceListResponse&gt; =
+<span class="fc" id="L340">        try {</span>
+<span class="fc" id="L341">            logDebug(LOG_TAG, &quot;getDevices&quot;)</span>
+<span class="pc bnc" id="L342" title="All 5 branches missed.">            safeBlock { syncRemote, feederSync, secretKey -&gt;</span>
+<span class="nc" id="L343">                logDebug(LOG_TAG, &quot;getDevices Inside block&quot;)</span>
+<span class="nc" id="L344">                feederSync</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">                    .getDevices(</span>
+<span class="nc" id="L346">                        syncChainId = syncRemote.syncChainId,</span>
+<span class="nc" id="L347">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L348">                    ).toEither()</span>
+<span class="nc" id="L349">                    .onRight { response -&gt;</span>
+<span class="nc" id="L350">                        logDebug(LOG_TAG, &quot;getDevices: $response&quot;)</span>
+
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                        repository.replaceDevices(</span>
+<span class="nc" id="L353">                            response.devices.map {</span>
+<span class="nc" id="L354">                                logDebug(LOG_TAG, &quot;device: $it&quot;)</span>
+<span class="nc" id="L355">                                SyncDevice(</span>
+<span class="nc" id="L356">                                    deviceId = it.deviceId,</span>
+                                    deviceName =
+<span class="nc" id="L358">                                        AesCbcWithIntegrity.decryptString(</span>
+<span class="nc" id="L359">                                            it.deviceName,</span>
+<span class="nc" id="L360">                                            secretKey,</span>
+                                        ),
+<span class="nc" id="L362">                                    syncRemote = syncRemote.id,</span>
+<span class="nc" id="L363">                                )</span>
+                            },
+                        )
+<span class="nc" id="L366">                    }.onLeft {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                        it.leaveChainIfKickedOutElseLog()</span>
+<span class="nc" id="L368">                    }</span>
+            }
+<span class="nc" id="L370">        } catch (e: Exception) {</span>
+<span class="nc" id="L371">            Log.e(LOG_TAG, &quot;Error in getDevices&quot;, e)</span>
+<span class="pc" id="L372">            Either.Left(</span>
+<span class="nc" id="L373">                ErrorResponse(1000, e.message, e),</span>
+            )
+<span class="fc" id="L375">        }</span>
+
+    internal suspend fun getRead() {
+<span class="fc" id="L378">        try {</span>
+<span class="pc bnc" id="L379" title="All 7 branches missed.">            safeBlock { syncRemote, feederSync, secretKey -&gt;</span>
+<span class="nc" id="L380">                logDebug(LOG_TAG, &quot;getRead&quot;)</span>
+<span class="nc" id="L381">                feederSync</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                    .getEncryptedReadMarks(</span>
+<span class="nc" id="L383">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L384">                        syncChainId = syncRemote.syncChainId,</span>
+                        // Add one ms so we don't get inclusive of last message we got
+<span class="nc" id="L386">                        sinceMillis = syncRemote.latestMessageTimestamp.plusMillis(1).toEpochMilli(),</span>
+<span class="nc" id="L387">                    ).toEither()</span>
+<span class="nc" id="L388">                    .onRight { response -&gt;</span>
+<span class="nc" id="L389">                        logDebug(LOG_TAG, &quot;getRead: ${response.readMarks.size} read marks&quot;)</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                        for (readMark in response.readMarks) {</span>
+<span class="nc" id="L391">                            val readMarkContent =</span>
+<span class="nc" id="L392">                                readMarkAdapter.fromJson(</span>
+<span class="nc" id="L393">                                    AesCbcWithIntegrity.decryptString(readMark.encrypted, secretKey),</span>
+                                )
+
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                            if (readMarkContent == null) {</span>
+<span class="nc" id="L397">                                Log.e(LOG_TAG, &quot;Failed to decrypt readMark content&quot;)</span>
+                                // Advance the timestamp so the same corrupt mark is not retried indefinitely.
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                                repository.updateSyncRemoteMessageTimestamp(readMark.timestamp)</span>
+<span class="nc" id="L400">                                continue</span>
+                            }
+
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                            repository.remoteMarkAsRead(</span>
+<span class="nc" id="L404">                                feedUrl = readMarkContent.feedUrl,</span>
+<span class="nc" id="L405">                                articleGuid = readMarkContent.articleGuid,</span>
+                            )
+<span class="nc bnc" id="L407" title="All 2 branches missed.">                            repository.updateSyncRemoteMessageTimestamp(readMark.timestamp)</span>
+                        }
+<span class="nc" id="L409">                    }.onLeft {</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">                        it.leaveChainIfKickedOutElseLog()</span>
+<span class="nc" id="L411">                    }</span>
+            }
+<span class="nc" id="L413">        } catch (e: Exception) {</span>
+<span class="nc" id="L414">            Log.e(LOG_TAG, &quot;Error in getRead&quot;, e)</span>
+        }
+<span class="fc" id="L416">    }</span>
+
+    internal suspend fun getFeeds() {
+<span class="fc" id="L419">        try {</span>
+<span class="pc bnc" id="L420" title="All 6 branches missed.">            safeBlock { syncRemote, feederSync, secretKey -&gt;</span>
+<span class="nc" id="L421">                logDebug(LOG_TAG, &quot;getFeeds&quot;)</span>
+<span class="nc" id="L422">                feederSync</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">                    .getFeeds(</span>
+<span class="nc" id="L424">                        syncChainId = syncRemote.syncChainId,</span>
+<span class="nc" id="L425">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L426">                    ).toEither()</span>
+<span class="nc" id="L427">                    .onRight { response -&gt;</span>
+<span class="nc" id="L428">                        logDebug(LOG_TAG, &quot;GetFeeds response hash: ${response.hash}&quot;)</span>
+
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                        if (response.hash == syncRemote.lastFeedsRemoteHash) {</span>
+                            // Nothing to do
+<span class="nc" id="L432">                            logDebug(LOG_TAG, &quot;GetFeeds got nothing new, returning.&quot;)</span>
+<span class="nc" id="L433">                            return@onRight</span>
+                        }
+
+<span class="nc" id="L436">                        val encryptedFeeds =</span>
+<span class="nc" id="L437">                            feedsAdapter.fromJson(</span>
+<span class="nc" id="L438">                                AesCbcWithIntegrity.decryptString(</span>
+<span class="nc" id="L439">                                    response.encrypted,</span>
+<span class="nc" id="L440">                                    secretKeys = secretKey,</span>
+                                ),
+                            )
+
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                        if (encryptedFeeds == null) {</span>
+<span class="nc" id="L445">                            Log.e(LOG_TAG, &quot;Failed to decrypt encrypted feeds&quot;)</span>
+<span class="nc" id="L446">                            return@onRight</span>
+                        }
+
+<span class="nc bnc" id="L449" title="All 2 branches missed.">                        feedDiffing(encryptedFeeds.feeds)</span>
+
+<span class="nc" id="L451">                        syncRemote.lastFeedsRemoteHash = response.hash</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                        repository.updateSyncRemote(syncRemote)</span>
+<span class="nc" id="L453">                    }.onLeft {</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">                        it.leaveChainIfKickedOutElseLog()</span>
+<span class="nc" id="L455">                    }</span>
+            }
+<span class="nc" id="L457">        } catch (e: Exception) {</span>
+<span class="nc" id="L458">            Log.e(LOG_TAG, &quot;Error in getFeeds&quot;, e)</span>
+        }
+<span class="fc" id="L460">    }</span>
+
+<span class="nc" id="L462">    private suspend fun feedDiffing(remoteFeeds: List&lt;EncryptedFeed&gt;) {</span>
+<span class="nc" id="L463">        try {</span>
+<span class="nc" id="L464">            logDebug(LOG_TAG, &quot;feedDiffing: ${remoteFeeds.size}&quot;)</span>
+<span class="nc" id="L465">            val remotelySeenFeedUrls = repository.getRemotelySeenFeeds()</span>
+
+<span class="nc" id="L467">            val feedUrlsWhichWereDeletedOnRemote =</span>
+<span class="nc" id="L468">                remotelySeenFeedUrls</span>
+<span class="nc" id="L469">                    .filterNot { url -&gt; remoteFeeds.asSequence().map { it.url }.contains(url) }</span>
+
+<span class="nc" id="L471">            logDebug(LOG_TAG, &quot;RemotelyDeleted: ${feedUrlsWhichWereDeletedOnRemote.size}&quot;)</span>
+
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            for (url in feedUrlsWhichWereDeletedOnRemote) {</span>
+<span class="nc" id="L474">                logDebug(LOG_TAG, &quot;Deleting remotely deleted feed: $url&quot;)</span>
+<span class="nc" id="L475">                repository.deleteFeed(url)</span>
+            }
+
+<span class="nc bnc" id="L478" title="All 2 branches missed.">            for (remoteFeed in remoteFeeds) {</span>
+<span class="nc" id="L479">                val seenRemotelyBefore = remoteFeed.url in remotelySeenFeedUrls</span>
+<span class="nc" id="L480">                val dbFeed = repository.getFeed(remoteFeed.url)</span>
+
+<span class="nc" id="L482">                when {</span>
+<span class="nc bnc" id="L483" title="All 4 branches missed.">                    dbFeed == null &amp;&amp; !seenRemotelyBefore -&gt; {</span>
+                        // Entirely new remote feed
+<span class="nc" id="L485">                        logDebug(LOG_TAG, &quot;Saving new feed: ${remoteFeed.url}&quot;)</span>
+<span class="nc" id="L486">                        repository.saveFeed(</span>
+<span class="nc" id="L487">                            remoteFeed.updateFeedCopy(Feed()),</span>
+                        )
+                    }
+
+<span class="nc bnc" id="L491" title="All 4 branches missed.">                    dbFeed == null &amp;&amp; seenRemotelyBefore -&gt; {</span>
+                        // Has been locally deleted, it will be deleted on next call of updateFeeds
+<span class="nc" id="L493">                        logDebug(</span>
+<span class="nc" id="L494">                            LOG_TAG,</span>
+<span class="nc" id="L495">                            &quot;Received update for locally deleted feed: ${remoteFeed.url}&quot;,</span>
+                        )
+                    }
+
+<span class="nc bnc" id="L499" title="All 2 branches missed.">                    dbFeed != null -&gt; {</span>
+                        // Update of feed
+                        // Compare modification date - only save if remote is newer
+<span class="nc bnc" id="L502" title="All 2 branches missed.">                        if (remoteFeed.whenModified &gt; dbFeed.whenModified) {</span>
+<span class="nc" id="L503">                            logDebug(LOG_TAG, &quot;Saving updated feed: ${remoteFeed.url}&quot;)</span>
+<span class="nc" id="L504">                            repository.saveFeed(</span>
+<span class="nc" id="L505">                                remoteFeed.updateFeedCopy(dbFeed),</span>
+                            )
+                        } else {
+<span class="nc" id="L508">                            logDebug(</span>
+<span class="nc" id="L509">                                LOG_TAG,</span>
+<span class="nc" id="L510">                                &quot;Not saving feed because local date trumps it: ${remoteFeed.url}&quot;,</span>
+                            )
+                        }
+                    }
+                }
+            }
+
+<span class="nc" id="L517">            repository.replaceRemoteFeedsWith(</span>
+<span class="nc" id="L518">                remoteFeeds.map {</span>
+<span class="nc" id="L519">                    RemoteFeed(</span>
+<span class="nc" id="L520">                        syncRemote = 1L,</span>
+<span class="nc" id="L521">                        url = it.url,</span>
+<span class="nc" id="L522">                    )</span>
+                },
+            )
+<span class="nc" id="L525">        } catch (e: Exception) {</span>
+<span class="nc" id="L526">            Log.e(LOG_TAG, &quot;Error in feedDiffing&quot;, e)</span>
+        }
+<span class="nc" id="L528">    }</span>
+
+    suspend fun sendUpdatedFeeds(): Either&lt;ErrorResponse, Boolean&gt; {
+<span class="fc" id="L531">        return try {</span>
+<span class="pc bnc" id="L532" title="All 8 branches missed.">            safeBlock { syncRemote, feederSync, secretKey -&gt;</span>
+<span class="nc" id="L533">                logDebug(LOG_TAG, &quot;sendUpdatedFeeds&quot;)</span>
+<span class="nc" id="L534">                val lastRemoteHash = syncRemote.lastFeedsRemoteHash</span>
+
+                // Only send if hash does not match
+                // Important to keep iteration order stable - across devices. So sort on URL, not ID or date
+<span class="nc" id="L538">                val feeds =</span>
+<span class="nc" id="L539">                    repository</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">                        .getFeedsOrderedByUrl()</span>
+<span class="nc" id="L541">                        .map { it.toEncryptedFeed() }</span>
+
+                // Yes, List hashCodes are based on elements. Just remember to hash what you send
+                // - and not raw database objects
+<span class="nc" id="L545">                val currentContentHash = feeds.hashCode()</span>
+
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                if (lastRemoteHash == currentContentHash) {</span>
+                    // Nothing to do
+<span class="nc" id="L549">                    logDebug(LOG_TAG, &quot;Feeds haven't changed - so not sending&quot;)</span>
+<span class="nc" id="L550">                    return@safeBlock Either.Right(false)</span>
+                }
+
+<span class="nc" id="L553">                val encrypted =</span>
+<span class="nc" id="L554">                    AesCbcWithIntegrity.encryptString(</span>
+<span class="nc" id="L555">                        feedsAdapter.toJson(</span>
+<span class="nc" id="L556">                            EncryptedFeeds(</span>
+<span class="nc" id="L557">                                feeds = feeds,</span>
+                            ),
+                        ),
+<span class="nc" id="L560">                        secretKeys = secretKey,</span>
+                    )
+
+<span class="nc" id="L563">                logDebug(</span>
+<span class="nc" id="L564">                    LOG_TAG,</span>
+<span class="nc" id="L565">                    &quot;Sending updated feeds with locally computed hash: $currentContentHash&quot;,</span>
+                )
+                // Might fail with 412 in case already updated remotely - need to call get
+<span class="nc" id="L568">                feederSync</span>
+<span class="nc bnc" id="L569" title="All 2 branches missed.">                    .updateFeeds(</span>
+<span class="nc" id="L570">                        syncChainId = syncRemote.syncChainId,</span>
+<span class="nc" id="L571">                        currentDeviceId = syncRemote.deviceId,</span>
+<span class="nc" id="L572">                        etagValue = syncRemote.lastFeedsRemoteHash.asWeakETagValue(),</span>
+                        request =
+<span class="nc" id="L574">                            UpdateFeedsRequest(</span>
+<span class="nc" id="L575">                                contentHash = currentContentHash,</span>
+<span class="nc" id="L576">                                encrypted = encrypted,</span>
+                            ),
+<span class="nc" id="L578">                    ).toEither()</span>
+<span class="nc" id="L579">                    .onLeft {</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">                        if (it.code == 412) {</span>
+                            // Need to call get first because updates have happened
+<span class="nc bnc" id="L582" title="All 2 branches missed.">                            getFeeds()</span>
+                            // Now try again
+<span class="nc bnc" id="L584" title="All 2 branches missed.">                            sendUpdatedFeeds()</span>
+                        } else {
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                            it.leaveChainIfKickedOutElseLog()</span>
+                        }
+<span class="nc" id="L588">                    }.onRight { response -&gt;</span>
+                        // Store hash for future
+<span class="nc" id="L590">                        syncRemote.lastFeedsRemoteHash = response.hash</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">                        repository.updateSyncRemote(syncRemote)</span>
+
+<span class="nc" id="L593">                        logDebug(LOG_TAG, &quot;Received updated feeds hash: ${response.hash}&quot;)</span>
+<span class="nc" id="L594">                    }.map {</span>
+<span class="nc" id="L595">                        true</span>
+<span class="nc" id="L596">                    }</span>
+            }
+<span class="nc" id="L598">        } catch (e: Exception) {</span>
+<span class="nc" id="L599">            Log.e(LOG_TAG, &quot;Error in sendUpdatedFeeds&quot;, e)</span>
+<span class="pc" id="L600">            Either.Left(</span>
+<span class="nc" id="L601">                ErrorResponse(1000, e.message, e),</span>
+            )
+        }
+    }
+
+    private suspend fun ErrorResponse.leaveChainIfKickedOutElseLog() {
+<span class="nc" id="L607">        Log.e(LOG_TAG, &quot;leaveChainIfKickedOutElseLog: $code, $body&quot;, throwable)</span>
+<span class="nc bnc" id="L608" title="All 6 branches missed.">        if (body?.contains(DEVICE_NOT_REGISTERED, ignoreCase = true) == true) {</span>
+            // this device has been removed from the chain from another device
+<span class="nc" id="L610">            leave()</span>
+        }
+<span class="nc" id="L612">    }</span>
+
+    /**
+     * Test-only helper that bypasses the normal [initialize] flow and directly sets the
+     * underlying [FeederSync] client and encryption key.
+     */
+    @VisibleForTesting
+    internal fun initForTesting(
+        feederSync: FeederSync,
+        secretKey: SecretKeys,
+    ) {
+<span class="nc" id="L623">        this.feederSync = feederSync</span>
+<span class="nc" id="L624">        this.secretKey = secretKey</span>
+<span class="nc" id="L625">    }</span>
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_REST_CLIENT&quot;
+        private const val DEVICE_NOT_REGISTERED = &quot;Device not registered&quot;
+    }
+}
+
+<span class="nc" id="L633">fun Any.asWeakETagValue() = &quot;W/\&quot;$this\&quot;&quot;</span>
+
+fun &lt;T&gt; Response&lt;T&gt;.toEither(): Either&lt;ErrorResponse, T&gt; =
+<span class="nc" id="L636">    try {</span>
+<span class="nc bnc" id="L637" title="All 2 branches missed.">        if (isSuccessful) {</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">            body()?.let { Either.Right(it) }</span>
+<span class="nc" id="L639">                ?: Either.Left(</span>
+<span class="nc" id="L640">                    ErrorResponse(</span>
+<span class="nc" id="L641">                        code = 998,</span>
+<span class="nc" id="L642">                        body = &quot;No body but success&quot;,</span>
+                    ),
+                )
+        } else {
+<span class="nc" id="L646">            Either.Left(</span>
+<span class="nc" id="L647">                ErrorResponse(</span>
+<span class="nc" id="L648">                    code = code(),</span>
+<span class="nc bnc" id="L649" title="All 2 branches missed.">                    body = errorBody()?.string(),</span>
+                ),
+            )
+        }
+<span class="nc" id="L653">    } catch (e: Exception) {</span>
+<span class="nc" id="L654">        Either.Left(</span>
+<span class="nc" id="L655">            ErrorResponse(</span>
+<span class="nc" id="L656">                code = 999,</span>
+<span class="nc" id="L657">                body = e.message,</span>
+<span class="nc" id="L658">                throwable = e,</span>
+            ),
+        )
+<span class="nc" id="L661">    }</span>
+
+<span class="fc" id="L663">data class ErrorResponse(</span>
+<span class="pc" id="L664">    val code: Int,</span>
+<span class="pc" id="L665">    val body: String? = null,</span>
+<span class="pc" id="L666">    val throwable: Throwable? = null,</span>
+<span class="fc" id="L667">)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

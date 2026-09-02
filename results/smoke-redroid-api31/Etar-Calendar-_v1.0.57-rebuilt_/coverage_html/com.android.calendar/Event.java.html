@@ -1,0 +1,949 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Event.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar</a> &gt; <span class="el_source">Event.java</span></div><h1>Event.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar;
+
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Debug;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.Calendars;
+import android.provider.CalendarContract.Events;
+import android.provider.CalendarContract.Instances;
+import android.text.TextUtils;
+import android.text.format.DateUtils;
+import android.util.Log;
+
+import com.android.calendar.settings.GeneralPreferences;
+
+import org.dmfs.rfc5545.DateTime;
+import org.dmfs.rfc5545.iterable.RecurrenceSet;
+import org.dmfs.rfc5545.iterable.instanceiterable.RuleInstances;
+import org.dmfs.rfc5545.recur.RecurrenceRule;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import ws.xsoh.etar.R;
+
+// TODO: should Event be Parcelable so it can be passed via Intents?
+<span class="nc" id="L53">public class Event implements Cloneable {</span>
+
+    private static final String TAG = &quot;CalEvent&quot;;
+    private static final boolean PROFILE = false;
+
+    /**
+     * The sort order is:
+     * 1) events with an earlier start (begin for normal events, startday for allday)
+     * 2) events with a later end (end for normal events, endday for allday)
+     * 3) the title (unnecessary, but nice)
+     *
+     * The start and end day is sorted first so that all day events are
+     * sorted correctly with respect to events that are &gt;24 hours (and
+     * therefore show up in the allday area).
+     */
+    private static final String SORT_EVENTS_BY =
+            &quot;begin ASC, end DESC, title ASC&quot;;
+    private static final String SORT_ALLDAY_BY =
+            &quot;startDay ASC, endDay DESC, title ASC&quot;;
+    private static final String DISPLAY_AS_ALLDAY = &quot;dispAllday&quot;;
+    // The projection to use when querying instances to build a list of events
+<span class="fc" id="L74">    public static final String[] EVENT_PROJECTION = new String[] {</span>
+            Instances.TITLE,                 // 0
+            Instances.EVENT_LOCATION,        // 1
+            Instances.ALL_DAY,               // 2
+            Instances.DISPLAY_COLOR,         // 3
+            Instances.EVENT_TIMEZONE,        // 4
+            Instances.EVENT_ID,              // 5
+            Instances.BEGIN,                 // 6
+            Instances.END,                   // 7
+            Instances._ID,                   // 8
+            Instances.START_DAY,             // 9
+            Instances.END_DAY,               // 10
+            Instances.START_MINUTE,          // 11
+            Instances.END_MINUTE,            // 12
+            Instances.HAS_ALARM,             // 13
+            Instances.RRULE,                 // 14
+            Instances.RDATE,                 // 15
+            Instances.STATUS,                // 16
+            Instances.SELF_ATTENDEE_STATUS,  // 17
+            Events.ORGANIZER,                // 18
+            Events.GUESTS_CAN_MODIFY,        // 19
+            Instances.ALL_DAY + &quot;=1 OR (&quot; + Instances.END + &quot;-&quot; + Instances.BEGIN + &quot;)&gt;=&quot;
+                    + DateUtils.DAY_IN_MILLIS + &quot; AS &quot; + DISPLAY_AS_ALLDAY, // 20
+    };
+    private static final String EVENTS_WHERE = DISPLAY_AS_ALLDAY + &quot;=0&quot;;
+    private static final String ALLDAY_WHERE = DISPLAY_AS_ALLDAY + &quot;=1&quot;;
+    // The indices for the projection array above.
+    private static final int PROJECTION_TITLE_INDEX = 0;
+    private static final int PROJECTION_LOCATION_INDEX = 1;
+    private static final int PROJECTION_ALL_DAY_INDEX = 2;
+    private static final int PROJECTION_COLOR_INDEX = 3;
+    private static final int PROJECTION_TIMEZONE_INDEX = 4;
+    private static final int PROJECTION_EVENT_ID_INDEX = 5;
+    private static final int PROJECTION_BEGIN_INDEX = 6;
+    private static final int PROJECTION_END_INDEX = 7;
+    private static final int PROJECTION_START_DAY_INDEX = 9;
+    private static final int PROJECTION_END_DAY_INDEX = 10;
+    private static final int PROJECTION_START_MINUTE_INDEX = 11;
+    private static final int PROJECTION_END_MINUTE_INDEX = 12;
+    private static final int PROJECTION_HAS_ALARM_INDEX = 13;
+    private static final int PROJECTION_RRULE_INDEX = 14;
+    private static final int PROJECTION_RDATE_INDEX = 15;
+    private static final int PROJECTION_STATUS_INDEX = 16;
+    private static final int PROJECTION_SELF_ATTENDEE_STATUS_INDEX = 17;
+    private static final int PROJECTION_ORGANIZER_INDEX = 18;
+    private static final int PROJECTION_GUESTS_CAN_INVITE_OTHERS_INDEX = 19;
+    private static final int PROJECTION_DISPLAY_AS_ALLDAY = 20;
+    private static String mNoTitleString;
+    private static int mNoColorColor;
+
+
+    public long id;
+    public int color;
+    public CharSequence title;
+    public CharSequence location;
+    public boolean allDay;
+    public String organizer;
+    public boolean guestsCanModify;
+
+    public int startDay;       // start Julian day
+    public int endDay;         // end Julian day
+    public int startTime;      // Start and end time are in minutes since midnight
+    public int endTime;
+
+    public long startMillis;   // UTC milliseconds since the epoch
+    public long endMillis;     // UTC milliseconds since the epoch
+    public boolean hasAlarm;
+    public boolean isRepeating;
+    public int status;
+    public int selfAttendeeStatus;
+    // The coordinates of the event rectangle drawn on the screen.
+    public float left;
+    public float right;
+    public float top;
+    public float bottom;
+    public float textTop;
+    // These 4 fields are used for navigating among events within the selected
+    // hour in the Day and Week view.
+    public Event nextRight;
+    public Event nextLeft;
+    public Event nextUp;
+    public Event nextDown;
+    private int mColumn;
+    private int mMaxColumns;
+    private boolean mDrawStaggered;
+    private long mTextOffsetMillis;
+
+    public static final Event newInstance() {
+<span class="nc" id="L162">        Event e = new Event();</span>
+
+<span class="nc" id="L164">        e.id = 0;</span>
+<span class="nc" id="L165">        e.title = null;</span>
+<span class="nc" id="L166">        e.color = 0;</span>
+<span class="nc" id="L167">        e.location = null;</span>
+<span class="nc" id="L168">        e.allDay = false;</span>
+<span class="nc" id="L169">        e.startDay = 0;</span>
+<span class="nc" id="L170">        e.endDay = 0;</span>
+<span class="nc" id="L171">        e.startTime = 0;</span>
+<span class="nc" id="L172">        e.endTime = 0;</span>
+<span class="nc" id="L173">        e.startMillis = 0;</span>
+<span class="nc" id="L174">        e.endMillis = 0;</span>
+<span class="nc" id="L175">        e.hasAlarm = false;</span>
+<span class="nc" id="L176">        e.isRepeating = false;</span>
+<span class="nc" id="L177">        e.status = Events.STATUS_CONFIRMED;</span>
+<span class="nc" id="L178">        e.selfAttendeeStatus = Attendees.ATTENDEE_STATUS_NONE;</span>
+
+<span class="nc" id="L180">        return e;</span>
+    }
+
+    /**
+     * Loads &lt;i&gt;days&lt;/i&gt; days worth of instances starting at &lt;i&gt;startDay&lt;/i&gt;.
+     */
+    public static void loadEvents(Context context, ArrayList&lt;Event&gt; events, int startDay, int days,
+            int requestId, AtomicInteger sequenceNumber) {
+
+        if (PROFILE) {
+            Debug.startMethodTracing(&quot;loadEvents&quot;);
+        }
+
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">        if (!Utils.isCalendarPermissionGranted(context, false)) {</span>
+            //If permission is not granted then just return.
+<span class="nc" id="L195">            return;</span>
+        }
+
+<span class="fc" id="L198">        Cursor cEvents = null;</span>
+<span class="fc" id="L199">        Cursor cAllday = null;</span>
+
+<span class="fc" id="L201">        events.clear();</span>
+        try {
+<span class="fc" id="L203">            int endDay = startDay + days - 1;</span>
+
+            // We use the byDay instances query to get a list of all events for
+            // the days we're interested in.
+            // The sort order is: events with an earlier start time occur
+            // first and if the start times are the same, then events with
+            // a later end time occur first. The later end time is ordered
+            // first so that long rectangles in the calendar views appear on
+            // the left side.  If the start and end times of two events are
+            // the same then we sort alphabetically on the title.  This isn't
+            // required for correctness, it just adds a nice touch.
+
+            // Respect the preference to show/hide declined events
+<span class="fc" id="L216">            SharedPreferences prefs = GeneralPreferences.Companion.getSharedPreferences(context);</span>
+<span class="fc" id="L217">            boolean hideDeclined = prefs.getBoolean(GeneralPreferences.KEY_HIDE_DECLINED,</span>
+                    false);
+
+<span class="fc" id="L220">            String where = EVENTS_WHERE;</span>
+<span class="fc" id="L221">            String whereAllday = ALLDAY_WHERE;</span>
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">            if (hideDeclined) {</span>
+<span class="nc" id="L223">                String hideString = &quot; AND &quot; + Instances.SELF_ATTENDEE_STATUS + &quot;!=&quot;</span>
+                        + Attendees.ATTENDEE_STATUS_DECLINED;
+<span class="nc" id="L225">                where += hideString;</span>
+<span class="nc" id="L226">                whereAllday += hideString;</span>
+            }
+
+<span class="fc" id="L229">            cEvents = instancesQuery(context.getContentResolver(), EVENT_PROJECTION, startDay,</span>
+                    endDay, where, null, SORT_EVENTS_BY);
+<span class="fc" id="L231">            cAllday = instancesQuery(context.getContentResolver(), EVENT_PROJECTION, startDay,</span>
+                    endDay, whereAllday, null, SORT_ALLDAY_BY);
+
+            // Check if we should return early because there are more recent
+            // load requests waiting.
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">            if (requestId != sequenceNumber.get()) {</span>
+<span class="nc" id="L237">                return;</span>
+            }
+
+<span class="fc" id="L240">            buildEventsFromCursor(events, cEvents, context, startDay, endDay);</span>
+<span class="fc" id="L241">            buildEventsFromCursor(events, cAllday, context, startDay, endDay);</span>
+
+        } finally {
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">            if (cEvents != null) {</span>
+<span class="fc" id="L245">                cEvents.close();</span>
+            }
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">            if (cAllday != null) {</span>
+<span class="fc" id="L248">                cAllday.close();</span>
+            }
+            if (PROFILE) {
+                Debug.stopMethodTracing();
+            }
+        }
+<span class="fc" id="L254">    }</span>
+
+    /**
+     * Performs a query to return all visible instances in the given range
+     * that match the given selection. This is a blocking function and
+     * should not be done on the UI thread. This will cause an expansion of
+     * recurring events to fill this time range if they are not already
+     * expanded and will slow down for larger time ranges with many
+     * recurring events.
+     *
+     * @param cr The ContentResolver to use for the query
+     * @param projection The columns to return
+     * @param begin The start of the time range to query in UTC millis since
+     *            epoch
+     * @param end The end of the time range to query in UTC millis since
+     *            epoch
+     * @param selection Filter on the query as an SQL WHERE statement
+     * @param selectionArgs Args to replace any '?'s in the selection
+     * @param orderBy How to order the rows as an SQL ORDER BY statement
+     * @return A Cursor of instances matching the selection
+     */
+    private static final Cursor instancesQuery(ContentResolver cr, String[] projection,
+            int startDay, int endDay, String selection, String[] selectionArgs, String orderBy) {
+<span class="fc" id="L277">        String WHERE_CALENDARS_SELECTED = Calendars.VISIBLE + &quot;=?&quot;;</span>
+<span class="fc" id="L278">        String[] WHERE_CALENDARS_ARGS = {&quot;1&quot;};</span>
+<span class="fc" id="L279">        String DEFAULT_SORT_ORDER = &quot;begin ASC&quot;;</span>
+
+<span class="fc" id="L281">        Uri.Builder builder = Instances.CONTENT_BY_DAY_URI.buildUpon();</span>
+<span class="fc" id="L282">        ContentUris.appendId(builder, startDay);</span>
+<span class="fc" id="L283">        ContentUris.appendId(builder, endDay);</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">        if (TextUtils.isEmpty(selection)) {</span>
+<span class="nc" id="L285">            selection = WHERE_CALENDARS_SELECTED;</span>
+<span class="nc" id="L286">            selectionArgs = WHERE_CALENDARS_ARGS;</span>
+        } else {
+<span class="fc" id="L288">            selection = &quot;(&quot; + selection + &quot;) AND &quot; + WHERE_CALENDARS_SELECTED;</span>
+<span class="pc bpc" id="L289" title="3 of 4 branches missed.">            if (selectionArgs != null &amp;&amp; selectionArgs.length &gt; 0) {</span>
+<span class="nc" id="L290">                selectionArgs = Arrays.copyOf(selectionArgs, selectionArgs.length + 1);</span>
+<span class="nc" id="L291">                selectionArgs[selectionArgs.length - 1] = WHERE_CALENDARS_ARGS[0];</span>
+            } else {
+<span class="fc" id="L293">                selectionArgs = WHERE_CALENDARS_ARGS;</span>
+            }
+        }
+<span class="fc" id="L296">        return cr.query(builder.build(), projection, selection, selectionArgs,</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">                orderBy == null ? DEFAULT_SORT_ORDER : orderBy);</span>
+    }
+
+    /**
+     * Adds all the events from the cursors to the events list.
+     *
+     * @param events The list of events
+     * @param cEvents Events to add to the list
+     * @param context
+     * @param startDay
+     * @param endDay
+     */
+    public static void buildEventsFromCursor(
+            ArrayList&lt;Event&gt; events, Cursor cEvents, Context context, int startDay, int endDay) {
+<span class="pc bpc" id="L311" title="2 of 4 branches missed.">        if (cEvents == null || events == null) {</span>
+<span class="nc" id="L312">            Log.e(TAG, &quot;buildEventsFromCursor: null cursor or null events list!&quot;);</span>
+<span class="nc" id="L313">            return;</span>
+        }
+
+<span class="fc" id="L316">        int count = cEvents.getCount();</span>
+
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">        if (count == 0) {</span>
+<span class="fc" id="L319">            return;</span>
+        }
+
+<span class="nc" id="L322">        Resources res = context.getResources();</span>
+<span class="nc" id="L323">        mNoTitleString = res.getString(R.string.no_title_label);</span>
+<span class="nc" id="L324">        mNoColorColor = res.getColor(R.color.event_center);</span>
+        // Sort events in two passes so we ensure the allday and standard events
+        // get sorted in the correct order
+<span class="nc" id="L327">        cEvents.moveToPosition(-1);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">        while (cEvents.moveToNext()) {</span>
+<span class="nc" id="L329">            Event e = generateEventFromCursor(cEvents, context);</span>
+<span class="nc bnc" id="L330" title="All 4 branches missed.">            if (e.startDay &gt; endDay || e.endDay &lt; startDay) {</span>
+<span class="nc" id="L331">                continue;</span>
+            }
+<span class="nc" id="L333">            events.add(e);</span>
+<span class="nc" id="L334">        }</span>
+<span class="nc" id="L335">    }</span>
+
+    /**
+     * @param cEvents Cursor pointing at event
+     * @return An event created from the cursor
+     */
+    private static Event generateEventFromCursor(Cursor cEvents, Context context) {
+<span class="nc" id="L342">        Event e = new Event();</span>
+
+<span class="nc" id="L344">        e.id = cEvents.getLong(PROJECTION_EVENT_ID_INDEX);</span>
+<span class="nc" id="L345">        e.title = cEvents.getString(PROJECTION_TITLE_INDEX);</span>
+<span class="nc" id="L346">        e.location = cEvents.getString(PROJECTION_LOCATION_INDEX);</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">        e.allDay = cEvents.getInt(PROJECTION_ALL_DAY_INDEX) != 0;</span>
+<span class="nc" id="L348">        e.organizer = cEvents.getString(PROJECTION_ORGANIZER_INDEX);</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        e.guestsCanModify = cEvents.getInt(PROJECTION_GUESTS_CAN_INVITE_OTHERS_INDEX) != 0;</span>
+
+<span class="nc bnc" id="L351" title="All 4 branches missed.">        if (e.title == null || e.title.length() == 0) {</span>
+<span class="nc" id="L352">            e.title = mNoTitleString;</span>
+        }
+
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if (!cEvents.isNull(PROJECTION_COLOR_INDEX)) {</span>
+            // Read the color from the database
+<span class="nc" id="L357">            e.color = Utils.getDisplayColorFromColor(context, cEvents.getInt(PROJECTION_COLOR_INDEX));</span>
+        } else {
+<span class="nc" id="L359">            e.color = mNoColorColor;</span>
+        }
+
+<span class="nc" id="L362">        long eStart = cEvents.getLong(PROJECTION_BEGIN_INDEX);</span>
+<span class="nc" id="L363">        long eEnd = cEvents.getLong(PROJECTION_END_INDEX);</span>
+
+<span class="nc" id="L365">        e.startMillis = eStart;</span>
+<span class="nc" id="L366">        e.startTime = cEvents.getInt(PROJECTION_START_MINUTE_INDEX);</span>
+<span class="nc" id="L367">        e.startDay = cEvents.getInt(PROJECTION_START_DAY_INDEX);</span>
+
+<span class="nc" id="L369">        e.endMillis = eEnd;</span>
+<span class="nc" id="L370">        e.endTime = cEvents.getInt(PROJECTION_END_MINUTE_INDEX);</span>
+<span class="nc" id="L371">        e.endDay = cEvents.getInt(PROJECTION_END_DAY_INDEX);</span>
+
+<span class="nc bnc" id="L373" title="All 2 branches missed.">        e.hasAlarm = cEvents.getInt(PROJECTION_HAS_ALARM_INDEX) != 0;</span>
+
+<span class="nc" id="L375">        e.status = cEvents.getInt(PROJECTION_STATUS_INDEX);</span>
+
+        // Check if this is a repeating event
+<span class="nc" id="L378">        String rrule = cEvents.getString(PROJECTION_RRULE_INDEX);</span>
+<span class="nc" id="L379">        String rdate = cEvents.getString(PROJECTION_RDATE_INDEX);</span>
+<span class="nc bnc" id="L380" title="All 4 branches missed.">        if (!TextUtils.isEmpty(rrule) || !TextUtils.isEmpty(rdate)) {</span>
+<span class="nc" id="L381">            e.isRepeating = true;</span>
+
+            /** We need to double check a few RRULE conditions that the Android Calendar Provider
+             *  doesn't handle and shows duplicate events for, namely:
+             *
+             *      - BYSETPOS
+             *      - BYWEEKNO
+             *
+             * For these conditions, double check if this event really occurs on this day, if it
+             * doesn't, reset the endDay value to 0 so it is removed from the events list.
+             *
+             * It might make sense to check all rrule's, as there may be other broken sets, but
+             * the overhead is probably not worth it at this point.
+             **/
+<span class="nc bnc" id="L395" title="All 6 branches missed.">            if (rrule instanceof String &amp;&amp; (rrule.contains(&quot;BYSETPOS=&quot;) || rrule.contains(&quot;BYWEEKNO=&quot;))) {</span>
+<span class="nc" id="L396">                e.endDay = checkRRuleEventDate(rrule, e.startMillis, e.endDay);</span>
+            }
+        } else {
+<span class="nc" id="L399">            e.isRepeating = false;</span>
+        }
+
+<span class="nc" id="L402">        e.selfAttendeeStatus = cEvents.getInt(PROJECTION_SELF_ATTENDEE_STATUS_INDEX);</span>
+<span class="nc" id="L403">        return e;</span>
+    }
+
+    /** Android's RRULE code is broken in a way the creates additional events in certain
+     *  circumstances (though never doesn't create the actual event) so let's use another RRULE
+     *  parser to validate if the event is real or not.
+     *
+     *  In this case we're using lib-recur from https://github.com/dmfs/lib-recur through maven.
+     *
+     **/
+    static int checkRRuleEventDate( String rrule, long startTime, int endDay) {
+        // Convert the startTime into some useable Day/Month/Year values.
+<span class="nc" id="L415">        Date date = new java.util.Date(startTime);</span>
+
+        // We'll use SimpleDateFormat to get the D/M/Y but we also need to set the timezone.
+<span class="nc" id="L418">        SimpleDateFormat sdf = new java.text.SimpleDateFormat();</span>
+<span class="nc" id="L419">        sdf.setTimeZone(java.util.TimeZone.getTimeZone(&quot;GMT&quot;));</span>
+
+<span class="nc" id="L421">        sdf.applyPattern(&quot;yyyy&quot;);</span>
+<span class="nc" id="L422">        int startYear = Integer.parseInt(sdf.format(date));</span>
+<span class="nc" id="L423">        sdf.applyPattern(&quot;MM&quot;);</span>
+<span class="nc" id="L424">        int startMonth = Integer.parseInt(sdf.format(date)) - 1;</span>
+<span class="nc" id="L425">        sdf.applyPattern(&quot;dd&quot;);</span>
+<span class="nc" id="L426">        int startDay = Integer.parseInt(sdf.format(date));</span>
+
+        // Parse the recurrence rule.
+        RecurrenceRule rule;
+        try {
+<span class="nc" id="L431">            rule = new RecurrenceRule(rrule);</span>
+<span class="nc" id="L432">        } catch (Exception e) {</span>
+            // On failure, assume we match and return.
+<span class="nc" id="L434">            return endDay;</span>
+<span class="nc" id="L435">        }</span>
+
+        // Use the Year/Month/Day startTime values to create a firstInstance.
+<span class="nc" id="L438">        DateTime firstInstance = new DateTime(startYear, startMonth, startDay);</span>
+        RecurrenceSet newRecurrenceSet;
+
+        // Wrap the recurrent set creation in a try/catch to ensure we don't run into an invalid
+        // rule set that lib-recur can't parse.
+        try {
+<span class="nc" id="L444">            newRecurrenceSet = new RecurrenceSet(firstInstance, new RuleInstances(rule));</span>
+<span class="nc" id="L445">        } catch (Exception e) {</span>
+<span class="nc" id="L446">            return endDay;</span>
+<span class="nc" id="L447">        }</span>
+
+        // Wrap the for loop in a try/catch to ensure we don't run into an invalid
+        // rule set that lib-recur can't parse.
+        try {
+            // Create the recurrence set for the rule, we're only going to look at the first one
+            // as it should match the firstInstance if this is a valid event from Android.
+<span class="nc bnc" id="L454" title="All 2 branches missed.">            for (DateTime instance:newRecurrenceSet) {</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                if (!instance.equals(firstInstance)) {</span>
+                    // If this isn't a valid event, return 0 so it gets removed from the event list.
+<span class="nc" id="L457">                    return 0;</span>
+                } else {
+                    // If this is a valid event, return the endDay that we were passed in with.
+<span class="nc" id="L460">                    return endDay;</span>
+                }
+            }
+<span class="nc" id="L463">        } catch (Exception e) {</span>
+<span class="nc" id="L464">            return endDay;</span>
+<span class="nc" id="L465">        }</span>
+
+        // We should never get here, but add a return just in case.
+<span class="nc" id="L468">        return endDay;</span>
+    }
+
+    /**
+     * Computes a position for each event.  Each event is displayed
+     * as a non-overlapping rectangle.  For normal events, these rectangles
+     * are displayed in separate columns in the week view and day view.  For
+     * all-day events, these rectangles are displayed in separate rows along
+     * the top.  In both cases, each event is assigned two numbers: N, and
+     * Max, that specify that this event is the Nth event of Max number of
+     * events that are displayed in a group. The width and position of each
+     * rectangle depend on the maximum number of rectangles that occur at
+     * the same time.
+     *
+     * @param eventsList the list of events, sorted into increasing time order
+     * @param minimumDurationMillis minimum duration acceptable as cell height of each event
+     * rectangle in millisecond. Should be 0 when it is not determined.
+     * @param drawStaggered if true, overlapping events will be drawn in a staggered layout
+     * (ignored for all-day events)
+     */
+    /* package */ static void computePositions(ArrayList&lt;Event&gt; eventsList,
+            long minimumDurationMillis, boolean drawStaggered) {
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">        if (eventsList == null) {</span>
+<span class="nc" id="L491">            return;</span>
+        }
+
+        // Compute the column positions separately for the all-day events
+<span class="fc" id="L495">        doComputePositions(eventsList, minimumDurationMillis, false, drawStaggered);</span>
+<span class="fc" id="L496">        doComputePositions(eventsList, minimumDurationMillis, true, false);</span>
+<span class="fc" id="L497">    }</span>
+
+    private static void doComputePositions(ArrayList&lt;Event&gt; eventsList,
+            long minimumDurationMillis, boolean doAlldayEvents, boolean drawStaggered) {
+<span class="fc" id="L501">        final ArrayList&lt;Event&gt; groupList = new ArrayList&lt;&gt;();</span>
+
+        // Staggered display is not supported for all day events
+<span class="pc bpc" id="L504" title="3 of 4 branches missed.">        drawStaggered = drawStaggered &amp;&amp; !doAlldayEvents;</span>
+
+<span class="fc" id="L506">        long currentGroupEndMillis = -1;</span>
+<span class="pc bpc" id="L507" title="1 of 2 branches missed.">        for (Event event : eventsList) {</span>
+            // Process all-day events separately
+<span class="nc bnc" id="L509" title="All 2 branches missed.">            if (event.drawAsAllday() != doAlldayEvents)</span>
+<span class="nc" id="L510">                continue;</span>
+
+<span class="nc bnc" id="L512" title="All 4 branches missed.">            if (!groupList.isEmpty() &amp;&amp; event.getStartMillis() &gt;= currentGroupEndMillis) {</span>
+                // This event is not part of the current group, start new group
+<span class="nc" id="L514">                computeGroupLayout(groupList, minimumDurationMillis, doAlldayEvents, drawStaggered);</span>
+<span class="nc" id="L515">                groupList.clear();</span>
+            }
+
+<span class="nc" id="L518">            groupList.add(event);</span>
+<span class="nc" id="L519">            currentGroupEndMillis = Math.max(currentGroupEndMillis, event.getEndMillis());</span>
+<span class="nc" id="L520">        }</span>
+<span class="fc" id="L521">        computeGroupLayout(groupList, minimumDurationMillis, doAlldayEvents, drawStaggered);</span>
+<span class="fc" id="L522">    }</span>
+
+    /**
+     * Computes the layout for one group of events (i.e., a set of events connected by overlapping).
+     * For each event in the group, `event.drawAsAllday()` MUST match `doAlldayEvents`.
+     *
+     * @param groupList The list of events in the group.
+     * @param minimumDurationMillis Minimum duration acceptable as cell height of each event
+     * rectangle in milliseconds. Should be 0 when it is not determined.
+     * @param doAlldayEvents Whether this is a group of all-day events
+     * @param drawStaggered If true, overlapping events will be drawn in a staggered layout
+     * (ignored for all-day events)
+     */
+    private static void computeGroupLayout(ArrayList&lt;Event&gt; groupList,
+            long minimumDurationMillis, boolean doAlldayEvents, boolean drawStaggered) {
+<span class="fc" id="L537">        final ArrayList&lt;Event&gt; activeList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L538">        final ArrayList&lt;Event&gt; processedList = new ArrayList&lt;&gt;();</span>
+
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">        if (minimumDurationMillis &lt; 0) {</span>
+<span class="nc" id="L541">            minimumDurationMillis = 0;</span>
+        }
+
+        // Staggered display is not supported for all day events
+<span class="pc bpc" id="L545" title="3 of 4 branches missed.">        drawStaggered = drawStaggered &amp;&amp; !doAlldayEvents;</span>
+
+<span class="fc" id="L547">        long colMask = 0;</span>
+<span class="fc" id="L548">        int maxColumns = 0;</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">        for (Event event : groupList) {</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">            if (!doAlldayEvents) {</span>
+<span class="nc" id="L551">                colMask = removeNonAlldayActiveEvents(</span>
+<span class="nc" id="L552">                        event, activeList.iterator(), minimumDurationMillis, colMask);</span>
+            } else {
+<span class="nc" id="L554">                colMask = removeAlldayActiveEvents(event, activeList.iterator(), colMask);</span>
+            }
+
+<span class="nc" id="L557">            activeList.add(event);</span>
+<span class="nc" id="L558">            processedList.add(event);</span>
+
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            if (drawStaggered) {</span>
+<span class="nc" id="L561">                long newColMask = computeEventColAndTextOffsetStaggered(event, activeList, groupList,</span>
+                        colMask, maxColumns, minimumDurationMillis);
+<span class="nc bnc" id="L563" title="All 2 branches missed.">                if (newColMask == -1) {</span>
+                    // No valid column found
+                    // -&gt; staggered layout not possible, fall back to non-staggered layout
+<span class="nc" id="L566">                    computeGroupLayout(groupList, minimumDurationMillis, doAlldayEvents, false);</span>
+<span class="nc" id="L567">                    return;</span>
+                }
+<span class="nc" id="L569">                colMask = newColMask;</span>
+<span class="nc" id="L570">            } else {</span>
+<span class="nc" id="L571">                long newColMask = computeEventColAndTextOffset(event, colMask);</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">                if (newColMask == -1) {</span>
+                    // TODO: No column available. What do we do now?
+                    // Use last column and reset text offset
+<span class="nc" id="L575">                    event.setColumn(63);</span>
+<span class="nc" id="L576">                    event.setTextOffsetMillis(0);</span>
+                } else {
+<span class="nc" id="L578">                    colMask = newColMask;</span>
+                }
+            }
+<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (maxColumns &lt; event.getColumn() + 1)</span>
+<span class="nc" id="L582">                maxColumns = event.getColumn() + 1;</span>
+<span class="nc" id="L583">        }</span>
+<span class="pc bpc" id="L584" title="1 of 2 branches missed.">        for (Event ev : groupList) {</span>
+<span class="nc" id="L585">            ev.setMaxColumns(maxColumns);</span>
+<span class="nc" id="L586">        }</span>
+<span class="pc bpc" id="L587" title="1 of 2 branches missed.">        for (Event ev : groupList) {</span>
+<span class="nc" id="L588">            ev.setDrawStaggered(drawStaggered);</span>
+<span class="nc" id="L589">        }</span>
+<span class="fc" id="L590">    }</span>
+
+    /**
+     * Finds and sets the minimum unoccupied column for the given event.
+     * This function updates the column and textOffsetMillis value for the given event in place.
+     *
+     * @param newEvent Event to find a column and compute textOffsetMillis for
+     * @param colMask Bitmask of occupied columns at A's start time before A has been inserted
+     * @return Bitmask of occupied columns at A's start time after A has been inserted, or -1 if
+     * there is no unoccupied column
+     */
+    public static long computeEventColAndTextOffset(Event newEvent, long colMask) {
+<span class="nc bnc" id="L602" title="All 2 branches missed.">        for (int col = 0; col &lt; 64; ++col) {</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">            if ((colMask &amp; (1L &lt;&lt; col)) == 0) {</span>
+<span class="nc" id="L604">                newEvent.setColumn(col);</span>
+<span class="nc" id="L605">                newEvent.setTextOffsetMillis(0);</span>
+<span class="nc" id="L606">                colMask |= (1L &lt;&lt; col);</span>
+<span class="nc" id="L607">                return colMask;</span>
+            }
+        }
+<span class="nc" id="L610">        return -1;</span>
+    }
+
+    /**
+     * Finds and sets the minimum column for the given event A such that
+     * 1) there is a timespan of at least minimumDurationMillis where no other event B from groupList
+     *    that is in a higher column is overlapping A, and
+     * 2) for each other event C from activeList there is a timespan of at least minimumDurationMillis
+     *    where no event D from groupList (including A) that is in a higher column than C is overlapping C.
+     * This function may insert a new column between to other columns if necessary.
+     * This function updates the column and textOffsetMillis value for A and any other events which
+     * have been moved or obscured by A in place.
+     *
+     * @param newEvent Event A to find a column and compute textOffsetMillis for
+     * @param activeList All events from the current group which are active at A's start time (including A)
+     * @param groupList All events from the current group (including A) sorted by their start time (ASC)
+     * @param colMask Bitmask of occupied columns at A's start time before A has been inserted
+     * @param maxColumns Current number of columns in group
+     * @param minimumDurationMillis Min unobscured duration
+     * @return Bitmask of occupied columns at A's start time after A has been inserted, or -1 if it
+     * is not possible to insert A according to the rules outlined above
+     */
+    private static long computeEventColAndTextOffsetStaggered(Event newEvent, List&lt;Event&gt; activeList, List&lt;Event&gt; groupList,
+                                                              long colMask, int maxColumns, long minimumDurationMillis) {
+<span class="nc bnc" id="L634" title="All 2 branches missed.">        for (int col = 0; col &lt; 64; ++col) {</span>
+<span class="nc" id="L635">            newEvent.setColumn(col);</span>
+<span class="nc" id="L636">            boolean obscuresEventInPrevCol = false;</span>
+            // Check if newEvent completely obscures any events in col - 1
+            // Columns below col - 1 have already been checked in previous iterations of this loop
+<span class="nc bnc" id="L639" title="All 2 branches missed.">            for (Event other : activeList) {</span>
+<span class="nc bnc" id="L640" title="All 4 branches missed.">                if (other == newEvent || other.getColumn() != col - 1)</span>
+<span class="nc" id="L641">                    continue;</span>
+<span class="nc" id="L642">                long unobsuredOffsetOther = getUnobscuredDurationOffset(other, groupList, minimumDurationMillis);</span>
+<span class="nc bnc" id="L643" title="All 2 branches missed.">                if (unobsuredOffsetOther == -1) {</span>
+                    // newEvent obscures event in previous column
+<span class="nc" id="L645">                    obscuresEventInPrevCol = true;</span>
+<span class="nc" id="L646">                    break;</span>
+                }
+                // Update other event's textOffsetMillis
+                // We can do this here since we know the new event is going to be in a higher column
+                // than this no matter what
+                // Exception: If this loop breaks later and a new column is inserted below col - 1,
+                // we need to recompute this again!
+<span class="nc" id="L653">                other.setTextOffsetMillis(unobsuredOffsetOther);</span>
+<span class="nc" id="L654">            }</span>
+<span class="nc bnc" id="L655" title="All 2 branches missed.">            if (obscuresEventInPrevCol) {</span>
+                // We need to insert a new column between col - 1 and col - 2
+                // Check if this is possible, i.e. if newEvent will not be completely obscured by
+                // events in higher columns, by playing newEvent in col - 2 temporarily
+<span class="nc" id="L659">                newEvent.setColumn(col - 2);</span>
+<span class="nc" id="L660">                long unobsuredOffset = getUnobscuredDurationOffset(newEvent, groupList, minimumDurationMillis);</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                if (unobsuredOffset == -1) {</span>
+                    // newEvent is completely obscured by events in higher columns
+                    // -&gt; inserting new column is not possible, give up
+<span class="nc" id="L664">                    return -1;</span>
+                }
+                // Insert newEvent at col - 1
+<span class="nc" id="L667">                newEvent.setColumn(col - 1);</span>
+<span class="nc" id="L668">                newEvent.setTextOffsetMillis(unobsuredOffset);</span>
+                // Fix textOffsetMillis value for active events from col - 1 since it may have been
+                // changed earlier because of newEvent (see above)
+<span class="nc bnc" id="L671" title="All 2 branches missed.">                for (Event other : activeList) {</span>
+                    // If textOffsetMillis is 0, we can skip this (no way to improve)
+<span class="nc bnc" id="L673" title="All 6 branches missed.">                    if (other == newEvent || other.getColumn() != col - 1 || other.getTextOffsetMillis() == 0)</span>
+<span class="nc" id="L674">                        continue;</span>
+<span class="nc" id="L675">                    long unobsuredOffsetOther = getUnobscuredDurationOffset(other, groupList, minimumDurationMillis);</span>
+<span class="nc bnc" id="L676" title="All 2 branches missed.">                    if (unobsuredOffsetOther == -1) {</span>
+                        // This should never happen!
+<span class="nc" id="L678">                        return -1;</span>
+                    }
+<span class="nc" id="L680">                    other.setTextOffsetMillis(unobsuredOffsetOther);</span>
+<span class="nc" id="L681">                }</span>
+                // Move other events from col - 1 to higher column
+<span class="nc bnc" id="L683" title="All 2 branches missed.">                for (Event other : groupList) {</span>
+<span class="nc bnc" id="L684" title="All 4 branches missed.">                    if (other == newEvent || other.getColumn() &lt; col - 1)</span>
+<span class="nc" id="L685">                        continue;</span>
+                    // Move other up
+<span class="nc" id="L687">                    other.setColumn(other.getColumn() + 1);</span>
+<span class="nc" id="L688">                }</span>
+                // Shift the bits in the mask to match the new column indices
+<span class="nc" id="L690">                long lowBits = colMask &amp; ((1L &lt;&lt; col) - 1);</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">                long highBits = col &lt; 63 ? (colMask &gt;&gt; col) &lt;&lt; (col + 1) : 0;</span>
+<span class="nc" id="L692">                colMask = lowBits | highBits;</span>
+<span class="nc" id="L693">                break;</span>
+<span class="nc bnc" id="L694" title="All 2 branches missed.">            } else if ((colMask &amp; (1L &lt;&lt; col)) != 0) {</span>
+                // Column is occupied, try next
+<span class="nc" id="L696">                continue;</span>
+<span class="nc bnc" id="L697" title="All 2 branches missed.">            } else if (col &gt;= maxColumns) {</span>
+                // No columns above this, insert newEvent here
+<span class="nc" id="L699">                newEvent.setTextOffsetMillis(0);</span>
+<span class="nc" id="L700">                break;</span>
+            } else {
+                // Column is free and newEvent is not completely obscuring any other event
+                // Check if events in higher columns completely obscure newEvent
+<span class="nc" id="L704">                long unobsuredOffset = getUnobscuredDurationOffset(newEvent, groupList, minimumDurationMillis);</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">                if (unobsuredOffset != -1) {</span>
+                    // newEvent not (completely) obscured by events in higher columns
+                    // Update textOffsetMillis and insert newEvent here
+<span class="nc" id="L708">                    newEvent.setTextOffsetMillis(unobsuredOffset);</span>
+<span class="nc" id="L709">                    break;</span>
+                }
+            }
+        }
+        // Update colMask
+<span class="nc" id="L714">        colMask |= (1L &lt;&lt; newEvent.getColumn());</span>
+<span class="nc" id="L715">        return colMask;</span>
+    }
+
+    /**
+     * Checks for a given event whether it has a timespan of at least minimumDurationMillis where no
+     * other event from groupList that is in a higher column is overlapping the given event.
+     * If the given event or another event from groupList is shorter than minimumDurationMillis,
+     * this function considers that event to be of duration minimumDurationMillis.
+     *
+     * @param event The event to check
+     * @param groupList All events from the current group sorted by their start time (ASC)
+     * @param minimumDurationMillis Min unobscured duration
+     * @return The offset of the start of the unobscured timespan relative to the event start time,
+     * or -1 if no timespan exists
+     */
+    private static long getUnobscuredDurationOffset(Event event, List&lt;Event&gt; groupList,
+            long minimumDurationMillis) {
+<span class="nc" id="L732">        long startUnobscured = event.getStartMillis();</span>
+        // Event is always displayed with duration of at least minimumDurationMillis
+<span class="nc" id="L734">        long eventEndMillis = Math.max(event.getEndMillis(), event.getStartMillis() + minimumDurationMillis);</span>
+<span class="nc bnc" id="L735" title="All 2 branches missed.">        for (Event other : groupList) {</span>
+<span class="nc bnc" id="L736" title="All 4 branches missed.">            if (event == other || other.getColumn() &lt;= event.getColumn())</span>
+<span class="nc" id="L737">                continue;</span>
+<span class="nc bnc" id="L738" title="All 2 branches missed.">            if (other.getStartMillis() &gt;= eventEndMillis)</span>
+<span class="nc" id="L739">                break;</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">            if (other.getStartMillis() - startUnobscured &gt;= minimumDurationMillis)</span>
+<span class="nc" id="L741">                return startUnobscured - event.getStartMillis();</span>
+<span class="nc" id="L742">            long otherEndMillis = Math.max(other.getEndMillis(), other.getStartMillis() + minimumDurationMillis);</span>
+<span class="nc" id="L743">            startUnobscured = Math.max(startUnobscured, otherEndMillis);</span>
+<span class="nc" id="L744">        }</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        if (eventEndMillis - startUnobscured &gt;= minimumDurationMillis) {</span>
+<span class="nc" id="L746">            return startUnobscured - event.getStartMillis();</span>
+        }
+<span class="nc" id="L748">        return -1;</span>
+    }
+
+    private static long removeAlldayActiveEvents(Event event, Iterator&lt;Event&gt; iter, long colMask) {
+        // Remove the inactive allday events. An event on the active list
+        // becomes inactive when the end day is less than the current event's
+        // start day.
+<span class="nc bnc" id="L755" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L756">            final Event active = iter.next();</span>
+<span class="nc bnc" id="L757" title="All 2 branches missed.">            if (active.endDay &lt; event.startDay) {</span>
+<span class="nc" id="L758">                colMask &amp;= ~(1L &lt;&lt; active.getColumn());</span>
+<span class="nc" id="L759">                iter.remove();</span>
+            }
+<span class="nc" id="L761">        }</span>
+<span class="nc" id="L762">        return colMask;</span>
+    }
+
+    private static long removeNonAlldayActiveEvents(
+            Event event, Iterator&lt;Event&gt; iter, long minDurationMillis, long colMask) {
+<span class="nc" id="L767">        long start = event.getStartMillis();</span>
+        // Remove the inactive events. An event on the active list
+        // becomes inactive when its end time is less than or equal to
+        // the current event's start time.
+<span class="nc bnc" id="L771" title="All 2 branches missed.">        while (iter.hasNext()) {</span>
+<span class="nc" id="L772">            final Event active = iter.next();</span>
+
+<span class="nc" id="L774">            final long duration = Math.max(</span>
+<span class="nc" id="L775">                    active.getEndMillis() - active.getStartMillis(), minDurationMillis);</span>
+<span class="nc bnc" id="L776" title="All 2 branches missed.">            if ((active.getStartMillis() + duration) &lt;= start) {</span>
+<span class="nc" id="L777">                colMask &amp;= ~(1L &lt;&lt; active.getColumn());</span>
+<span class="nc" id="L778">                iter.remove();</span>
+            }
+<span class="nc" id="L780">        }</span>
+<span class="nc" id="L781">        return colMask;</span>
+    }
+
+    @Override
+    public final Object clone() throws CloneNotSupportedException {
+<span class="nc" id="L786">        super.clone();</span>
+<span class="nc" id="L787">        Event e = new Event();</span>
+
+<span class="nc" id="L789">        e.title = title;</span>
+<span class="nc" id="L790">        e.color = color;</span>
+<span class="nc" id="L791">        e.location = location;</span>
+<span class="nc" id="L792">        e.allDay = allDay;</span>
+<span class="nc" id="L793">        e.startDay = startDay;</span>
+<span class="nc" id="L794">        e.endDay = endDay;</span>
+<span class="nc" id="L795">        e.startTime = startTime;</span>
+<span class="nc" id="L796">        e.endTime = endTime;</span>
+<span class="nc" id="L797">        e.startMillis = startMillis;</span>
+<span class="nc" id="L798">        e.endMillis = endMillis;</span>
+<span class="nc" id="L799">        e.hasAlarm = hasAlarm;</span>
+<span class="nc" id="L800">        e.isRepeating = isRepeating;</span>
+<span class="nc" id="L801">        e.status = status;</span>
+<span class="nc" id="L802">        e.selfAttendeeStatus = selfAttendeeStatus;</span>
+<span class="nc" id="L803">        e.organizer = organizer;</span>
+<span class="nc" id="L804">        e.guestsCanModify = guestsCanModify;</span>
+
+<span class="nc" id="L806">        return e;</span>
+    }
+
+    public final void copyTo(Event dest) {
+<span class="nc" id="L810">        dest.id = id;</span>
+<span class="nc" id="L811">        dest.title = title;</span>
+<span class="nc" id="L812">        dest.color = color;</span>
+<span class="nc" id="L813">        dest.location = location;</span>
+<span class="nc" id="L814">        dest.allDay = allDay;</span>
+<span class="nc" id="L815">        dest.startDay = startDay;</span>
+<span class="nc" id="L816">        dest.endDay = endDay;</span>
+<span class="nc" id="L817">        dest.startTime = startTime;</span>
+<span class="nc" id="L818">        dest.endTime = endTime;</span>
+<span class="nc" id="L819">        dest.startMillis = startMillis;</span>
+<span class="nc" id="L820">        dest.endMillis = endMillis;</span>
+<span class="nc" id="L821">        dest.hasAlarm = hasAlarm;</span>
+<span class="nc" id="L822">        dest.isRepeating = isRepeating;</span>
+<span class="nc" id="L823">        dest.status = status;</span>
+<span class="nc" id="L824">        dest.selfAttendeeStatus = selfAttendeeStatus;</span>
+<span class="nc" id="L825">        dest.organizer = organizer;</span>
+<span class="nc" id="L826">        dest.guestsCanModify = guestsCanModify;</span>
+<span class="nc" id="L827">    }</span>
+
+    public final void dump() {
+<span class="nc" id="L830">        Log.e(&quot;Cal&quot;, &quot;+-----------------------------------------+&quot;);</span>
+<span class="nc" id="L831">        Log.e(&quot;Cal&quot;, &quot;+        id = &quot; + id);</span>
+<span class="nc" id="L832">        Log.e(&quot;Cal&quot;, &quot;+     color = &quot; + color);</span>
+<span class="nc" id="L833">        Log.e(&quot;Cal&quot;, &quot;+     title = &quot; + title);</span>
+<span class="nc" id="L834">        Log.e(&quot;Cal&quot;, &quot;+  location = &quot; + location);</span>
+<span class="nc" id="L835">        Log.e(&quot;Cal&quot;, &quot;+    allDay = &quot; + allDay);</span>
+<span class="nc" id="L836">        Log.e(&quot;Cal&quot;, &quot;+  startDay = &quot; + startDay);</span>
+<span class="nc" id="L837">        Log.e(&quot;Cal&quot;, &quot;+    endDay = &quot; + endDay);</span>
+<span class="nc" id="L838">        Log.e(&quot;Cal&quot;, &quot;+ startTime = &quot; + startTime);</span>
+<span class="nc" id="L839">        Log.e(&quot;Cal&quot;, &quot;+   endTime = &quot; + endTime);</span>
+<span class="nc" id="L840">        Log.e(&quot;Cal&quot;, &quot;+ organizer = &quot; + organizer);</span>
+<span class="nc" id="L841">        Log.e(&quot;Cal&quot;, &quot;+  guestwrt = &quot; + guestsCanModify);</span>
+<span class="nc" id="L842">    }</span>
+
+    public final boolean intersects(int julianDay, int startMinute,
+            int endMinute) {
+<span class="nc bnc" id="L846" title="All 2 branches missed.">        if (endDay &lt; julianDay) {</span>
+<span class="nc" id="L847">            return false;</span>
+        }
+
+<span class="nc bnc" id="L850" title="All 2 branches missed.">        if (startDay &gt; julianDay) {</span>
+<span class="nc" id="L851">            return false;</span>
+        }
+
+<span class="nc bnc" id="L854" title="All 2 branches missed.">        if (endDay == julianDay) {</span>
+<span class="nc bnc" id="L855" title="All 2 branches missed.">            if (endTime &lt; startMinute) {</span>
+<span class="nc" id="L856">                return false;</span>
+            }
+            // An event that ends at the start minute should not be considered
+            // as intersecting the given time span, but don't exclude
+            // zero-length (or very short) events.
+<span class="nc bnc" id="L861" title="All 6 branches missed.">            if (endTime == startMinute</span>
+                    &amp;&amp; (startTime != endTime || startDay != endDay)) {
+<span class="nc" id="L863">                return false;</span>
+            }
+        }
+
+<span class="nc bnc" id="L867" title="All 4 branches missed.">        if (startDay == julianDay &amp;&amp; startTime &gt; endMinute) {</span>
+<span class="nc" id="L868">            return false;</span>
+        }
+
+<span class="nc" id="L871">        return true;</span>
+    }
+
+    /**
+     * Returns the event title and location separated by a comma.  If the
+     * location is already part of the title (at the end of the title), then
+     * just the title is returned.
+     *
+     * @return the event title and location as a String
+     */
+    public String getTitleAndLocation() {
+<span class="nc" id="L882">        String text = title.toString();</span>
+
+        // Append the location to the title, unless the title ends with the
+        // location (for example, &quot;meeting in building 42&quot; ends with the
+        // location).
+<span class="nc bnc" id="L887" title="All 2 branches missed.">        if (location != null) {</span>
+<span class="nc" id="L888">            String locationString = location.toString();</span>
+<span class="nc bnc" id="L889" title="All 2 branches missed.">            if (!text.endsWith(locationString)) {</span>
+<span class="nc" id="L890">                text += &quot;, &quot; + locationString;</span>
+            }
+        }
+<span class="nc" id="L893">        return text;</span>
+    }
+
+    public int getColumn() {
+<span class="nc" id="L897">        return mColumn;</span>
+    }
+
+    public void setColumn(int column) {
+<span class="nc" id="L901">        mColumn = column;</span>
+<span class="nc" id="L902">    }</span>
+
+    public int getMaxColumns() {
+<span class="nc" id="L905">        return mMaxColumns;</span>
+    }
+
+    public void setMaxColumns(int maxColumns) {
+<span class="nc" id="L909">        mMaxColumns = maxColumns;</span>
+<span class="nc" id="L910">    }</span>
+
+    public boolean isDrawStaggered() {
+<span class="nc" id="L913">        return mDrawStaggered;</span>
+    }
+
+    public void setDrawStaggered(boolean drawStaggered) {
+<span class="nc" id="L917">        mDrawStaggered = drawStaggered;</span>
+<span class="nc" id="L918">    }</span>
+
+    public long getStartMillis() {
+<span class="nc" id="L921">        return startMillis;</span>
+    }
+
+    public void setStartMillis(long startMillis) {
+<span class="nc" id="L925">        this.startMillis = startMillis;</span>
+<span class="nc" id="L926">    }</span>
+
+    public long getEndMillis() {
+<span class="nc" id="L929">        return endMillis;</span>
+    }
+
+    public void setEndMillis(long endMillis) {
+<span class="nc" id="L933">        this.endMillis = endMillis;</span>
+<span class="nc" id="L934">    }</span>
+
+    public long getTextOffsetMillis() {
+<span class="nc" id="L937">        return mTextOffsetMillis;</span>
+    }
+
+    public void setTextOffsetMillis(long textOffsetMillis) {
+<span class="nc" id="L941">        mTextOffsetMillis = textOffsetMillis;</span>
+<span class="nc" id="L942">    }</span>
+
+    public boolean drawAsAllday() {
+        // Use &gt;= so we'll pick up Exchange allday events
+<span class="nc bnc" id="L946" title="All 4 branches missed.">        return allDay || endMillis - startMillis &gt;= DateUtils.DAY_IN_MILLIS;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

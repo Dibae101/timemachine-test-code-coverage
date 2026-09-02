@@ -1,0 +1,612 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HighlightingEditor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Markor</a> &gt; <a href="index.source.html" class="el_package">net.gsantner.markor.frontend.textview</a> &gt; <span class="el_source">HighlightingEditor.java</span></div><h1>HighlightingEditor.java</h1><pre class="source lang-java linenums">/*#######################################################
+ *
+ *   Maintained 2017-2025 by Gregor Santner &lt;gsantner AT mailbox DOT org&gt;
+ *   License of this file: Apache 2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+#########################################################*/
+package net.gsantner.markor.frontend.textview;
+
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Rect;
+import android.os.Build;
+import android.os.Parcelable;
+import android.text.Editable;
+import android.text.InputFilter;
+import android.text.Layout;
+import android.text.TextWatcher;
+import android.util.AttributeSet;
+import android.util.Log;
+import android.view.ActionMode;
+import android.view.KeyEvent;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewTreeObserver;
+import android.view.accessibility.AccessibilityEvent;
+import android.widget.Toast;
+
+import androidx.annotation.ColorInt;
+import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
+import androidx.appcompat.widget.AppCompatEditText;
+
+import net.gsantner.markor.R;
+import net.gsantner.markor.activity.MainActivity;
+import net.gsantner.markor.model.AppSettings;
+import net.gsantner.opoc.format.GsTextUtils;
+import net.gsantner.opoc.wrapper.GsCallback;
+import net.gsantner.opoc.wrapper.GsTextWatcherAdapter;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+@SuppressWarnings(&quot;UnusedReturnValue&quot;)
+public class HighlightingEditor extends AppCompatEditText {
+
+    final static int HIGHLIGHT_SHIFT_LINES = 8;              // Lines to scroll before hl updated
+    final static float HIGHLIGHT_REGION_SIZE = 0.75f;        // Minimum extra screens to highlight (should be &gt; 0.5 to cover screen)
+
+    public final static String PLACE_CURSOR_HERE_TOKEN = &quot;%%PLACE_CURSOR_HERE%%&quot;;
+    public final static String INSERT_SELECTION_HERE_TOKEN = &quot;%%INSERT_SELECTION_HERE%%&quot;;
+
+<span class="nc" id="L61">    private boolean _accessibilityEnabled = true;</span>
+    private final boolean _isSpellingRedUnderline;
+    private SyntaxHighlighterBase _hl;
+    private Runnable _hlDebounced;        // Debounced runnable which recomputes highlighting
+    private boolean _hlEnabled;           // Whether highlighting is enabled
+    private final Rect _oldHlRect;        // Rect highlighting was previously applied to
+    private final Rect _hlRect;           // Current rect
+<span class="nc" id="L68">    private int _hlShiftThreshold = -1;   // How much to scroll before re-apply highlight</span>
+    private InputFilter _autoFormatFilter;
+    private TextWatcher _autoFormatModifier;
+    private boolean _autoFormatEnabled;
+<span class="nc" id="L72">    private boolean _saveInstanceState = true;</span>
+<span class="nc" id="L73">    private final ExecutorService executor = new ThreadPoolExecutor(0, 3, 60, TimeUnit.SECONDS, new SynchronousQueue&lt;&gt;());</span>
+<span class="nc" id="L74">    private final AtomicBoolean _textUnchangedWhileHighlighting = new AtomicBoolean(true);</span>
+    private int _textChangedNumber;
+<span class="nc" id="L76">    private final Runnable _textChangedRecorder = TextViewUtils.makeDebounced(getHandler(), 1000, () -&gt; _textChangedNumber++);</span>
+
+    public HighlightingEditor(Context context, AttributeSet attrs) {
+<span class="nc" id="L79">        super(context, attrs);</span>
+<span class="nc" id="L80">        final AppSettings as = AppSettings.get(context);</span>
+
+<span class="nc" id="L82">        setAutoFormatters(null, null);</span>
+
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        _isSpellingRedUnderline = !as.isDisableSpellingRedUnderline();</span>
+
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.P) {</span>
+<span class="nc" id="L87">            setFallbackLineSpacing(false);</span>
+        }
+
+<span class="nc" id="L90">        _hlEnabled = false;</span>
+<span class="nc" id="L91">        _oldHlRect = new Rect();</span>
+<span class="nc" id="L92">        _hlRect = new Rect();</span>
+
+<span class="nc" id="L94">        addTextChangedListener(new GsTextWatcherAdapter() {</span>
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+<span class="nc bnc" id="L98" title="All 4 branches missed.">                if (_hlEnabled &amp;&amp; _hl != null) {</span>
+<span class="nc" id="L99">                    _textUnchangedWhileHighlighting.set(false);</span>
+<span class="nc" id="L100">                    _hl.fixup(start, before, count);</span>
+                }
+<span class="nc" id="L102">            }</span>
+
+            @Override
+            public void afterTextChanged(final Editable s) {
+<span class="nc bnc" id="L106" title="All 6 branches missed.">                if (_hlEnabled &amp;&amp; _hl != null &amp;&amp; _hlDebounced != null) {</span>
+<span class="nc" id="L107">                    _hlDebounced.run();</span>
+                }
+<span class="nc" id="L109">                _textChangedRecorder.run();</span>
+<span class="nc" id="L110">            }</span>
+        });
+
+        // Listen to and update highlighting
+<span class="nc" id="L114">        final ViewTreeObserver observer = getViewTreeObserver();</span>
+<span class="nc" id="L115">        observer.addOnScrollChangedListener(this::updateHighlighting);</span>
+<span class="nc" id="L116">        observer.addOnGlobalLayoutListener(this::updateHighlighting);</span>
+
+        // Fix for Android 12 perf issues - https://github.com/gsantner/markor/discussions/1794
+<span class="nc" id="L119">        setEmojiCompatEnabled(false);</span>
+
+        // Custom options
+<span class="nc" id="L122">        setupCustomOptions();</span>
+<span class="nc" id="L123">    }</span>
+
+    @Override
+    public boolean onPreDraw() {
+        try {
+<span class="nc" id="L128">            return super.onPreDraw();</span>
+<span class="nc" id="L129">        } catch (OutOfMemoryError ignored) {</span>
+<span class="nc" id="L130">            return false; // return false to cancel current drawing pass/round</span>
+        }
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        try {
+<span class="nc" id="L137">            super.onDraw(canvas);</span>
+<span class="nc" id="L138">        } catch (Exception e) {</span>
+            // Hinder drawing from crashing the app
+<span class="nc" id="L140">            Log.e(getClass().getName(), &quot;HighlightingEdtior onDraw-&gt;super.onDraw crash&quot; + e);</span>
+<span class="nc" id="L141">            Toast.makeText(getContext(), e.toString(), Toast.LENGTH_SHORT).show();</span>
+<span class="nc" id="L142">        }</span>
+<span class="nc" id="L143">    }</span>
+
+    // Highlighting
+    // ---------------------------------------------------------------------------------------------
+
+    // Batch edit spans (or anything else, really)
+    // This triggers a reflow which will bring focus back to the cursor.
+    // Therefore it cannot be used for updating the highlighting as one scrolls
+    private void batch(final Runnable runnable) {
+        try {
+<span class="nc" id="L153">            beginBatchEdit();</span>
+<span class="nc" id="L154">            runnable.run();</span>
+        } finally {
+<span class="nc" id="L156">            endBatchEdit();</span>
+        }
+<span class="nc" id="L158">    }</span>
+
+    private boolean isScrollSignificant() {
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        return Math.abs(_oldHlRect.top - _hlRect.top) &gt; _hlShiftThreshold ||</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                Math.abs(_hlRect.bottom - _oldHlRect.bottom) &gt; _hlShiftThreshold;</span>
+    }
+
+    // The order of tests here is important
+    // - we want to run getLocalVisibleRect even if recompute is true
+    // - we want to run isScrollSignificant after getLocalVisibleRect
+    // - We don't care about the presence of spans or scroll significance if recompute is true
+    private boolean runHighlight(final boolean recompute) {
+<span class="nc bnc" id="L170" title="All 4 branches missed.">        return _hl != null &amp;&amp; getLayout() != null &amp;&amp;</span>
+<span class="nc bnc" id="L171" title="All 6 branches missed.">                (getLocalVisibleRect(_hlRect) || recompute) &amp;&amp;</span>
+<span class="nc bnc" id="L172" title="All 4 branches missed.">                (recompute || _hl.hasSpans()) &amp;&amp;</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                (recompute || isScrollSignificant());</span>
+    }
+
+    private void updateHighlighting() {
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (runHighlight(false)) {</span>
+            // Do not batch as we do not want to reflow
+<span class="nc" id="L179">            _hl.clearDynamic().applyDynamic(hlRegion());</span>
+<span class="nc" id="L180">            _oldHlRect.set(_hlRect);</span>
+        }
+<span class="nc" id="L182">    }</span>
+
+    public void recomputeHighlighting() {
+<span class="nc bnc" id="L185" title="All 4 branches missed.">        if (_hlEnabled &amp;&amp; runHighlight(true)) {</span>
+<span class="nc" id="L186">            batch(() -&gt; _hl</span>
+<span class="nc" id="L187">                    .clearDynamic()</span>
+<span class="nc" id="L188">                    .clearStatic(false)</span>
+<span class="nc" id="L189">                    .recompute()</span>
+<span class="nc" id="L190">                    .addAdditional(_matches)</span>
+<span class="nc" id="L191">                    .applyStatic()</span>
+<span class="nc" id="L192">                    .applyDynamic(hlRegion())</span>
+            );
+        }
+<span class="nc" id="L195">    }</span>
+
+    /**
+     * Computing the highlighting spans for a lot of text can be slow so we do it async
+     * 1. We set a flag to check that the text did not change when we were computing
+     * 2. We trigger the computation to a buffer
+     * 3. If the text did not change during computation, we apply the highlighting
+     */
+    private void recomputeHighlightingAsync() {
+<span class="nc bnc" id="L204" title="All 4 branches missed.">        if (_hlEnabled &amp;&amp; runHighlight(true)) {</span>
+            try {
+<span class="nc" id="L206">                executor.execute(this::_recomputeHighlightingWorker);</span>
+<span class="nc" id="L207">            } catch (RejectedExecutionException ignored) {</span>
+<span class="nc" id="L208">            }</span>
+        }
+<span class="nc" id="L210">    }</span>
+
+    private synchronized void _recomputeHighlightingWorker() {
+<span class="nc" id="L213">        _textUnchangedWhileHighlighting.set(true);</span>
+<span class="nc" id="L214">        _hl.compute();</span>
+<span class="nc" id="L215">        post(() -&gt; {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (_textUnchangedWhileHighlighting.get()) {</span>
+<span class="nc" id="L217">                batch(() -&gt; _hl</span>
+<span class="nc" id="L218">                        .clearStatic(false)</span>
+<span class="nc" id="L219">                        .clearDynamic()</span>
+<span class="nc" id="L220">                        .setComputed()</span>
+<span class="nc" id="L221">                        .addAdditional(_matches)</span>
+<span class="nc" id="L222">                        .applyStatic()</span>
+<span class="nc" id="L223">                        .applyDynamic(hlRegion())</span>
+                );
+            }
+<span class="nc" id="L226">        });</span>
+<span class="nc" id="L227">    }</span>
+
+    public void setHighlighter(final SyntaxHighlighterBase newHighlighter) {
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L231">            _hl.clearDynamic().clearStatic(true);</span>
+        }
+
+<span class="nc" id="L234">        _hl = newHighlighter;</span>
+
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L237">            initHighlighter();</span>
+<span class="nc" id="L238">            _hlDebounced = TextViewUtils.makeDebounced(getHandler(), _hl.getHighlightingDelay(), this::recomputeHighlightingAsync);</span>
+<span class="nc" id="L239">            recomputeHighlighting();</span>
+        } else {
+<span class="nc" id="L241">            _hlDebounced = null;</span>
+        }
+<span class="nc" id="L243">    }</span>
+
+    public void initHighlighter() {
+<span class="nc" id="L246">        final Paint paint = getPaint();</span>
+<span class="nc" id="L247">        _hlShiftThreshold = Math.round(paint.getTextSize() * HIGHLIGHT_SHIFT_LINES);</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L249">            _hl.setSpannable(getText()).configure(paint);</span>
+        }
+<span class="nc" id="L251">    }</span>
+
+    public SyntaxHighlighterBase getHighlighter() {
+<span class="nc" id="L254">        return _hl;</span>
+    }
+
+    public boolean getHighlightingEnabled() {
+<span class="nc" id="L258">        return _hlEnabled;</span>
+    }
+
+    public boolean setHighlightingEnabled(final boolean enable) {
+<span class="nc" id="L262">        final boolean prev = _hlEnabled;</span>
+<span class="nc bnc" id="L263" title="All 4 branches missed.">        if (enable &amp;&amp; !_hlEnabled) {</span>
+<span class="nc" id="L264">            _hlEnabled = true;</span>
+<span class="nc" id="L265">            initHighlighter();</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (_hlDebounced != null) {</span>
+<span class="nc" id="L267">                _hlDebounced.run();</span>
+            }
+<span class="nc bnc" id="L269" title="All 4 branches missed.">        } else if (!enable &amp;&amp; _hlEnabled) {</span>
+<span class="nc" id="L270">            _hlEnabled = false;</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            if (_hl != null) {</span>
+<span class="nc" id="L272">                _hl.clearDynamic().clearStatic(true).clearComputed();</span>
+            }
+        }
+<span class="nc" id="L275">        return prev;</span>
+    }
+
+    // Region to highlight
+    private int[] hlRegion() {
+<span class="nc" id="L280">        final int hlSize = Math.round(HIGHLIGHT_REGION_SIZE * _hlRect.height()) + _hlShiftThreshold;</span>
+<span class="nc" id="L281">        final int startY = _hlRect.centerY() - hlSize;</span>
+<span class="nc" id="L282">        final int endY = _hlRect.centerY() + hlSize;</span>
+<span class="nc" id="L283">        return new int[]{rowStart(startY), rowEnd(endY)};</span>
+    }
+
+    private int rowStart(final int y) {
+<span class="nc" id="L287">        final Layout layout = getLayout();</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        return layout == null ? 0 : layout.getLineStart(layout.getLineForVertical(y));</span>
+    }
+
+    private int rowEnd(final int y) {
+<span class="nc" id="L292">        final Layout layout = getLayout();</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        return layout == null ? 0 : layout.getLineEnd(layout.getLineForVertical(y));</span>
+    }
+
+    // Additional highlight for search / replace etc
+    // ---------------------------------------------------------------------------------------------
+
+    // for highlight text search matches/occurrences
+<span class="nc" id="L300">    private final List&lt;SyntaxHighlighterBase.SpanGroup&gt; _matches = new ArrayList&lt;&gt;();</span>
+
+    public void setSearchMatches(List&lt;SyntaxHighlighterBase.SpanGroup&gt; spanGroups) {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L304">            _hl.clearAdditional(_matches);</span>
+        }
+<span class="nc" id="L306">        _matches.clear();</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (spanGroups != null) {</span>
+<span class="nc" id="L308">            _matches.addAll(spanGroups);</span>
+        }
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L311">            _hl.addAdditional(_matches);</span>
+        }
+<span class="nc" id="L313">    }</span>
+
+    public void removeSearchMatch(SyntaxHighlighterBase.SpanGroup spanGroup) {
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L317">            _hl.clearDynamic().clearAdditional(spanGroup);</span>
+        }
+<span class="nc" id="L319">        _matches.remove(spanGroup);</span>
+<span class="nc" id="L320">    }</span>
+
+    public void clearSearchMatches() {
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L324">            _hl.clearDynamic().clearAdditional(_matches).applyDynamic(hlRegion());</span>
+        }
+<span class="nc" id="L326">        _matches.clear();</span>
+<span class="nc" id="L327">    }</span>
+
+    public void applyDynamicHighlight() {
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L331">            _hl.clearDynamic().applyDynamic(hlRegion());</span>
+        }
+<span class="nc" id="L333">    }</span>
+
+    // for highlight find-in-selection region
+<span class="nc" id="L336">    private SyntaxHighlighterBase.SpanGroup _searchSelection = null;</span>
+
+    public void addSearchSelection(final int start, final int end, final @ColorInt int color) {
+<span class="nc" id="L339">        _searchSelection = SyntaxHighlighterBase.createBackgroundHighlight(start, end, color);</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L341">            _hl.addAdditional(_searchSelection);</span>
+        }
+<span class="nc" id="L343">    }</span>
+
+    public void clearSearchSelection() {
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        if (_hl != null) {</span>
+<span class="nc" id="L347">            _hl.clearDynamic().clearAdditional(_searchSelection);</span>
+<span class="nc" id="L348">            _searchSelection = null;</span>
+        }
+<span class="nc" id="L350">    }</span>
+
+    // Various overrides
+    // ---------------------------------------------------------------------------------------------
+    public void setSaveInstanceState(final boolean save) {
+<span class="nc" id="L355">        _saveInstanceState = save;</span>
+<span class="nc" id="L356">    }</span>
+
+    @Override
+    public Parcelable onSaveInstanceState() {
+        // Call is always required
+<span class="nc" id="L361">        final Parcelable state = super.onSaveInstanceState();</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        return _saveInstanceState ? state : null;</span>
+    }
+
+    @Override
+    protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+<span class="nc" id="L367">        super.onVisibilityChanged(changedView, visibility);</span>
+<span class="nc bnc" id="L368" title="All 4 branches missed.">        if (changedView == this &amp;&amp; visibility == View.VISIBLE) {</span>
+<span class="nc" id="L369">            recomputeHighlighting();</span>
+        }
+<span class="nc" id="L371">    }</span>
+
+    @Override
+    public void setTextSize(float size) {
+<span class="nc" id="L375">        super.setTextSize(size);</span>
+<span class="nc" id="L376">        initHighlighter();</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">        if (_hlDebounced != null) {</span>
+<span class="nc" id="L378">            _hlDebounced.run();</span>
+        }
+<span class="nc" id="L380">    }</span>
+
+    @Override
+    public void setText(final CharSequence text, final BufferType type) {
+<span class="nc" id="L384">        super.setText(text, type);</span>
+<span class="nc" id="L385">        initHighlighter();</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        if (_hlDebounced != null) {</span>
+<span class="nc" id="L387">            _hlDebounced.run();</span>
+        }
+<span class="nc" id="L389">    }</span>
+
+    @Override
+    public boolean onTextContextMenuItem(int id) {
+        // Copy-paste fix by bad rich-text pasting - example text from code at https://plantuml.com/activity-diagram-beta
+<span class="nc bnc" id="L394" title="All 4 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.M &amp;&amp; id == android.R.id.paste) {</span>
+<span class="nc" id="L395">            id = android.R.id.pasteAsPlainText;</span>
+        }
+        try {
+            // i.e. DeadSystemRuntimeException can happen here
+<span class="nc" id="L399">            return super.onTextContextMenuItem(id);</span>
+<span class="nc" id="L400">        } catch (Exception ignored) {</span>
+<span class="nc" id="L401">            return true;</span>
+        }
+    }
+
+    // Accessibility code is blocked during rapid update events
+    // such as highlighting and some actions.
+    // This prevents errors and potential crashes.
+    @Override
+    public void sendAccessibilityEventUnchecked(AccessibilityEvent event) {
+<span class="nc bnc" id="L410" title="All 4 branches missed.">        if (_accessibilityEnabled &amp;&amp; length() &lt; 10000) {</span>
+<span class="nc" id="L411">            super.sendAccessibilityEventUnchecked(event);</span>
+        }
+<span class="nc" id="L413">    }</span>
+
+    // Hleditor will report that it is not autofillable under certain circumstances
+    @RequiresApi(api = Build.VERSION_CODES.O)
+    @Override
+    public int getAutofillType() {
+<span class="nc bnc" id="L419" title="All 4 branches missed.">        if (_accessibilityEnabled &amp;&amp; length() &lt; 10000) {</span>
+<span class="nc" id="L420">            return super.getAutofillType();</span>
+        } else {
+<span class="nc" id="L422">            return View.AUTOFILL_TYPE_NONE;</span>
+        }
+    }
+
+    @Override
+    public boolean isSuggestionsEnabled() {
+<span class="nc bnc" id="L428" title="All 4 branches missed.">        return _isSpellingRedUnderline &amp;&amp; super.isSuggestionsEnabled();</span>
+    }
+
+    @Override
+    public void setSelection(int index) {
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        if (indexesValid(index)) {</span>
+<span class="nc" id="L434">            super.setSelection(index);</span>
+        }
+<span class="nc" id="L436">    }</span>
+
+    @Override
+    public void setSelection(int start, int stop) {
+<span class="nc bnc" id="L440" title="All 2 branches missed.">        if (indexesValid(start, stop)) {</span>
+<span class="nc" id="L441">            super.setSelection(start, stop);</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        } else if (indexesValid(start, stop - 1)) {</span>
+<span class="nc" id="L443">            super.setSelection(start, stop - 1);</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        } else if (indexesValid(start + 1, stop)) {</span>
+<span class="nc" id="L445">            super.setSelection(start + 1, stop);</span>
+        }
+<span class="nc" id="L447">    }</span>
+
+    @Override
+    protected void onSelectionChanged(int selStart, int selEnd) {
+<span class="nc" id="L451">        super.onSelectionChanged(selStart, selEnd);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if (MainActivity.IS_DEBUG_ENABLED) {</span>
+<span class="nc" id="L453">            AppSettings.appendDebugLog(&quot;Selection changed: &quot; + selStart + &quot;-&gt;&quot; + selEnd);</span>
+        }
+<span class="nc" id="L455">    }</span>
+
+    @Override
+    protected void onMeasure(final int widthMeasureSpec, final int heightMeasureSpec) {
+<span class="nc" id="L459">        super.onMeasure(widthMeasureSpec, heightMeasureSpec);</span>
+<span class="nc" id="L460">    }</span>
+
+
+    // Auto-format
+    // ---------------------------------------------------------------------------------------------
+
+    public void setAutoFormatters(final InputFilter inputFilter, final TextWatcher modifier) {
+<span class="nc" id="L467">        final boolean state = getAutoFormatEnabled();</span>
+<span class="nc" id="L468">        setAutoFormatEnabled(false); // Remove any existing modifiers if applied</span>
+<span class="nc" id="L469">        _autoFormatFilter = inputFilter;</span>
+<span class="nc" id="L470">        _autoFormatModifier = modifier;</span>
+<span class="nc" id="L471">        setAutoFormatEnabled(state); // Restore state</span>
+<span class="nc" id="L472">    }</span>
+
+    public boolean getAutoFormatEnabled() {
+<span class="nc" id="L475">        return _autoFormatEnabled;</span>
+    }
+
+    public void setAutoFormatEnabled(final boolean enable) {
+<span class="nc bnc" id="L479" title="All 4 branches missed.">        if (enable &amp;&amp; !_autoFormatEnabled) {</span>
+<span class="nc" id="L480">            TextViewUtils.addFilter(this, _autoFormatFilter);</span>
+
+<span class="nc bnc" id="L482" title="All 2 branches missed.">            if (_autoFormatModifier != null) {</span>
+<span class="nc" id="L483">                addTextChangedListener(_autoFormatModifier);</span>
+            }
+
+<span class="nc bnc" id="L486" title="All 4 branches missed.">        } else if (!enable &amp;&amp; _autoFormatEnabled) {</span>
+<span class="nc" id="L487">            TextViewUtils.removeFilter(this, _autoFormatFilter);</span>
+
+<span class="nc bnc" id="L489" title="All 2 branches missed.">            if (_autoFormatModifier != null) {</span>
+<span class="nc" id="L490">                removeTextChangedListener(_autoFormatModifier);</span>
+            }
+        }
+<span class="nc" id="L493">        _autoFormatEnabled = enable;</span>
+<span class="nc" id="L494">    }</span>
+
+    // Run some code with auto formatters and accessibility disabled
+    public void withAutoFormatDisabled(final GsCallback.a0 callback) {
+<span class="nc" id="L498">        final boolean enabled = getAutoFormatEnabled();</span>
+        try {
+<span class="nc" id="L500">            _accessibilityEnabled = false;</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">            if (enabled) {</span>
+<span class="nc" id="L502">                setAutoFormatEnabled(false);</span>
+            }
+<span class="nc" id="L504">            callback.callback();</span>
+        } finally {
+<span class="nc" id="L506">            setAutoFormatEnabled(enabled);</span>
+<span class="nc" id="L507">            _accessibilityEnabled = true;</span>
+        }
+<span class="nc" id="L509">    }</span>
+
+    // Utility functions for interaction
+    // ---------------------------------------------------------------------------------------------
+
+    public void selectLines() {
+<span class="nc" id="L515">        final int[] sel = TextViewUtils.getLineSelection(this);</span>
+<span class="nc" id="L516">        setSelection(sel[0], sel[1]);</span>
+<span class="nc" id="L517">    }</span>
+
+    public void simulateKeyPress(int keyEvent_KEYCODE_SOMETHING) {
+<span class="nc" id="L520">        dispatchKeyEvent(new KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keyEvent_KEYCODE_SOMETHING, 0));</span>
+<span class="nc" id="L521">        dispatchKeyEvent(new KeyEvent(0, 0, KeyEvent.ACTION_UP, keyEvent_KEYCODE_SOMETHING, 0));</span>
+<span class="nc" id="L522">    }</span>
+
+    public void insertOrReplaceTextOnCursor(final String newText) {
+<span class="nc" id="L525">        final Editable edit = getText();</span>
+<span class="nc bnc" id="L526" title="All 4 branches missed.">        if (edit != null &amp;&amp; newText != null) {</span>
+
+            // Fill in any instances of selection
+<span class="nc" id="L529">            final int[] sel = TextViewUtils.getSelection(this);</span>
+<span class="nc" id="L530">            final CharSequence selected = TextViewUtils.toString(edit, sel[0], sel[1]);</span>
+<span class="nc" id="L531">            String expanded = newText.replace(INSERT_SELECTION_HERE_TOKEN, selected);</span>
+
+            // Determine where to place the cursor
+<span class="nc" id="L534">            final int newCursorPos = expanded.indexOf(PLACE_CURSOR_HERE_TOKEN);</span>
+<span class="nc" id="L535">            final String finalText = expanded.replace(PLACE_CURSOR_HERE_TOKEN, &quot;&quot;);</span>
+
+<span class="nc" id="L537">            sel[0] = Math.max(sel[0], 0);</span>
+
+            // Needed to prevent selection of whole of inserted text after replace
+            // if we want a cursor position instead
+<span class="nc bnc" id="L541" title="All 2 branches missed.">            if (newCursorPos &gt;= 0) {</span>
+<span class="nc" id="L542">                setSelection(sel[0]);</span>
+            }
+
+<span class="nc" id="L545">            withAutoFormatDisabled(() -&gt; edit.replace(sel[0], sel[1], finalText));</span>
+
+<span class="nc bnc" id="L547" title="All 2 branches missed.">            if (newCursorPos &gt;= 0) {</span>
+<span class="nc" id="L548">                setSelection(sel[0] + newCursorPos);</span>
+<span class="nc" id="L549">                postDelayed(() -&gt; TextViewUtils.showSelection(this), 500);</span>
+            }
+        }
+<span class="nc" id="L552">    }</span>
+
+    public int moveCursorToEndOfLine(int offset) {
+<span class="nc" id="L555">        simulateKeyPress(KeyEvent.KEYCODE_MOVE_END);</span>
+<span class="nc" id="L556">        setSelection(getSelectionStart() + offset);</span>
+<span class="nc" id="L557">        return getSelectionStart();</span>
+    }
+
+    public int moveCursorToBeginOfLine(int offset) {
+<span class="nc" id="L561">        simulateKeyPress(KeyEvent.KEYCODE_MOVE_HOME);</span>
+<span class="nc" id="L562">        setSelection(getSelectionStart() + offset);</span>
+<span class="nc" id="L563">        return getSelectionStart();</span>
+    }
+
+    public boolean indexesValid(int... indexes) {
+<span class="nc" id="L567">        return GsTextUtils.inRange(0, length(), indexes);</span>
+    }
+
+    private void setupCustomOptions() {
+<span class="nc" id="L571">        setCustomSelectionActionModeCallback(new ActionMode.Callback() {</span>
+            @Override
+            public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                // Add custom items programmatically
+<span class="nc" id="L575">                menu.add(0, R.string.option_select_lines, 0, &quot;☰&quot;);</span>
+<span class="nc" id="L576">                return true;</span>
+            }
+
+            @Override
+            public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                // Modify menu items here if necessary
+<span class="nc" id="L582">                return true;</span>
+            }
+
+            @Override
+            public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                if (item.getItemId() == R.string.option_select_lines) {</span>
+<span class="nc" id="L588">                    HighlightingEditor.this.selectLines();</span>
+<span class="nc" id="L589">                    return true;</span>
+                }
+<span class="nc" id="L591">                return false;</span>
+            }
+
+            @Override
+            public void onDestroyActionMode(ActionMode mode) {
+                // Cleanup if needed
+<span class="nc" id="L597">            }</span>
+        });
+<span class="nc" id="L599">    }</span>
+
+    /**
+     * Get a number representing the current text changed state.
+     * This number will increase by 1 every time the text is changed.
+     * This is lighter weight than hash to represent text changed state.
+     *
+     * @return the number representing text last changed state, update time error within 1000ms.
+     */
+    public int getTextChangedNumber() {
+<span class="nc" id="L609">        return _textChangedNumber;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

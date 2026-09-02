@@ -1,0 +1,562 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>IndexV1Parser.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.index</a> &gt; <span class="el_source">IndexV1Parser.kt</span></div><h1>IndexV1Parser.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.index
+
+import android.content.res.Resources
+import androidx.core.os.ConfigurationCompat.getLocales
+import androidx.core.os.LocaleListCompat
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.JsonToken
+import com.looker.droidify.model.Product
+import com.looker.droidify.model.Product.Donate.Bitcoin
+import com.looker.droidify.model.Product.Donate.Liberapay
+import com.looker.droidify.model.Product.Donate.Litecoin
+import com.looker.droidify.model.Product.Donate.OpenCollective
+import com.looker.droidify.model.Product.Donate.Regular
+import com.looker.droidify.model.Product.Screenshot.Type.LARGE_TABLET
+import com.looker.droidify.model.Product.Screenshot.Type.PHONE
+import com.looker.droidify.model.Product.Screenshot.Type.SMALL_TABLET
+import com.looker.droidify.model.Product.Screenshot.Type.TV
+import com.looker.droidify.model.Product.Screenshot.Type.VIDEO
+import com.looker.droidify.model.Product.Screenshot.Type.WEAR
+import com.looker.droidify.model.Release
+import com.looker.droidify.utility.common.SdkCheck
+import com.looker.droidify.utility.common.extension.Json
+import com.looker.droidify.utility.common.extension.collectDistinctNotEmptyStrings
+import com.looker.droidify.utility.common.extension.collectNotNull
+import com.looker.droidify.utility.common.extension.forEach
+import com.looker.droidify.utility.common.extension.forEachKey
+import com.looker.droidify.utility.common.extension.illegal
+import com.looker.droidify.utility.common.nullIfEmpty
+import java.io.InputStream
+
+object IndexV1Parser {
+    interface Callback {
+        fun onRepository(
+            mirrors: List&lt;String&gt;,
+            name: String,
+            description: String,
+            version: Int,
+            timestamp: Long,
+        )
+
+        fun onProduct(product: Product)
+        fun onReleases(packageName: String, releases: List&lt;Release&gt;)
+    }
+
+<span class="fc" id="L45">    private class Screenshots(</span>
+<span class="fc" id="L46">        val video: List&lt;String&gt;,</span>
+<span class="fc" id="L47">        val phone: List&lt;String&gt;,</span>
+<span class="fc" id="L48">        val smallTablet: List&lt;String&gt;,</span>
+<span class="fc" id="L49">        val largeTablet: List&lt;String&gt;,</span>
+<span class="fc" id="L50">        val wear: List&lt;String&gt;,</span>
+<span class="fc" id="L51">        val tv: List&lt;String&gt;,</span>
+    )
+
+<span class="fc" id="L54">    private class Localized(</span>
+<span class="fc" id="L55">        val name: String,</span>
+<span class="fc" id="L56">        val summary: String,</span>
+<span class="fc" id="L57">        val description: String,</span>
+<span class="fc" id="L58">        val whatsNew: String,</span>
+<span class="fc" id="L59">        val metadataIcon: String,</span>
+<span class="fc" id="L60">        val screenshots: Screenshots?,</span>
+    )
+
+    private fun &lt;T&gt; Map&lt;String, Localized&gt;.getAndCall(
+        key: String,
+        callback: (String, Localized) -&gt; T?,
+    ): T? {
+<span class="fc bfc" id="L67" title="All 2 branches covered.">        return this[key]?.let { callback(key, it) }</span>
+    }
+
+    /**
+     * Gets the best localization for the given [localeList]
+     * from collections.
+     */
+    private fun &lt;T&gt; Map&lt;String, T&gt;?.getBestLocale(localeList: LocaleListCompat): T? {
+<span class="pc bpc" id="L75" title="1 of 6 branches missed.">        if (isNullOrEmpty()) return null</span>
+<span class="pc bpc" id="L76" title="1 of 2 branches missed.">        val firstMatch = localeList.getFirstMatch(keys.toTypedArray()) ?: return null</span>
+<span class="fc" id="L77">        val tag = firstMatch.toLanguageTag()</span>
+        // try first matched tag first (usually has region tag, e.g. de-DE)
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        return get(tag) ?: run {</span>
+            // split away stuff like script and try language and region only
+<span class="fc" id="L81">            val langCountryTag = &quot;${firstMatch.language}-${firstMatch.country}&quot;</span>
+<span class="pc bpc" id="L82" title="1 of 2 branches missed.">            getOrStartsWith(langCountryTag) ?: run {</span>
+                // split away region tag and try language only
+<span class="fc" id="L84">                val langTag = firstMatch.language</span>
+                // try language, then English and then just take the first of the list
+<span class="pc bpc" id="L86" title="5 of 6 branches missed.">                getOrStartsWith(langTag) ?: get(&quot;en-US&quot;) ?: get(&quot;en&quot;) ?: values.first()</span>
+<span class="fc" id="L87">            }</span>
+        }
+    }
+
+    /**
+     * Returns the value from the map with the given key or if that key is not contained in the map,
+     * tries the first map key that starts with the given key.
+     * If nothing matches, null is returned.
+     *
+     * This is useful when looking for a language tag like `fr_CH` and falling back to `fr`
+     * in a map that has `fr_FR` as a key.
+     */
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">    private fun &lt;T&gt; Map&lt;String, T&gt;.getOrStartsWith(s: String): T? = get(s) ?: run {</span>
+<span class="fc" id="L100">        entries.forEach { (key, value) -&gt;</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">            if (key.startsWith(s)) return value</span>
+<span class="fc" id="L102">        }</span>
+<span class="fc" id="L103">        return null</span>
+<span class="nc" id="L104">    }</span>
+
+    private fun &lt;T&gt; Map&lt;String, Localized&gt;.find(callback: (String, Localized) -&gt; T?): T? {
+<span class="fc bfc" id="L107" title="All 4 branches covered.">        return getAndCall(&quot;en-US&quot;, callback)</span>
+<span class="fc" id="L108">            ?: getAndCall(&quot;en_US&quot;, callback)</span>
+<span class="fc" id="L109">            ?: getAndCall(&quot;en&quot;, callback)</span>
+    }
+
+    private fun &lt;T&gt; Map&lt;String, Localized&gt;.findLocalized(callback: (Localized) -&gt; T?): T? {
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        return getBestLocale(getLocales(Resources.getSystem().configuration))?.let { callback(it) }</span>
+    }
+
+    private fun Map&lt;String, Localized&gt;.findString(
+        fallback: String,
+        callback: (Localized) -&gt; String,
+    ): String {
+<span class="fc bfc" id="L120" title="All 2 branches covered.">        return (find { _, localized -&gt; callback(localized).nullIfEmpty() } ?: fallback).trim()</span>
+    }
+
+    private fun Map&lt;String, Localized&gt;.findLocalizedString(
+        fallback: String,
+        callback: (Localized) -&gt; String,
+    ): String {
+        // In index-v1 a top-level name/summary/description overrides all localized values
+        // https://gitlab.com/fdroid/fdroidserver/-/issues/1241
+        // https://github.com/Droid-ify/client/issues/980
+<span class="fc bfc" id="L130" title="All 4 branches covered.">        if (fallback.isNotBlank()) return fallback.trim()</span>
+        // @BLumia: it's possible a key of a certain Localized object is empty, so we still need a fallback
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        return findLocalized { localized -&gt; callback(localized).trim().nullIfEmpty() }</span>
+<span class="fc" id="L133">            ?: findString(&quot;&quot;, callback).trim()</span>
+    }
+
+    internal object DonateComparator : Comparator&lt;Product.Donate&gt; {
+<span class="fc" id="L137">        private val classes = listOf(</span>
+<span class="fc" id="L138">            Regular::class,</span>
+            Bitcoin::class,
+            Litecoin::class,
+            Liberapay::class,
+            OpenCollective::class,
+        )
+
+        override fun compare(donate1: Product.Donate, donate2: Product.Donate): Int {
+<span class="fc" id="L146">            val index1 = classes.indexOf(donate1::class)</span>
+<span class="fc" id="L147">            val index2 = classes.indexOf(donate2::class)</span>
+<span class="fc" id="L148">            return when {</span>
+<span class="pc bpc" id="L149" title="2 of 4 branches missed.">                index1 &gt;= 0 &amp;&amp; index2 == -1 -&gt; -1</span>
+<span class="pc bpc" id="L150" title="2 of 4 branches missed.">                index2 &gt;= 0 &amp;&amp; index1 == -1 -&gt; 1</span>
+<span class="fc" id="L151">                else -&gt; index1.compareTo(index2)</span>
+            }
+        }
+    }
+
+    private const val DICT_REPO = &quot;repo&quot;
+    private const val DICT_PRODUCT = &quot;apps&quot;
+    private const val DICT_RELEASE = &quot;packages&quot;
+
+    private const val KEY_REPO_ADDRESS = &quot;address&quot;
+    private const val KEY_REPO_MIRRORS = &quot;mirrors&quot;
+    private const val KEY_REPO_NAME = &quot;name&quot;
+    private const val KEY_REPO_DESC = &quot;description&quot;
+    private const val KEY_REPO_VER = &quot;version&quot;
+    private const val KEY_REPO_TIME = &quot;timestamp&quot;
+
+    fun parse(repositoryId: Long, inputStream: InputStream, callback: Callback) {
+<span class="fc" id="L168">        val jsonParser = Json.factory.createParser(inputStream)</span>
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">        if (jsonParser.nextToken() != JsonToken.START_OBJECT) {</span>
+<span class="nc" id="L170">            jsonParser.illegal()</span>
+        } else {
+<span class="fc" id="L172">            jsonParser.forEachKey { key -&gt;</span>
+<span class="fc" id="L173">                when {</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">                    key.dictionary(DICT_REPO) -&gt; {</span>
+<span class="fc" id="L175">                        var address = &quot;&quot;</span>
+<span class="fc" id="L176">                        var mirrors = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L177">                        var name = &quot;&quot;</span>
+<span class="fc" id="L178">                        var description = &quot;&quot;</span>
+<span class="fc" id="L179">                        var version = 0</span>
+<span class="fc" id="L180">                        var timestamp = 0L</span>
+<span class="fc" id="L181">                        forEachKey {</span>
+<span class="fc" id="L182">                            when {</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">                                it.string(KEY_REPO_ADDRESS) -&gt; address = valueAsString</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">                                it.array(KEY_REPO_MIRRORS) -&gt;</span>
+<span class="fc" id="L185">                                    mirrors =</span>
+<span class="fc" id="L186">                                        collectDistinctNotEmptyStrings()</span>
+
+<span class="fc bfc" id="L188" title="All 2 branches covered.">                                it.string(KEY_REPO_NAME) -&gt; name = valueAsString</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">                                it.string(KEY_REPO_DESC) -&gt; description = valueAsString</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">                                it.number(KEY_REPO_VER) -&gt; version = valueAsInt</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">                                it.number(KEY_REPO_TIME) -&gt; timestamp = valueAsLong</span>
+<span class="fc" id="L192">                                else -&gt; skipChildren()</span>
+                            }
+<span class="fc" id="L194">                        }</span>
+<span class="fc" id="L195">                        val realMirrors = (</span>
+<span class="pc bpc" id="L196" title="2 of 4 branches missed.">                            if (address.isNotEmpty()) {</span>
+<span class="fc" id="L197">                                listOf(address)</span>
+                            } else {
+<span class="pc" id="L199">                                emptyList()</span>
+                            }
+<span class="fc" id="L201">                            ) + mirrors</span>
+<span class="fc" id="L202">                        callback.onRepository(</span>
+<span class="fc" id="L203">                            mirrors = realMirrors.distinct(),</span>
+<span class="fc" id="L204">                            name = name,</span>
+<span class="fc" id="L205">                            description = description,</span>
+<span class="fc" id="L206">                            version = version,</span>
+<span class="fc" id="L207">                            timestamp = timestamp,</span>
+                        )
+                    }
+
+<span class="fc bfc" id="L211" title="All 2 branches covered.">                    key.array(DICT_PRODUCT) -&gt; forEach(JsonToken.START_OBJECT) {</span>
+<span class="fc" id="L212">                        val product = parseProduct(repositoryId)</span>
+<span class="fc" id="L213">                        callback.onProduct(product)</span>
+<span class="fc" id="L214">                    }</span>
+
+<span class="fc bfc" id="L216" title="All 2 branches covered.">                    key.dictionary(DICT_RELEASE) -&gt; forEachKey {</span>
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">                        if (it.token == JsonToken.START_ARRAY) {</span>
+<span class="fc" id="L218">                            val packageName = it.key</span>
+<span class="fc" id="L219">                            val releases = collectNotNull(JsonToken.START_OBJECT) { parseRelease() }</span>
+<span class="fc" id="L220">                            callback.onReleases(packageName, releases)</span>
+                        } else {
+<span class="nc" id="L222">                            skipChildren()</span>
+                        }
+<span class="fc" id="L224">                    }</span>
+
+<span class="fc" id="L226">                    else -&gt; skipChildren()</span>
+                }
+<span class="fc" id="L228">            }</span>
+        }
+<span class="fc" id="L230">    }</span>
+
+    private const val KEY_PRODUCT_PACKAGENAME = &quot;packageName&quot;
+    private const val KEY_PRODUCT_NAME = &quot;name&quot;
+    private const val KEY_PRODUCT_SUMMARY = &quot;summary&quot;
+    private const val KEY_PRODUCT_DESCRIPTION = &quot;description&quot;
+    private const val KEY_PRODUCT_ICON = &quot;icon&quot;
+    private const val KEY_PRODUCT_AUTHORNAME = &quot;authorName&quot;
+    private const val KEY_PRODUCT_AUTHOREMAIL = &quot;authorEmail&quot;
+    private const val KEY_PRODUCT_AUTHORWEBSITE = &quot;authorWebSite&quot;
+    private const val KEY_PRODUCT_SOURCECODE = &quot;sourceCode&quot;
+    private const val KEY_PRODUCT_CHANGELOG = &quot;changelog&quot;
+    private const val KEY_PRODUCT_WEBSITE = &quot;webSite&quot;
+    private const val KEY_PRODUCT_ISSUETRACKER = &quot;issueTracker&quot;
+    private const val KEY_PRODUCT_ADDED = &quot;added&quot;
+    private const val KEY_PRODUCT_LASTUPDATED = &quot;lastUpdated&quot;
+    private const val KEY_PRODUCT_SUGGESTEDVERSIONCODE = &quot;suggestedVersionCode&quot;
+    private const val KEY_PRODUCT_CATEGORIES = &quot;categories&quot;
+    private const val KEY_PRODUCT_ANTIFEATURES = &quot;antiFeatures&quot;
+    private const val KEY_PRODUCT_LICENSE = &quot;license&quot;
+    private const val KEY_PRODUCT_DONATE = &quot;donate&quot;
+    private const val KEY_PRODUCT_BITCOIN = &quot;bitcoin&quot;
+    private const val KEY_PRODUCT_LIBERAPAYID = &quot;liberapay&quot;
+    private const val KEY_PRODUCT_LITECOIN = &quot;litecoin&quot;
+    private const val KEY_PRODUCT_OPENCOLLECTIVE = &quot;openCollective&quot;
+    private const val KEY_PRODUCT_LOCALIZED = &quot;localized&quot;
+    private const val KEY_PRODUCT_WHATSNEW = &quot;whatsNew&quot;
+    private const val KEY_PRODUCT_PHONE_SCREENSHOTS = &quot;phoneScreenshots&quot;
+    private const val KEY_PRODUCT_SEVEN_INCH_SCREENSHOTS = &quot;sevenInchScreenshots&quot;
+    private const val KEY_PRODUCT_TEN_INCH_SCREENSHOTS = &quot;tenInchScreenshots&quot;
+    private const val KEY_PRODUCT_WEAR_SCREENSHOTS = &quot;wearScreenshots&quot;
+    private const val KEY_PRODUCT_TV_SCREENSHOTS = &quot;tvScreenshots&quot;
+    private const val KEY_PRODUCT_VIDEO = &quot;video&quot;
+
+    private fun JsonParser.parseProduct(repositoryId: Long): Product {
+<span class="fc" id="L265">        var packageName = &quot;&quot;</span>
+<span class="fc" id="L266">        var nameFallback = &quot;&quot;</span>
+<span class="fc" id="L267">        var summaryFallback = &quot;&quot;</span>
+<span class="fc" id="L268">        var descriptionFallback = &quot;&quot;</span>
+<span class="fc" id="L269">        var icon = &quot;&quot;</span>
+<span class="fc" id="L270">        var authorName = &quot;&quot;</span>
+<span class="fc" id="L271">        var authorEmail = &quot;&quot;</span>
+<span class="fc" id="L272">        var authorWeb = &quot;&quot;</span>
+<span class="fc" id="L273">        var source = &quot;&quot;</span>
+<span class="fc" id="L274">        var changelog = &quot;&quot;</span>
+<span class="fc" id="L275">        var web = &quot;&quot;</span>
+<span class="fc" id="L276">        var tracker = &quot;&quot;</span>
+<span class="fc" id="L277">        var added = 0L</span>
+<span class="fc" id="L278">        var updated = 0L</span>
+<span class="fc" id="L279">        var suggestedVersionCode = 0L</span>
+<span class="fc" id="L280">        var categories = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L281">        var antiFeatures = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L282">        val licenses = mutableListOf&lt;String&gt;()</span>
+<span class="fc" id="L283">        val donates = mutableListOf&lt;Product.Donate&gt;()</span>
+<span class="fc" id="L284">        val localizedMap = mutableMapOf&lt;String, Localized&gt;()</span>
+<span class="fc" id="L285">        forEachKey { key -&gt;</span>
+<span class="fc" id="L286">            when {</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">                key.string(KEY_PRODUCT_PACKAGENAME) -&gt; packageName = valueAsString</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">                key.string(KEY_PRODUCT_NAME) -&gt; nameFallback = valueAsString</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">                key.string(KEY_PRODUCT_SUMMARY) -&gt; summaryFallback = valueAsString</span>
+<span class="fc bfc" id="L290" title="All 2 branches covered.">                key.string(KEY_PRODUCT_DESCRIPTION) -&gt; descriptionFallback = valueAsString</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">                key.string(KEY_PRODUCT_ICON) -&gt; icon = validateIcon(valueAsString)</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">                key.string(KEY_PRODUCT_AUTHORNAME) -&gt; authorName = valueAsString</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">                key.string(KEY_PRODUCT_AUTHOREMAIL) -&gt; authorEmail = valueAsString</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">                key.string(KEY_PRODUCT_AUTHORWEBSITE) -&gt; authorWeb = valueAsString</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">                key.string(KEY_PRODUCT_SOURCECODE) -&gt; source = valueAsString</span>
+<span class="fc bfc" id="L296" title="All 2 branches covered.">                key.string(KEY_PRODUCT_CHANGELOG) -&gt; changelog = valueAsString</span>
+<span class="fc bfc" id="L297" title="All 2 branches covered.">                key.string(KEY_PRODUCT_WEBSITE) -&gt; web = valueAsString</span>
+<span class="fc bfc" id="L298" title="All 2 branches covered.">                key.string(KEY_PRODUCT_ISSUETRACKER) -&gt; tracker = valueAsString</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">                key.number(KEY_PRODUCT_ADDED) -&gt; added = valueAsLong</span>
+<span class="fc bfc" id="L300" title="All 2 branches covered.">                key.number(KEY_PRODUCT_LASTUPDATED) -&gt; updated = valueAsLong</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">                key.string(KEY_PRODUCT_SUGGESTEDVERSIONCODE) -&gt;</span>
+<span class="fc" id="L302">                    suggestedVersionCode =</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">                        valueAsString.toLongOrNull() ?: 0L</span>
+
+<span class="fc bfc" id="L305" title="All 2 branches covered.">                key.array(KEY_PRODUCT_CATEGORIES) -&gt; categories = collectDistinctNotEmptyStrings()</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">                key.array(KEY_PRODUCT_ANTIFEATURES) -&gt;</span>
+<span class="fc" id="L307">                    antiFeatures =</span>
+<span class="fc" id="L308">                        collectDistinctNotEmptyStrings()</span>
+
+<span class="fc bfc" id="L310" title="All 2 branches covered.">                key.string(KEY_PRODUCT_LICENSE) -&gt; licenses += valueAsString.split(',')</span>
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">                    .filter { it.isNotEmpty() }</span>
+
+<span class="fc bfc" id="L313" title="All 2 branches covered.">                key.string(KEY_PRODUCT_DONATE) -&gt; donates += Regular(valueAsString)</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">                key.string(KEY_PRODUCT_BITCOIN) -&gt; donates += Bitcoin(valueAsString)</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">                key.string(KEY_PRODUCT_LIBERAPAYID) -&gt; donates += Liberapay(valueAsString)</span>
+<span class="fc bfc" id="L316" title="All 2 branches covered.">                key.string(KEY_PRODUCT_LITECOIN) -&gt; donates += Litecoin(valueAsString)</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">                key.string(KEY_PRODUCT_OPENCOLLECTIVE) -&gt; donates += OpenCollective(valueAsString)</span>
+
+<span class="fc bfc" id="L319" title="All 2 branches covered.">                key.dictionary(KEY_PRODUCT_LOCALIZED) -&gt; forEachKey { localizedKey -&gt;</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">                    if (localizedKey.token == JsonToken.START_OBJECT) {</span>
+<span class="fc" id="L321">                        val locale = localizedKey.key</span>
+<span class="fc" id="L322">                        var name = &quot;&quot;</span>
+<span class="fc" id="L323">                        var summary = &quot;&quot;</span>
+<span class="fc" id="L324">                        var description = &quot;&quot;</span>
+<span class="fc" id="L325">                        var whatsNew = &quot;&quot;</span>
+<span class="fc" id="L326">                        var metadataIcon = &quot;&quot;</span>
+<span class="fc" id="L327">                        var phone = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L328">                        var smallTablet = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L329">                        var largeTablet = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L330">                        var wear = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L331">                        var tv = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L332">                        var video = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L333">                        forEachKey {</span>
+<span class="fc" id="L334">                            when {</span>
+<span class="fc bfc" id="L335" title="All 2 branches covered.">                                it.string(KEY_PRODUCT_NAME) -&gt; name = valueAsString</span>
+<span class="fc bfc" id="L336" title="All 2 branches covered.">                                it.string(KEY_PRODUCT_SUMMARY) -&gt; summary = valueAsString</span>
+<span class="fc bfc" id="L337" title="All 2 branches covered.">                                it.string(KEY_PRODUCT_DESCRIPTION) -&gt; description = valueAsString</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">                                it.string(KEY_PRODUCT_WHATSNEW) -&gt; whatsNew = valueAsString</span>
+<span class="fc bfc" id="L339" title="All 2 branches covered.">                                it.string(KEY_PRODUCT_ICON) -&gt; metadataIcon = valueAsString</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">                                it.string(KEY_PRODUCT_VIDEO) -&gt; video = listOf(valueAsString)</span>
+<span class="fc bfc" id="L341" title="All 2 branches covered.">                                it.array(KEY_PRODUCT_PHONE_SCREENSHOTS) -&gt;</span>
+<span class="fc" id="L342">                                    phone = collectDistinctNotEmptyStrings()</span>
+
+<span class="fc bfc" id="L344" title="All 2 branches covered.">                                it.array(KEY_PRODUCT_SEVEN_INCH_SCREENSHOTS) -&gt;</span>
+<span class="fc" id="L345">                                    smallTablet = collectDistinctNotEmptyStrings()</span>
+
+<span class="fc bfc" id="L347" title="All 2 branches covered.">                                it.array(KEY_PRODUCT_TEN_INCH_SCREENSHOTS) -&gt;</span>
+<span class="fc" id="L348">                                    largeTablet = collectDistinctNotEmptyStrings()</span>
+
+<span class="fc bfc" id="L350" title="All 2 branches covered.">                                it.array(KEY_PRODUCT_WEAR_SCREENSHOTS) -&gt;</span>
+<span class="fc" id="L351">                                    wear = collectDistinctNotEmptyStrings()</span>
+
+<span class="fc bfc" id="L353" title="All 2 branches covered.">                                it.array(KEY_PRODUCT_TV_SCREENSHOTS) -&gt;</span>
+<span class="fc" id="L354">                                    tv = collectDistinctNotEmptyStrings()</span>
+
+<span class="fc" id="L356">                                else -&gt; skipChildren()</span>
+                            }
+<span class="fc" id="L358">                        }</span>
+<span class="fc" id="L359">                        val isScreenshotEmpty =</span>
+<span class="fc" id="L360">                            arrayOf(video, phone, smallTablet, largeTablet, wear, tv)</span>
+<span class="fc bfc" id="L361" title="All 2 branches covered.">                                .any { it.isNotEmpty() }</span>
+<span class="fc" id="L362">                        val screenshots =</span>
+<span class="fc bfc" id="L363" title="All 2 branches covered.">                            if (isScreenshotEmpty) {</span>
+<span class="fc" id="L364">                                Screenshots(video, phone, smallTablet, largeTablet, wear, tv)</span>
+                            } else {
+<span class="fc" id="L366">                                null</span>
+                            }
+<span class="fc" id="L368">                        localizedMap[locale] = Localized(</span>
+<span class="fc" id="L369">                            name = name,</span>
+<span class="fc" id="L370">                            summary = summary,</span>
+<span class="fc" id="L371">                            description = description,</span>
+<span class="fc" id="L372">                            whatsNew = whatsNew,</span>
+<span class="fc bfc" id="L373" title="All 2 branches covered.">                            metadataIcon = metadataIcon.nullIfEmpty()?.let { &quot;$locale/$it&quot; }</span>
+<span class="fc bfc" id="L374" title="All 2 branches covered.">                                .orEmpty(),</span>
+<span class="fc" id="L375">                            screenshots = screenshots,</span>
+                        )
+                    } else {
+<span class="nc" id="L378">                        skipChildren()</span>
+                    }
+<span class="fc" id="L380">                }</span>
+
+<span class="fc" id="L382">                else -&gt; skipChildren()</span>
+            }
+<span class="fc" id="L384">        }</span>
+<span class="fc" id="L385">        val name = localizedMap.findLocalizedString(nameFallback) { it.name }</span>
+<span class="fc" id="L386">        val summary = localizedMap.findLocalizedString(summaryFallback) { it.summary }</span>
+<span class="fc" id="L387">        val description =</span>
+<span class="fc" id="L388">            localizedMap.findLocalizedString(descriptionFallback) { it.description }.replace(</span>
+<span class="fc" id="L389">                &quot;\n&quot;,</span>
+<span class="fc" id="L390">                &quot;&lt;br/&gt;&quot;,</span>
+            )
+<span class="fc" id="L392">        val whatsNew = localizedMap.findLocalizedString(&quot;&quot;) { it.whatsNew }</span>
+<span class="fc bfc" id="L393" title="All 4 branches covered.">        val metadataIcon = localizedMap.findLocalizedString(&quot;&quot;) { it.metadataIcon }.ifEmpty {</span>
+<span class="pc bpc" id="L394" title="1 of 6 branches missed.">            localizedMap.firstNotNullOfOrNull { it.value.metadataIcon }.orEmpty()</span>
+        }
+<span class="fc" id="L396">        val screenshotPairs =</span>
+<span class="fc bfc" id="L397" title="All 2 branches covered.">            localizedMap.find { key, localized -&gt; localized.screenshots?.let { Pair(key, it) } }</span>
+<span class="fc bfc" id="L398" title="All 2 branches covered.">        val screenshots = screenshotPairs?.let { (key, screenshots) -&gt;</span>
+<span class="fc" id="L399">            screenshots.video.map { Product.Screenshot(key, VIDEO, it) } +</span>
+<span class="fc" id="L400">                screenshots.phone.map { Product.Screenshot(key, PHONE, it) } +</span>
+<span class="fc" id="L401">                screenshots.smallTablet.map { Product.Screenshot(key, SMALL_TABLET, it) } +</span>
+<span class="fc" id="L402">                screenshots.largeTablet.map { Product.Screenshot(key, LARGE_TABLET, it) } +</span>
+<span class="fc" id="L403">                screenshots.wear.map { Product.Screenshot(key, WEAR, it) } +</span>
+<span class="fc" id="L404">                screenshots.tv.map { Product.Screenshot(key, TV, it) }</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">        }.orEmpty()</span>
+<span class="fc" id="L406">        return Product(</span>
+<span class="fc" id="L407">            repositoryId = repositoryId,</span>
+<span class="fc" id="L408">            packageName = packageName,</span>
+<span class="fc" id="L409">            name = name,</span>
+<span class="fc" id="L410">            summary = summary,</span>
+<span class="fc" id="L411">            description = description,</span>
+<span class="fc" id="L412">            whatsNew = whatsNew,</span>
+<span class="fc" id="L413">            icon = icon,</span>
+<span class="fc" id="L414">            metadataIcon = metadataIcon,</span>
+<span class="fc" id="L415">            author = Product.Author(authorName, authorEmail, authorWeb),</span>
+<span class="fc" id="L416">            source = source,</span>
+<span class="fc" id="L417">            changelog = changelog,</span>
+<span class="fc" id="L418">            web = web,</span>
+<span class="fc" id="L419">            tracker = tracker,</span>
+<span class="fc" id="L420">            added = added,</span>
+<span class="fc" id="L421">            updated = updated,</span>
+<span class="fc" id="L422">            suggestedVersionCode = suggestedVersionCode,</span>
+<span class="fc" id="L423">            categories = categories,</span>
+<span class="fc" id="L424">            antiFeatures = antiFeatures,</span>
+<span class="fc" id="L425">            licenses = licenses,</span>
+<span class="fc" id="L426">            donates = donates.sortedWith(DonateComparator),</span>
+<span class="fc" id="L427">            screenshots = screenshots,</span>
+<span class="fc" id="L428">            releases = emptyList(),</span>
+        )
+    }
+
+    private const val KEY_RELEASE_VERSIONNAME = &quot;versionName&quot;
+    private const val KEY_RELEASE_VERSIONCODE = &quot;versionCode&quot;
+    private const val KEY_RELEASE_ADDED = &quot;added&quot;
+    private const val KEY_RELEASE_SIZE = &quot;size&quot;
+    private const val KEY_RELEASE_MINSDKVERSION = &quot;minSdkVersion&quot;
+    private const val KEY_RELEASE_TARGETSDKVERSION = &quot;targetSdkVersion&quot;
+    private const val KEY_RELEASE_MAXSDKVERSION = &quot;maxSdkVersion&quot;
+    private const val KEY_RELEASE_SRCNAME = &quot;srcname&quot;
+    private const val KEY_RELEASE_APKNAME = &quot;apkName&quot;
+    private const val KEY_RELEASE_HASH = &quot;hash&quot;
+    private const val KEY_RELEASE_HASHTYPE = &quot;hashType&quot;
+    private const val KEY_RELEASE_SIGNER_SHA256 = &quot;signer&quot;
+    private const val KEY_RELEASE_OBBMAINFILE = &quot;obbMainFile&quot;
+    private const val KEY_RELEASE_OBBMAINFILESHA256 = &quot;obbMainFileSha256&quot;
+    private const val KEY_RELEASE_OBBPATCHFILE = &quot;obbPatchFile&quot;
+    private const val KEY_RELEASE_OBBPATCHFILESHA256 = &quot;obbPatchFileSha256&quot;
+    private const val KEY_RELEASE_USESPERMISSION = &quot;uses-permission&quot;
+    private const val KEY_RELEASE_USESPERMISSIONSDK23 = &quot;uses-permission-sdk-23&quot;
+    private const val KEY_RELEASE_FEATURES = &quot;features&quot;
+    private const val KEY_RELEASE_NATIVECODE = &quot;nativecode&quot;
+
+    private fun JsonParser.parseRelease(): Release {
+<span class="fc" id="L454">        var version = &quot;&quot;</span>
+<span class="fc" id="L455">        var versionCode = 0L</span>
+<span class="fc" id="L456">        var added = 0L</span>
+<span class="fc" id="L457">        var size = 0L</span>
+<span class="fc" id="L458">        var minSdkVersion = 0</span>
+<span class="fc" id="L459">        var targetSdkVersion = 0</span>
+<span class="fc" id="L460">        var maxSdkVersion = 0</span>
+<span class="fc" id="L461">        var source = &quot;&quot;</span>
+<span class="fc" id="L462">        var release = &quot;&quot;</span>
+<span class="fc" id="L463">        var hash = &quot;&quot;</span>
+<span class="fc" id="L464">        var hashTypeCandidate = &quot;&quot;</span>
+<span class="fc" id="L465">        var signature = &quot;&quot;</span>
+<span class="fc" id="L466">        var obbMain = &quot;&quot;</span>
+<span class="fc" id="L467">        var obbMainHash = &quot;&quot;</span>
+<span class="fc" id="L468">        var obbPatch = &quot;&quot;</span>
+<span class="fc" id="L469">        var obbPatchHash = &quot;&quot;</span>
+<span class="fc" id="L470">        val permissions = linkedSetOf&lt;String&gt;()</span>
+<span class="fc" id="L471">        var features = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L472">        var platforms = emptyList&lt;String&gt;()</span>
+<span class="fc" id="L473">        forEachKey { key -&gt;</span>
+<span class="fc" id="L474">            when {</span>
+<span class="fc bfc" id="L475" title="All 2 branches covered.">                key.string(KEY_RELEASE_VERSIONNAME) -&gt; version = valueAsString</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">                key.number(KEY_RELEASE_VERSIONCODE) -&gt; versionCode = valueAsLong</span>
+<span class="fc bfc" id="L477" title="All 2 branches covered.">                key.number(KEY_RELEASE_ADDED) -&gt; added = valueAsLong</span>
+<span class="fc bfc" id="L478" title="All 2 branches covered.">                key.number(KEY_RELEASE_SIZE) -&gt; size = valueAsLong</span>
+<span class="fc bfc" id="L479" title="All 2 branches covered.">                key.number(KEY_RELEASE_MINSDKVERSION) -&gt; minSdkVersion = valueAsInt</span>
+<span class="fc bfc" id="L480" title="All 2 branches covered.">                key.number(KEY_RELEASE_TARGETSDKVERSION) -&gt; targetSdkVersion = valueAsInt</span>
+<span class="fc bfc" id="L481" title="All 2 branches covered.">                key.number(KEY_RELEASE_MAXSDKVERSION) -&gt; maxSdkVersion = valueAsInt</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">                key.string(KEY_RELEASE_SRCNAME) -&gt; source = valueAsString</span>
+<span class="fc bfc" id="L483" title="All 2 branches covered.">                key.string(KEY_RELEASE_APKNAME) -&gt; release = valueAsString</span>
+<span class="fc bfc" id="L484" title="All 2 branches covered.">                key.string(KEY_RELEASE_HASH) -&gt; hash = valueAsString</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">                key.string(KEY_RELEASE_HASHTYPE) -&gt; hashTypeCandidate = valueAsString</span>
+<span class="fc bfc" id="L486" title="All 2 branches covered.">                key.string(KEY_RELEASE_SIGNER_SHA256) -&gt; signature = valueAsString</span>
+<span class="pc bpc" id="L487" title="1 of 2 branches missed.">                key.string(KEY_RELEASE_OBBMAINFILE) -&gt; obbMain = valueAsString</span>
+<span class="pc bpc" id="L488" title="1 of 2 branches missed.">                key.string(KEY_RELEASE_OBBMAINFILESHA256) -&gt; obbMainHash = valueAsString</span>
+<span class="pc bpc" id="L489" title="1 of 2 branches missed.">                key.string(KEY_RELEASE_OBBPATCHFILE) -&gt; obbPatch = valueAsString</span>
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">                key.string(KEY_RELEASE_OBBPATCHFILESHA256) -&gt; obbPatchHash = valueAsString</span>
+<span class="fc bfc" id="L491" title="All 2 branches covered.">                key.array(KEY_RELEASE_USESPERMISSION) -&gt; collectPermissions(permissions, 0)</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">                key.array(KEY_RELEASE_USESPERMISSIONSDK23) -&gt; collectPermissions(permissions, 23)</span>
+<span class="fc bfc" id="L493" title="All 2 branches covered.">                key.array(KEY_RELEASE_FEATURES) -&gt; features = collectDistinctNotEmptyStrings()</span>
+<span class="fc bfc" id="L494" title="All 2 branches covered.">                key.array(KEY_RELEASE_NATIVECODE) -&gt; platforms = collectDistinctNotEmptyStrings()</span>
+<span class="fc" id="L495">                else -&gt; skipChildren()</span>
+            }
+<span class="fc" id="L497">        }</span>
+<span class="fc" id="L498">        val hashType =</span>
+<span class="pc bpc" id="L499" title="4 of 8 branches missed.">            if (hash.isNotEmpty() &amp;&amp; hashTypeCandidate.isEmpty()) &quot;sha256&quot; else hashTypeCandidate</span>
+<span class="pc bpc" id="L500" title="2 of 4 branches missed.">        val obbMainHashType = if (obbMainHash.isNotEmpty()) &quot;sha256&quot; else &quot;&quot;</span>
+<span class="pc bpc" id="L501" title="2 of 4 branches missed.">        val obbPatchHashType = if (obbPatchHash.isNotEmpty()) &quot;sha256&quot; else &quot;&quot;</span>
+<span class="fc" id="L502">        return Release(</span>
+<span class="fc" id="L503">            selected = false,</span>
+<span class="fc" id="L504">            version = version,</span>
+<span class="fc" id="L505">            versionCode = versionCode,</span>
+<span class="fc" id="L506">            added = added,</span>
+<span class="fc" id="L507">            size = size,</span>
+<span class="fc" id="L508">            minSdkVersion = minSdkVersion,</span>
+<span class="fc" id="L509">            targetSdkVersion = targetSdkVersion,</span>
+<span class="fc" id="L510">            maxSdkVersion = maxSdkVersion,</span>
+<span class="fc" id="L511">            source = source,</span>
+<span class="fc" id="L512">            release = release,</span>
+<span class="fc" id="L513">            hash = hash,</span>
+<span class="fc" id="L514">            hashType = hashType,</span>
+<span class="fc" id="L515">            signature = signature,</span>
+<span class="fc" id="L516">            obbMain = obbMain,</span>
+<span class="fc" id="L517">            obbMainHash = obbMainHash,</span>
+<span class="fc" id="L518">            obbMainHashType = obbMainHashType,</span>
+<span class="fc" id="L519">            obbPatch = obbPatch,</span>
+<span class="fc" id="L520">            obbPatchHash = obbPatchHash,</span>
+<span class="fc" id="L521">            obbPatchHashType = obbPatchHashType,</span>
+<span class="fc" id="L522">            permissions = permissions.toList(),</span>
+<span class="fc" id="L523">            features = features,</span>
+<span class="fc" id="L524">            platforms = platforms,</span>
+<span class="fc" id="L525">            incompatibilities = emptyList(),</span>
+        )
+    }
+
+    private fun JsonParser.collectPermissions(permissions: LinkedHashSet&lt;String&gt;, minSdk: Int) {
+<span class="fc" id="L530">        forEach(JsonToken.START_ARRAY) {</span>
+<span class="fc" id="L531">            val firstToken = nextToken()</span>
+<span class="pc bpc" id="L532" title="1 of 2 branches missed.">            val permission = if (firstToken == JsonToken.VALUE_STRING) valueAsString else &quot;&quot;</span>
+<span class="pc bpc" id="L533" title="1 of 2 branches missed.">            if (firstToken != JsonToken.END_ARRAY) {</span>
+<span class="fc" id="L534">                val secondToken = nextToken()</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">                val maxSdk = if (secondToken == JsonToken.VALUE_NUMBER_INT) valueAsInt else 0</span>
+<span class="pc bpc" id="L536" title="2 of 4 branches missed.">                if (permission.isNotEmpty() &amp;&amp;</span>
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">                    SdkCheck.sdk &gt;= minSdk &amp;&amp; (</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">                        maxSdk &lt;= 0 ||</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">                            SdkCheck.sdk &lt;= maxSdk</span>
+                        )
+                ) {
+<span class="fc" id="L542">                    permissions.add(permission)</span>
+                }
+<span class="pc bpc" id="L544" title="1 of 2 branches missed.">                if (secondToken != JsonToken.END_ARRAY) {</span>
+<span class="fc" id="L545">                    while (true) {</span>
+<span class="fc" id="L546">                        val token = nextToken()</span>
+<span class="pc bpc" id="L547" title="1 of 2 branches missed.">                        if (token == JsonToken.END_ARRAY) {</span>
+<span class="fc" id="L548">                            break</span>
+<span class="nc bnc" id="L549" title="All 2 branches missed.">                        } else if (token.isStructStart) {</span>
+<span class="nc" id="L550">                            skipChildren()</span>
+                        }
+                    }
+                }
+            }
+<span class="fc" id="L555">        }</span>
+<span class="fc" id="L556">    }</span>
+
+    private fun validateIcon(icon: String): String {
+<span class="pc bpc" id="L559" title="1 of 2 branches missed.">        return if (icon.endsWith(&quot;.xml&quot;)) &quot;&quot; else icon</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

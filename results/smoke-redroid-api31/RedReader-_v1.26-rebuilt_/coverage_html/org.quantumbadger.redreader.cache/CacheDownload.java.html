@@ -1,0 +1,396 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CacheDownload.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE RedReader</a> &gt; <a href="index.source.html" class="el_package">org.quantumbadger.redreader.cache</a> &gt; <span class="el_source">CacheDownload.java</span></div><h1>CacheDownload.java</h1><pre class="source lang-java linenums">/*******************************************************************************
+ * This file is part of RedReader.
+ *
+ * RedReader is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * RedReader is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with RedReader.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ ******************************************************************************/
+
+package org.quantumbadger.redreader.cache;
+
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import org.quantumbadger.redreader.activities.BugReportActivity;
+import org.quantumbadger.redreader.common.Constants;
+import org.quantumbadger.redreader.common.General;
+import org.quantumbadger.redreader.common.Optional;
+import org.quantumbadger.redreader.common.PrioritisedCachedThreadPool;
+import org.quantumbadger.redreader.common.Priority;
+import org.quantumbadger.redreader.common.TorCommon;
+import org.quantumbadger.redreader.common.datastream.MemoryDataStream;
+import org.quantumbadger.redreader.common.time.TimestampUTC;
+import org.quantumbadger.redreader.http.FailedRequestBody;
+import org.quantumbadger.redreader.http.HTTPBackend;
+import org.quantumbadger.redreader.image.RedgifsAPIV2;
+import org.quantumbadger.redreader.reddit.api.RedditOAuth;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public final class CacheDownload extends PrioritisedCachedThreadPool.Task {
+
+	private static final String TAG = &quot;CacheDownload&quot;;
+
+	private final CacheRequest mInitiator;
+	private final CacheManager manager;
+	private final UUID session;
+
+<span class="fc" id="L52">	private volatile boolean mCancelled = false;</span>
+<span class="fc" id="L53">	private static final AtomicBoolean resetUserCredentials = new AtomicBoolean(false);</span>
+	private final HTTPBackend.Request mRequest;
+
+	public CacheDownload(
+			final CacheRequest initiator,
+<span class="fc" id="L58">			final CacheManager manager) {</span>
+
+<span class="fc" id="L60">		this.mInitiator = initiator;</span>
+
+<span class="fc" id="L62">		this.manager = manager;</span>
+
+<span class="pc bpc" id="L64" title="1 of 2 branches missed.">		if(!initiator.setDownload(this)) {</span>
+<span class="nc" id="L65">			mCancelled = true;</span>
+		}
+
+<span class="pc bpc" id="L68" title="1 of 2 branches missed.">		if(initiator.requestSession != null) {</span>
+<span class="nc" id="L69">			session = initiator.requestSession;</span>
+		} else {
+<span class="fc" id="L71">			session = UUID.randomUUID();</span>
+		}
+
+<span class="fc" id="L74">		mRequest = HTTPBackend.getBackend().prepareRequest(</span>
+				initiator.context,
+				new HTTPBackend.RequestDetails(
+						mInitiator.url,
+<span class="fc" id="L78">						mInitiator.requestBody.asNullable()));</span>
+<span class="fc" id="L79">	}</span>
+
+	public synchronized void cancel() {
+
+<span class="nc" id="L83">		mCancelled = true;</span>
+
+<span class="nc" id="L85">		new Thread() {</span>
+			@Override
+			public void run() {
+<span class="nc bnc" id="L88" title="All 2 branches missed.">				if(mRequest != null) {</span>
+<span class="nc" id="L89">					mRequest.cancel();</span>
+<span class="nc" id="L90">					mInitiator.notifyFailure(General.getGeneralErrorForFailure(</span>
+							mInitiator.context,
+							CacheRequest.RequestFailureType.CANCELLED,
+							null,
+							null,
+							mInitiator.url,
+<span class="nc" id="L96">							Optional.empty()));</span>
+				}
+<span class="nc" id="L98">			}</span>
+<span class="nc" id="L99">		}.start();</span>
+<span class="nc" id="L100">	}</span>
+
+	public void doDownload() {
+
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">		if(mCancelled) {</span>
+<span class="nc" id="L105">			return;</span>
+		}
+
+		try {
+<span class="fc" id="L109">			performDownload(mRequest);</span>
+
+<span class="nc" id="L111">		} catch(final Throwable t) {</span>
+<span class="nc" id="L112">			BugReportActivity.handleGlobalError(mInitiator.context, t);</span>
+<span class="fc" id="L113">		}</span>
+<span class="fc" id="L114">	}</span>
+
+	public static void resetUserCredentialsOnNextRequest() {
+<span class="nc" id="L117">		resetUserCredentials.set(true);</span>
+<span class="nc" id="L118">	}</span>
+
+	private void performDownload(final HTTPBackend.Request request) {
+
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">		if(mInitiator.queueType == CacheRequest.DownloadQueueType.REDDIT_API) {</span>
+
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">			if(resetUserCredentials.getAndSet(false)) {</span>
+<span class="nc" id="L125">				mInitiator.user.setAccessToken(null);</span>
+			}
+
+<span class="fc" id="L128">			RedditOAuth.AccessToken accessToken</span>
+<span class="fc" id="L129">					= mInitiator.user.getMostRecentAccessToken();</span>
+
+<span class="pc bpc" id="L131" title="3 of 4 branches missed.">			if(accessToken == null || accessToken.isExpired()) {</span>
+
+<span class="fc" id="L133">				mInitiator.notifyProgress(true, 0, 0);</span>
+
+				final RedditOAuth.FetchAccessTokenResult result;
+
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">				if(mInitiator.user.isAnonymous()) {</span>
+<span class="fc" id="L138">					result = RedditOAuth.fetchAnonymousAccessTokenSynchronous(mInitiator.context);</span>
+
+				} else {
+<span class="nc" id="L141">					result = RedditOAuth.fetchAccessTokenSynchronous(</span>
+							mInitiator.context,
+							mInitiator.user);
+				}
+
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">				if(result.status != RedditOAuth.FetchAccessTokenResultStatus.SUCCESS) {</span>
+<span class="fc" id="L147">					mInitiator.notifyFailure(result.error);</span>
+<span class="fc" id="L148">					return;</span>
+				}
+
+<span class="nc" id="L151">				accessToken = result.accessToken;</span>
+<span class="nc" id="L152">				mInitiator.user.setAccessToken(accessToken);</span>
+			}
+
+<span class="nc" id="L155">			request.addHeader(&quot;Authorization&quot;, &quot;bearer &quot; + accessToken.token);</span>
+		}
+
+<span class="nc bnc" id="L158" title="All 2 branches missed.">		if(mInitiator.queueType == CacheRequest.DownloadQueueType.IMGUR_API) {</span>
+<span class="nc" id="L159">			request.addHeader(&quot;Authorization&quot;, &quot;Client-ID c3713d9e7674477&quot;);</span>
+
+<span class="nc bnc" id="L161" title="All 2 branches missed.">		} else if(mInitiator.queueType == CacheRequest.DownloadQueueType.REDGIFS_API_V2) {</span>
+<span class="nc" id="L162">			request.addHeader(&quot;Authorization&quot;, &quot;Bearer &quot; + RedgifsAPIV2.getLatestToken());</span>
+		}
+
+<span class="nc" id="L165">		mInitiator.notifyDownloadStarted();</span>
+
+<span class="nc" id="L167">		request.executeInThisThread(new HTTPBackend.Listener() {</span>
+			@Override
+			public void onError(
+					@NonNull final CacheRequest.RequestFailureType failureType,
+					final Throwable exception,
+					final Integer httpStatus,
+					@Nullable final FailedRequestBody body) {
+<span class="nc bnc" id="L174" title="All 2 branches missed.">				if(mInitiator.queueType == CacheRequest.DownloadQueueType.REDDIT_API</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">						&amp;&amp; TorCommon.isTorEnabled()) {</span>
+<span class="nc" id="L176">					HTTPBackend.getBackend().recreateHttpBackend();</span>
+<span class="nc" id="L177">					resetUserCredentialsOnNextRequest();</span>
+				}
+
+<span class="nc" id="L180">				mInitiator.notifyFailure(General.getGeneralErrorForFailure(</span>
+						mInitiator.context,
+						failureType,
+						exception,
+						httpStatus,
+						mInitiator.url,
+<span class="nc" id="L186">						Optional.ofNullable(body)));</span>
+<span class="nc" id="L187">			}</span>
+
+			@Override
+			public void onSuccess(
+					final String mimetype,
+					final Long bodyBytes,
+					final InputStream is) {
+
+<span class="nc bnc" id="L195" title="All 2 branches missed.">				if(mCancelled) {</span>
+<span class="nc" id="L196">					Log.i(TAG, &quot;Request cancelled at start of onSuccess()&quot;);</span>
+<span class="nc" id="L197">					return;</span>
+				}
+
+<span class="nc" id="L200">				final MemoryDataStream stream = new MemoryDataStream(64 * 1024);</span>
+
+<span class="nc" id="L202">				mInitiator.notifyDataStreamAvailable(</span>
+<span class="nc" id="L203">						stream::getInputStream,</span>
+<span class="nc" id="L204">						TimestampUTC.now(),</span>
+						session,
+						false,
+						mimetype);
+
+				// Download the file into memory
+
+				try {
+
+<span class="nc" id="L213">					final byte[] buf = new byte[64 * 1024];</span>
+
+					int bytesRead;
+<span class="nc" id="L216">					long totalBytesRead = 0;</span>
+
+<span class="nc bnc" id="L218" title="All 2 branches missed.">					while((bytesRead = tryReadFully(is, buf)) &gt; 0) {</span>
+
+<span class="nc" id="L220">						totalBytesRead += bytesRead;</span>
+
+<span class="nc" id="L222">						stream.writeBytes(buf, 0, bytesRead);</span>
+
+<span class="nc bnc" id="L224" title="All 2 branches missed.">						if(bodyBytes != null) {</span>
+<span class="nc" id="L225">							mInitiator.notifyProgress(</span>
+									false,
+									totalBytesRead,
+<span class="nc" id="L228">									bodyBytes);</span>
+						}
+
+<span class="nc bnc" id="L231" title="All 2 branches missed.">						if(mCancelled) {</span>
+<span class="nc" id="L232">							Log.i(TAG, &quot;Request cancelled during read loop&quot;);</span>
+<span class="nc" id="L233">							stream.setFailed(new IOException(&quot;Download cancelled&quot;));</span>
+<span class="nc" id="L234">							return;</span>
+						}
+					}
+
+<span class="nc" id="L238">					stream.setComplete();</span>
+
+<span class="nc" id="L240">					mInitiator.notifyDataStreamComplete(</span>
+<span class="nc" id="L241">							stream::getInputStream,</span>
+<span class="nc" id="L242">							TimestampUTC.now(),</span>
+							session,
+							false,
+							mimetype);
+
+<span class="nc" id="L247">				} catch(final Throwable t) {</span>
+
+<span class="nc bnc" id="L249" title="All 2 branches missed.">					stream.setFailed(t instanceof IOException</span>
+<span class="nc" id="L250">							? (IOException)t</span>
+<span class="nc" id="L251">							: new IOException(&quot;Got exception during download&quot;, t));</span>
+
+<span class="nc" id="L253">					mInitiator.notifyFailure(General.getGeneralErrorForFailure(</span>
+							mInitiator.context,
+							CacheRequest.RequestFailureType.CONNECTION,
+							t,
+							null,
+							mInitiator.url,
+<span class="nc" id="L259">							Optional.empty()));</span>
+
+<span class="nc" id="L261">					return;</span>
+
+				} finally {
+<span class="nc" id="L264">					General.closeSafely(is);</span>
+				}
+
+				// Save it to the cache
+
+<span class="nc bnc" id="L269" title="All 2 branches missed.">				if(mInitiator.cache) {</span>
+
+					@NonNull final CacheManager.WritableCacheFile writableCacheFile;
+
+					final CacheCompressionType cacheCompressionType;
+
+<span class="nc bnc" id="L275" title="All 3 branches missed.">					switch(mInitiator.fileType) {</span>
+						case Constants.FileType.CAPTCHA:
+						case Constants.FileType.IMAGE:
+						case Constants.FileType.INLINE_IMAGE_PREVIEW:
+						case Constants.FileType.NOCACHE:
+						case Constants.FileType.THUMBNAIL:
+							// Image saving/sharing relies the file on disk being &quot;raw&quot;
+<span class="nc" id="L282">							cacheCompressionType = CacheCompressionType.NONE;</span>
+<span class="nc" id="L283">							break;</span>
+
+						case Constants.FileType.COMMENT_LIST:
+						case Constants.FileType.IMAGE_INFO:
+						case Constants.FileType.INBOX_LIST:
+						case Constants.FileType.MULTIREDDIT_LIST:
+						case Constants.FileType.POST_LIST:
+						case Constants.FileType.SUBREDDIT_ABOUT:
+						case Constants.FileType.SUBREDDIT_LIST:
+						case Constants.FileType.USER_ABOUT:
+<span class="nc" id="L293">							cacheCompressionType = CacheCompressionType.ZSTD;</span>
+<span class="nc" id="L294">							break;</span>
+
+						default:
+<span class="nc" id="L297">							Log.e(TAG, &quot;Unhandled filetype: &quot; + mInitiator.fileType);</span>
+<span class="nc" id="L298">							cacheCompressionType = CacheCompressionType.NONE;</span>
+					}
+
+					try {
+<span class="nc" id="L302">						writableCacheFile = manager.openNewCacheFile(</span>
+								mInitiator.url,
+								mInitiator.user,
+								mInitiator.fileType,
+								session,
+								mimetype,
+								cacheCompressionType);
+
+<span class="nc" id="L310">					} catch(final IOException e) {</span>
+
+<span class="nc" id="L312">						Log.e(TAG, &quot;Exception opening cache file for write&quot;, e);</span>
+
+						final CacheRequest.RequestFailureType failureType;
+
+<span class="nc bnc" id="L316" title="All 2 branches missed.">						if(manager.getPreferredCacheLocation().exists()) {</span>
+<span class="nc" id="L317">							failureType = CacheRequest.RequestFailureType.STORAGE;</span>
+						} else {
+<span class="nc" id="L319">							failureType = CacheRequest</span>
+									.RequestFailureType.CACHE_DIR_DOES_NOT_EXIST;
+						}
+
+<span class="nc" id="L323">						mInitiator.notifyFailure(General.getGeneralErrorForFailure(</span>
+								mInitiator.context,
+								failureType,
+								e,
+								null,
+								mInitiator.url,
+<span class="nc" id="L329">								Optional.empty()));</span>
+
+<span class="nc" id="L331">						return;</span>
+<span class="nc" id="L332">					}</span>
+
+					try {
+<span class="nc" id="L335">						stream.getUnderlyingByteArrayWhenComplete(</span>
+<span class="nc" id="L336">								writableCacheFile::writeWholeFile);</span>
+
+<span class="nc" id="L338">						writableCacheFile.onWriteFinished();</span>
+
+<span class="nc" id="L340">						mInitiator.notifyCacheFileWritten(</span>
+<span class="nc" id="L341">								writableCacheFile.getReadableCacheFile(),</span>
+<span class="nc" id="L342">								TimestampUTC.now(),</span>
+								session,
+								false,
+								mimetype);
+
+<span class="nc" id="L347">					} catch(final IOException e) {</span>
+
+<span class="nc" id="L349">						writableCacheFile.onWriteCancelled();</span>
+
+<span class="nc" id="L351">						mInitiator.notifyFailure(General.getGeneralErrorForFailure(</span>
+								mInitiator.context,
+								CacheRequest.RequestFailureType.STORAGE,
+								e,
+								null,
+								mInitiator.url,
+<span class="nc" id="L357">								Optional.empty()));</span>
+<span class="nc" id="L358">					}</span>
+				}
+<span class="nc" id="L360">			}</span>
+		});
+<span class="nc" id="L362">	}</span>
+
+	@NonNull
+	@Override
+	public Priority getPriority() {
+<span class="nc" id="L367">		return mInitiator.priority;</span>
+	}
+
+	@Override
+	public void run() {
+<span class="nc" id="L372">		doDownload();</span>
+<span class="nc" id="L373">	}</span>
+
+	private static int tryReadFully(
+			final InputStream src,
+			final byte[] dst
+	) throws IOException {
+<span class="nc" id="L379">		int totalBytesRead = 0;</span>
+
+		while(true) {
+<span class="nc" id="L382">			final int bytesRead = src.read(dst, totalBytesRead, dst.length - totalBytesRead);</span>
+
+<span class="nc bnc" id="L384" title="All 2 branches missed.">			if (bytesRead &lt;= 0) {</span>
+<span class="nc" id="L385">				return totalBytesRead;</span>
+			}
+
+<span class="nc" id="L388">			totalBytesRead += bytesRead;</span>
+
+<span class="nc bnc" id="L390" title="All 2 branches missed.">			if (totalBytesRead &gt;= dst.length) {</span>
+<span class="nc" id="L391">				return totalBytesRead;</span>
+			}
+<span class="nc" id="L393">		}</span>
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

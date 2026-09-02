@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlertService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AlarmClock</a> &gt; <a href="index.source.html" class="el_package">com.better.alarm.background</a> &gt; <span class="el_source">AlertService.kt</span></div><h1>AlertService.kt</h1><pre class="source lang-java linenums">package com.better.alarm.background
+
+import android.app.Notification
+import com.better.alarm.BuildConfig
+import com.better.alarm.configuration.Prefs
+import com.better.alarm.interfaces.IAlarmsManager
+import com.better.alarm.interfaces.Intents
+import com.better.alarm.isOreo
+import com.better.alarm.logger.Logger
+import com.better.alarm.model.Alarmtone
+import com.better.alarm.util.modify
+import com.better.alarm.util.requireValue
+import com.better.alarm.util.subscribeIn
+import com.better.alarm.wakelock.Wakelocks
+import io.reactivex.Observable
+import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.disposables.Disposable
+import io.reactivex.subjects.BehaviorSubject
+import java.util.Calendar
+
+interface AlertPlugin {
+  fun go(
+      alarm: PluginAlarmData,
+      prealarm: Boolean,
+      targetVolume: Observable&lt;TargetVolume&gt;
+  ): Disposable
+}
+
+<span class="nc" id="L29">data class PluginAlarmData(val id: Int, val alarmtone: Alarmtone, val label: String)</span>
+
+enum class TargetVolume {
+<span class="nc" id="L32">  MUTED,</span>
+<span class="nc" id="L33">  FADED_IN,</span>
+<span class="nc" id="L34">  FADED_IN_FAST</span>
+}
+
+sealed class Event {
+<span class="nc" id="L38">  data class NullEvent(val actions: String = &quot;null&quot;) : Event()</span>
+
+<span class="nc" id="L40">  data class AlarmEvent(val id: Int, val actions: String = Intents.ALARM_ALERT_ACTION) : Event()</span>
+
+<span class="nc" id="L42">  data class PrealarmEvent(val id: Int, val actions: String = Intents.ALARM_PREALARM_ACTION) :</span>
+<span class="nc" id="L43">      Event()</span>
+
+<span class="nc" id="L45">  data class DismissEvent(val id: Int, val actions: String = Intents.ALARM_DISMISS_ACTION) :</span>
+<span class="nc" id="L46">      Event()</span>
+
+<span class="nc" id="L48">  data class SnoozedEvent(</span>
+<span class="nc" id="L49">      val id: Int,</span>
+<span class="nc" id="L50">      val calendar: Calendar,</span>
+<span class="nc" id="L51">      val actions: String = Intents.ALARM_SNOOZE_ACTION</span>
+<span class="nc" id="L52">  ) : Event()</span>
+
+<span class="nc" id="L54">  data class ShowSkip(val id: Int, val actions: String = Intents.ALARM_SHOW_SKIP) : Event()</span>
+
+<span class="nc" id="L56">  data class HideSkip(val id: Int, val actions: String = Intents.ALARM_REMOVE_SKIP) : Event()</span>
+
+<span class="nc" id="L58">  data class CancelSnoozedEvent(val id: Int, val actions: String = Intents.ACTION_CANCEL_SNOOZE) :</span>
+<span class="nc" id="L59">      Event()</span>
+
+<span class="nc" id="L61">  data class Autosilenced(val id: Int, val actions: String = Intents.ACTION_SOUND_EXPIRED) :</span>
+<span class="nc" id="L62">      Event()</span>
+
+<span class="nc" id="L64">  data class MuteEvent(val actions: String = Intents.ACTION_MUTE) : Event()</span>
+
+<span class="nc" id="L66">  data class DemuteEvent(val actions: String = Intents.ACTION_DEMUTE) : Event()</span>
+}
+
+interface EnclosingService {
+  fun handleUnwantedEvent()
+
+  fun stopSelf()
+
+  fun startForeground(id: Int, notification: Notification)
+}
+
+/** Listens to all kinds of events, vibrates, shows notifications and so on. */
+<span class="nc" id="L78">class AlertService(</span>
+<span class="nc" id="L79">    private val log: Logger,</span>
+<span class="nc" id="L80">    private val wakelocks: Wakelocks,</span>
+<span class="nc" id="L81">    private val alarms: IAlarmsManager,</span>
+<span class="nc" id="L82">    private val inCall: Observable&lt;Boolean&gt;,</span>
+<span class="nc" id="L83">    private val plugins: List&lt;AlertPlugin&gt;,</span>
+<span class="nc" id="L84">    private val notifications: NotificationsPlugin,</span>
+<span class="nc" id="L85">    private val enclosing: EnclosingService,</span>
+<span class="nc" id="L86">    private val prefs: Prefs,</span>
+) {
+  private val wantedVolume: BehaviorSubject&lt;TargetVolume&gt; =
+<span class="nc" id="L89">      BehaviorSubject.createDefault(TargetVolume.MUTED)</span>
+
+  private enum class Type {
+<span class="nc" id="L92">    NORMAL,</span>
+<span class="nc" id="L93">    PREALARM</span>
+  }
+
+<span class="nc" id="L96">  private data class CallState(val initial: Boolean, val inCall: Boolean)</span>
+
+<span class="nc" id="L98">  private val disposable: CompositeDisposable = CompositeDisposable()</span>
+<span class="nc" id="L99">  private var soundAlarmDisposable: CompositeDisposable = CompositeDisposable()</span>
+
+<span class="nc" id="L101">  private val activeAlarms = BehaviorSubject.createDefault(mapOf&lt;Int, Type&gt;())</span>
+<span class="nc" id="L102">  private var nowShowing = emptyList&lt;Int&gt;()</span>
+
+<span class="nc" id="L104">  init {</span>
+<span class="nc" id="L105">    wakelocks.acquireServiceLock()</span>
+<span class="nc" id="L106">    activeAlarms</span>
+<span class="nc" id="L107">        .distinctUntilChanged()</span>
+<span class="nc" id="L108">        .skipWhile { it.isEmpty() }</span>
+<span class="nc" id="L109">        .subscribeIn(disposable) { active -&gt;</span>
+<span class="nc bnc" id="L110" title="All 4 branches missed.">          if (active.isNotEmpty()) {</span>
+<span class="nc" id="L111">            log.debug { &quot;activeAlarms: $active&quot; }</span>
+<span class="nc" id="L112">            playSound(active)</span>
+<span class="nc" id="L113">            showNotifications(active)</span>
+          } else {
+<span class="nc" id="L115">            log.debug { &quot;no alarms anymore, stopSelf()&quot; }</span>
+<span class="nc" id="L116">            soundAlarmDisposable.dispose()</span>
+<span class="nc" id="L117">            wantedVolume.onNext(TargetVolume.MUTED)</span>
+<span class="nc" id="L118">            nowShowing</span>
+<span class="nc bnc" id="L119" title="All 4 branches missed.">                .filter { !isOreo() || it != 0 } // not the foreground notification</span>
+<span class="nc" id="L120">                .forEach { notifications.cancel(it) }</span>
+<span class="nc" id="L121">            enclosing.stopSelf()</span>
+<span class="nc" id="L122">            disposable.dispose()</span>
+          }
+<span class="nc" id="L124">        }</span>
+<span class="nc" id="L125">  }</span>
+
+  fun onDestroy() {
+<span class="nc" id="L128">    log.debug { &quot;onDestroy&quot; }</span>
+<span class="nc" id="L129">    wakelocks.releaseServiceLock()</span>
+<span class="nc" id="L130">  }</span>
+
+  fun onStartCommand(event: Event): Boolean {
+<span class="nc" id="L133">    log.debug { &quot;onStartCommand $event&quot; }</span>
+
+<span class="nc bnc" id="L135" title="All 2 branches missed.">    return if (stateValid(event)) {</span>
+<span class="nc" id="L136">      when (event) {</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        is Event.AlarmEvent -&gt; soundAlarm(event.id, Type.NORMAL)</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        is Event.PrealarmEvent -&gt; soundAlarm(event.id, Type.PREALARM)</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        is Event.MuteEvent -&gt; wantedVolume.onNext(TargetVolume.MUTED)</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        is Event.DemuteEvent -&gt; wantedVolume.onNext(TargetVolume.FADED_IN_FAST)</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        is Event.DismissEvent -&gt; remove(event.id)</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        is Event.SnoozedEvent -&gt; remove(event.id)</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        is Event.Autosilenced -&gt; remove(event.id)</span>
+        else -&gt; {
+<span class="nc bnc" id="L145" title="All 4 branches missed.">          check(!BuildConfig.DEBUG) { &quot;Unexpected event: $event&quot; }</span>
+        }
+      }
+
+<span class="nc bnc" id="L149" title="All 2 branches missed.">      activeAlarms.requireValue().isNotEmpty()</span>
+    } else {
+<span class="nc" id="L151">      enclosing.handleUnwantedEvent()</span>
+<span class="nc" id="L152">      false</span>
+    }
+  }
+
+  private fun stateValid(event: Event): Boolean {
+<span class="nc" id="L157">    return when {</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">      activeAlarms.requireValue().isEmpty() -&gt; {</span>
+<span class="nc" id="L159">        when (event) {</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">          is Event.AlarmEvent -&gt; true</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">          is Event.PrealarmEvent -&gt; true</span>
+          else -&gt; {
+<span class="nc bnc" id="L163" title="All 4 branches missed.">            check(!BuildConfig.DEBUG) {</span>
+<span class="nc" id="L164">              &quot;First event must be AlarmEvent or PrealarmEvent, but was $event&quot;</span>
+            }
+<span class="nc" id="L166">            false</span>
+          }
+        }
+      }
+<span class="nc bnc" id="L170" title="All 2 branches missed.">      disposable.isDisposed -&gt; {</span>
+<span class="nc bnc" id="L171" title="All 4 branches missed.">        check(!BuildConfig.DEBUG) { &quot;Already disposed!&quot; }</span>
+<span class="nc" id="L172">        false</span>
+      }
+<span class="nc" id="L174">      else -&gt; true</span>
+    }
+  }
+
+  private fun remove(id: Int) {
+<span class="nc" id="L179">    activeAlarms.modify { minus(id) }</span>
+<span class="nc" id="L180">  }</span>
+
+  private fun soundAlarm(id: Int, type: Type) {
+<span class="nc" id="L183">    activeAlarms.modify { plus(id to type) }</span>
+<span class="nc" id="L184">  }</span>
+
+  private fun showNotifications(active: Map&lt;Int, Type&gt;) {
+<span class="nc bnc" id="L187" title="All 4 branches missed.">    require(active.isNotEmpty())</span>
+<span class="nc" id="L188">    val toShow =</span>
+<span class="nc" id="L189">        active</span>
+<span class="nc" id="L190">            .mapNotNull { (id, _) -&gt; alarms.getAlarm(id) }</span>
+<span class="nc" id="L191">            .map { alarm -&gt;</span>
+<span class="nc" id="L192">              val alarmtone = alarm.alarmtone</span>
+<span class="nc" id="L193">              val label = alarm.labelOrDefault</span>
+<span class="nc" id="L194">              PluginAlarmData(alarm.id, alarmtone, label)</span>
+            }
+
+<span class="nc" id="L197">    log.debug { &quot;Show notifications: $toShow&quot; }</span>
+
+    // Send the notification using the alarm id to easily identify the
+    // correct notification.
+<span class="nc" id="L201">    toShow.forEachIndexed { index, alarmData -&gt;</span>
+<span class="nc bnc" id="L202" title="All 4 branches missed.">      val startForeground = nowShowing.isEmpty() &amp;&amp; index == 0</span>
+<span class="nc" id="L203">      log.debug { &quot;notifications.show(${alarmData}, $index, $startForeground)&quot; }</span>
+<span class="nc" id="L204">      notifications.show(alarmData, index, startForeground)</span>
+<span class="nc" id="L205">    }</span>
+
+    // cancel what we don't need anymore
+<span class="nc" id="L208">    nowShowing.drop(toShow.size).forEach { notifications.cancel(it) }</span>
+
+<span class="nc bnc" id="L210" title="All 2 branches missed.">    nowShowing = List(toShow.size) { index -&gt; index }</span>
+<span class="nc" id="L211">  }</span>
+
+  private fun playSound(active: Map&lt;Int, Type&gt;) {
+<span class="nc bnc" id="L214" title="All 4 branches missed.">    require(active.isNotEmpty())</span>
+<span class="nc" id="L215">    val (id, type) = active.entries.last()</span>
+<span class="nc" id="L216">    play(id, type)</span>
+<span class="nc" id="L217">  }</span>
+
+  private fun play(id: Int, type: Type) {
+    // new alarm - dispose all current signals
+<span class="nc" id="L221">    soundAlarmDisposable.dispose()</span>
+
+<span class="nc" id="L223">    wantedVolume.onNext(TargetVolume.FADED_IN)</span>
+
+<span class="nc" id="L225">    val targetVolumeAccountingForInCallState: Observable&lt;TargetVolume&gt; =</span>
+<span class="nc" id="L226">        Observable.combineLatest(</span>
+<span class="nc" id="L227">            wantedVolume,</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            inCall.zipWithIndex { callActive, index -&gt; CallState(index == 0, callActive) }) {</span>
+                volume,
+                callState -&gt;
+<span class="nc" id="L231">              when {</span>
+<span class="nc bnc" id="L232" title="All 4 branches missed.">                !callState.initial &amp;&amp; callState.inCall -&gt; TargetVolume.MUTED</span>
+<span class="nc bnc" id="L233" title="All 4 branches missed.">                !callState.initial &amp;&amp; !callState.inCall -&gt; TargetVolume.FADED_IN_FAST</span>
+<span class="nc" id="L234">                else -&gt; volume</span>
+              }
+            }
+<span class="nc" id="L237">    val alarm = alarms.getAlarm(id)</span>
+<span class="nc" id="L238">    val alarmtone =</span>
+<span class="nc bnc" id="L239" title="All 4 branches missed.">        if (alarm?.alarmtone is Alarmtone.Default) prefs.defaultRingtone()</span>
+<span class="nc bnc" id="L240" title="All 4 branches missed.">        else alarm?.alarmtone ?: Alarmtone.Default</span>
+<span class="nc bnc" id="L241" title="All 4 branches missed.">    val label = alarm?.labelOrDefault ?: &quot;&quot;</span>
+<span class="nc" id="L242">    val pluginDisposables =</span>
+<span class="nc" id="L243">        plugins.map {</span>
+<span class="nc" id="L244">          it.go(</span>
+<span class="nc" id="L245">              PluginAlarmData(id, alarmtone, label),</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">              prealarm = type == Type.PREALARM,</span>
+<span class="nc" id="L247">              targetVolume = targetVolumeAccountingForInCallState)</span>
+        }
+<span class="nc" id="L249">    soundAlarmDisposable = CompositeDisposable(pluginDisposables)</span>
+<span class="nc" id="L250">  }</span>
+
+  private fun &lt;U : Any, D : Any&gt; Observable&lt;U&gt;.zipWithIndex(
+      function: (U, Int) -&gt; D
+  ): Observable&lt;D&gt; {
+<span class="nc" id="L255">    return zipWith(generateSequence(0) { it + 1 }.asIterable()) { next, index -&gt;</span>
+<span class="nc" id="L256">      function.invoke(next, index)</span>
+    }
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

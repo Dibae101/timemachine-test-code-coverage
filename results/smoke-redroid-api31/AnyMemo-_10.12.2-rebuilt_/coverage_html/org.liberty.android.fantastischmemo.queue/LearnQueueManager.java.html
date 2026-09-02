@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LearnQueueManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnyMemo</a> &gt; <a href="index.source.html" class="el_package">org.liberty.android.fantastischmemo.queue</a> &gt; <span class="el_source">LearnQueueManager.java</span></div><h1>LearnQueueManager.java</h1><pre class="source lang-java linenums">/*
+Copyright (C) 2012 Haowen Ning
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+
+*/
+
+package org.liberty.android.fantastischmemo.queue;
+
+import android.content.Context;
+import android.util.Log;
+
+import org.liberty.android.fantastischmemo.common.AnyMemoDBOpenHelper;
+import org.liberty.android.fantastischmemo.common.AnyMemoDBOpenHelperManager;
+import org.liberty.android.fantastischmemo.dao.CardDao;
+import org.liberty.android.fantastischmemo.dao.LearningDataDao;
+import org.liberty.android.fantastischmemo.entity.Card;
+import org.liberty.android.fantastischmemo.entity.Category;
+import org.liberty.android.fantastischmemo.entity.ReviewOrdering;
+import org.liberty.android.fantastischmemo.scheduler.Scheduler;
+import org.liberty.android.fantastischmemo.utils.AnyMemoExecutor;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.LinkedBlockingQueue;
+
+public class LearnQueueManager implements QueueManager {
+<span class="nc" id="L46">    private static final String TAG = LearnQueueManager.class.getSimpleName();</span>
+    /*
+     * The scheduler to determine whether a card should reimain
+     * in the learn queue
+     */
+    private Scheduler scheduler;
+
+    private Category filterCategory;
+
+    private List&lt;Card&gt; learnQueue;
+    private List&lt;Card&gt; newCache;
+    private List&lt;Card&gt; reviewCache;
+    private BlockingQueue&lt;Card&gt; dirtyCache;
+
+    private int learnQueueSize;
+
+    private int cacheSize;
+
+    private boolean shuffle;
+
+    private ReviewOrdering reviewOrdering;
+
+    private Context context;
+
+    private String dbPath;
+
+<span class="nc" id="L72">    private LearnQueueManager(Builder builder) {</span>
+<span class="nc" id="L73">        this.filterCategory = builder.filterCategory;</span>
+<span class="nc" id="L74">        this.learnQueueSize = builder.learnQueueSize;</span>
+<span class="nc" id="L75">        this.cacheSize = builder.cacheSize;</span>
+<span class="nc" id="L76">        this.shuffle = builder.shuffle;</span>
+<span class="nc" id="L77">        this.scheduler = builder.scheduler;</span>
+<span class="nc" id="L78">        this.context = builder.context;</span>
+<span class="nc" id="L79">        this.dbPath = builder.dbPath;</span>
+<span class="nc" id="L80">        this.reviewOrdering = builder.reviewOrdering;</span>
+
+<span class="nc" id="L82">        learnQueue = Collections.synchronizedList(new LinkedList&lt;Card&gt;());</span>
+<span class="nc" id="L83">        newCache = Collections.synchronizedList(new LinkedList&lt;Card&gt;());</span>
+<span class="nc" id="L84">        reviewCache = Collections.synchronizedList(new LinkedList&lt;Card&gt;());</span>
+
+        // Make sure the dirtyCache is thread safe because multiple threads will access
+        // the set
+<span class="nc" id="L88">        dirtyCache = new LinkedBlockingQueue&lt;Card&gt;();</span>
+<span class="nc" id="L89">    }</span>
+
+    @Override
+    public synchronized Card dequeue() {
+<span class="nc" id="L93">        shuffle();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (!learnQueue.isEmpty()) {</span>
+<span class="nc" id="L95">            Card c = learnQueue.get(0);</span>
+<span class="nc" id="L96">            Log.d(TAG, &quot;Dequeue card: &quot; + c.getId());</span>
+<span class="nc" id="L97">            return c;</span>
+        } else {
+<span class="nc" id="L99">            return null;</span>
+        }
+    }
+
+    @Override
+    public synchronized Card dequeuePosition(int cardId) {
+<span class="nc" id="L105">        position(cardId);</span>
+
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (!learnQueue.isEmpty()) {</span>
+<span class="nc" id="L108">            Card c = learnQueue.get(0);</span>
+<span class="nc" id="L109">            Log.d(TAG, &quot;Dequeue card: &quot; + c.getId());</span>
+<span class="nc" id="L110">            return c;</span>
+        } else {
+<span class="nc" id="L112">            return null;</span>
+        }
+
+    }
+
+    @Override
+    public synchronized void remove(Card card) {
+<span class="nc" id="L119">        learnQueue.remove(card);</span>
+<span class="nc" id="L120">        reviewCache.remove(card);</span>
+<span class="nc" id="L121">        newCache.remove(card);</span>
+<span class="nc" id="L122">    }</span>
+
+    @Override
+    public synchronized void release() {
+        // Make sure the cache is flushed.
+<span class="nc" id="L127">        flushDirtyCache();</span>
+<span class="nc" id="L128">        AnyMemoExecutor.waitAllTasks();</span>
+<span class="nc" id="L129">    }</span>
+
+    private synchronized void refill() {
+<span class="nc" id="L132">        final AnyMemoDBOpenHelper dbOpenHelper = AnyMemoDBOpenHelperManager</span>
+<span class="nc" id="L133">                .getHelper(context, dbPath);</span>
+<span class="nc" id="L134">        final CardDao cardDao = dbOpenHelper.getCardDao();</span>
+<span class="nc" id="L135">        dumpLearnQueue();</span>
+<span class="nc" id="L136">        List&lt;Card&gt; exclusionList = new ArrayList&lt;Card&gt;(learnQueue.size()</span>
+<span class="nc" id="L137">                + dirtyCache.size());</span>
+<span class="nc" id="L138">        exclusionList.addAll(learnQueue);</span>
+<span class="nc" id="L139">        exclusionList.addAll(dirtyCache);</span>
+
+        try {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if (newCache.size() == 0) {</span>
+<span class="nc" id="L143">                List&lt;Card&gt; cs = cardDao.getNewCards(filterCategory,</span>
+                        exclusionList, cacheSize);
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                if (cs.size() &gt; 0) {</span>
+<span class="nc" id="L146">                    newCache.addAll(cs);</span>
+                }
+            }
+
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (reviewCache.size() == 0) {</span>
+<span class="nc" id="L151">                List&lt;Card&gt; cs = cardDao.getCardsForReview(filterCategory,</span>
+                        exclusionList, cacheSize, reviewOrdering);
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                if (cs.size() &gt; 0) {</span>
+<span class="nc" id="L155">                    reviewCache.addAll(cs);</span>
+                }
+            }
+
+<span class="nc bnc" id="L159" title="All 4 branches missed.">            while (learnQueue.size() &lt; learnQueueSize &amp;&amp; !reviewCache.isEmpty()) {</span>
+<span class="nc" id="L160">                learnQueue.add(reviewCache.get(0));</span>
+<span class="nc" id="L161">                reviewCache.remove(0);</span>
+            }
+<span class="nc bnc" id="L163" title="All 4 branches missed.">            while (learnQueue.size() &lt; learnQueueSize &amp;&amp; !newCache.isEmpty()) {</span>
+<span class="nc" id="L164">                learnQueue.add(newCache.get(0));</span>
+<span class="nc" id="L165">                newCache.remove(0);</span>
+            }
+        } finally {
+<span class="nc" id="L168">            AnyMemoDBOpenHelperManager.releaseHelper(dbOpenHelper);</span>
+        }
+<span class="nc" id="L170">        flushDirtyCache();</span>
+<span class="nc" id="L171">        dumpLearnQueue();</span>
+<span class="nc" id="L172">    }</span>
+
+    private synchronized void shuffle() {
+        // Shuffle all the caches
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (shuffle) {</span>
+<span class="nc" id="L177">            Collections.shuffle(newCache);</span>
+<span class="nc" id="L178">            Collections.shuffle(reviewCache);</span>
+<span class="nc" id="L179">            Collections.shuffle(learnQueue);</span>
+        }
+<span class="nc" id="L181">    }</span>
+
+    @Override
+    public synchronized void update(Card card) {
+        // Make sure to remove the stale cache first.
+        // Set.add(Object) will not overwrite object.
+<span class="nc" id="L187">        remove(card);</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (!scheduler.isCardLearned(card.getLearningData())) {</span>
+            // Add to the back of the queue
+<span class="nc" id="L190">            learnQueue.add(card);</span>
+        }
+        try {
+<span class="nc" id="L193">            dirtyCache.put(card);</span>
+<span class="nc" id="L194">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L195">            Log.e(TAG, &quot;Updating card is interrupted&quot;, e);</span>
+<span class="nc" id="L196">            assert false : &quot;The update should not be interrupted&quot;;</span>
+<span class="nc" id="L197">        }</span>
+<span class="nc" id="L198">        refill();</span>
+<span class="nc" id="L199">    }</span>
+
+    private synchronized void position(int cardId) {
+<span class="nc" id="L202">        Iterator&lt;Card&gt; learnIterator= learnQueue.iterator();</span>
+<span class="nc" id="L203">        Iterator&lt;Card&gt; reviewCacheIterator = reviewCache.iterator();</span>
+<span class="nc" id="L204">        Iterator&lt;Card&gt; newCacheIterator = newCache.iterator();</span>
+
+<span class="nc" id="L206">        int learnQueueRotateDistance = 0;</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        while (learnIterator.hasNext()) {</span>
+<span class="nc" id="L208">            Card c =learnIterator.next();</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (c.getId() == cardId) {</span>
+<span class="nc" id="L210">                int index = learnQueue.indexOf(c);</span>
+<span class="nc" id="L211">                learnQueueRotateDistance = -index;</span>
+<span class="nc" id="L212">                Log.i(TAG, &quot;Rotate index: &quot; + index);</span>
+            }
+<span class="nc" id="L214">        }</span>
+<span class="nc" id="L215">        Collections.rotate(learnQueue, learnQueueRotateDistance);</span>
+
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        while (reviewCacheIterator.hasNext()) {</span>
+<span class="nc" id="L218">            Card c =reviewCacheIterator.next();</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (c.getId() == cardId) {</span>
+<span class="nc" id="L220">                reviewCacheIterator.remove();</span>
+            }
+<span class="nc" id="L222">        }</span>
+
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        while (newCacheIterator.hasNext()) {</span>
+<span class="nc" id="L225">            Card c = newCacheIterator.next();</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (c.getId() == cardId) {</span>
+<span class="nc" id="L227">                newCacheIterator.remove();</span>
+            }
+<span class="nc" id="L229">        }</span>
+
+<span class="nc" id="L231">        final AnyMemoDBOpenHelper dbOpenHelper = AnyMemoDBOpenHelperManager.getHelper(context, dbPath);</span>
+<span class="nc" id="L232">        final CardDao cardDao = dbOpenHelper.getCardDao();</span>
+<span class="nc" id="L233">        final LearningDataDao learningDataDao = dbOpenHelper.getLearningDataDao();</span>
+        try {
+<span class="nc" id="L235">            Card headCard = null;</span>
+<span class="nc" id="L236">            headCard = cardDao.queryForId(cardId);</span>
+<span class="nc" id="L237">            learningDataDao.refresh(headCard.getLearningData());</span>
+
+<span class="nc" id="L239">            learnQueue.add(0, headCard);</span>
+        } finally {
+<span class="nc" id="L241">            AnyMemoDBOpenHelperManager.releaseHelper(dbOpenHelper);</span>
+        }
+<span class="nc" id="L243">    }</span>
+
+    private synchronized void flushDirtyCache() {
+<span class="nc" id="L246">        AnyMemoExecutor.submit(new Runnable() {</span>
+            public void run() {
+                // Update the queue
+<span class="nc" id="L249">                final AnyMemoDBOpenHelper dbOpenHelper = AnyMemoDBOpenHelperManager.getHelper(context, dbPath);</span>
+<span class="nc" id="L250">                final CardDao cardDao = dbOpenHelper.getCardDao();</span>
+<span class="nc" id="L251">                final LearningDataDao learningDataDao = dbOpenHelper.getLearningDataDao();</span>
+
+                try {
+<span class="nc" id="L254">                    learningDataDao.callBatchTasks (</span>
+<span class="nc" id="L255">                        new Callable&lt;Void&gt;() {</span>
+                            public Void call() throws Exception {
+<span class="nc" id="L257">                                Log.i(TAG, &quot;Flushing dirty cache. # of cards to flush: &quot; + dirtyCache.size());</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                                while (!dirtyCache.isEmpty()) {</span>
+<span class="nc" id="L259">                                    Card card = dirtyCache.take();</span>
+<span class="nc" id="L260">                                    Log.i(TAG, &quot;Flushing card id: &quot; + card.getId() + &quot; with learning data: &quot; + card.getLearningData());</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                                    if (learningDataDao.update(card.getLearningData()) == 0) {</span>
+<span class="nc" id="L262">                                        Log.w(TAG, &quot;LearningDataDao update failed for : &quot; + card.getLearningData());</span>
+<span class="nc" id="L263">                                        throw new RuntimeException(&quot;LearningDataDao update failed! LearningData to update: &quot; + card.getLearningData() + &quot; current value: &quot; + learningDataDao.queryForId(card.getLearningData().getId()));</span>
+                                    }
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                                    if (cardDao.update(card) == 0) {</span>
+<span class="nc" id="L266">                                        Log.w(TAG, &quot;CardDao update failed for : &quot; + card.getLearningData());</span>
+<span class="nc" id="L267">                                        throw new RuntimeException(&quot;CardDao update failed. Card to update: &quot; + card);</span>
+                                    }
+<span class="nc" id="L269">                                }</span>
+<span class="nc" id="L270">                                Log.i(TAG, &quot;Flushing dirty cache done.&quot;);</span>
+<span class="nc" id="L271">                                return null;</span>
+                            }
+                        });
+                } finally {
+<span class="nc" id="L275">                    AnyMemoDBOpenHelperManager.releaseHelper(dbOpenHelper);</span>
+                }
+<span class="nc" id="L277">            }</span>
+        });
+<span class="nc" id="L279">    }</span>
+
+    private void dumpLearnQueue() {
+<span class="nc" id="L282">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L283">        sb.append(&quot;LearnQueue : card ids[&quot;);</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">        for (Card c : learnQueue) {</span>
+<span class="nc" id="L285">            sb.append(&quot;&quot; + c.getId() + &quot;, &quot;);</span>
+<span class="nc" id="L286">        }</span>
+<span class="nc" id="L287">        sb.append(&quot;]\n&quot;);</span>
+
+        // sb.append(&quot;LearnQueue: card learning data[&quot;);
+        // for (Card c : learnQueue) {
+        //     sb.append(&quot;&quot; + c.getLearningData() + &quot;\n &quot;);
+        // }
+        // sb.append(&quot;]\n&quot;);
+
+<span class="nc" id="L295">        sb.append(&quot;Dirty cache: card ids[&quot;);</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        for (Card c : dirtyCache) {</span>
+<span class="nc" id="L297">            sb.append(&quot;&quot; + c.getId() + &quot;, &quot;);</span>
+<span class="nc" id="L298">        }</span>
+<span class="nc" id="L299">        sb.append(&quot;]\n&quot;);</span>
+
+        // sb.append(&quot;Dirty cache: card learning data[&quot;);
+        // for (Card c : dirtyCache) {
+        //     sb.append(&quot;&quot; + c.getLearningData() + &quot;\n &quot;);
+        // }
+        // sb.append(&quot;]\n&quot;);
+<span class="nc" id="L306">        Log.v(TAG, sb.toString());</span>
+<span class="nc" id="L307">    }</span>
+
+    public static class Builder {
+        private Scheduler scheduler;
+
+        private Category filterCategory;
+
+<span class="nc" id="L314">        private int learnQueueSize = 10;</span>
+
+<span class="nc" id="L316">        private int cacheSize = 50;</span>
+
+<span class="nc" id="L318">        private boolean shuffle = false;</span>
+
+        private String dbPath;
+
+        private Context context;
+
+        private ReviewOrdering reviewOrdering;
+
+<span class="nc" id="L326">        public Builder(Context context, String dbPath) {</span>
+<span class="nc" id="L327">            this.dbPath = dbPath;</span>
+<span class="nc" id="L328">            this.context = context;</span>
+<span class="nc" id="L329">        }</span>
+
+        public Builder setScheduler(Scheduler scheduler) {
+<span class="nc" id="L332">            this.scheduler = scheduler;</span>
+<span class="nc" id="L333">            return this;</span>
+        }
+
+        public Builder setFilterCategory(Category filterCategory) {
+<span class="nc" id="L337">            this.filterCategory = filterCategory;</span>
+<span class="nc" id="L338">            return this;</span>
+        }
+        public Builder setLearnQueueSize(int learnQueueSize) {
+<span class="nc" id="L341">            this.learnQueueSize = learnQueueSize;</span>
+<span class="nc" id="L342">            return this;</span>
+        }
+        public Builder setCacheSize(int cacheSize) {
+<span class="nc" id="L345">            this.cacheSize = cacheSize;</span>
+<span class="nc" id="L346">            return this;</span>
+        }
+        public Builder setShuffle(boolean shuffle) {
+<span class="nc" id="L349">            this.shuffle = shuffle;</span>
+<span class="nc" id="L350">            return this;</span>
+        }
+
+        public Builder setReviewOrdering(ReviewOrdering reviewOrdering) {
+<span class="nc" id="L354">            this.reviewOrdering = reviewOrdering;</span>
+<span class="nc" id="L355">            return this;</span>
+        }
+
+        public QueueManager build() {
+<span class="nc" id="L359">            LearnQueueManager qm = new LearnQueueManager(this);</span>
+<span class="nc" id="L360">            qm.refill();</span>
+<span class="nc" id="L361">            return qm;</span>
+        }
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

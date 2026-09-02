@@ -1,0 +1,119 @@
+name: Instrumented tests
+
+# Modeled on nowinandroid's androidTest job.
+on:
+  workflow_call:
+    inputs:
+      api-level:
+        description: Emulator API level
+        required: true
+        type: number
+      profile:
+        description: Emulator device profile (e.g. medium_phone)
+        required: true
+        type: string
+      gradle-task:
+        description: Instrumented Gradle task to run on the emulator
+        required: true
+        type: string
+      coverage:
+        description: Whether to publish Jacoco coverage and run SonarQube
+        required: false
+        type: boolean
+        default: false
+      artifact-name:
+        description: Name of the uploaded test-report artifact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  instrumented:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EMULATOR_TARGET: google_apis
+      EMULATOR_ARCH: x86_64
+    steps:
+      - name: Delete unnecessary tools
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: false # Don't remove Android tools
+          tool-cache: true
+          dotnet: true
+          haskell: true
+          swap-storage: true
+          docker-images: false
+          large-packages: false
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JDK 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: gradle
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Run device tests
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ inputs.api-level }}
+          profile: ${{ inputs.profile }}
+          arch: ${{ env.EMULATOR_ARCH }}
+          target: ${{ env.EMULATOR_TARGET }}
+          disable-animations: true
+          disk-size: 6000M
+          heap-size: 600M
+          ram-size: 4096M
+          cores: 4
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics
+          script: |
+            adb shell settings put global auto_time 0
+            adb shell su 0 toybox date 0801160025
+            EXIT_CODE=0 && ./gradlew ${{ inputs.gradle-task }} --daemon || EXIT_CODE=$? && (adb pull /sdcard/googletest/test_outputfiles app/build/outputs/androidTest-results/ || true) && exit $EXIT_CODE
+
+      - name: Upload coverage to Qlty
+        if: inputs.coverage && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: qltysh/qlty-action/coverage@08a0a862c159eae9b9003081da6663d96efef637 # v2.3.0
+        env:
+          JACOCO_SOURCE_PATH: >-
+            app/src/main/java
+            core/common/src/main/java
+            core/domain/src/main/java
+            core/database/src/main/java
+            core/datastore/src/main/java
+            core/ui/src/main/java
+            core/location/src/main/java
+            core/location/src/full/java
+            feature/reminders/api/src/main/java
+            feature/reminders/src/main/java
+            feature/ui/src/main/java
+        with:
+          oidc: true
+          files: app/build/reports/jacoco/jacocoFullDebugCodeCoverage/jacocoFullDebugCodeCoverage.xml
+
+      - name: SonarQube
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        if: ${{ inputs.coverage && env.SONAR_TOKEN != '' }}
+        run: ./gradlew sonar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            app/build/reports/jacoco/jacocoFullDebugCodeCoverage
+            app/build/reports/androidTest/connected/fullDebug
+            app/build/outputs/androidTest-results

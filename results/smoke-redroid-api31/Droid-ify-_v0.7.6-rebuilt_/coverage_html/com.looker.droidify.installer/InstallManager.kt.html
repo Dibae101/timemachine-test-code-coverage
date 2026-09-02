@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstallManager.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.installer</a> &gt; <span class="el_source">InstallManager.kt</span></div><h1>InstallManager.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.installer
+
+import android.content.Context
+import android.util.Log
+import com.looker.droidify.data.model.PackageName
+import com.looker.droidify.database.Database
+import com.looker.droidify.datastore.SettingsRepository
+import com.looker.droidify.datastore.get
+import com.looker.droidify.datastore.model.InstallerType
+import com.looker.droidify.installer.installers.Installer
+import com.looker.droidify.installer.installers.LegacyInstaller
+import com.looker.droidify.installer.installers.root.RootInstaller
+import com.looker.droidify.installer.installers.session.SessionInstaller
+import com.looker.droidify.installer.installers.shizuku.ShizukuInstaller
+import com.looker.droidify.installer.model.InstallItem
+import com.looker.droidify.installer.model.InstallState
+import com.looker.droidify.service.SyncService
+import com.looker.droidify.utility.common.Constants
+import com.looker.droidify.utility.common.cache.Cache
+import com.looker.droidify.utility.common.extension.addAndCompute
+import com.looker.droidify.utility.common.extension.filter
+import com.looker.droidify.utility.common.extension.notificationManager
+import com.looker.droidify.utility.common.extension.updateAsMutable
+import com.looker.droidify.utility.common.log
+import com.looker.droidify.utility.notifications.createInstallNotification
+import com.looker.droidify.utility.notifications.installNotification
+import com.looker.droidify.utility.notifications.removeInstallNotification
+import com.looker.droidify.utility.notifications.updatesAvailableNotification
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+<span class="fc" id="L39">class InstallManager(</span>
+<span class="fc" id="L40">    private val context: Context,</span>
+<span class="fc" id="L41">    private val settingsRepository: SettingsRepository,</span>
+) {
+
+<span class="fc" id="L44">    private val installItems = Channel&lt;InstallItem&gt;()</span>
+<span class="fc" id="L45">    private val uninstallItems = Channel&lt;PackageName&gt;()</span>
+
+<span class="pc" id="L47">    val state = MutableStateFlow&lt;Map&lt;PackageName, InstallState&gt;&gt;(emptyMap())</span>
+
+<span class="fc" id="L49">    private val skipSignature = settingsRepository.get { ignoreSignature }</span>
+<span class="fc" id="L50">    private val installerPreference = settingsRepository.get { installerType }</span>
+<span class="fc" id="L51">    private val deleteApkPreference = settingsRepository.get { deleteApkOnInstall }</span>
+<span class="pc" id="L52">    private val notificationManager by lazy { context.notificationManager }</span>
+
+<span class="pc bpc" id="L54" title="1 of 2 branches missed.">    suspend operator fun invoke() = coroutineScope {</span>
+<span class="fc" id="L55">        installer()</span>
+<span class="fc" id="L56">        uninstaller()</span>
+<span class="fc" id="L57">    }</span>
+
+    fun close() {
+<span class="nc" id="L60">        uninstallItems.close()</span>
+<span class="nc" id="L61">        installItems.close()</span>
+<span class="nc" id="L62">    }</span>
+
+    suspend infix fun install(installItem: InstallItem) {
+<span class="nc" id="L65">        installItems.send(installItem)</span>
+<span class="nc" id="L66">    }</span>
+
+    suspend infix fun uninstall(packageName: PackageName) {
+<span class="nc" id="L69">        uninstallItems.send(packageName)</span>
+<span class="nc" id="L70">    }</span>
+
+    infix fun remove(packageName: PackageName) {
+<span class="nc" id="L73">        updateState { remove(packageName) }</span>
+<span class="nc" id="L74">    }</span>
+
+    infix fun setFailed(packageName: PackageName) {
+<span class="nc" id="L77">        updateState { put(packageName, InstallState.Failed) }</span>
+<span class="nc" id="L78">    }</span>
+
+<span class="pc bpc" id="L80" title="7 of 8 branches missed.">    private fun CoroutineScope.installer() = launch {</span>
+<span class="fc" id="L81">        val currentQueue = mutableSetOf&lt;String&gt;()</span>
+<span class="pc bnc" id="L82" title="All 2 branches missed.">        installItems.filter { item -&gt;</span>
+<span class="nc" id="L83">            currentQueue.addAndCompute(item.packageName.name) { isAdded -&gt;</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                if (isAdded) {</span>
+<span class="nc" id="L85">                    updateState { put(item.packageName, InstallState.Pending) }</span>
+                }
+<span class="nc" id="L87">            }</span>
+<span class="fc" id="L88">        }.consumeEach { item -&gt;</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            if (state.value.containsKey(item.packageName)) {</span>
+<span class="nc" id="L90">                updateState { put(item.packageName, InstallState.Installing) }</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                notificationManager?.installNotification(</span>
+<span class="nc" id="L92">                    packageName = item.packageName.name,</span>
+<span class="nc" id="L93">                    notification = context.createInstallNotification(</span>
+<span class="nc" id="L94">                        appName = item.packageName.name,</span>
+<span class="nc" id="L95">                        state = InstallState.Installing,</span>
+                    ),
+                )
+<span class="nc bnc" id="L98" title="All 2 branches missed.">                val installer = currentInstaller()</span>
+
+<span class="nc" id="L100">                val result = try {</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                    installer.install(item)</span>
+<span class="nc" id="L102">                } catch (e: CancellationException) {</span>
+<span class="nc" id="L103">                    throw e</span>
+<span class="nc" id="L104">                } catch (e: Exception) {</span>
+<span class="nc" id="L105">                    Log.e(</span>
+<span class="nc" id="L106">                        &quot;InstallManager&quot;,</span>
+<span class="nc" id="L107">                        &quot;Install failed for ${item.packageName.name}&quot;,</span>
+<span class="nc" id="L108">                        e,</span>
+                    )
+<span class="nc" id="L110">                    InstallState.Failed</span>
+                }
+<span class="nc bnc" id="L112" title="All 4 branches missed.">                if (result == InstallState.Installed &amp;&amp; installer !is LegacyInstaller) {</span>
+<span class="nc bnc" id="L113" title="All 4 branches missed.">                    if (deleteApkPreference.first()) {</span>
+<span class="nc" id="L114">                        val apkFile = Cache.getReleaseFile(context, item.installFileName)</span>
+<span class="nc" id="L115">                        apkFile.delete()</span>
+                    }
+                }
+<span class="nc bnc" id="L118" title="All 4 branches missed.">                if (result == InstallState.Installed &amp;&amp; SyncService.autoUpdating) {</span>
+<span class="nc bnc" id="L119" title="All 4 branches missed.">                    val updates = Database.ProductAdapter.getUpdates(skipSignature.first())</span>
+<span class="nc" id="L120">                    when {</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                        updates.isEmpty() -&gt; {</span>
+<span class="nc" id="L122">                            SyncService.autoUpdating = false</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                            notificationManager?.cancel(Constants.NOTIFICATION_ID_UPDATES)</span>
+                        }
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                        updates.map { it.packageName } != SyncService.autoUpdateStartedFor -&gt; {</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                            notificationManager?.notify(</span>
+<span class="nc" id="L127">                                Constants.NOTIFICATION_ID_UPDATES,</span>
+<span class="nc" id="L128">                                updatesAvailableNotification(context, updates),</span>
+                            )
+                        }
+                    }
+                }
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                notificationManager?.removeInstallNotification(item.packageName.name)</span>
+<span class="nc" id="L134">                updateState { put(item.packageName, result) }</span>
+<span class="nc" id="L135">                currentQueue.remove(item.packageName.name)</span>
+            }
+<span class="nc" id="L137">        }</span>
+<span class="pc" id="L138">    }</span>
+
+<span class="pc" id="L140">    private fun CoroutineScope.uninstaller() = launch {</span>
+<span class="fc" id="L141">        uninstallItems.consumeEach {</span>
+<span class="nc" id="L142">            try {</span>
+<span class="nc" id="L143">                currentInstaller().uninstall(it)</span>
+<span class="nc" id="L144">            } catch (e: CancellationException) {</span>
+<span class="nc" id="L145">                throw e</span>
+<span class="nc" id="L146">            } catch (e: Exception) {</span>
+<span class="nc" id="L147">                Log.e(</span>
+<span class="nc" id="L148">                    &quot;InstallManager&quot;,</span>
+<span class="nc" id="L149">                    &quot;Uninstall failed for ${it.name}&quot;,</span>
+<span class="nc" id="L150">                    e,</span>
+                )
+            }
+<span class="nc" id="L153">        }</span>
+<span class="pc" id="L154">    }</span>
+
+    private suspend fun currentInstaller(): Installer =
+<span class="nc bnc" id="L157" title="All 4 branches missed.">        when (installerPreference.first()) {</span>
+<span class="nc" id="L158">            InstallerType.LEGACY -&gt; LegacyInstaller(context, settingsRepository)</span>
+<span class="nc" id="L159">            InstallerType.SESSION -&gt; SessionInstaller(context)</span>
+<span class="nc" id="L160">            InstallerType.SHIZUKU -&gt; ShizukuInstaller(context)</span>
+<span class="nc" id="L161">            InstallerType.ROOT -&gt; RootInstaller(context)</span>
+<span class="nc" id="L162">        }</span>
+
+    private inline fun updateState(block: MutableMap&lt;PackageName, InstallState&gt;.() -&gt; Unit) {
+<span class="nc" id="L165">        state.update { it.updateAsMutable(block) }</span>
+<span class="nc" id="L166">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

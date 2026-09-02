@@ -1,0 +1,533 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ManageCategoriesViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">ManageCategoriesViewModel.kt</span></div><h1>ManageCategoriesViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.database.Cursor
+import android.database.sqlite.SQLiteConstraintException
+import android.net.Uri
+import android.os.Parcelable
+import androidx.annotation.StringRes
+import androidx.compose.runtime.mutableStateOf
+import androidx.core.os.BundleCompat
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.asFlow
+import androidx.lifecycle.liveData
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.SavedStateHandleSaveableApi
+import androidx.lifecycle.viewmodel.compose.saveable
+import arrow.core.flatMap
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.parcelize.Parcelize
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.db2.deleteCategory
+import org.totschnig.myexpenses.db2.ensureCategoryTree
+import org.totschnig.myexpenses.db2.mergeCategories
+import org.totschnig.myexpenses.db2.moveCategory
+import org.totschnig.myexpenses.db2.saveCategory
+import org.totschnig.myexpenses.export.CategoryExporter
+import org.totschnig.myexpenses.export.createFileFailure
+import org.totschnig.myexpenses.model.ExportFormat
+import org.totschnig.myexpenses.model.sort.Sort
+import org.totschnig.myexpenses.model2.CategoryExport
+import org.totschnig.myexpenses.provider.BaseTransactionProvider
+import org.totschnig.myexpenses.provider.BaseTransactionProvider.Companion.ACCOUNTS_MINIMAL_URI_WITH_AGGREGATES
+import org.totschnig.myexpenses.provider.KEY_CATID
+import org.totschnig.myexpenses.provider.KEY_COLOR
+import org.totschnig.myexpenses.provider.KEY_HAS_DESCENDANTS
+import org.totschnig.myexpenses.provider.KEY_ICON
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_LABEL_NORMALIZED
+import org.totschnig.myexpenses.provider.KEY_MAPPED_BUDGETS
+import org.totschnig.myexpenses.provider.KEY_MAPPED_TEMPLATES
+import org.totschnig.myexpenses.provider.KEY_MAPPED_TRANSACTIONS
+import org.totschnig.myexpenses.provider.KEY_PARENTID
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_TYPE
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.TABLE_BUDGETS
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.TransactionProvider.BUDGETS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.CATEGORIES_URI
+import org.totschnig.myexpenses.provider.filter.AndCriterion
+import org.totschnig.myexpenses.provider.filter.CategoryCriterion
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.filter.FilterPersistence
+import org.totschnig.myexpenses.provider.filter.KEY_FILTER
+import org.totschnig.myexpenses.provider.filter.NotCriterion
+import org.totschnig.myexpenses.provider.filter.Operation
+import org.totschnig.myexpenses.provider.filter.OrCriterion
+import org.totschnig.myexpenses.provider.getIntOrNull
+import org.totschnig.myexpenses.provider.getLong
+import org.totschnig.myexpenses.provider.getLongOrNull
+import org.totschnig.myexpenses.provider.getString
+import org.totschnig.myexpenses.provider.getStringOrNull
+import org.totschnig.myexpenses.sync.GenericAccountService
+import org.totschnig.myexpenses.util.AppDirHelper
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.failure
+import org.totschnig.myexpenses.util.io.displayName
+import org.totschnig.myexpenses.util.replace
+import org.totschnig.myexpenses.util.safeMessage
+import org.totschnig.myexpenses.viewmodel.data.Category
+import timber.log.Timber
+import java.io.FileNotFoundException
+
+<span class="nc" id="L86">class ManageCategoriesViewModel(application: Application, savedStateHandle: SavedStateHandle):</span>
+<span class="nc" id="L87">    CategoryViewModel(application, savedStateHandle) {</span>
+
+    sealed class DialogState : Parcelable
+
+<span class="nc" id="L91">    @Parcelize</span>
+<span class="nc" id="L92">    data object NoShow : DialogState()</span>
+
+<span class="nc" id="L94">    @Parcelize</span>
+<span class="nc" id="L95">    data class Edit(</span>
+<span class="nc" id="L96">        val category: Category? = null,</span>
+<span class="nc" id="L97">        val parent: Category? = null,</span>
+<span class="nc" id="L98">        val saving: Boolean = false,</span>
+<span class="nc" id="L99">        val error: Boolean = false,</span>
+<span class="nc" id="L100">    ) : DialogState() {</span>
+        val isNew: Boolean
+<span class="nc bnc" id="L102" title="All 4 branches missed.">            get() = category == null || category.id == 0L</span>
+<span class="nc" id="L103">    }</span>
+
+<span class="nc" id="L105">    @Parcelize</span>
+<span class="nc" id="L106">    data class Merge(</span>
+<span class="nc" id="L107">        val categories: List&lt;Category&gt;,</span>
+<span class="nc" id="L108">        val saving: Boolean = false,</span>
+<span class="nc" id="L109">    ) : DialogState()</span>
+
+    sealed class DeleteResult {
+<span class="nc" id="L112">        class OperationPending(</span>
+<span class="nc" id="L113">            val categories: List&lt;Category&gt;,</span>
+<span class="nc" id="L114">            val mappedToBudgets: Int,</span>
+<span class="nc" id="L115">            val hasDescendants: Int,</span>
+        ) : DeleteResult()
+
+<span class="nc" id="L118">        class OperationComplete(</span>
+<span class="nc" id="L119">            val deleted: Int,</span>
+<span class="nc" id="L120">            val mappedToTransactions: Int,</span>
+<span class="nc" id="L121">            val mappedToTemplates: Int,</span>
+        ) : DeleteResult()
+    }
+
+    @OptIn(SavedStateHandleSaveableApi::class)
+<span class="nc" id="L126">    var dialogState: DialogState by savedStateHandle.saveable { mutableStateOf(NoShow) }</span>
+
+<span class="nc" id="L128">    private val _mergeResult: MutableStateFlow&lt;Unit?&gt; = MutableStateFlow(null)</span>
+<span class="nc" id="L129">    private val _deleteResult: MutableStateFlow&lt;Result&lt;DeleteResult&gt;?&gt; = MutableStateFlow(null)</span>
+<span class="nc" id="L130">    private val _moveResult: MutableStateFlow&lt;Boolean?&gt; = MutableStateFlow(null)</span>
+<span class="nc" id="L131">    private val _importResult: MutableStateFlow&lt;Pair&lt;Int, Int&gt;?&gt; = MutableStateFlow(null)</span>
+<span class="nc" id="L132">    private val _exportResult: MutableStateFlow&lt;Result&lt;Pair&lt;Uri, String&gt;&gt;?&gt; = MutableStateFlow(null)</span>
+<span class="nc" id="L133">    val deleteResult: StateFlow&lt;Result&lt;DeleteResult&gt;?&gt; = _deleteResult.asStateFlow()</span>
+<span class="nc" id="L134">    val moveResult: StateFlow&lt;Boolean?&gt; = _moveResult.asStateFlow()</span>
+<span class="nc" id="L135">    val importResult: StateFlow&lt;Pair&lt;Int, Int&gt;?&gt; = _importResult.asStateFlow()</span>
+<span class="nc" id="L136">    val exportResult: StateFlow&lt;Result&lt;Pair&lt;Uri, String&gt;&gt;?&gt; = _exportResult.asStateFlow()</span>
+<span class="nc" id="L137">    val mergeResult: Flow&lt;Unit?&gt; = _mergeResult.asStateFlow()</span>
+
+<span class="nc" id="L139">    val defaultSort = Sort.USAGES</span>
+<span class="nc" id="L140">    val sortOrder = MutableStateFlow(defaultSort)</span>
+    fun setSortOrder(sort: Sort) {
+<span class="nc" id="L142">        sortOrder.value = sort</span>
+<span class="nc" id="L143">    }</span>
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+<span class="nc" id="L146">    val categoryTree = combine(</span>
+<span class="nc" id="L147">        typeFilterLiveData.asFlow(),</span>
+<span class="nc" id="L148">        savedStateHandle.getLiveData(KEY_FILTER, &quot;&quot;).asFlow(),</span>
+<span class="nc" id="L149">        sortOrder</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">    ) { type, filter, sort -&gt;</span>
+<span class="nc" id="L151">        Timber.d(&quot;new emission: $type/$filter/$sort&quot;)</span>
+<span class="nc" id="L152">        Triple(type, filter, sort)</span>
+<span class="nc" id="L153">    }.flatMapLatest { (type, filter, sortOrder) -&gt;</span>
+<span class="nc" id="L154">        val (selection, selectionArgs) = joinQueryAndAccountFilter(</span>
+<span class="nc" id="L155">            null,</span>
+<span class="nc" id="L156">            savedStateHandle,</span>
+<span class="nc" id="L157">            KEY_LABEL_NORMALIZED, KEY_CATID, &quot;_Tree_&quot;</span>
+        )
+<span class="nc" id="L159">        categoryTree(</span>
+<span class="nc" id="L160">            selection = selection,</span>
+<span class="nc" id="L161">            selectionArgs = selectionArgs?.let { it + it } ?: emptyArray(),</span>
+<span class="nc" id="L162">            sortOrder = sortOrder.toOrderByWithDefault(defaultSort, collate),</span>
+<span class="nc" id="L163">            queryParameter = type?.let { mapOf(KEY_TYPE to type.toString()) } ?: emptyMap(),</span>
+<span class="nc" id="L164">            projection = null,</span>
+<span class="nc" id="L165">            keepCriterion = { it.label.contains(filter, ignoreCase = true) },</span>
+<span class="nc" id="L166">            withColors = false</span>
+<span class="nc" id="L167">        )</span>
+    }
+<span class="nc" id="L169">        .stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, LoadingState.Loading)</span>
+
+<span class="nc" id="L171">    val categoryTreeForSelect: Flow&lt;LoadingState&gt; by lazy {</span>
+<span class="nc" id="L172">        categoryTree(sortOrder = sortOrder.value.toOrderByWithDefault(defaultSort, collate))</span>
+    }
+
+    fun saveCategory(label: String, icon: String?, typeFlags: Byte) {
+<span class="nc" id="L176">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L177" title="All 10 branches missed.">            (dialogState as? Edit)?.takeIf { !it.saving }?.let { edit -&gt;</span>
+<span class="nc" id="L178">                val category = org.totschnig.myexpenses.model2.Category(</span>
+<span class="nc bnc" id="L179" title="All 6 branches missed.">                    id = edit.category?.id?.takeIf { it != 0L },</span>
+<span class="nc" id="L180">                    label = label,</span>
+<span class="nc" id="L181">                    icon = icon,</span>
+<span class="nc bnc" id="L182" title="All 4 branches missed.">                    parentId = edit.parent?.id ?: edit.category?.parentId,</span>
+<span class="nc" id="L183">                    type = typeFlags</span>
+                )
+<span class="nc" id="L185">                dialogState = edit.copy(saving = true)</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                dialogState = if (repository.saveCategory(category) == null) {</span>
+<span class="nc" id="L187">                    edit.copy(error = true)</span>
+                } else {
+<span class="nc" id="L189">                    NoShow</span>
+                }
+<span class="nc" id="L191">            }</span>
+<span class="nc" id="L192">        }</span>
+<span class="nc" id="L193">    }</span>
+
+    fun mergeCategories(keepIndex: Int) {
+<span class="nc" id="L196">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L197" title="All 10 branches missed.">            (dialogState as? Merge)?.takeIf { !it.saving }?.let { merge -&gt;</span>
+<span class="nc" id="L198">                dialogState = merge.copy(saving = true)</span>
+<span class="nc" id="L199">                val idList = merge.categories.map { it.id }.toMutableList()</span>
+<span class="nc" id="L200">                val kept = idList.removeAt(keepIndex)</span>
+<span class="nc" id="L201">                repository.mergeCategories(idList, kept)</span>
+<span class="nc" id="L202">                updateCategoryFilters(idList.toSet(), kept)</span>
+<span class="nc" id="L203">                updateCategoryBudgets(idList.toSet(), kept)</span>
+<span class="nc" id="L204">                dialogState = NoShow</span>
+<span class="nc" id="L205">                _mergeResult.update { }</span>
+<span class="nc" id="L206">            }</span>
+<span class="nc" id="L207">        }</span>
+<span class="nc" id="L208">    }</span>
+
+    private suspend fun updateCategoryFilters(old: Set&lt;Long&gt;, new: Long) {
+<span class="nc" id="L211">        contentResolver.query(ACCOUNTS_MINIMAL_URI_WITH_AGGREGATES, null, null, null, null)</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            ?.use { cursor -&gt;</span>
+<span class="nc" id="L213">                updateFilterHelper(old, new, cursor, MyExpensesViewModel::prefNameForCriteria)</span>
+<span class="nc" id="L214">            }</span>
+<span class="nc" id="L215">    }</span>
+
+
+    private suspend fun updateCategoryBudgets(old: Set&lt;Long&gt;, new: Long) {
+<span class="nc" id="L219">        contentResolver.query(</span>
+<span class="nc" id="L220">            BUDGETS_URI,</span>
+<span class="nc" id="L221">            arrayOf(&quot;$TABLE_BUDGETS.$KEY_ROWID&quot;),</span>
+<span class="nc" id="L222">            null,</span>
+<span class="nc" id="L223">            null,</span>
+<span class="nc" id="L224">            null</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        )?.use { cursor -&gt;</span>
+<span class="nc" id="L226">            updateFilterHelper(old, new, cursor, BudgetViewModel::prefNameForCriteria)</span>
+<span class="nc" id="L227">        }</span>
+<span class="nc" id="L228">    }</span>
+
+    private suspend fun updateFilterHelper(
+        old: Set&lt;Long&gt;,
+        new: Long,
+        cursor: Cursor,
+        prefNameCreator: (Long) -&gt; String,
+    ) {
+<span class="nc" id="L236">        cursor.moveToFirst()</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        while (!cursor.isAfterLast) {</span>
+<span class="nc" id="L238">            val id = cursor.getLong(KEY_ROWID)</span>
+<span class="nc" id="L239">            val filterKey = prefNameCreator(id)</span>
+<span class="nc" id="L240">            val filterPersistence = FilterPersistence(dataStore, filterKey)</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            filterPersistence.getValue()?.let {</span>
+<span class="nc" id="L242">                val newValue = updateCriterion(it, old, new)</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                if (newValue != it) {</span>
+<span class="nc" id="L244">                    Timber.i(&quot;updating categories in filter %s: %s -&gt; %s&quot;, filterKey, it, newValue)</span>
+<span class="nc" id="L245">                    filterPersistence.persist(newValue)</span>
+                }
+<span class="nc" id="L247">            }</span>
+<span class="nc" id="L248">            cursor.moveToNext()</span>
+        }
+<span class="nc" id="L250">    }</span>
+
+    private fun updateCriterion(
+        criterion: Criterion,
+        old: Set&lt;Long&gt;,
+        new: Long,
+    ): Criterion {
+<span class="nc" id="L257">        return when (criterion) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            is CategoryCriterion -&gt; {</span>
+<span class="nc" id="L259">                val oldSet = criterion.values.toSet()</span>
+<span class="nc" id="L260">                val newSet: Set&lt;Long&gt; = oldSet.replace(old, new)</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                if (oldSet != newSet) {</span>
+<span class="nc" id="L262">                    val labelList = mutableListOf&lt;String&gt;()</span>
+<span class="nc" id="L263">                    contentResolver.query(</span>
+<span class="nc" id="L264">                        CATEGORIES_URI, arrayOf(KEY_LABEL),</span>
+<span class="nc" id="L265">                        &quot;$KEY_ROWID IN (${newSet.joinToString()})&quot;, null, null</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                    )?.use {</span>
+<span class="nc" id="L267">                        it.moveToFirst()</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">                        while (!it.isAfterLast) {</span>
+<span class="nc" id="L269">                            labelList.add(it.getString(0))</span>
+<span class="nc" id="L270">                            it.moveToNext()</span>
+                        }
+<span class="nc" id="L272">                    }</span>
+<span class="nc" id="L273">                    CategoryCriterion(</span>
+<span class="nc" id="L274">                        labelList.joinToString(&quot;,&quot;),</span>
+<span class="nc" id="L275">                        *newSet.toLongArray()</span>
+                    )
+<span class="nc" id="L277">                } else criterion</span>
+            }
+
+<span class="nc bnc" id="L280" title="All 2 branches missed.">            is NotCriterion -&gt; NotCriterion(updateCriterion(criterion.criterion, old, new))</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            is AndCriterion -&gt; AndCriterion(criterion.criteria.map { updateCriterion(it, old, new) }</span>
+<span class="nc" id="L282">                .toSet())</span>
+
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            is OrCriterion -&gt; OrCriterion(criterion.criteria.map { updateCriterion(it, old, new) }</span>
+<span class="nc" id="L285">                .toSet())</span>
+
+<span class="nc" id="L287">            else -&gt; criterion</span>
+        }
+    }
+
+    fun deleteCategories(categories: List&lt;Category&gt;) {
+<span class="nc" id="L292">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L293">            mappedObjectQuery(</span>
+<span class="nc" id="L294">                arrayOf(KEY_MAPPED_BUDGETS, KEY_HAS_DESCENDANTS),</span>
+<span class="nc" id="L295">                categories.map { it.id }, true</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            )?.use { cursor -&gt;</span>
+<span class="nc" id="L297">                cursor.moveToFirst()</span>
+<span class="nc" id="L298">                val mappedBudgets = cursor.getInt(0)</span>
+<span class="nc" id="L299">                val hasDescendants = cursor.getInt(1)</span>
+<span class="nc" id="L300">                _deleteResult.update {</span>
+<span class="nc" id="L301">                    Result.success(</span>
+<span class="nc" id="L302">                        DeleteResult.OperationPending(</span>
+<span class="nc" id="L303">                            categories,</span>
+<span class="nc" id="L304">                            mappedBudgets,</span>
+<span class="nc" id="L305">                            hasDescendants</span>
+                        )
+<span class="nc" id="L307">                    )</span>
+                }
+<span class="nc" id="L309">            }</span>
+<span class="nc" id="L310">        }</span>
+<span class="nc" id="L311">    }</span>
+
+    fun deleteCategoriesDo(ids: List&lt;Long&gt;) {
+<span class="nc" id="L314">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L315">            _deleteResult.update {</span>
+<span class="nc" id="L316">                try {</span>
+<span class="nc" id="L317">                    mappedObjectQuery(</span>
+<span class="nc" id="L318">                        arrayOf(KEY_ROWID, KEY_MAPPED_TRANSACTIONS, KEY_MAPPED_TEMPLATES),</span>
+<span class="nc" id="L319">                        ids, false</span>
+<span class="nc" id="L320">                    ).use { cursor -&gt;</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                        if (cursor == null) {</span>
+<span class="nc" id="L322">                            failure(R.string.db_error_cursor_null)</span>
+                        } else {
+<span class="nc" id="L324">                            var deleted = 0</span>
+<span class="nc" id="L325">                            var mappedToTransaction = 0</span>
+<span class="nc" id="L326">                            var mappedToTemplate = 0</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                            if (cursor.moveToFirst()) {</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                                while (!cursor.isAfterLast) {</span>
+<span class="nc" id="L329">                                    var deletable = true</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                                    if (cursor.getInt(1) &gt; 0) {</span>
+<span class="nc" id="L331">                                        deletable = false</span>
+<span class="nc" id="L332">                                        mappedToTransaction++</span>
+                                    }
+<span class="nc bnc" id="L334" title="All 2 branches missed.">                                    if (cursor.getInt(2) &gt; 0) {</span>
+<span class="nc" id="L335">                                        deletable = false</span>
+<span class="nc" id="L336">                                        mappedToTemplate++</span>
+                                    }
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                                    if (deletable) {</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">                                        if (repository.deleteCategory(cursor.getLong(0))) {</span>
+<span class="nc" id="L340">                                            deleted++</span>
+                                        }
+                                    }
+<span class="nc" id="L343">                                    cursor.moveToNext()</span>
+                                }
+<span class="nc" id="L345">                                Result.success(</span>
+<span class="nc" id="L346">                                    DeleteResult.OperationComplete(</span>
+<span class="nc" id="L347">                                        deleted,</span>
+<span class="nc" id="L348">                                        mappedToTransaction,</span>
+<span class="nc" id="L349">                                        mappedToTemplate</span>
+                                    )
+                                )
+                            } else {
+<span class="nc" id="L353">                                failure(R.string.db_error_cursor_empty)</span>
+                            }
+<span class="nc" id="L355">                        }</span>
+                    }
+<span class="nc" id="L357">                } catch (e: SQLiteConstraintException) {</span>
+<span class="nc" id="L358">                    CrashHandler.reportWithDbSchema(contentResolver, e)</span>
+<span class="nc" id="L359">                    Result.failure(e)</span>
+<span class="nc" id="L360">                }</span>
+            }
+<span class="nc" id="L362">        }</span>
+<span class="nc" id="L363">    }</span>
+
+    private fun mappedObjectQuery(projection: Array&lt;String&gt;, ids: List&lt;Long&gt;, aggregate: Boolean) =
+<span class="nc" id="L366">        contentResolver.query(</span>
+<span class="nc" id="L367">            CATEGORIES_URI.buildUpon()</span>
+<span class="nc" id="L368">                .appendQueryParameter(</span>
+<span class="nc" id="L369">                    TransactionProvider.QUERY_PARAMETER_MAPPED_OBJECTS,</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                    if (aggregate) &quot;2&quot; else &quot;1&quot;</span>
+                )
+<span class="nc" id="L372">                .build(),</span>
+<span class="nc" id="L373">            projection,</span>
+<span class="nc" id="L374">            &quot;$KEY_ROWID ${Operation.IN.getOp(ids.size)}&quot;,</span>
+<span class="nc" id="L375">            ids.map { it.toString() }.toTypedArray(), null</span>
+<span class="nc" id="L376">        )</span>
+
+    private fun &lt;T&gt; failure(
+        @StringRes resId: Int,
+        vararg formatArgs: Any?,
+<span class="nc" id="L381">    ) = Result.failure&lt;T&gt;(getApplication(), resId, formatArgs)</span>
+
+    fun moveCategory(source: Long, target: Long?) {
+<span class="nc" id="L384">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L385">            _moveResult.update {</span>
+<span class="nc" id="L386">                repository.moveCategory(source, target)</span>
+            }
+<span class="nc" id="L388">        }</span>
+<span class="nc" id="L389">    }</span>
+
+    fun importCats() {
+<span class="nc" id="L392">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L393">            _importResult.update {</span>
+<span class="nc bnc" id="L394" title="All 4 branches missed.">                contentResolver.call(</span>
+<span class="nc" id="L395">                    TransactionProvider.DUAL_URI,</span>
+<span class="nc" id="L396">                    TransactionProvider.METHOD_SETUP_CATEGORIES,</span>
+<span class="nc" id="L397">                    null,</span>
+<span class="nc" id="L398">                    null</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                )?.getSerializable(TransactionProvider.KEY_RESULT) as? Pair&lt;Int, Int&gt; ?: (0 to 0)</span>
+            }
+<span class="nc" id="L401">        }</span>
+<span class="nc" id="L402">    }</span>
+
+    fun exportCats(encoding: String) {
+<span class="nc" id="L405">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L406">            val context = getApplication&lt;MyApplication&gt;()</span>
+<span class="nc" id="L407">            val fileName = &quot;categories&quot;</span>
+<span class="nc" id="L408">            _exportResult.update {</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">                AppDirHelper.getAppDir(context).mapCatching { destDir -&gt;</span>
+<span class="nc" id="L410">                    CategoryExporter.export(</span>
+<span class="nc" id="L411">                        getApplication(), encoding,</span>
+<span class="nc" id="L412">                        lazy {</span>
+<span class="nc" id="L413">                            AppDirHelper.timeStampedFile(</span>
+<span class="nc" id="L414">                                destDir,</span>
+<span class="nc" id="L415">                                fileName,</span>
+<span class="nc" id="L416">                                ExportFormat.QIF.mimeType, &quot;qif&quot;</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                            )?.let {</span>
+<span class="nc" id="L418">                                Result.success(it)</span>
+<span class="nc" id="L419">                            } ?: Result.failure(createFileFailure(context, destDir, fileName))</span>
+                        }
+<span class="nc" id="L421">                    ).getOrThrow()</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">                }.mapCatching {</span>
+<span class="nc" id="L423">                    it.uri to it.displayName</span>
+<span class="nc" id="L424">                }</span>
+            }
+<span class="nc" id="L426">        }</span>
+<span class="nc" id="L427">    }</span>
+
+    override fun messageShown() {
+<span class="nc" id="L430">        super.messageShown()</span>
+<span class="nc" id="L431">        _deleteResult.update { null }</span>
+<span class="nc" id="L432">        _moveResult.update { null }</span>
+<span class="nc" id="L433">        _importResult.update { null }</span>
+<span class="nc" id="L434">        _mergeResult.update { null }</span>
+<span class="nc" id="L435">        _exportResult.update { null }</span>
+<span class="nc" id="L436">    }</span>
+
+<span class="nc bnc" id="L438" title="All 3 branches missed.">    fun checkImportableCategories(): LiveData&lt;Category&gt; = liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L439">        contentResolver.call(</span>
+<span class="nc" id="L440">            TransactionProvider.DUAL_URI,</span>
+<span class="nc" id="L441">            TransactionProvider.METHOD_SETUP_CATEGORIES_DRY_RUN,</span>
+<span class="nc" id="L442">            null,</span>
+<span class="nc" id="L443">            null</span>
+<span class="nc" id="L444">        )!!.let {</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">            emit(</span>
+<span class="nc" id="L446">                BundleCompat.getParcelable(</span>
+<span class="nc" id="L447">                    it,</span>
+<span class="nc" id="L448">                    TransactionProvider.KEY_RESULT,</span>
+<span class="nc" id="L449">                    Category::class.java</span>
+                )!!
+            )
+<span class="nc" id="L452">        }</span>
+<span class="nc" id="L453">    }</span>
+
+    fun syncCatsExport(accountName: String) {
+<span class="nc" id="L456">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            GenericAccountService.getSyncBackendProvider(localizedContext, accountName)</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                .mapCatching { backend -&gt;</span>
+<span class="nc" id="L459">                    contentResolver.query(</span>
+<span class="nc" id="L460">                        BaseTransactionProvider.CATEGORY_TREE_URI,</span>
+<span class="nc" id="L461">                        null,</span>
+<span class="nc" id="L462">                        null,</span>
+<span class="nc" id="L463">                        null,</span>
+<span class="nc" id="L464">                        null,</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">                    )?.use {</span>
+                        fun ingest(
+                            cursor: Cursor,
+                            parentId: Long?,
+                        ): List&lt;CategoryExport&gt; =
+<span class="nc" id="L470">                            buildList {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">                                while (!cursor.isAfterLast) {</span>
+<span class="nc" id="L472">                                    val nextId = cursor.getLong(KEY_ROWID)</span>
+<span class="nc" id="L473">                                    val nextParent = cursor.getLongOrNull(KEY_PARENTID)</span>
+<span class="nc" id="L474">                                    val nextLabel = cursor.getString(KEY_LABEL)</span>
+<span class="nc" id="L475">                                    val nextColor = cursor.getIntOrNull(KEY_COLOR)</span>
+<span class="nc" id="L476">                                    val nextIcon = cursor.getStringOrNull(KEY_ICON)</span>
+<span class="nc" id="L477">                                    val nextUuid = cursor.getString(KEY_UUID)</span>
+<span class="nc" id="L478">                                    val nextType =</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">                                        if (parentId == null) cursor.getIntOrNull(KEY_TYPE) else null</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">                                    if (nextParent == parentId) {</span>
+<span class="nc" id="L481">                                        cursor.moveToNext()</span>
+<span class="nc" id="L482">                                        add(</span>
+<span class="nc" id="L483">                                            CategoryExport(</span>
+<span class="nc" id="L484">                                                nextUuid,</span>
+<span class="nc" id="L485">                                                nextLabel,</span>
+<span class="nc" id="L486">                                                nextIcon,</span>
+<span class="nc" id="L487">                                                nextColor,</span>
+<span class="nc" id="L488">                                                nextType,</span>
+<span class="nc" id="L489">                                                ingest(cursor, nextId)</span>
+                                            )
+                                        )
+<span class="nc" id="L492">                                    } else return@buildList</span>
+                                }
+<span class="nc" id="L494">                            }</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                        if (it.moveToFirst()) {</span>
+<span class="nc" id="L496">                            ingest(it, null)</span>
+<span class="nc" id="L497">                        } else null</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">                    }?.let {</span>
+<span class="nc" id="L499">                        &quot;${backend.writeCategories(it)} -&gt; $accountName&quot;</span>
+<span class="nc" id="L500">                    }</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">                }.fold(</span>
+<span class="nc" id="L502">                    onSuccess = { it },</span>
+                    onFailure = {
+<span class="nc" id="L504">                        CrashHandler.report(it)</span>
+<span class="nc" id="L505">                        getString(R.string.write_fail_reason_cannot_write) + &quot;: &quot; + it.message</span>
+                    }
+<span class="nc bnc" id="L507" title="All 2 branches missed.">                )?.let { message -&gt; _syncResult.update { message } }</span>
+<span class="nc" id="L508">        }</span>
+<span class="nc" id="L509">    }</span>
+
+    fun syncCatsImport(accountName: String) {
+<span class="nc" id="L512">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">            GenericAccountService.getSyncBackendProvider(getApplication(), accountName)</span>
+<span class="nc" id="L514">                .flatMap { it.categories }</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                .fold(</span>
+                    onSuccess = { list -&gt;
+<span class="nc" id="L517">                        try {</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">                            &quot;Imported ${list.sumOf { repository.ensureCategoryTree(it) }} categories&quot;</span>
+<span class="nc" id="L519">                        } catch (e: Exception) {</span>
+<span class="nc" id="L520">                            e.safeMessage</span>
+<span class="nc" id="L521">                        }</span>
+                    },
+                    onFailure = {
+<span class="nc bnc" id="L524" title="All 2 branches missed.">                        if (it !is FileNotFoundException) {</span>
+<span class="nc" id="L525">                            CrashHandler.report(it)</span>
+                        }
+<span class="nc" id="L527">                        it.safeMessage</span>
+                    }
+<span class="nc" id="L529">                ).let { message -&gt; _syncResult.update { message } }</span>
+<span class="nc" id="L530">        }</span>
+<span class="nc" id="L531">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,482 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MissionRemoteDataSource.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE FirefoxLite</a> &gt; <a href="index.source.html" class="el_package">org.mozilla.rocket.msrp.data</a> &gt; <span class="el_source">MissionRemoteDataSource.kt</span></div><h1>MissionRemoteDataSource.kt</h1><pre class="source lang-java linenums">package org.mozilla.rocket.msrp.data
+
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import mozilla.components.concept.fetch.MutableHeaders
+import mozilla.components.concept.fetch.Request
+import mozilla.components.concept.fetch.Response
+import mozilla.components.concept.fetch.interceptor.withInterceptors
+import mozilla.components.lib.fetch.httpurlconnection.HttpURLConnectionClient
+import org.json.JSONArray
+import org.json.JSONObject
+import org.mozilla.focus.BuildConfig
+import org.mozilla.focus.utils.FirebaseHelper
+import org.mozilla.rocket.util.Result
+import java.io.IOException
+import java.util.Locale
+import java.util.TimeZone
+
+<span class="nc" id="L20">class MissionRemoteDataSource {</span>
+
+    private val msrpApiHost: String
+<span class="nc" id="L23">        get() = FirebaseHelper.getFirebase().getRcString(STR_RC_MSRP_API_HOST)</span>
+
+    private val missionListEndpoint: String
+<span class="nc" id="L26">        get() = FirebaseHelper.getFirebase().getRcString(STR_RC_MISSION_LIST_ENDPOINT)</span>
+
+    private val isMsrpEnabled: Boolean
+<span class="nc" id="L29">        get() = FirebaseHelper.getFirebase().getRcBoolean(BOOL_RC_MSRP_ENABLED)</span>
+
+    fun isMsrpAvailable(): Boolean {
+<span class="nc bnc" id="L32" title="All 6 branches missed.">        return isMsrpEnabled &amp;&amp; missionListEndpoint.isNotBlank()</span>
+    }
+
+    /**
+     * Fetch a list of [Mission]s from the server
+     *
+     * @return a list of [Mission]s the user can join or has joined
+     */
+<span class="nc" id="L40">    suspend fun getMissions(accessToken: String?): Result&lt;List&lt;Mission&gt;, RewardServiceError&gt; = withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L41" title="All 2 branches missed.">        val token = accessToken</span>
+<span class="nc" id="L42">                ?: return@withContext Result.error&lt;List&lt;Mission&gt;, RewardServiceError&gt;(error = RewardServiceError.Unauthorized)</span>
+
+<span class="nc bnc" id="L44" title="All 2 branches missed.">        if (!isMsrpAvailable()) {</span>
+<span class="nc" id="L45">            return@withContext Result.error&lt;List&lt;Mission&gt;, RewardServiceError&gt;(error = RewardServiceError.MsrpDisabled)</span>
+        }
+
+<span class="nc" id="L48">        val endpoint = &quot;$msrpApiHost$missionListEndpoint?tz=${TimeZone.getDefault().id}&quot;</span>
+<span class="nc" id="L49">        return@withContext sendRequest(</span>
+<span class="nc" id="L50">                request = Request(url = endpoint, headers = createHeader(token)),</span>
+<span class="nc" id="L51">                onSuccess = {</span>
+<span class="nc" id="L52">                    parseMissionListResponse(it)</span>
+                },
+<span class="nc" id="L54">                onError = {</span>
+<span class="nc" id="L55">                    log(&quot;fetch mission failed, msg=$it&quot;)</span>
+<span class="nc" id="L56">                    Result.error(error = RewardServiceError.NetworkError)</span>
+                }
+        )
+<span class="nc" id="L59">    }</span>
+
+    private fun parseMissionListResponse(response: Response): Result&lt;List&lt;Mission&gt;, RewardServiceError&gt; {
+<span class="nc bnc" id="L62" title="All 4 branches missed.">        return when (response.status) {</span>
+<span class="nc" id="L63">            400 -&gt; Result.error(error = RewardServiceError.Unauthorized)</span>
+<span class="nc" id="L64">            403 -&gt; Result.error(error = RewardServiceError.AccountDisabled)</span>
+            200 -&gt; {
+<span class="nc" id="L66">                val json = response.body.string()</span>
+<span class="nc" id="L67">                log(&quot;response=$json&quot;)</span>
+
+<span class="nc" id="L69">                val missions = convertToMissionList(json)</span>
+<span class="nc" id="L70">                log(&quot;mission list=$missions&quot;)</span>
+
+<span class="nc" id="L72">                Result.success(missions)</span>
+            }
+<span class="nc" id="L74">            else -&gt; Result.error(error = RewardServiceError.Unknown(response.body.string()))</span>
+        }
+    }
+
+    private fun convertToMissionList(json: String): List&lt;Mission&gt; {
+<span class="nc" id="L79">        val root = JSONObject(json)</span>
+<span class="nc" id="L80">        val missionArray = root.getJSONArray(&quot;result&quot;)</span>
+
+<span class="nc" id="L82">        return (0 until missionArray.length()).mapNotNull {</span>
+<span class="nc" id="L83">            val missionJson = missionArray.getJSONObject(it)</span>
+
+<span class="nc" id="L85">            val interestEvents = parseInterestEvents(missionJson.optJSONArray(&quot;events&quot;))</span>
+
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            val missionType = MissionType.valueOf(missionJson.optString(&quot;missionType&quot;))</span>
+<span class="nc" id="L88">                    ?: return@mapNotNull null</span>
+
+<span class="nc bnc" id="L90" title="All 2 branches missed.">            val progress = parseProgress(missionType, missionJson.optJSONObject(&quot;progress&quot;))</span>
+<span class="nc" id="L91">                    ?: return@mapNotNull null</span>
+
+<span class="nc" id="L93">            val parameters = missionJson.optJSONObject(&quot;parameters&quot;)</span>
+
+<span class="nc" id="L95">            Mission(</span>
+<span class="nc" id="L96">                mid = missionJson.optString(&quot;mid&quot;),</span>
+<span class="nc" id="L97">                missionType = missionJson.optString(&quot;missionType&quot;),</span>
+<span class="nc" id="L98">                title = missionJson.optString(&quot;title&quot;),</span>
+<span class="nc" id="L99">                missionName = missionJson.optString(&quot;missionName&quot;),</span>
+<span class="nc" id="L100">                description = missionJson.optString(&quot;description&quot;),</span>
+<span class="nc" id="L101">                imageUrl = missionJson.optString(&quot;imageUrl&quot;),</span>
+<span class="nc" id="L102">                endpoint = missionJson.optString(&quot;joinEndpoint&quot;),</span>
+<span class="nc" id="L103">                redeem = missionJson.optString(&quot;redeemEndpoint&quot;),</span>
+<span class="nc" id="L104">                events = interestEvents,</span>
+<span class="nc" id="L105">                important = missionJson.optBoolean(&quot;important&quot;),</span>
+<span class="nc" id="L106">                minVersion = missionJson.optInt(&quot;minVersion&quot;),</span>
+<span class="nc" id="L107">                minVerDialogTitle = missionJson.optString(&quot;minVerDialogTitle&quot;),</span>
+<span class="nc" id="L108">                minVerDialogMessage = missionJson.optString(&quot;minVerDialogMessage&quot;),</span>
+<span class="nc" id="L109">                minVerDialogImage = missionJson.optString(&quot;minVerDialogImage&quot;),</span>
+<span class="nc" id="L110">                joinEndDate = missionJson.optLong(&quot;joinEndDate&quot;),</span>
+<span class="nc" id="L111">                expiredDate = missionJson.optLong(&quot;expiredDate&quot;),</span>
+<span class="nc" id="L112">                redeemEndDate = missionJson.optLong(&quot;redeemEndDate&quot;),</span>
+<span class="nc" id="L113">                rewardExpiredDate = missionJson.optLong(&quot;rewardExpiredDate&quot;),</span>
+<span class="nc" id="L114">                status = missionJson.optInt(&quot;status&quot;),</span>
+<span class="nc" id="L115">                missionProgress = progress,</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                totalDays = parameters?.optInt(&quot;totalDays&quot;) ?: 0</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            )</span>
+        }
+    }
+
+    private fun parseInterestEvents(events: JSONArray): List&lt;String&gt; {
+<span class="nc" id="L122">        return (0 until events.length()).map { events.optString(it) }</span>
+    }
+
+    private fun parseProgress(missionType: MissionType?, progress: JSONObject): MissionProgress? {
+<span class="nc" id="L126">        return when (missionType) {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            is MissionType.MissionDaily -&gt; MissionProgress.TypeDaily(</span>
+<span class="nc" id="L128">                joinDate = progress.optLong(&quot;joinDate&quot;),</span>
+<span class="nc" id="L129">                currentDay = progress.optInt(&quot;currentDayCount&quot;),</span>
+<span class="nc" id="L130">                totalDays = progress.optInt(&quot;totalDays&quot;),</span>
+<span class="nc" id="L131">                message = progress.optString(&quot;message&quot;)</span>
+            )
+
+<span class="nc" id="L134">            else -&gt; null</span>
+        }
+    }
+
+    /**
+     * Join to the given mission
+     */
+<span class="nc" id="L141">    suspend fun joinMission(mission: Mission, accessToken: String?): Result&lt;JoinMissionResult, RewardServiceError&gt; = withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        val token = accessToken</span>
+<span class="nc" id="L143">                ?: return@withContext Result.error&lt;JoinMissionResult, RewardServiceError&gt;(error = RewardServiceError.Unauthorized)</span>
+
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!isMsrpAvailable()) {</span>
+<span class="nc" id="L146">            return@withContext Result.error&lt;JoinMissionResult, RewardServiceError&gt;(error = RewardServiceError.MsrpDisabled)</span>
+        }
+
+<span class="nc" id="L149">        val endpoint = &quot;${msrpApiHost}${mission.endpoint}?tz=${TimeZone.getDefault().id}&quot;</span>
+<span class="nc" id="L150">        return@withContext sendRequest(</span>
+<span class="nc" id="L151">                request = Request(url = endpoint, headers = createHeader(token), method = Request.Method.POST),</span>
+<span class="nc" id="L152">                onSuccess = {</span>
+<span class="nc" id="L153">                    parseJoinMissionResponse(it)</span>
+                },
+<span class="nc" id="L155">                onError = {</span>
+<span class="nc" id="L156">                    log(&quot;join mission failed, msg=$it&quot;)</span>
+<span class="nc" id="L157">                    Result.error(error = RewardServiceError.NetworkError)</span>
+                }
+        )
+<span class="nc" id="L160">    }</span>
+
+    private fun parseJoinMissionResponse(response: Response): Result&lt;JoinMissionResult, RewardServiceError&gt; {
+<span class="nc" id="L163">        val body = response.body.string()</span>
+<span class="nc" id="L164">        val root = JSONObject(body)</span>
+
+<span class="nc" id="L166">        log(&quot;join response, code=${response.status}, body=$body&quot;)</span>
+
+<span class="nc bnc" id="L168" title="All 3 branches missed.">        return when (response.status) {</span>
+            200 -&gt; {
+<span class="nc" id="L170">                val result = root.optJSONObject(&quot;result&quot;)</span>
+<span class="nc" id="L171">                val mid = result.optString(&quot;mid&quot;)</span>
+
+<span class="nc" id="L173">                val status = MissionJoinStatus.valueOf(result.optInt(&quot;status&quot;))</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                status ?: return Result.error(&quot;unknown join status=$status&quot;, error = RewardServiceError.Unknown(&quot;unknown join status=$status&quot;))</span>
+
+<span class="nc" id="L176">                Result.success(JoinMissionResult(mid, status))</span>
+            }
+            403 -&gt; {
+<span class="nc bnc" id="L179" title="All 4 branches missed.">                if (body.isEmpty()) {</span>
+<span class="nc" id="L180">                    Result.error&lt;JoinMissionResult, RewardServiceError&gt;(error = RewardServiceError.AccountDisabled)</span>
+                } else {
+<span class="nc" id="L182">                    when (val errorType = ErrorType.fromJson(body)) {</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                        is ErrorType.Unknown -&gt; Result.error&lt;JoinMissionResult, RewardServiceError&gt;(error = RewardServiceError.Unknown(errorType.message))</span>
+<span class="nc" id="L184">                        is ErrorType.NoQuota -&gt; Result.error&lt;JoinMissionResult, RewardServiceError&gt;(error = RewardServiceError.NoQuota)</span>
+                    }
+                }
+            }
+            else -&gt; {
+<span class="nc" id="L189">                val msg = root.optString(&quot;message&quot;)</span>
+<span class="nc" id="L190">                Result.error(&quot;join failed, code=${response.status}, msg=$msg&quot;, error = RewardServiceError.Unknown(msg))</span>
+            }
+        }
+    }
+
+    /**
+     * Check-in missions that is interested in the given ping
+     */
+<span class="nc" id="L198">    suspend fun checkInMission(ping: String, accessToken: String?): Result&lt;List&lt;Mission&gt;, RewardServiceError&gt; = withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        val token = accessToken</span>
+<span class="nc" id="L200">                ?: return@withContext Result.error&lt;List&lt;Mission&gt;, RewardServiceError&gt;(error = RewardServiceError.Unauthorized)</span>
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (!isMsrpAvailable()) {</span>
+<span class="nc" id="L203">            return@withContext Result.error&lt;List&lt;Mission&gt;, RewardServiceError&gt;(error = RewardServiceError.MsrpDisabled)</span>
+        }
+
+<span class="nc" id="L206">        val endpoint = &quot;$msrpApiHost/$MSRP_API_VERSION_PATH/ping/$ping?tz=${TimeZone.getDefault().id}&quot;</span>
+<span class="nc" id="L207">        return@withContext sendRequest(</span>
+<span class="nc" id="L208">                request = Request(url = endpoint, headers = createHeader(token), method = Request.Method.PUT),</span>
+<span class="nc" id="L209">                onSuccess = {</span>
+<span class="nc" id="L210">                    parseMissionListResponse(it)</span>
+                },
+<span class="nc" id="L212">                onError = {</span>
+<span class="nc" id="L213">                    log(&quot;check-in mission failed, msg=$it&quot;)</span>
+<span class="nc" id="L214">                    Result.error(error = RewardServiceError.NetworkError)</span>
+                }
+        )
+<span class="nc" id="L217">    }</span>
+
+<span class="nc" id="L219">    suspend fun quitMission(mission: Mission, accessToken: String?): Result&lt;QuitMissionResult, RewardServiceError&gt; = withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        val token = accessToken</span>
+<span class="nc" id="L221">                ?: return@withContext Result.error&lt;QuitMissionResult, RewardServiceError&gt;(error = RewardServiceError.Unauthorized)</span>
+
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (!isMsrpAvailable()) {</span>
+<span class="nc" id="L224">            return@withContext Result.error&lt;QuitMissionResult, RewardServiceError&gt;(error = RewardServiceError.MsrpDisabled)</span>
+        }
+
+<span class="nc" id="L227">        val endpoint = &quot;${msrpApiHost}${mission.endpoint}?tz=${TimeZone.getDefault().id}&quot;</span>
+<span class="nc" id="L228">        return@withContext sendRequest(</span>
+<span class="nc" id="L229">            request = Request(url = endpoint, headers = createHeader(token), method = Request.Method.DELETE),</span>
+<span class="nc" id="L230">            onSuccess = {</span>
+<span class="nc" id="L231">                parseQuitMissionResponse(it)</span>
+            },
+<span class="nc" id="L233">            onError = {</span>
+<span class="nc" id="L234">                log(&quot;join mission failed, msg=$it&quot;)</span>
+<span class="nc" id="L235">                Result.error(error = RewardServiceError.NetworkError)</span>
+            }
+        )
+<span class="nc" id="L238">    }</span>
+
+    private fun parseQuitMissionResponse(response: Response): Result&lt;QuitMissionResult, RewardServiceError&gt; {
+<span class="nc" id="L241">        val body = response.body.string()</span>
+<span class="nc" id="L242">        val root = JSONObject(body)</span>
+
+<span class="nc" id="L244">        log(&quot;quit response, code=${response.status}, body=$body&quot;)</span>
+
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        return when (response.status) {</span>
+            200 -&gt; {
+<span class="nc" id="L248">                val mid = root.optString(&quot;mid&quot;)</span>
+
+<span class="nc" id="L250">                val status = MissionJoinStatus.valueOf(root.optInt(&quot;status&quot;))</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                status ?: return Result.error(&quot;unknown join status=$status&quot;, error = RewardServiceError.Unknown(&quot;unknown join status=$status&quot;))</span>
+
+<span class="nc" id="L253">                Result.success(QuitMissionResult(mid, status))</span>
+            }
+
+            else -&gt; {
+<span class="nc" id="L257">                val msg = root.optString(&quot;message&quot;)</span>
+<span class="nc" id="L258">                Result.error(&quot;quit failed, code=${response.status}, msg=$msg&quot;, error = RewardServiceError.Unknown(msg))</span>
+            }
+        }
+    }
+
+<span class="nc" id="L263">    suspend fun redeem(userToken: String?, redeemEndPoint: String): Result&lt;RewardCouponDoc, RedeemServiceError&gt; = withContext(Dispatchers.IO) {</span>
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (userToken == null) {</span>
+<span class="nc" id="L266">            return@withContext Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.NotLogin(&quot;Please login first&quot;))</span>
+        }
+<span class="nc" id="L268">        val hasParams = redeemEndPoint.contains(&quot;?&quot;)</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        val concatSymbol = if (hasParams) {</span>
+<span class="nc" id="L270">            &quot;&amp;&quot;</span>
+        } else {
+<span class="nc" id="L272">            &quot;?&quot;</span>
+        }
+<span class="nc" id="L274">        val url = &quot;${msrpApiHost}${redeemEndPoint}${concatSymbol}tz=${TimeZone.getDefault().id}&quot;</span>
+<span class="nc" id="L275">        val request = Request(</span>
+<span class="nc" id="L276">                url = url,</span>
+<span class="nc" id="L277">                headers = MutableHeaders(</span>
+<span class="nc" id="L278">                    &quot;Accept&quot; to &quot;application/json; q=0.5&quot;,</span>
+<span class="nc" id="L279">                    &quot;Accept&quot; to &quot;application/vnd.github.v3+json&quot;,</span>
+<span class="nc" id="L280">                    &quot;tz&quot; to TimeZone.getDefault().id, // too bad we can't use ZoneId(require API 26)</span>
+<span class="nc" id="L281">                    &quot;Authorization&quot; to &quot;Bearer $userToken&quot; // add this when we do the real integration)</span>
+                )
+        )
+<span class="nc" id="L284">        try {</span>
+
+            // pretending we are doing some network request here...
+            // since we only have one data source, we'll just do it in the repository.
+<span class="nc" id="L288">            HttpURLConnectionClient().withInterceptors(LoggingInterceptor()).fetch(request).use { response -&gt;</span>
+<span class="nc" id="L289">                return@withContext when {</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">                    response.status == 500 -&gt; { // 500 is define in the server spec...in the future.</span>
+<span class="nc" id="L291">                        val resJson = JSONObject(response.body.string())</span>
+<span class="nc" id="L292">                        val message = resJson.optString(&quot;message&quot;)</span>
+<span class="nc" id="L293">                        Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.Failure(message)) // return failure with message</span>
+                    }
+<span class="nc bnc" id="L295" title="All 2 branches missed.">                    response.status == 400 -&gt; {</span>
+<span class="nc" id="L296">                        val resJson = JSONObject(response.body.string())</span>
+<span class="nc" id="L297">                        val message = resJson.optString(&quot;message&quot;)</span>
+<span class="nc" id="L298">                        Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.InvalidRewardType(message)) // return failure with message</span>
+                    }
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                    response.status == 403 -&gt; {</span>
+<span class="nc" id="L301">                        val resJson = JSONObject(response.body.string())</span>
+<span class="nc" id="L302">                        val message = resJson.optString(&quot;message&quot;)</span>
+<span class="nc" id="L303">                        Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.NotReady(message)) // return failure with message</span>
+                    }
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                    response.status == 404 -&gt; {</span>
+<span class="nc" id="L306">                        val resJson = JSONObject(response.body.string())</span>
+<span class="nc" id="L307">                        val message = resJson.optString(&quot;message&quot;)</span>
+<span class="nc" id="L308">                        Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.UsedUp(message)) // return failure with message</span>
+                    }
+<span class="nc bnc" id="L310" title="All 2 branches missed.">                    response.status == 200 -&gt; {</span>
+<span class="nc" id="L311">                        val responseStr = response.body.string()</span>
+<span class="nc" id="L312">                        val resJson = JSONObject(responseStr).getJSONObject(&quot;rewardCoupon&quot;)</span>
+<span class="nc" id="L313">                        val reward = RewardCouponDoc(</span>
+<span class="nc" id="L314">                            resJson.optString(&quot;rid&quot;),</span>
+<span class="nc" id="L315">                            resJson.optString(&quot;uid&quot;),</span>
+<span class="nc" id="L316">                            resJson.optString(&quot;mid&quot;),</span>
+<span class="nc" id="L317">                            resJson.optString(&quot;code&quot;),</span>
+<span class="nc" id="L318">                            resJson.optString(&quot;campaign&quot;),</span>
+<span class="nc" id="L319">                            resJson.optString(&quot;title&quot;),</span>
+<span class="nc" id="L320">                            resJson.optString(&quot;content&quot;),</span>
+<span class="nc" id="L321">                            resJson.optLong(&quot;expire_date&quot;),</span>
+<span class="nc" id="L322">                            resJson.optLong(&quot;created_timestamp&quot;),</span>
+<span class="nc" id="L323">                            resJson.optLong(&quot;updated_timestamp&quot;),</span>
+<span class="nc" id="L324">                            resJson.optString(&quot;open_link&quot;)</span>
+                        )
+
+<span class="nc" id="L327">                        Result.success(reward) // return failure with message</span>
+                    }
+                    else -&gt; {
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                        if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L331">                            throw RuntimeException(&quot;Should not reach this&quot;)</span>
+                        } else {
+<span class="nc" id="L333">                            Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.Failure(&quot;Something is wrong&quot;))</span>
+                        }
+                    }
+                }
+            }
+<span class="nc" id="L338">        } catch (e: IOException) {</span>
+<span class="nc" id="L339">            log(&quot;Redeem network error, msg=$e&quot;)</span>
+<span class="nc" id="L340">            return@withContext Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.NetworkError)</span>
+<span class="nc" id="L341">        } catch (e: Exception) {</span>
+<span class="nc" id="L342">            Log.e(TAG, &quot;Redeem error $e&quot;)</span>
+<span class="nc" id="L343">            return@withContext Result.error&lt;RewardCouponDoc, RedeemServiceError&gt;(error = RedeemServiceError.Failure(&quot;Something is wrong&quot;))</span>
+        }
+<span class="nc" id="L345">    }</span>
+
+<span class="nc" id="L347">    private fun createHeader(token: String) = MutableHeaders(</span>
+<span class="nc" id="L348">            &quot;Accept&quot; to &quot;application/json&quot;,</span>
+<span class="nc" id="L349">            &quot;tz&quot; to TimeZone.getDefault().id,</span>
+<span class="nc" id="L350">            &quot;Authorization&quot; to &quot;Bearer $token&quot;,</span>
+<span class="nc" id="L351">            &quot;Accept-Language&quot; to Locale.getDefault().toLanguageTag()</span>
+<span class="nc" id="L352">    )</span>
+
+    private fun &lt;T&gt; sendRequest(request: Request, onSuccess: (Response) -&gt; T, onError: (Exception) -&gt; T): T {
+<span class="nc" id="L355">        return try {</span>
+<span class="nc" id="L356">            return HttpURLConnectionClient()</span>
+<span class="nc" id="L357">                    .withInterceptors(LoggingInterceptor())</span>
+<span class="nc" id="L358">                    .fetch(request)</span>
+<span class="nc" id="L359">                    .use { onSuccess(it) }</span>
+<span class="nc" id="L360">        } catch (e: IOException) {</span>
+<span class="nc" id="L361">            onError(e)</span>
+        }
+    }
+
+    private fun log(msg: String) {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L367">            Log.d(TAG, msg)</span>
+        }
+<span class="nc" id="L369">    }</span>
+
+<span class="nc" id="L371">    companion object {</span>
+        private const val TAG = &quot;MissionRemoteDataSource&quot;
+        private const val BOOL_RC_MSRP_ENABLED = &quot;bool_msrp_enabled&quot;
+        private const val STR_RC_MISSION_LIST_ENDPOINT = &quot;str_mission_list_endpoint&quot;
+        private const val STR_RC_MSRP_API_HOST = &quot;str_msrp_api_host&quot;
+
+        // TODO: to be updated
+        private const val MSRP_API_VERSION_PATH = &quot;api/v1/&quot;
+    }
+}
+
+<span class="nc" id="L382">sealed class MissionType {</span>
+
+<span class="nc" id="L384">    object MissionDaily : MissionType()</span>
+
+<span class="nc" id="L386">    companion object {</span>
+        fun valueOf(missionType: String): MissionType? {
+<span class="nc bnc" id="L388" title="All 2 branches missed.">            return when (missionType) {</span>
+<span class="nc" id="L389">                &quot;mission_daily&quot; -&gt; MissionDaily</span>
+<span class="nc" id="L390">                else -&gt; null</span>
+            }
+        }
+    }
+}
+
+<span class="nc" id="L396">sealed class MissionJoinStatus {</span>
+<span class="nc" id="L397">    object New : MissionJoinStatus()</span>
+<span class="nc" id="L398">    object Joined : MissionJoinStatus()</span>
+<span class="nc" id="L399">    object Completed : MissionJoinStatus()</span>
+<span class="nc" id="L400">    object Redeemed : MissionJoinStatus()</span>
+
+<span class="nc" id="L402">    companion object {</span>
+        fun valueOf(value: Int): MissionJoinStatus? {
+<span class="nc bnc" id="L404" title="All 5 branches missed.">            return when (value) {</span>
+<span class="nc" id="L405">                0 -&gt; New</span>
+<span class="nc" id="L406">                1 -&gt; Joined</span>
+<span class="nc" id="L407">                2 -&gt; Completed</span>
+<span class="nc" id="L408">                3 -&gt; Redeemed</span>
+<span class="nc" id="L409">                else -&gt; null</span>
+            }
+        }
+    }
+}
+
+<span class="nc" id="L415">class JoinMissionResult(val mid: String, val status: MissionJoinStatus)</span>
+
+<span class="nc" id="L417">class QuitMissionResult(val mid: String, val status: MissionJoinStatus)</span>
+
+<span class="nc" id="L419">class RewardCouponDoc(</span>
+<span class="nc" id="L420">    var rid: String,</span>
+<span class="nc" id="L421">    var uid: String,</span>
+<span class="nc" id="L422">    var mid: String,</span>
+<span class="nc" id="L423">    var code: String,</span>
+<span class="nc" id="L424">    var campaign: String,</span>
+<span class="nc" id="L425">    var title: String,</span>
+<span class="nc" id="L426">    var content: String,</span>
+<span class="nc" id="L427">    var expire_date: Long,</span>
+<span class="nc" id="L428">    var created_timestamp: Long,</span>
+<span class="nc" id="L429">    var updated_timestamp: Long,</span>
+<span class="nc" id="L430">    var open_link: String</span>
+)
+
+<span class="nc" id="L433">sealed class RewardServiceError {</span>
+<span class="nc" id="L434">    object NetworkError : RewardServiceError()</span>
+<span class="nc" id="L435">    object MsrpDisabled : RewardServiceError()</span>
+<span class="nc" id="L436">    object Unauthorized : RewardServiceError()</span>
+<span class="nc" id="L437">    object AccountDisabled : RewardServiceError()</span>
+<span class="nc" id="L438">    object NoQuota : RewardServiceError()</span>
+<span class="nc" id="L439">    class Unknown(val msg: String) : RewardServiceError()</span>
+}
+
+<span class="nc" id="L442">sealed class RedeemServiceError {</span>
+<span class="nc" id="L443">    object NetworkError : RedeemServiceError()</span>
+<span class="nc" id="L444">    class UsedUp(val message: String) : RedeemServiceError()</span>
+<span class="nc" id="L445">    class NotReady(val message: String) : RedeemServiceError()</span>
+<span class="nc" id="L446">    class Failure(val message: String) : RedeemServiceError()</span>
+<span class="nc" id="L447">    class InvalidRewardType(val message: String) : RedeemServiceError()</span>
+<span class="nc" id="L448">    class NotLogin(val message: String) : RedeemServiceError()</span>
+}
+
+<span class="nc" id="L451">private data class ErrorData(</span>
+<span class="nc" id="L452">    val message: String,</span>
+<span class="nc" id="L453">    val reason: Int</span>
+) {
+<span class="nc" id="L455">    companion object {</span>
+        fun fromJson(jsonStr: String): ErrorData {
+<span class="nc" id="L457">            val json = JSONObject(jsonStr)</span>
+<span class="nc" id="L458">            return ErrorData(</span>
+<span class="nc" id="L459">                message = json.optString(&quot;message&quot;),</span>
+<span class="nc" id="L460">                reason = json.optInt(&quot;reason&quot;, 0)</span>
+            )
+        }
+    }
+}
+
+<span class="nc" id="L466">sealed class ErrorType(val message: String) {</span>
+<span class="nc" id="L467">    class Unknown(message: String) : ErrorType(message)</span>
+<span class="nc" id="L468">    class NoQuota(message: String) : ErrorType(message)</span>
+
+<span class="nc" id="L470">    companion object {</span>
+        private const val ERROR_CODE_NO_QUOTA = 4
+
+        fun fromJson(jsonStr: String): ErrorType {
+<span class="nc" id="L474">            val errorData = ErrorData.fromJson(jsonStr)</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">            return when (errorData.reason) {</span>
+<span class="nc" id="L476">                ERROR_CODE_NO_QUOTA -&gt; NoQuota(errorData.message)</span>
+<span class="nc" id="L477">                else -&gt; Unknown(errorData.message)</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

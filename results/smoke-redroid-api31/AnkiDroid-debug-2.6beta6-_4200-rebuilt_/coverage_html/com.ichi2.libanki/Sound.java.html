@@ -1,0 +1,463 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Sound.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.libanki</a> &gt; <span class="el_source">Sound.java</span></div><h1>Sound.java</h1><pre class="source lang-java linenums">/****************************************************************************************
+ * Copyright (c) 2009 Edu Zamora &lt;edu.zasu@gmail.com&gt;                                   *
+ * Copyright (c) 2014 Timothy rae &lt;perceptualchaos2@gmail.com&gt;                          *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General Public License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General Public License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.libanki;
+
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.content.Context;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.media.MediaPlayer.OnCompletionListener;
+import android.media.ThumbnailUtils;
+import android.net.Uri;
+import android.os.Build;
+import android.provider.MediaStore;
+
+import android.view.Display;
+import android.view.WindowManager;
+import android.webkit.MimeTypeMap;
+import android.widget.VideoView;
+
+import com.ichi2.anki.AbstractFlashcardViewer;
+import com.ichi2.anki.AnkiDroidApp;
+import com.ichi2.anki.ReadText;
+import com.ichi2.compat.CompatHelper;
+
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import timber.log.Timber;
+
+/**
+ * Class used to parse, load and play sound files on AnkiDroid.
+ */
+<span class="nc" id="L53">public class Sound {</span>
+
+    /**
+     * Pattern used to identify the markers for sound files
+     */
+<span class="nc" id="L58">    public static Pattern sSoundPattern = Pattern.compile(&quot;\\[sound\\:([^\\[\\]]*)\\]&quot;);</span>
+
+    /**
+     * Pattern used to parse URI (according to http://tools.ietf.org/html/rfc3986#page-50)
+     */
+<span class="nc" id="L63">    private static Pattern sUriPattern = Pattern.compile(&quot;^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\\?([^#]*))?(#(.*))?$&quot;);</span>
+
+    /**
+     * Media player used to play the sounds
+     */
+    private MediaPlayer mMediaPlayer;
+
+    /**
+     * AudioManager to request/release audio focus
+     */
+    private AudioManager mAudioManager;
+
+    /**
+     * OnCompletionListener so that external video player can notify to play next sound
+     */
+    private static OnCompletionListener mPlayAllListener;
+
+    /**
+     * Weak reference to the activity which is attempting to play the sound
+     */
+    private WeakReference&lt;Activity&gt; mCallingActivity;
+
+    /**
+     * Subset Flags: Flags that indicate the subset of sounds to involve
+     */
+    public static final int  SOUNDS_QUESTION = 0;
+    public static final int  SOUNDS_ANSWER = 1;
+    public static final int  SOUNDS_QUESTION_AND_ANSWER = 2;
+
+    /**
+     * Stores sounds for the current card, key is one of the subset flags. It is intended that it not contain empty lists, and code assumes this will be true.
+     */
+<span class="nc" id="L95">    private HashMap&lt;Integer, ArrayList&lt;String&gt;&gt; mSoundPaths = new HashMap&lt;&gt;();</span>
+
+
+    /**
+     * Whitelist for video extensions
+     */
+<span class="nc" id="L101">    private static final String[] VIDEO_WHITELIST = {&quot;3gp&quot;, &quot;mp4&quot;, &quot;webm&quot;, &quot;mkv&quot;, &quot;flv&quot;};</span>
+
+    /**
+     * Listener to handle audio focus. Currently blank because we're not respecting losing focus from other apps.
+     */
+<span class="nc" id="L106">    private static AudioManager.OnAudioFocusChangeListener afChangeListener = new AudioManager.OnAudioFocusChangeListener() {</span>
+        public void onAudioFocusChange(int focusChange) {
+<span class="nc" id="L108">        }</span>
+    };
+
+
+    // Clears current sound paths; call before parseSounds() calls
+    public void resetSounds() {
+<span class="nc" id="L114">        mSoundPaths.clear();</span>
+<span class="nc" id="L115">    }</span>
+
+    /**
+     * resetSounds removes lists of sounds
+     * @param which -- One of the subset flags, such as Sound.SOUNDS_QUESTION
+     */
+    public void resetSounds(int which) {
+<span class="nc" id="L122">        mSoundPaths.remove(which);</span>
+<span class="nc" id="L123">    }</span>
+
+
+    /**
+     * The function addSounds() parses content for sound files, and stores entries to the filepaths for them,
+     * categorized as belonging to the front (question) or back (answer) of cards. Note that all sounds embedded in
+     * the content will be given the same base categorization of question or answer. Additionally, the result is to be
+     * sorted by the order of appearance on the card.
+     * @param soundDir -- base path to the media files
+     * @param content -- parsed for sound entries, the entries expected in display order
+     * @param qa -- the base categorization of the sounds in the content, Sound.SOUNDS_QUESTION or Sound.SOUNDS_ANSWER
+     */
+    public void addSounds(String soundDir, String content, int qa) {
+<span class="nc" id="L136">        Matcher matcher = sSoundPattern.matcher(content);</span>
+        // While there is matches of the pattern for sound markers
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        while (matcher.find()) {</span>
+            // Create appropriate list if needed; list must not be empty so long as code does no check
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (!mSoundPaths.containsKey(qa)) {</span>
+<span class="nc" id="L141">                mSoundPaths.put(qa, new ArrayList&lt;String&gt;());</span>
+            }
+
+            // Get the sound file name
+<span class="nc" id="L145">            String sound = matcher.group(1).trim();</span>
+
+            // Construct the sound path and store it
+<span class="nc" id="L148">            mSoundPaths.get(qa).add(getSoundPath(soundDir, sound));</span>
+<span class="nc" id="L149">        }</span>
+<span class="nc" id="L150">    }</span>
+
+    /**
+     * makeQuestionAnswerSoundList creates a single list of both the question and answer audio only if it does not
+     * already exist. It's intended for lazy evaluation, only in the rare cases when both sides are fully played
+     * together, which even when configured as supported may not be instigated
+     * @return True if a non-null list was created, or false otherwise
+     */
+    public Boolean makeQuestionAnswerList() {
+        // if combined list already exists, don't recreate
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (mSoundPaths.containsKey(Sound.SOUNDS_QUESTION_AND_ANSWER)) {</span>
+<span class="nc" id="L161">            return false; // combined list already exists</span>
+        }
+
+        // make combined list only if necessary to avoid an empty combined list
+<span class="nc bnc" id="L165" title="All 4 branches missed.">        if (mSoundPaths.containsKey(Sound.SOUNDS_QUESTION) || mSoundPaths.containsKey(Sound.SOUNDS_ANSWER)) {</span>
+            // some list exists to place into combined list
+<span class="nc" id="L167">            mSoundPaths.put(Sound.SOUNDS_QUESTION_AND_ANSWER, new ArrayList&lt;String&gt;());</span>
+        } else { // no need to make list
+<span class="nc" id="L169">            return false;</span>
+        }
+
+<span class="nc" id="L172">        ArrayList&lt;String&gt; combinedSounds = mSoundPaths.get(Sound.SOUNDS_QUESTION_AND_ANSWER);</span>
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (mSoundPaths.containsKey(Sound.SOUNDS_QUESTION)) {</span>
+<span class="nc" id="L175">            combinedSounds.addAll(mSoundPaths.get(Sound.SOUNDS_QUESTION));</span>
+        }
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (mSoundPaths.containsKey(Sound.SOUNDS_ANSWER)) {</span>
+<span class="nc" id="L178">            combinedSounds.addAll(mSoundPaths.get(Sound.SOUNDS_ANSWER));</span>
+        }
+
+<span class="nc" id="L181">        return true;</span>
+    }
+
+    /**
+     * expandSounds takes content with embedded sound file placeholders and expands them to reference the actual media
+     * file
+     *
+     * @param soundDir -- the base path of the media files
+     * @param content -- card content to be rendered that may contain embedded audio
+     * @return -- the same content but in a format that will render working play buttons when audio was embedded
+     */
+    public static String expandSounds(String soundDir, String content) {
+<span class="nc" id="L193">        StringBuilder stringBuilder = new StringBuilder();</span>
+<span class="nc" id="L194">        String contentLeft = content;</span>
+
+<span class="nc" id="L196">        Timber.d(&quot;expandSounds&quot;);</span>
+
+<span class="nc" id="L198">        Matcher matcher = sSoundPattern.matcher(content);</span>
+        // While there is matches of the pattern for sound markers
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        while (matcher.find()) {</span>
+            // Get the sound file name
+<span class="nc" id="L202">            String sound = matcher.group(1).trim();</span>
+
+            // Construct the sound path
+<span class="nc" id="L205">            String soundPath = getSoundPath(soundDir, sound);</span>
+
+            // Construct the new content, appending the substring from the beginning of the content left until the
+            // beginning of the sound marker
+            // and then appending the html code to add the play button
+            String button;
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            if (CompatHelper.getSdkVersion() &gt;= Build.VERSION_CODES.HONEYCOMB) {</span>
+<span class="nc" id="L212">                button = &quot;&lt;svg viewBox=\&quot;0 0 32 32\&quot;&gt;&lt;polygon points=\&quot;11,25 25,16 11,7\&quot;/&gt;Replay&lt;/svg&gt;&quot;;</span>
+            } else {
+<span class="nc" id="L214">                button = &quot;&lt;img src='file:///android_asset/inline_play_button.png' /&gt;&quot;;</span>
+            }
+<span class="nc" id="L216">            String soundMarker = matcher.group();</span>
+<span class="nc" id="L217">            int markerStart = contentLeft.indexOf(soundMarker);</span>
+<span class="nc" id="L218">            stringBuilder.append(contentLeft.substring(0, markerStart));</span>
+            // The &lt;span&gt; around the button (SVG or PNG image) is needed to make the vertical alignment work.
+<span class="nc" id="L220">            stringBuilder.append(&quot;&lt;a class='replaybutton' href=\&quot;playsound:&quot; + soundPath + &quot;\&quot;&gt;&quot;</span>
+                    + &quot;&lt;span&gt;&quot;+ button
+                    + &quot;&lt;/span&gt;&lt;/a&gt;&quot;);
+<span class="nc" id="L223">            contentLeft = contentLeft.substring(markerStart + soundMarker.length());</span>
+<span class="nc" id="L224">            Timber.d(&quot;Content left = %s&quot;, contentLeft);</span>
+<span class="nc" id="L225">        }</span>
+
+        // unused code related to tts support taken out after v2.2alpha55
+        // if/when tts support is considered complete, these comment lines serve no purpose
+
+<span class="nc" id="L230">        stringBuilder.append(contentLeft);</span>
+
+<span class="nc" id="L232">        return stringBuilder.toString();</span>
+    }
+
+
+    /**
+     * Plays the sounds for the indicated sides
+     * @param qa -- One of Sound.SOUNDS_QUESTION, Sound.SOUNDS_ANSWER, or Sound.SOUNDS_QUESTION_AND_ANSWER
+     */
+    public void playSounds(int qa) {
+        // If there are sounds to play for the current card, start with the first one
+<span class="nc bnc" id="L242" title="All 4 branches missed.">        if (mSoundPaths != null &amp;&amp; mSoundPaths.containsKey(qa)) {</span>
+<span class="nc" id="L243">            playSound(mSoundPaths.get(qa).get(0), new PlayAllCompletionListener(qa));</span>
+<span class="nc bnc" id="L244" title="All 4 branches missed.">        } else if (mSoundPaths != null &amp;&amp; qa == Sound.SOUNDS_QUESTION_AND_ANSWER) {</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">            if (makeQuestionAnswerList()) {</span>
+<span class="nc" id="L246">                playSound(mSoundPaths.get(qa).get(0), new PlayAllCompletionListener(qa));</span>
+            }
+        }
+<span class="nc" id="L249">    }</span>
+
+    /**
+     * Plays the given sound or video and sets playAllListener if available on media player to start next media
+     * @param soundPath
+     * @param playAllListener
+     */
+    public void playSound(String soundPath, OnCompletionListener playAllListener) {
+<span class="nc" id="L257">        playSound(soundPath, playAllListener, null);</span>
+<span class="nc" id="L258">    }</span>
+
+    /**
+     * Plays the given sound or video and sets playAllListener if available on media player to start next media.
+     * If videoView is null and the media is a video, then a request is sent to start the VideoPlayer Activity
+     * @param soundPath
+     * @param playAllListener
+     * @param videoView
+     */
+    @SuppressLint(&quot;NewApi&quot;)
+    public void playSound(String soundPath, OnCompletionListener playAllListener, final VideoView videoView) {
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        Timber.d(&quot;Playing %s has listener? %b&quot;, soundPath, playAllListener != null);</span>
+<span class="nc" id="L270">        Uri soundUri = Uri.parse(soundPath);</span>
+
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        if (soundPath.substring(0, 3).equals(&quot;tts&quot;)) {</span>
+            // TODO: give information about did
+//            ReadText.textToSpeech(soundPath.substring(4, soundPath.length()),
+//                    Integer.parseInt(soundPath.substring(3, 4)));
+        } else {
+            // Check if the file extension is that of a known video format
+<span class="nc" id="L278">            final String extension = soundPath.substring(soundPath.lastIndexOf(&quot;.&quot;) + 1).toLowerCase();</span>
+<span class="nc" id="L279">            boolean isVideo = Arrays.asList(VIDEO_WHITELIST).contains(extension);</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">            if (!isVideo) {</span>
+<span class="nc" id="L281">                final String guessedType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);</span>
+<span class="nc bnc" id="L282" title="All 6 branches missed.">                isVideo = isVideo || (guessedType != null &amp;&amp; guessedType.startsWith(&quot;video/&quot;));</span>
+            }
+            // Also check that there is a video thumbnail, as some formats like mp4 can be audio only
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            isVideo = isVideo &amp;&amp;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                ThumbnailUtils.createVideoThumbnail(soundUri.getPath(), MediaStore.Images.Thumbnails.MINI_KIND) != null;</span>
+            // No thumbnail: no video after all. (Or maybe not a video we can handle on the specific device.)
+            // If video file but no SurfaceHolder provided then ask AbstractFlashcardViewer to provide a VideoView
+            // holder
+<span class="nc bnc" id="L290" title="All 8 branches missed.">            if (isVideo &amp;&amp; videoView == null &amp;&amp; mCallingActivity != null &amp;&amp; mCallingActivity.get() != null) {</span>
+<span class="nc" id="L291">                mPlayAllListener = playAllListener;</span>
+<span class="nc" id="L292">                ((AbstractFlashcardViewer) mCallingActivity.get()).playVideo(soundPath);</span>
+<span class="nc" id="L293">                return;</span>
+            }
+            // Play media
+            try {
+                // Create media player
+<span class="nc bnc" id="L298" title="All 2 branches missed.">                if (mMediaPlayer == null) {</span>
+<span class="nc" id="L299">                    mMediaPlayer = new MediaPlayer();</span>
+                } else {
+<span class="nc" id="L301">                    mMediaPlayer.reset();</span>
+                }
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                if (mAudioManager == null) {</span>
+<span class="nc" id="L304">                    mAudioManager = (AudioManager) AnkiDroidApp.getInstance().getApplicationContext().getSystemService(Context.AUDIO_SERVICE);</span>
+                }
+                // Provide a VideoView to the MediaPlayer if valid video file
+<span class="nc bnc" id="L307" title="All 4 branches missed.">                if (isVideo &amp;&amp; videoView != null) {</span>
+<span class="nc" id="L308">                    mMediaPlayer.setDisplay(videoView.getHolder());</span>
+<span class="nc" id="L309">                    mMediaPlayer.setOnVideoSizeChangedListener(new MediaPlayer.OnVideoSizeChangedListener() {</span>
+                        @Override
+                        public void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
+<span class="nc" id="L312">                            configureVideo(videoView, width, height);</span>
+<span class="nc" id="L313">                        }</span>
+                    });
+                }
+                // Setup the MediaPlayer
+<span class="nc" id="L317">                mMediaPlayer.setDataSource(AnkiDroidApp.getInstance().getApplicationContext(), soundUri);</span>
+<span class="nc" id="L318">                mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);</span>
+<span class="nc" id="L319">                mMediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {</span>
+                    @Override
+                    public void onPrepared(MediaPlayer mp) {
+<span class="nc" id="L322">                        mMediaPlayer.start();</span>
+<span class="nc" id="L323">                    }</span>
+                });
+<span class="nc bnc" id="L325" title="All 2 branches missed.">                if (playAllListener != null) {</span>
+<span class="nc" id="L326">                    mMediaPlayer.setOnCompletionListener(playAllListener);</span>
+                }
+<span class="nc" id="L328">                mMediaPlayer.prepareAsync();</span>
+<span class="nc" id="L329">                mAudioManager.requestAudioFocus(afChangeListener, AudioManager.STREAM_MUSIC,</span>
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+<span class="nc" id="L331">            } catch (Exception e) {</span>
+<span class="nc" id="L332">                Timber.e(e, &quot;playSounds - Error reproducing sound %s&quot;, soundPath);</span>
+<span class="nc" id="L333">                releaseSound();</span>
+<span class="nc" id="L334">            }</span>
+        }
+<span class="nc" id="L336">    }</span>
+
+    private static void configureVideo(VideoView videoView, int videoWidth, int videoHeight) {
+        // get the display
+<span class="nc" id="L340">        Context context = AnkiDroidApp.getInstance().getApplicationContext();</span>
+<span class="nc" id="L341">        WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);</span>
+<span class="nc" id="L342">        Display display = wm.getDefaultDisplay();</span>
+        // adjust the size of the video so it fits on the screen
+<span class="nc" id="L344">        float videoProportion = (float) videoWidth / (float) videoHeight;</span>
+<span class="nc" id="L345">        int screenWidth = display.getWidth();</span>
+<span class="nc" id="L346">        int screenHeight = display.getHeight();</span>
+<span class="nc" id="L347">        float screenProportion = (float) screenWidth / (float) screenHeight;</span>
+<span class="nc" id="L348">        android.view.ViewGroup.LayoutParams lp = videoView.getLayoutParams();</span>
+
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        if (videoProportion &gt; screenProportion) {</span>
+<span class="nc" id="L351">            lp.width = screenWidth;</span>
+<span class="nc" id="L352">            lp.height = (int) ((float) screenWidth / videoProportion);</span>
+        } else {
+<span class="nc" id="L354">            lp.width = (int) (videoProportion * (float) screenHeight);</span>
+<span class="nc" id="L355">            lp.height = screenHeight;</span>
+        }
+<span class="nc" id="L357">        videoView.setLayoutParams(lp);</span>
+<span class="nc" id="L358">    }</span>
+
+    public void notifyConfigurationChanged(VideoView videoView) {
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (mMediaPlayer != null) {</span>
+<span class="nc" id="L362">            configureVideo(videoView, mMediaPlayer.getVideoWidth(), mMediaPlayer.getVideoHeight());</span>
+        }
+<span class="nc" id="L364">    }</span>
+
+    /**
+     * Class used to play all sounds for a given card side
+     */
+    private final class PlayAllCompletionListener implements OnCompletionListener {
+
+        /**
+         * Question/Answer
+         */
+        private final int mQa;
+
+        /**
+         * next sound to play (onCompletion() is first called after the first (0) has been played)
+         */
+<span class="nc" id="L379">        private int mNextToPlay = 1;</span>
+
+
+<span class="nc" id="L382">        private PlayAllCompletionListener(int qa) {</span>
+<span class="nc" id="L383">            mQa = qa;</span>
+<span class="nc" id="L384">        }</span>
+
+
+        @Override
+        public void onCompletion(MediaPlayer mp) {
+            // If there is still more sounds to play for the current card, play the next one
+<span class="nc bnc" id="L390" title="All 4 branches missed.">            if (mSoundPaths.containsKey(mQa) &amp;&amp; mNextToPlay &lt; mSoundPaths.get(mQa).size()) {</span>
+<span class="nc" id="L391">                playSound(mSoundPaths.get(mQa).get(mNextToPlay++), this);</span>
+            } else {
+<span class="nc" id="L393">                releaseSound();</span>
+            }
+<span class="nc" id="L395">        }</span>
+    }
+
+    /**
+     * Releases the sound.
+     */
+    private void releaseSound() {
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        if (mMediaPlayer != null) {</span>
+<span class="nc" id="L403">            mMediaPlayer.release();</span>
+<span class="nc" id="L404">            mMediaPlayer = null;</span>
+        }
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (mAudioManager != null) {</span>
+<span class="nc" id="L407">            mAudioManager.abandonAudioFocus(afChangeListener);</span>
+<span class="nc" id="L408">            mAudioManager = null;</span>
+        }
+<span class="nc" id="L410">    }</span>
+
+    /**
+     * Stops the playing sounds.
+     */
+    public void stopSounds() {
+<span class="nc bnc" id="L416" title="All 2 branches missed.">        if (mMediaPlayer != null) {</span>
+<span class="nc" id="L417">            mMediaPlayer.stop();</span>
+<span class="nc" id="L418">            releaseSound();</span>
+        }
+<span class="nc" id="L420">        ReadText.stopTts();</span>
+<span class="nc" id="L421">    }</span>
+
+    /**
+     * @param soundDir -- base path to the media files.
+     * @param sound -- path to the sound file from the card content.
+     * @return absolute URI to the sound file.
+     */
+    private static String getSoundPath(String soundDir, String sound) {
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        if (hasURIScheme(sound)) {</span>
+<span class="nc" id="L430">            return sound;</span>
+        }
+<span class="nc" id="L432">        return soundDir + Uri.encode(sound);</span>
+    }
+
+    /**
+     * @param path -- path to the sound file from the card content.
+     * @return true if path is well-formed URI and contains URI scheme.
+     */
+    private static boolean hasURIScheme(String path) {
+<span class="nc" id="L440">        Matcher uriMatcher = sUriPattern.matcher(path.trim());</span>
+<span class="nc bnc" id="L441" title="All 4 branches missed.">        return uriMatcher.matches() &amp;&amp; uriMatcher.group(2) != null;</span>
+    }
+
+    /**
+     * Set the context for the calling activity (necessary for playing videos)
+     * @param activityRef
+     */
+    public void setContext(WeakReference&lt;Activity&gt; activityRef) {
+<span class="nc" id="L449">        mCallingActivity = activityRef;</span>
+<span class="nc" id="L450">    }</span>
+
+    public OnCompletionListener getMediaCompletionListener() {
+<span class="nc" id="L453">        return mPlayAllListener;</span>
+    }
+
+    public boolean hasQuestion() {
+<span class="nc" id="L457">        return mSoundPaths.containsKey(Sound.SOUNDS_QUESTION);</span>
+    }
+    public boolean hasAnswer() {
+<span class="nc" id="L460">        return mSoundPaths.containsKey(Sound.SOUNDS_ANSWER);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

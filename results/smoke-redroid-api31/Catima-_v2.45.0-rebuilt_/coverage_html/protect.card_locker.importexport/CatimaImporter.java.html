@@ -1,0 +1,559 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CatimaImporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Catima</a> &gt; <a href="index.source.html" class="el_package">protect.card_locker.importexport</a> &gt; <span class="el_source">CatimaImporter.java</span></div><h1>CatimaImporter.java</h1><pre class="source lang-java linenums">package protect.card_locker.importexport;
+
+import android.content.Context;
+import android.database.sqlite.SQLiteDatabase;
+import android.net.Uri;
+
+import net.lingala.zip4j.io.inputstream.ZipInputStream;
+import net.lingala.zip4j.model.LocalFileHeader;
+
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.StringReader;
+import java.math.BigDecimal;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Currency;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import protect.card_locker.CatimaBarcode;
+import protect.card_locker.DBHelper;
+import protect.card_locker.FormatException;
+import protect.card_locker.Group;
+import protect.card_locker.ImageLocationType;
+import protect.card_locker.LoyaltyCard;
+import protect.card_locker.Utils;
+import protect.card_locker.ZipUtils;
+
+/**
+ * Class for importing a database from CSV (Comma Separate Values)
+ * formatted data.
+ * &lt;p&gt;
+ * The database's loyalty cards are expected to appear in the CSV data.
+ * A header is expected for the each table showing the names of the columns.
+ */
+<span class="nc" id="L49">public class CatimaImporter implements Importer {</span>
+    public static class ImportedData {
+        public final List&lt;LoyaltyCard&gt; cards;
+        public final List&lt;String&gt; groups;
+        public final List&lt;Map.Entry&lt;Integer, String&gt;&gt; cardGroups;
+
+<span class="nc" id="L55">        ImportedData(final List&lt;LoyaltyCard&gt; cards, final List&lt;String&gt; groups, final List&lt;Map.Entry&lt;Integer, String&gt;&gt; cardGroups) {</span>
+<span class="nc" id="L56">            this.cards = cards;</span>
+<span class="nc" id="L57">            this.groups = groups;</span>
+<span class="nc" id="L58">            this.cardGroups = cardGroups;</span>
+<span class="nc" id="L59">        }</span>
+    }
+
+    public void importData(Context context, SQLiteDatabase database, File inputFile, char[] password) throws IOException, FormatException, InterruptedException {
+        // Pass #1: get hashes and parse CSV
+<span class="nc" id="L64">        InputStream input1 = new FileInputStream(inputFile);</span>
+<span class="nc" id="L65">        InputStream bufferedInputStream1 = new BufferedInputStream(input1);</span>
+<span class="nc" id="L66">        bufferedInputStream1.mark(100);</span>
+<span class="nc" id="L67">        ZipInputStream zipInputStream1 = new ZipInputStream(bufferedInputStream1, password);</span>
+
+        // First, check if this is a zip file
+<span class="nc" id="L70">        boolean isZipFile = false;</span>
+        LocalFileHeader localFileHeader;
+<span class="nc" id="L72">        Map&lt;String, String&gt; imageChecksums = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L73">        ImportedData importedData = null;</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        while ((localFileHeader = zipInputStream1.getNextEntry()) != null) {</span>
+<span class="nc" id="L76">            isZipFile = true;</span>
+
+<span class="nc" id="L78">            String fileName = Uri.parse(localFileHeader.getFileName()).getLastPathSegment();</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            if (fileName.equals(&quot;catima.csv&quot;)) {</span>
+<span class="nc" id="L80">                importedData = importCSV(zipInputStream1);</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            } else if (fileName.endsWith(&quot;.png&quot;)) {</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                if (!fileName.matches(Utils.CARD_IMAGE_FILENAME_REGEX)) {</span>
+<span class="nc" id="L83">                    throw new FormatException(&quot;Unexpected PNG file in import: &quot; + fileName);</span>
+                }
+<span class="nc" id="L85">                imageChecksums.put(fileName, Utils.checksum(zipInputStream1));</span>
+            } else {
+<span class="nc" id="L87">                throw new FormatException(&quot;Unexpected file in import: &quot; + fileName);</span>
+            }
+<span class="nc" id="L89">        }</span>
+
+<span class="nc bnc" id="L91" title="All 2 branches missed.">        if (!isZipFile) {</span>
+            // This is not a zip file, try importing as bare CSV
+<span class="nc" id="L93">            bufferedInputStream1.reset();</span>
+<span class="nc" id="L94">            importedData = importCSV(bufferedInputStream1);</span>
+        }
+
+<span class="nc" id="L97">        input1.close();</span>
+
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (importedData == null) {</span>
+<span class="nc" id="L100">            throw new FormatException(&quot;No imported data&quot;);</span>
+        }
+
+<span class="nc" id="L103">        Map&lt;Integer, Integer&gt; idMap = saveAndDeduplicate(context, database, importedData, imageChecksums);</span>
+
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (isZipFile) {</span>
+            // Pass #2: save images
+<span class="nc" id="L107">            InputStream input2 = new FileInputStream(inputFile);</span>
+<span class="nc" id="L108">            InputStream bufferedInputStream2 = new BufferedInputStream(input2);</span>
+<span class="nc" id="L109">            ZipInputStream zipInputStream2 = new ZipInputStream(bufferedInputStream2, password);</span>
+
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            while ((localFileHeader = zipInputStream2.getNextEntry()) != null) {</span>
+<span class="nc" id="L112">                String fileName = Uri.parse(localFileHeader.getFileName()).getLastPathSegment();</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                if (fileName.endsWith(&quot;.png&quot;)) {</span>
+<span class="nc" id="L114">                    String newFileName = Utils.getRenamedCardImageFileName(fileName, idMap);</span>
+<span class="nc" id="L115">                    Utils.saveCardImage(context, ZipUtils.readImage(zipInputStream2), newFileName);</span>
+                }
+<span class="nc" id="L117">            }</span>
+
+<span class="nc" id="L119">            input2.close();</span>
+        }
+<span class="nc" id="L121">    }</span>
+
+    public Map&lt;Integer, Integer&gt; saveAndDeduplicate(Context context, SQLiteDatabase database, final ImportedData data, final Map&lt;String, String&gt; imageChecksums) throws IOException {
+<span class="nc" id="L124">        Map&lt;Integer, Integer&gt; idMap = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L125">        Set&lt;String&gt; existingImages = DBHelper.imageFiles(context, database);</span>
+
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        for (LoyaltyCard card : data.cards) {</span>
+<span class="nc" id="L128">            LoyaltyCard existing = DBHelper.getLoyaltyCard(context, database, card.id);</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">            if (existing == null) {</span>
+<span class="nc" id="L130">                DBHelper.insertLoyaltyCard(database, card.id, card.store, card.note, card.validFrom, card.expiry, card.balance, card.balanceType,</span>
+<span class="nc" id="L131">                        card.cardId, card.barcodeId, card.barcodeType, card.barcodeEncoding, card.headerColor, card.starStatus, card.lastUsed, card.archiveStatus);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            } else if (!isDuplicate(context, existing, card, existingImages, imageChecksums)) {</span>
+<span class="nc" id="L133">                long newId = DBHelper.insertLoyaltyCard(database, card.store, card.note, card.validFrom, card.expiry, card.balance, card.balanceType,</span>
+<span class="nc" id="L134">                        card.cardId, card.barcodeId, card.barcodeType, card.barcodeEncoding, card.headerColor, card.starStatus, card.lastUsed, card.archiveStatus);</span>
+<span class="nc" id="L135">                idMap.put(card.id, (int) newId);</span>
+            }
+<span class="nc" id="L137">        }</span>
+
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        for (String group : data.groups) {</span>
+<span class="nc" id="L140">            DBHelper.insertGroup(database, group);</span>
+<span class="nc" id="L141">        }</span>
+
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        for (Map.Entry&lt;Integer, String&gt; entry : data.cardGroups) {</span>
+<span class="nc" id="L144">            int cardId = idMap.getOrDefault(entry.getKey(), entry.getKey());</span>
+<span class="nc" id="L145">            String groupId = entry.getValue();</span>
+            // For existing &amp; newly imported cards, add the groups from the import to the internal state
+<span class="nc" id="L147">            List&lt;Group&gt; cardGroups = DBHelper.getLoyaltyCardGroups(database, cardId);</span>
+<span class="nc" id="L148">            cardGroups.add(DBHelper.getGroup(database, groupId));</span>
+<span class="nc" id="L149">            DBHelper.setLoyaltyCardGroups(database, cardId, cardGroups);</span>
+<span class="nc" id="L150">        }</span>
+
+<span class="nc" id="L152">        return idMap;</span>
+    }
+
+    public boolean isDuplicate(Context context, final LoyaltyCard existing, final LoyaltyCard card, final Set&lt;String&gt; existingImages, final Map&lt;String, String&gt; imageChecksums) throws IOException {
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (!LoyaltyCard.isDuplicate(context, existing, card)) {</span>
+<span class="nc" id="L157">            return false;</span>
+        }
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        for (ImageLocationType imageLocationType : ImageLocationType.values()) {</span>
+<span class="nc" id="L160">            String name = Utils.getCardImageFileName(existing.id, imageLocationType);</span>
+<span class="nc" id="L161">            boolean exists = existingImages.contains(name);</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (exists != imageChecksums.containsKey(name)) {</span>
+<span class="nc" id="L163">                return false;</span>
+            }
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            if (exists) {</span>
+<span class="nc" id="L166">                File file = Utils.retrieveCardImageAsFile(context, name);</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                if (!imageChecksums.get(name).equals(Utils.checksum(new FileInputStream(file)))) {</span>
+<span class="nc" id="L168">                    return false;</span>
+                }
+            }
+        }
+<span class="nc" id="L172">        return true;</span>
+    }
+
+    public ImportedData importCSV(InputStream input) throws IOException, FormatException, InterruptedException {
+<span class="nc" id="L176">        BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));</span>
+
+<span class="nc" id="L178">        int version = parseVersion(bufferedReader);</span>
+<span class="nc bnc" id="L179" title="All 3 branches missed.">        switch (version) {</span>
+            case 1:
+<span class="nc" id="L181">                return parseV1(bufferedReader);</span>
+            case 2:
+<span class="nc" id="L183">                return parseV2(bufferedReader);</span>
+            default:
+<span class="nc" id="L185">                throw new FormatException(String.format(&quot;No code to parse version %s&quot;, version));</span>
+        }
+    }
+
+    public ImportedData parseV1(BufferedReader input) throws IOException, FormatException, InterruptedException {
+<span class="nc" id="L190">        ImportedData data = new ImportedData(new ArrayList&lt;&gt;(), new ArrayList&lt;&gt;(), new ArrayList&lt;&gt;());</span>
+<span class="nc" id="L191">        final CSVParser parser = new CSVParser(input, CSVFormat.RFC4180.builder().setHeader().build());</span>
+
+        try {
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            for (CSVRecord record : parser) {</span>
+<span class="nc" id="L195">                LoyaltyCard card = importLoyaltyCard(record);</span>
+<span class="nc" id="L196">                data.cards.add(card);</span>
+
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L199">                    throw new InterruptedException();</span>
+                }
+<span class="nc" id="L201">            }</span>
+
+<span class="nc" id="L203">            parser.close();</span>
+<span class="nc" id="L204">        } catch (IllegalArgumentException | IllegalStateException e) {</span>
+<span class="nc" id="L205">            throw new FormatException(&quot;Issue parsing CSV data&quot;, e);</span>
+<span class="nc" id="L206">        }</span>
+
+<span class="nc" id="L208">        return data;</span>
+    }
+
+    public ImportedData parseV2(BufferedReader input) throws IOException, FormatException, InterruptedException {
+<span class="nc" id="L212">        List&lt;LoyaltyCard&gt; cards = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L213">        List&lt;String&gt; groups = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L214">        List&lt;Map.Entry&lt;Integer, String&gt;&gt; cardGroups = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L216">        int part = 0;</span>
+<span class="nc" id="L217">        StringBuilder stringPart = new StringBuilder();</span>
+
+        try {
+            while (true) {
+<span class="nc" id="L221">                String tmp = input.readLine();</span>
+
+<span class="nc bnc" id="L223" title="All 4 branches missed.">                if (tmp == null || tmp.isEmpty()) {</span>
+<span class="nc" id="L224">                    boolean sectionParsed = false;</span>
+
+<span class="nc bnc" id="L226" title="All 5 branches missed.">                    switch (part) {</span>
+                        case 0:
+                            // This is the version info, ignore
+<span class="nc" id="L229">                            sectionParsed = true;</span>
+<span class="nc" id="L230">                            break;</span>
+                        case 1:
+                            try {
+<span class="nc" id="L233">                                groups = parseV2Groups(stringPart.toString());</span>
+<span class="nc" id="L234">                                sectionParsed = true;</span>
+<span class="nc" id="L235">                            } catch (FormatException e) {</span>
+                                // We may have a multiline field, try again
+<span class="nc" id="L237">                            }</span>
+<span class="nc" id="L238">                            break;</span>
+                        case 2:
+                            try {
+<span class="nc" id="L241">                                cards = parseV2Cards(stringPart.toString());</span>
+<span class="nc" id="L242">                                sectionParsed = true;</span>
+<span class="nc" id="L243">                            } catch (FormatException e) {</span>
+                                // We may have a multiline field, try again
+<span class="nc" id="L245">                            }</span>
+<span class="nc" id="L246">                            break;</span>
+                        case 3:
+                            try {
+<span class="nc" id="L249">                                cardGroups = parseV2CardGroups(stringPart.toString());</span>
+<span class="nc" id="L250">                                sectionParsed = true;</span>
+<span class="nc" id="L251">                            } catch (FormatException e) {</span>
+                                // We may have a multiline field, try again
+<span class="nc" id="L253">                            }</span>
+<span class="nc" id="L254">                            break;</span>
+                        default:
+<span class="nc" id="L256">                            throw new FormatException(&quot;Issue parsing CSV data, too many parts for v2 parsing&quot;);</span>
+                    }
+
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                    if (tmp == null) {</span>
+<span class="nc" id="L260">                        break;</span>
+                    }
+
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                    if (sectionParsed) {</span>
+<span class="nc" id="L264">                        part += 1;</span>
+<span class="nc" id="L265">                        stringPart = new StringBuilder();</span>
+                    } else {
+<span class="nc" id="L267">                        stringPart.append(tmp).append('\n');</span>
+                    }
+<span class="nc" id="L269">                } else {</span>
+<span class="nc" id="L270">                    stringPart.append(tmp).append('\n');</span>
+                }
+<span class="nc" id="L272">            }</span>
+<span class="nc" id="L273">        } catch (FormatException e) {</span>
+<span class="nc" id="L274">            throw new FormatException(&quot;Issue parsing CSV data&quot;, e);</span>
+<span class="nc" id="L275">        }</span>
+
+<span class="nc" id="L277">        return new ImportedData(cards, groups, cardGroups);</span>
+    }
+
+    public List&lt;String&gt; parseV2Groups(String data) throws IOException, FormatException, InterruptedException {
+        // Parse groups
+<span class="nc" id="L282">        final CSVParser groupParser = new CSVParser(new StringReader(data), CSVFormat.RFC4180.builder().setHeader().build());</span>
+
+<span class="nc" id="L284">        List&lt;CSVRecord&gt; records = new ArrayList&lt;&gt;();</span>
+
+        try {
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            for (CSVRecord record : groupParser) {</span>
+<span class="nc" id="L288">                records.add(record);</span>
+
+<span class="nc bnc" id="L290" title="All 2 branches missed.">                if (Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L291">                    throw new InterruptedException();</span>
+                }
+<span class="nc" id="L293">            }</span>
+<span class="nc" id="L294">        } catch (IllegalArgumentException | IllegalStateException e) {</span>
+<span class="nc" id="L295">            throw new FormatException(&quot;Issue parsing CSV data&quot;, e);</span>
+        } finally {
+<span class="nc" id="L297">            groupParser.close();</span>
+        }
+
+<span class="nc" id="L300">        List&lt;String&gt; groups = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        for (CSVRecord record : records) {</span>
+<span class="nc" id="L302">            String group = importGroup(record);</span>
+<span class="nc" id="L303">            groups.add(group);</span>
+<span class="nc" id="L304">        }</span>
+<span class="nc" id="L305">        return groups;</span>
+    }
+
+    public List&lt;LoyaltyCard&gt; parseV2Cards(String data) throws IOException, FormatException, InterruptedException {
+        // Parse cards
+<span class="nc" id="L310">        final CSVParser cardParser = new CSVParser(new StringReader(data), CSVFormat.RFC4180.builder().setHeader().build());</span>
+
+<span class="nc" id="L312">        List&lt;CSVRecord&gt; records = new ArrayList&lt;&gt;();</span>
+
+        try {
+<span class="nc bnc" id="L315" title="All 2 branches missed.">            for (CSVRecord record : cardParser) {</span>
+<span class="nc" id="L316">                records.add(record);</span>
+
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                if (Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L319">                    throw new InterruptedException();</span>
+                }
+<span class="nc" id="L321">            }</span>
+<span class="nc" id="L322">        } catch (IllegalArgumentException | IllegalStateException e) {</span>
+<span class="nc" id="L323">            throw new FormatException(&quot;Issue parsing CSV data&quot;, e);</span>
+        } finally {
+<span class="nc" id="L325">            cardParser.close();</span>
+        }
+
+<span class="nc" id="L328">        List&lt;LoyaltyCard&gt; cards = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        for (CSVRecord record : records) {</span>
+<span class="nc" id="L330">            LoyaltyCard card = importLoyaltyCard(record);</span>
+<span class="nc" id="L331">            cards.add(card);</span>
+<span class="nc" id="L332">        }</span>
+<span class="nc" id="L333">        return cards;</span>
+    }
+
+    public List&lt;Map.Entry&lt;Integer, String&gt;&gt; parseV2CardGroups(String data) throws IOException, FormatException, InterruptedException {
+        // Parse card group mappings
+<span class="nc" id="L338">        final CSVParser cardGroupParser = new CSVParser(new StringReader(data), CSVFormat.RFC4180.builder().setHeader().build());</span>
+
+<span class="nc" id="L340">        List&lt;CSVRecord&gt; records = new ArrayList&lt;&gt;();</span>
+
+        try {
+<span class="nc bnc" id="L343" title="All 2 branches missed.">            for (CSVRecord record : cardGroupParser) {</span>
+<span class="nc" id="L344">                records.add(record);</span>
+
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                if (Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L347">                    throw new InterruptedException();</span>
+                }
+<span class="nc" id="L349">            }</span>
+<span class="nc" id="L350">        } catch (IllegalArgumentException | IllegalStateException e) {</span>
+<span class="nc" id="L351">            throw new FormatException(&quot;Issue parsing CSV data&quot;, e);</span>
+        } finally {
+<span class="nc" id="L353">            cardGroupParser.close();</span>
+        }
+
+<span class="nc" id="L356">        List&lt;Map.Entry&lt;Integer, String&gt;&gt; cardGroups = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        for (CSVRecord record : records) {</span>
+<span class="nc" id="L358">            Map.Entry&lt;Integer, String&gt; entry = importCardGroupMapping(record);</span>
+<span class="nc" id="L359">            cardGroups.add(entry);</span>
+<span class="nc" id="L360">        }</span>
+<span class="nc" id="L361">        return cardGroups;</span>
+    }
+
+    /**
+     * Parse the version number of the import file
+     *
+     * @param reader the reader containing the import file
+     * @return the parsed version number, defaulting to 1 if none is found
+     * @throws IOException there was a problem reading the file
+     */
+    private int parseVersion(BufferedReader reader) throws IOException {
+<span class="nc" id="L372">        reader.mark(10); // slightly over the search limit just to be sure</span>
+<span class="nc" id="L373">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L374">        int searchLimit = 5; // gives you version numbers up to 99999</span>
+        int codePoint;
+        // search until the next whitespace, indicating the end of the version
+<span class="nc bnc" id="L377" title="All 2 branches missed.">        while (!Character.isWhitespace(codePoint = reader.read())) {</span>
+            // we found something that isn't a digit, or we ran out of chars
+<span class="nc bnc" id="L379" title="All 4 branches missed.">            if (!Character.isDigit(codePoint) || searchLimit &lt;= 0) {</span>
+<span class="nc" id="L380">                reader.reset();</span>
+<span class="nc" id="L381">                return 1; // default value</span>
+            }
+<span class="nc" id="L383">            sb.append((char) codePoint);</span>
+<span class="nc" id="L384">            searchLimit--;</span>
+        }
+<span class="nc" id="L386">        reader.reset();</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        if (sb.length() == 0) {</span>
+<span class="nc" id="L388">            return 1;</span>
+        }
+<span class="nc" id="L390">        return Integer.parseInt(sb.toString());</span>
+    }
+
+    /**
+     * Import a single loyalty card into the database using the given
+     * session.
+     */
+    private LoyaltyCard importLoyaltyCard(CSVRecord record) throws FormatException {
+<span class="nc" id="L398">        int id = CSVHelpers.extractInt(DBHelper.LoyaltyCardDbIds.ID, record);</span>
+
+<span class="nc" id="L400">        String store = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.STORE, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        if (store.isEmpty()) {</span>
+<span class="nc" id="L402">            throw new FormatException(&quot;No store listed, but is required&quot;);</span>
+        }
+
+<span class="nc" id="L405">        String note = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.NOTE, record, &quot;&quot;);</span>
+
+<span class="nc" id="L407">        Date validFrom = null;</span>
+        Long validFromLong;
+        try {
+<span class="nc" id="L410">            validFromLong = CSVHelpers.extractLong(DBHelper.LoyaltyCardDbIds.VALID_FROM, record);</span>
+<span class="nc" id="L411">        } catch (FormatException ignored) {</span>
+<span class="nc" id="L412">            validFromLong = null;</span>
+<span class="nc" id="L413">        }</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">        if (validFromLong != null) {</span>
+<span class="nc" id="L415">            validFrom = new Date(validFromLong);</span>
+        }
+
+<span class="nc" id="L418">        Date expiry = null;</span>
+        Long expiryLong;
+        try {
+<span class="nc" id="L421">            expiryLong = CSVHelpers.extractLong(DBHelper.LoyaltyCardDbIds.EXPIRY, record);</span>
+<span class="nc" id="L422">        } catch (FormatException ignored) {</span>
+<span class="nc" id="L423">            expiryLong = null;</span>
+<span class="nc" id="L424">        }</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        if (expiryLong != null) {</span>
+<span class="nc" id="L426">            expiry = new Date(expiryLong);</span>
+        }
+
+        // These fields did not exist in versions 1.8.1 and before
+        // We default to 0 so we can still import old backups
+<span class="nc" id="L431">        BigDecimal balance = new BigDecimal(&quot;0&quot;);</span>
+<span class="nc" id="L432">        String balanceString = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.BALANCE, record, null);</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        if (balanceString != null) {</span>
+            try {
+<span class="nc" id="L435">                balance = new BigDecimal(CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.BALANCE, record, null));</span>
+<span class="nc" id="L436">            } catch (NumberFormatException ignored) {</span>
+<span class="nc" id="L437">            }</span>
+        }
+
+<span class="nc" id="L440">        Currency balanceType = null;</span>
+<span class="nc" id="L441">        String unparsedBalanceType = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.BALANCE_TYPE, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">        if (!unparsedBalanceType.isEmpty()) {</span>
+<span class="nc" id="L443">            balanceType = Currency.getInstance(unparsedBalanceType);</span>
+        }
+
+<span class="nc" id="L446">        String cardId = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.CARD_ID, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (cardId.isEmpty()) {</span>
+<span class="nc" id="L448">            throw new FormatException(&quot;No card ID listed, but is required&quot;);</span>
+        }
+
+<span class="nc" id="L451">        String barcodeId = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.BARCODE_ID, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">        if (barcodeId.isEmpty()) {</span>
+<span class="nc" id="L453">            barcodeId = null;</span>
+        }
+
+<span class="nc" id="L456">        CatimaBarcode barcodeType = null;</span>
+<span class="nc" id="L457">        String unparsedBarcodeType = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.BARCODE_TYPE, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">        if (!unparsedBarcodeType.isEmpty()) {</span>
+<span class="nc" id="L459">            barcodeType = CatimaBarcode.fromName(unparsedBarcodeType);</span>
+        }
+
+        // Barcode encoding information is only supported since Catima 2.41.0, so old exports will lack this field
+        // Database migration 19 forcing ISO-8859-1 on all cards, so we should treat imports from old Catima versions the same and force ISO-8859-1 there too
+        // This limits the risk of breaking cards when importing an old database backup
+<span class="nc" id="L465">        Charset barcodeEncoding = StandardCharsets.ISO_8859_1;</span>
+<span class="nc" id="L466">        String unparsedBarcodeEncoding = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIds.BARCODE_ENCODING, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">        if (!unparsedBarcodeEncoding.isEmpty()) {</span>
+<span class="nc" id="L468">            barcodeEncoding = Charset.forName(unparsedBarcodeEncoding);</span>
+        }
+
+<span class="nc" id="L471">        Integer headerColor = null;</span>
+        try {
+<span class="nc" id="L473">            headerColor = CSVHelpers.extractInt(DBHelper.LoyaltyCardDbIds.HEADER_COLOR, record);</span>
+<span class="nc" id="L474">        } catch (FormatException ignored) {</span>
+<span class="nc" id="L475">        }</span>
+
+<span class="nc" id="L477">        int starStatus = 0;</span>
+        try {
+<span class="nc" id="L479">            starStatus = CSVHelpers.extractInt(DBHelper.LoyaltyCardDbIds.STAR_STATUS, record);</span>
+<span class="nc" id="L480">        } catch (FormatException _e) {</span>
+            // This field did not exist in versions 0.28 and before
+            // We catch this exception so we can still import old backups
+<span class="nc" id="L483">        }</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">        if (starStatus != 1) starStatus = 0;</span>
+
+<span class="nc" id="L486">        int archiveStatus = 0;</span>
+        try {
+<span class="nc" id="L488">            archiveStatus = CSVHelpers.extractInt(DBHelper.LoyaltyCardDbIds.ARCHIVE_STATUS, record);</span>
+<span class="nc" id="L489">        } catch (FormatException _e) {</span>
+            // This field did not exist in versions 2.16.3 and before
+            // We catch this exception so we can still import old backups
+<span class="nc" id="L492">        }</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">        if (archiveStatus != 1) archiveStatus = 0;</span>
+
+<span class="nc" id="L495">        Long lastUsed = 0L;</span>
+        try {
+<span class="nc" id="L497">            lastUsed = CSVHelpers.extractLong(DBHelper.LoyaltyCardDbIds.LAST_USED, record);</span>
+<span class="nc" id="L498">        } catch (FormatException _e) {</span>
+            // This field did not exist in versions 2.5.0 and before
+            // We catch this exception so we can still import old backups
+<span class="nc" id="L501">        }</span>
+
+<span class="nc" id="L503">        return new LoyaltyCard(</span>
+                id,
+                store,
+                note,
+                validFrom,
+                expiry,
+                balance,
+                balanceType,
+                cardId,
+                barcodeId,
+                barcodeType,
+                barcodeEncoding,
+                headerColor,
+                starStatus,
+<span class="nc" id="L517">                lastUsed,</span>
+                DBHelper.DEFAULT_ZOOM_LEVEL,
+                DBHelper.DEFAULT_ZOOM_LEVEL_WIDTH,
+                archiveStatus,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    /**
+     * Import a single group into the database using the given
+     * session.
+     */
+    private String importGroup(CSVRecord record) throws FormatException {
+<span class="nc" id="L535">        String id = CSVHelpers.extractString(DBHelper.LoyaltyCardDbGroups.ID, record, null);</span>
+
+<span class="nc bnc" id="L537" title="All 2 branches missed.">        if (id == null) {</span>
+<span class="nc" id="L538">            throw new FormatException(&quot;Group has no ID: &quot; + record);</span>
+        }
+
+<span class="nc" id="L541">        return id;</span>
+    }
+
+    /**
+     * Import a single card to group mapping into the database using the given
+     * session.
+     */
+    private Map.Entry&lt;Integer, String&gt; importCardGroupMapping(CSVRecord record) throws FormatException {
+<span class="nc" id="L549">        int cardId = CSVHelpers.extractInt(DBHelper.LoyaltyCardDbIdsGroups.cardID, record);</span>
+<span class="nc" id="L550">        String groupId = CSVHelpers.extractString(DBHelper.LoyaltyCardDbIdsGroups.groupID, record, null);</span>
+
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        if (groupId == null) {</span>
+<span class="nc" id="L553">            throw new FormatException(&quot;Group has no ID: &quot; + record);</span>
+        }
+
+<span class="nc" id="L556">        return Map.entry(cardId, groupId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

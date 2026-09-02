@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DailyExchangeRateDownloadService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.service</a> &gt; <span class="el_source">DailyExchangeRateDownloadService.kt</span></div><h1>DailyExchangeRateDownloadService.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.service
+
+import android.content.Context
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import kotlinx.coroutines.flow.first
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.savePrice
+import org.totschnig.myexpenses.injector
+import org.totschnig.myexpenses.model.ContribFeature
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefHandler.Companion.AUTOMATIC_EXCHANGE_RATE_DOWNLOAD_PREF_KEY_PREFIX
+import org.totschnig.myexpenses.preference.PrefHandler.Companion.SERVICE_DEACTIVATED
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.preference.TimePreference
+import org.totschnig.myexpenses.preference.dynamicExchangeRates
+import org.totschnig.myexpenses.provider.KEY_COMMODITY
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_DATE
+import org.totschnig.myexpenses.provider.TABLE_ACCOUNTS
+import org.totschnig.myexpenses.provider.TABLE_PRICES
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.useAndMapToList
+import org.totschnig.myexpenses.retrofit.ExchangeRateApi
+import org.totschnig.myexpenses.retrofit.ExchangeRateService
+import org.totschnig.myexpenses.util.ContribUtils
+import org.totschnig.myexpenses.util.NotificationBuilderWrapper
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.licence.LicenceHandler
+import timber.log.Timber
+import java.math.BigDecimal
+import java.util.concurrent.TimeUnit
+import javax.inject.Inject
+
+<span class="nc" id="L43">class DailyExchangeRateDownloadService(context: Context, workerParameters: WorkerParameters) :</span>
+<span class="nc" id="L44">    NotifyingBaseWorker(context, workerParameters) {</span>
+
+    @Inject
+<span class="nc" id="L47">    lateinit var exchangeRateService: ExchangeRateService</span>
+
+    @Inject
+<span class="nc" id="L50">    lateinit var currencyContext: CurrencyContext</span>
+
+    @Inject
+<span class="nc" id="L53">    lateinit var repository: Repository</span>
+
+    @Inject
+<span class="nc" id="L56">    lateinit var licenceHandler: LicenceHandler</span>
+
+<span class="nc" id="L58">    init {</span>
+<span class="nc" id="L59">        context.injector.inject(this)</span>
+<span class="nc" id="L60">    }</span>
+
+    companion object {
+        private const val WORK_NAME = &quot;DailyExchangeRateService&quot;
+
+        private fun buildWorkRequest(initialDelayMillis: Long?): OneTimeWorkRequest {
+<span class="nc" id="L66">            return OneTimeWorkRequestBuilder&lt;DailyExchangeRateDownloadService&gt;().apply {</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                initialDelayMillis?.let {</span>
+<span class="nc" id="L68">                    setInitialDelay(it, TimeUnit.MILLISECONDS)</span>
+                }
+<span class="nc" id="L70">                setConstraints(Constraints.Builder()</span>
+<span class="nc" id="L71">                    .setRequiredNetworkType(NetworkType.CONNECTED)</span>
+<span class="nc" id="L72">                    .build())</span>
+<span class="nc" id="L73">                setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 40, TimeUnit.MINUTES)</span>
+<span class="nc" id="L74">            }.build()</span>
+        }
+
+<span class="nc" id="L77">        private fun WorkManager.cancelWork() = cancelUniqueWork(WORK_NAME)</span>
+
+        private fun WorkManager.enqueue(initialDelayMillis: Long?) {
+<span class="nc" id="L80">            enqueueUniqueWork(</span>
+<span class="nc" id="L81">                WORK_NAME,</span>
+<span class="nc" id="L82">                ExistingWorkPolicy.REPLACE,</span>
+<span class="nc" id="L83">                buildWorkRequest(initialDelayMillis)</span>
+            )
+<span class="nc" id="L85">        }</span>
+
+        fun enqueueOrCancel(context: Context, prefHandler: PrefHandler) {
+<span class="nc" id="L88">            val workManager = WorkManager.getInstance(context)</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            if (prefHandler.getBoolean(PrefKey.AUTOMATIC_EXCHANGE_RATE_DOWNLOAD, false)) {</span>
+<span class="nc" id="L90">                workManager.enqueue(</span>
+<span class="nc" id="L91">                    TimePreference.getScheduledTime(12, 0)</span>
+                )
+            } else {
+<span class="nc" id="L94">                workManager.cancelWork()</span>
+            }
+<span class="nc" id="L96">        }</span>
+
+        fun cancel(context: Context) {
+<span class="nc" id="L99">            WorkManager.getInstance(context).cancelWork()</span>
+<span class="nc" id="L100">        }</span>
+
+        fun enqueue(context: Context) {
+<span class="nc" id="L103">            WorkManager.getInstance(context).enqueue(null)</span>
+<span class="nc" id="L104">        }</span>
+    }
+
+<span class="nc" id="L107">    override val channelId: String = NotificationBuilderWrapper.CHANNEL_ID_DEFAULT</span>
+<span class="nc" id="L108">    override val notificationId =</span>
+<span class="nc" id="L109">        NotificationBuilderWrapper.NOTIFICATION_EXCHANGE_RATE_DOWNLOAD_ERROR</span>
+<span class="nc" id="L110">    override val notificationTitleResId = R.string.pref_category_exchange_rates</span>
+
+<span class="nc" id="L112">    override suspend fun doWork(): Result {</span>
+
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (!licenceHandler.hasTrialAccessTo(ContribFeature.AUTOMATIC_FX_DOWNLOAD)) {</span>
+<span class="nc" id="L115">            prefHandler.putBoolean(PrefKey.AUTOMATIC_EXCHANGE_RATE_DOWNLOAD, false)</span>
+<span class="nc" id="L116">            ContribUtils.showContribNotification(applicationContext, ContribFeature.AUTOMATIC_FX_DOWNLOAD)</span>
+<span class="nc" id="L117">            return Result.failure()</span>
+        }
+
+<span class="nc" id="L120">        val result: List&lt;kotlin.Result&lt;Unit&gt;&gt;? = applicationContext.contentResolver.query(</span>
+<span class="nc" id="L121">            TransactionProvider.ACCOUNTS_MINIMAL_URI,</span>
+<span class="nc" id="L122">            arrayOf(&quot;distinct $KEY_CURRENCY&quot;),</span>
+<span class="nc" id="L123">            &quot;${datastore.dynamicExchangeRates.first()} AND $KEY_CURRENCY != ? AND NOT EXISTS(SELECT 1 from $TABLE_PRICES where $KEY_COMMODITY = $TABLE_ACCOUNTS.$KEY_CURRENCY and $KEY_DATE = date('now'))&quot;,</span>
+<span class="nc" id="L124">            arrayOf(currencyContext.homeCurrencyString),</span>
+<span class="nc" id="L125">            null</span>
+        )
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            ?.useAndMapToList {</span>
+<span class="nc" id="L128">                val currency = it.getString(0)</span>
+<span class="nc" id="L129">                prefHandler.getString(&quot;${AUTOMATIC_EXCHANGE_RATE_DOWNLOAD_PREF_KEY_PREFIX}${currency}&quot;)</span>
+<span class="nc bnc" id="L130" title="All 6 branches missed.">                    ?.takeIf { it != SERVICE_DEACTIVATED }</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                    ?.let { ExchangeRateApi.getByName(it) to currency }</span>
+            }
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            ?.filterNotNull()</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            ?.groupBy({ it.first }, { it.second })</span>
+<span class="nc" id="L135">            ?.map { (source, symbols) -&gt;</span>
+<span class="nc" id="L136">                runCatching {</span>
+<span class="nc" id="L137">                    Timber.d(&quot;Loading ${symbols.joinToString()} from $source (attempt $runAttemptCount)&quot;)</span>
+<span class="nc" id="L138">                    val apiKey =</span>
+<span class="nc bnc" id="L139" title="All 4 branches missed.">                        (source as? ExchangeRateApi.SourceWithApiKey)?.requireApiKey(prefHandler)</span>
+<span class="nc" id="L140">                    val base = currencyContext.homeCurrencyString</span>
+<span class="nc" id="L141">                    val (date,rates) = exchangeRateService.getLatest(</span>
+<span class="nc" id="L142">                        source,</span>
+<span class="nc" id="L143">                        apiKey,</span>
+<span class="nc" id="L144">                        base,</span>
+<span class="nc" id="L145">                        symbols</span>
+                    )
+<span class="nc" id="L147">                    symbols.forEachIndexed { index, currency -&gt;</span>
+<span class="nc" id="L148">                        repository.savePrice(</span>
+<span class="nc" id="L149">                            currencyContext.homeCurrencyUnit,</span>
+<span class="nc" id="L150">                            currencyContext[currency],</span>
+<span class="nc" id="L151">                            date,</span>
+<span class="nc" id="L152">                            source,</span>
+<span class="nc" id="L153">                            BigDecimal.valueOf(rates[index])</span>
+                        )
+<span class="nc" id="L155">                    }</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                }.onFailure {</span>
+<span class="nc" id="L157">                    CrashHandler.report(it)</span>
+<span class="nc" id="L158">                }</span>
+            }
+<span class="nc bnc" id="L160" title="All 6 branches missed.">        return if (result?.any { it.isFailure } == true) {</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            if (runAttemptCount == 6) {</span>
+<span class="nc" id="L162">                notify(&quot;Download of exchange rates failed five times. Giving up.&quot;)</span>
+<span class="nc" id="L163">                Result.failure()</span>
+<span class="nc" id="L164">            } else Result.retry()</span>
+<span class="nc" id="L165">        } else {</span>
+<span class="nc" id="L166">            enqueueOrCancel(applicationContext, prefHandler)</span>
+<span class="nc" id="L167">            Result.success()</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

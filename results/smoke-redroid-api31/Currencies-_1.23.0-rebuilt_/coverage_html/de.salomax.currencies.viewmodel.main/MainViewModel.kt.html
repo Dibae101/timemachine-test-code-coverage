@@ -1,0 +1,632 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MainViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Currencies</a> &gt; <a href="index.source.html" class="el_package">de.salomax.currencies.viewmodel.main</a> &gt; <span class="el_source">MainViewModel.kt</span></div><h1>MainViewModel.kt</h1><pre class="source lang-java linenums">package de.salomax.currencies.viewmodel.main
+
+import android.app.Application
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import androidx.core.text.HtmlCompat
+import androidx.core.text.bold
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MediatorLiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.map
+import de.salomax.currencies.R
+import de.salomax.currencies.model.Currency
+import de.salomax.currencies.model.ExchangeRates
+import de.salomax.currencies.repository.Database
+import de.salomax.currencies.repository.ExchangeRatesRepository
+import de.salomax.currencies.util.combineWith
+import de.salomax.currencies.util.getDecimalSeparator
+import de.salomax.currencies.util.getLocale
+import de.salomax.currencies.util.getSignificantDecimalPlaces
+import de.salomax.currencies.util.hasAppendedCurrencySymbol
+import de.salomax.currencies.util.toHumanReadableNumber
+import org.mariuszgromada.math.mxparser.Expression
+import java.text.Collator
+import java.time.LocalDate
+import java.time.ZoneId
+
+@Suppress(&quot;unused&quot;, &quot;MemberVisibilityCanBePrivate&quot;)
+<span class="pc" id="L32">class MainViewModel(val app: Application, onlyCache: Boolean = false) : AndroidViewModel(app) {</span>
+
+<span class="fc" id="L34">    constructor(app: Application) : this(app, false)</span>
+
+<span class="nc" id="L36">    class Factory(val app: Application, val onlyCache: Boolean = false) :</span>
+        ViewModelProvider.Factory {
+
+        @Suppress(&quot;UNCHECKED_CAST&quot;)
+        override fun &lt;T : ViewModel&gt; create(modelClass: Class&lt;T&gt;): T {
+<span class="nc" id="L41">            return MainViewModel(app, onlyCache) as T</span>
+        }
+    }
+
+<span class="fc" id="L45">    private var repository: ExchangeRatesRepository = ExchangeRatesRepository(app)</span>
+
+    // repository data
+    private var dbLiveItems: LiveData&lt;ExchangeRates?&gt;
+    private var exchangeRates: LiveData&lt;ExchangeRates?&gt;
+    private val starredLiveItems: LiveData&lt;Set&lt;Currency&gt;&gt;
+    private val onlyShowStarred: LiveData&lt;Boolean&gt;
+<span class="fc" id="L52">    private val liveError = repository.getError()</span>
+
+    // ui
+<span class="fc" id="L55">    private var isUpdating: LiveData&lt;Boolean&gt; = repository.isUpdating()</span>
+<span class="fc" id="L56">    val isExtendedKeypadEnabled: LiveData&lt;Boolean&gt; = Database(app).isExtendedKeypadEnabled()</span>
+
+
+    // number input
+<span class="fc" id="L60">    private val currentBaseValueText = MutableLiveData(&quot;0&quot;)</span>
+<span class="fc" id="L61">    private val currentCalculationValueText = MutableLiveData&lt;String?&gt;()</span>
+
+    // currency selection
+    private val currentBaseCurrency: LiveData&lt;Currency?&gt;
+    private val currentDestinationCurrency: LiveData&lt;Currency?&gt;
+
+    // fee
+    private val isFeeEnabled: LiveData&lt;Boolean&gt;
+    private val fee: LiveData&lt;Float&gt;
+
+    /*
+     * repository data =============================================================================
+     */
+
+<span class="fc" id="L75">    init {</span>
+        // only update if data is old: https://github.com/Formicka/exchangerate.host
+        // &quot;Rates are updated around midnight UTC every working day.&quot;
+<span class="fc" id="L78">        val currentDate = LocalDate.now(ZoneId.of(&quot;UTC&quot;))</span>
+<span class="fc" id="L79">        val cachedDate = Database(app).getDate()</span>
+<span class="fc" id="L80">        val historicalDate = Database(app).getHistoricalDate()</span>
+
+<span class="fc" id="L82">        dbLiveItems = when {</span>
+            // force-use cache
+<span class="pc bpc" id="L84" title="1 of 2 branches missed.">            onlyCache -&gt; Database(app).getExchangeRates()</span>
+            // first run: fetch data
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">            cachedDate == null -&gt; repository.getExchangeRates()</span>
+            // historical rates in use...
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            historicalDate != null -&gt; {</span>
+                // ...and already cached
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                if (historicalDate == cachedDate) Database(app).getExchangeRates()</span>
+                // ...and not cached
+<span class="nc" id="L92">                else repository.getExchangeRates()</span>
+            }
+            // fetch if stored date is before the current date
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            cachedDate.isBefore(currentDate) -&gt; repository.getExchangeRates()</span>
+            // else just use the cached value
+<span class="nc" id="L97">            else -&gt; Database(app).getExchangeRates()</span>
+        }
+
+<span class="fc" id="L100">        starredLiveItems = Database(app).getStarredCurrencies()</span>
+<span class="fc" id="L101">        onlyShowStarred = Database(app).isFilterStarredEnabled()</span>
+
+<span class="fc" id="L103">        isFeeEnabled = Database(getApplication()).isFeeEnabled()</span>
+<span class="fc" id="L104">        fee = Database(getApplication()).getFee()</span>
+
+        //
+<span class="fc" id="L107">        exchangeRates = object : MediatorLiveData&lt;ExchangeRates?&gt;() {</span>
+<span class="nc" id="L108">            var liveItems: ExchangeRates? = null</span>
+
+<span class="fc" id="L110">            init {</span>
+<span class="fc" id="L111">                addSource(dbLiveItems) { liveItems = it; calc() }</span>
+<span class="fc" id="L112">                addSource(starredLiveItems) { calc() }</span>
+<span class="fc" id="L113">                addSource(onlyShowStarred) { calc() }</span>
+<span class="fc" id="L114">            }</span>
+
+            private fun calc() {
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">                liveItems?.let { rates -&gt;</span>
+<span class="nc" id="L118">                    this.value = rates</span>
+                        // usa a copy with ...
+<span class="nc" id="L120">                        .copy(</span>
+<span class="nc" id="L121">                            rates = rates.rates</span>
+                                // ... the correct sort order of the rates
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                                ?.sortedWith(</span>
+                                    // sort by full name (locale-aware)
+<span class="nc" id="L125">                                    compareBy(Collator.getInstance()) { rate -&gt;</span>
+<span class="nc" id="L126">                                        rate.currency.fullName(app)</span>
+                                    }
+                                )
+                        )
+<span class="nc" id="L130">                }</span>
+<span class="fc" id="L131">            }</span>
+        }
+
+        // update currently selected currencies when rates are updated:
+        // sometimes the selected rates aren't available anymore, so reset them
+<span class="fc" id="L136">        val baseCurrency = Database(app).getLastBaseCurrency()</span>
+<span class="fc" id="L137">        val destinationCurrency = Database(app).getLastDestinationCurrency()</span>
+<span class="fc" id="L138">        currentBaseCurrency = object : MediatorLiveData&lt;Currency?&gt;() {</span>
+<span class="nc" id="L139">            var base: Currency? = null</span>
+<span class="nc" id="L140">            var rates: ExchangeRates? = null</span>
+
+<span class="fc" id="L142">            init {</span>
+<span class="fc" id="L143">                addSource(baseCurrency) { base = it; update() }</span>
+<span class="pc" id="L144">                addSource(exchangeRates) { rates = it; update() }</span>
+<span class="fc" id="L145">            }</span>
+
+            private fun update() {
+<span class="fc" id="L148">                this.value =</span>
+                    // last used is present in the current currency set
+<span class="pc bpc" id="L150" title="11 of 14 branches missed.">                    rates?.rates?.find { it.currency == base }?.currency</span>
+                        // not present, so just return the first of the set
+<span class="pc bpc" id="L152" title="3 of 6 branches missed.">                        ?: rates?.rates?.firstOrNull()?.currency</span>
+<span class="fc" id="L153">            }</span>
+        }
+<span class="fc" id="L155">        currentDestinationCurrency = object : MediatorLiveData&lt;Currency?&gt;() {</span>
+<span class="nc" id="L156">            var destination: Currency? = null</span>
+<span class="nc" id="L157">            var rates: ExchangeRates? = null</span>
+
+<span class="fc" id="L159">            init {</span>
+<span class="fc" id="L160">                addSource(destinationCurrency) { destination = it; update() }</span>
+<span class="pc" id="L161">                addSource(exchangeRates) { rates = it; update() }</span>
+<span class="fc" id="L162">            }</span>
+
+            private fun update() {
+<span class="fc" id="L165">                this.value =</span>
+                    // last used is present in the current currency set
+<span class="pc bpc" id="L167" title="11 of 14 branches missed.">                    rates?.rates?.find { it.currency == destination }?.currency</span>
+                            // not present, so just return the first of the set
+<span class="pc bpc" id="L169" title="3 of 6 branches missed.">                        ?: rates?.rates?.firstOrNull()?.currency</span>
+<span class="fc" id="L170">            }</span>
+        }
+
+<span class="fc" id="L173">    }</span>
+
+    /**
+     * all the current rates and/or an error message, if present
+     */
+    internal fun getExchangeRates(): LiveData&lt;ExchangeRates?&gt; {
+<span class="fc" id="L179">        return exchangeRates</span>
+    }
+
+    /**
+     * update the data, without checking the cache
+     */
+    internal fun forceUpdateExchangeRate() {
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if (isUpdating.value != true)</span>
+<span class="nc" id="L187">            dbLiveItems = repository.getExchangeRates()</span>
+<span class="nc" id="L188">    }</span>
+
+    /**
+     * all the currencies that the user has starred
+     */
+    internal fun getStarredCurrencies(): LiveData&lt;Set&lt;Currency&gt;&gt; {
+<span class="nc" id="L194">        return starredLiveItems</span>
+    }
+
+    /**
+     * whether the currencies should be filtered
+     */
+    internal fun isFilterStarredEnabled(): LiveData&lt;Boolean&gt; {
+<span class="nc" id="L201">        return onlyShowStarred</span>
+    }
+
+    /**
+     * switch the starred-filter on/off
+     */
+    internal fun toggleStarredActive() {
+<span class="nc" id="L208">        Database(getApplication()).toggleStarredActive()</span>
+<span class="nc" id="L209">    }</span>
+
+    /**
+     * de-/star a currency
+     */
+    internal fun toggleCurrencyStar(currencyCode: Currency) {
+<span class="nc" id="L215">        Database(getApplication()).toggleCurrencyStar(currencyCode)</span>
+<span class="nc" id="L216">    }</span>
+
+    /**
+     * the error message, if present
+     */
+<span class="fc" id="L221">    internal fun getError(): LiveData&lt;String?&gt; = liveError</span>
+
+    /**
+     * if the app is updating the rates
+     */
+<span class="fc" id="L226">    internal fun isUpdating(): LiveData&lt;Boolean&gt; = isUpdating</span>
+
+    /**
+     * whether the fee should be included in the calculation
+     */
+    internal fun isFeeEnabled(): LiveData&lt;Boolean&gt; {
+<span class="fc" id="L232">        return isFeeEnabled</span>
+    }
+
+    /**
+     * the fee amount
+     */
+    internal fun getFee(): LiveData&lt;Float&gt; {
+<span class="fc" id="L239">        return fee</span>
+    }
+
+<span class="fc" id="L242">    internal val ratesInformationFooter = object : MediatorLiveData&lt;Spanned?&gt;() {</span>
+<span class="nc" id="L243">        var exchangeRates: ExchangeRates? = null</span>
+<span class="nc" id="L244">        var baseCurrency: Currency? = null</span>
+<span class="nc" id="L245">        var destinationCurrency: Currency? = null</span>
+
+<span class="fc" id="L247">        init {</span>
+<span class="pc" id="L248">            addSource(getExchangeRates()) { exchangeRates = it; update() }</span>
+<span class="fc" id="L249">            addSource(currentBaseCurrency) { baseCurrency = it; update() }</span>
+<span class="fc" id="L250">            addSource(currentDestinationCurrency) { destinationCurrency = it; update() }</span>
+<span class="fc" id="L251">        }</span>
+
+        fun update() {
+<span class="pc bpc" id="L254" title="5 of 6 branches missed.">            if (exchangeRates != null &amp;&amp; baseCurrency != null &amp;&amp; destinationCurrency != null) {</span>
+                // base currency
+<span class="nc bnc" id="L256" title="All 10 branches missed.">                val baseValue = exchangeRates!!.rates?.find { it.currency == baseCurrency }?.value</span>
+                // target currency
+<span class="nc bnc" id="L258" title="All 10 branches missed.">                val destinationValue = exchangeRates!!.rates?.find { it.currency == destinationCurrency }?.value</span>
+<span class="nc bnc" id="L259" title="All 4 branches missed.">                val destinationValueCalculated = baseValue?.let { destinationValue?.div(it) }</span>
+
+                // create string
+<span class="nc" id="L262">                this.value = HtmlCompat.fromHtml(</span>
+<span class="nc" id="L263">                    app.getString(</span>
+<span class="nc" id="L264">                        R.string.info_conversion,</span>
+<span class="nc" id="L265">                        &quot;1&quot;,</span>
+<span class="nc" id="L266">                        baseCurrency!!.iso4217Alpha(),</span>
+<span class="nc" id="L267">                        String.format(</span>
+<span class="nc" id="L268">                            getLocale(app),</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">                            &quot;%.${destinationValueCalculated?.getSignificantDecimalPlaces(2)}f&quot;,</span>
+<span class="nc" id="L270">                            destinationValueCalculated</span>
+                        ),
+<span class="nc" id="L272">                        destinationCurrency!!.iso4217Alpha()</span>
+                    ),
+<span class="nc" id="L274">                    HtmlCompat.FROM_HTML_MODE_LEGACY</span>
+                )
+            }
+<span class="fc" id="L277">        }</span>
+    }
+
+    /*
+     * base and destination text ===================================================================
+     */
+
+    /**
+     * the total base value
+     */
+<span class="fc" id="L287">    private val currentBaseValue = object : MediatorLiveData&lt;String?&gt;() {</span>
+<span class="nc" id="L288">        var baseValueText: String? = null</span>
+<span class="nc" id="L289">        var calculationValueText: String? = null</span>
+
+<span class="fc" id="L291">        init {</span>
+<span class="fc" id="L292">            addSource(currentBaseValueText) { baseValueText = it; update() }</span>
+<span class="pc" id="L293">            addSource(currentCalculationValueText) { calculationValueText= it; update() }</span>
+<span class="fc" id="L294">        }</span>
+
+        fun update() {
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">            if (isInCalculationMode())</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">                this.value = calculationValueText?.evaluateMathExpression()</span>
+            else
+<span class="fc" id="L300">                this.value = baseValueText</span>
+<span class="fc" id="L301">        }</span>
+
+        // Turns e.g. &quot;1 + 2 × 4&quot; to &quot;9&quot;
+        fun String.evaluateMathExpression(): String? {
+            // change nice operators to proper computer operators
+<span class="nc" id="L306">            var s = this</span>
+<span class="nc" id="L307">                .replace(&quot; &quot;, &quot;&quot;)</span>
+<span class="nc" id="L308">                .replace(&quot;\u2212&quot;, &quot;-&quot;)</span>
+<span class="nc" id="L309">                .replace(&quot;\u00D7&quot;, &quot;*&quot;)</span>
+<span class="nc" id="L310">                .replace(&quot;\u00F7&quot;, &quot;/&quot;)</span>
+            // fill, if last character is an operator
+<span class="nc bnc" id="L312" title="All 6 branches missed.">            when (s.trim().last()) {</span>
+<span class="nc" id="L313">                '/' -&gt; s += &quot;1&quot;</span>
+<span class="nc" id="L314">                '*' -&gt; s += &quot;1&quot;</span>
+<span class="nc" id="L315">                '+' -&gt; s += &quot;0&quot;</span>
+<span class="nc" id="L316">                '-' -&gt; s += &quot;0&quot;</span>
+<span class="nc" id="L317">                '.' -&gt; s += &quot;0&quot;</span>
+            }
+            // calculate
+<span class="nc" id="L320">            val result = Expression(s).calculate()</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">            return if (result.isNaN())</span>
+<span class="nc" id="L322">                &quot;0&quot;</span>
+            else
+<span class="nc" id="L324">                result.toBigDecimal().toPlainString()</span>
+        }
+    }
+
+    /**
+     * the total base value, converted to double (internal is string)
+     */
+    internal fun getCurrentBaseValueAsNumber(): LiveData&lt;Double&gt; {
+<span class="fc" id="L332">        return currentBaseValue.map {</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">            it?.toBigDecimal()?.toDouble() ?: 0.0</span>
+        }
+    }
+
+    /**
+     * the nicely formatted, total base value including the currency symbol at the right position.
+     */
+    internal fun getCurrentBaseValueFormatted(): LiveData&lt;SpannableStringBuilder&gt; {
+<span class="fc" id="L341">        return currentBaseValue.combineWith(currentBaseCurrency) { value, currency -&gt;</span>
+<span class="pc bpc" id="L342" title="2 of 4 branches missed.">            val number = (value?.toHumanReadableNumber(</span>
+<span class="fc" id="L343">                app,</span>
+<span class="fc" id="L344">                trim = isInCalculationMode(),</span>
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">                decimalPlaces = if (isInCalculationMode()) 2 else null</span>
+<span class="nc" id="L346">            ) ?: &quot;0&quot;)</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">            val symbol = currency?.symbol()</span>
+
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">            if (hasAppendedCurrencySymbol(app))</span>
+<span class="nc" id="L350">                SpannableStringBuilder() // 123 $</span>
+<span class="nc" id="L351">                    .bold { append(number) }</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                    .append(if (symbol != null) &quot; $symbol&quot; else &quot;&quot;)</span>
+            else
+<span class="fc" id="L354">                SpannableStringBuilder() // $ 123</span>
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">                    .append(if (symbol != null) &quot;$symbol &quot; else &quot;&quot;)</span>
+<span class="fc" id="L356">                    .bold { append(number) }</span>
+        }
+    }
+
+    // ===============================
+
+    /**
+     * the nicely formatted calculation string: e.g. 4 + 2.2 - 4 / 2
+     */
+    internal fun getCalculationInputFormatted(): LiveData&lt;String?&gt; {
+<span class="fc" id="L366">        return currentCalculationValueText.map {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            it?.replace(&quot;.&quot;, getDecimalSeparator(app))</span>
+        }
+    }
+
+    // ===============================
+
+    /**
+     * the total destination value
+     */
+<span class="fc" id="L376">    private val result = object : MediatorLiveData&lt;String&gt;() {</span>
+<span class="nc" id="L377">        var rates : ExchangeRates? = null</span>
+<span class="nc" id="L378">        var baseValue: String? = null</span>
+<span class="nc" id="L379">        var baseCurrency: Currency? = null</span>
+<span class="nc" id="L380">        var destinationCurrency: Currency? = null</span>
+<span class="nc" id="L381">        var feeValue: Float? = null</span>
+<span class="nc" id="L382">        var feeEnabled: Boolean? = null</span>
+
+<span class="fc" id="L384">        init {</span>
+            // rates changed
+<span class="pc" id="L386">            addSource(exchangeRates) { rates = it; calculateResult() }</span>
+            // base input changed
+<span class="fc" id="L388">            addSource(currentBaseValue) { baseValue = it; calculateResult() }</span>
+            // base currency changed
+<span class="fc" id="L390">            addSource(currentBaseCurrency) { baseCurrency = it; calculateResult() }</span>
+            // destination currency changed
+<span class="fc" id="L392">            addSource(currentDestinationCurrency) { destinationCurrency = it; calculateResult() }</span>
+            // fee changed
+<span class="fc" id="L394">            addSource(fee) { feeValue = it; calculateResult() }</span>
+            // fee got enabled/disabled
+<span class="fc" id="L396">            addSource(isFeeEnabled) { feeEnabled = it; calculateResult() }</span>
+<span class="fc" id="L397">        }</span>
+
+        private fun calculateResult() {
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">            val baseValue: Double = baseValue?.toBigDecimal()?.toDouble() ?: 0.0</span>
+<span class="pc bpc" id="L401" title="8 of 10 branches missed.">            val baseRate = rates?.rates?.find { it.currency == baseCurrency }</span>
+<span class="pc bpc" id="L402" title="8 of 10 branches missed.">            val destinationRate = rates?.rates?.find { it.currency == destinationCurrency }</span>
+
+<span class="pc bpc" id="L404" title="3 of 4 branches missed.">            if (baseRate != null &amp;&amp; destinationRate != null) {</span>
+<span class="nc" id="L405">                this.value =</span>
+<span class="nc" id="L406">                    baseValue.div(baseRate.value).times(destinationRate.value)</span>
+<span class="nc" id="L407">                        .let {</span>
+                            // add fee, if enabled
+<span class="nc bnc" id="L409" title="All 6 branches missed.">                            if (feeEnabled != null &amp;&amp; feeEnabled == true &amp;&amp; feeValue != null) {</span>
+<span class="nc" id="L410">                                it + (it * (feeValue!! / 100))</span>
+                            } else {
+<span class="nc" id="L412">                                it</span>
+<span class="nc" id="L413">                            }</span>
+                        }
+<span class="nc" id="L415">                        .toString()</span>
+            }
+<span class="fc" id="L417">        }</span>
+    }
+
+    /**
+     * the total destination value, converted to double (internal is string)
+     */
+    internal fun getResultAsNumber(): LiveData&lt;Double&gt; {
+<span class="fc" id="L424">        return result.map {</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">            it?.toBigDecimal()?.toDouble() ?: 0.0</span>
+        }
+    }
+
+    /**
+     * the nicely formatted, total destination value including the currency symbol at the right position.
+     */
+    internal fun getResultFormatted(): LiveData&lt;SpannableStringBuilder&gt; {
+<span class="fc" id="L433">        return result.combineWith(currentDestinationCurrency) { value, currency -&gt;</span>
+<span class="pc bpc" id="L434" title="3 of 4 branches missed.">            val number = (value?.toHumanReadableNumber(</span>
+<span class="nc" id="L435">                app,</span>
+<span class="nc" id="L436">                trim = true,</span>
+<span class="nc" id="L437">                decimalPlaces = 2</span>
+<span class="fc" id="L438">            ) ?: &quot;0&quot;)</span>
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">            val symbol = currency?.symbol()</span>
+
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">            if (hasAppendedCurrencySymbol(app))</span>
+<span class="nc" id="L442">                SpannableStringBuilder() // 123 $</span>
+<span class="nc" id="L443">                    .bold { append(number) }</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                    .append(if (symbol != null) &quot; $symbol&quot; else &quot;&quot;)</span>
+            else
+<span class="fc" id="L446">                SpannableStringBuilder() // $ 123</span>
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">                    .append(if (symbol != null) &quot;$symbol &quot; else &quot;&quot;)</span>
+<span class="fc" id="L448">                    .bold { append(number) }</span>
+        }
+    }
+
+    /*
+     * user input **********************************************************************************
+     */
+
+    internal fun addNumber(value: String) {
+        // in calculation mode: add to upper row
+<span class="nc bnc" id="L458" title="All 2 branches missed.">        if (isInCalculationMode()) {</span>
+            // last input was &quot;0&quot;
+<span class="nc bnc" id="L460" title="All 2 branches missed.">            if (currentCalculationValueText.value!!.split(&quot; &quot;).last().trim() == &quot;0&quot;) {</span>
+                // replace that &quot;0&quot; with any other number
+<span class="nc bnc" id="L462" title="All 6 branches missed.">                if (value != &quot;0&quot; &amp;&amp; value != &quot;00&quot; &amp;&amp; value != &quot;000&quot;)</span>
+<span class="nc bnc" id="L463" title="All 6 branches missed.">                    currentCalculationValueText.value = currentCalculationValueText.value?.trim()?.dropLast(1)?.plus(value)</span>
+            }
+            // last input was an operator: replace &quot;00&quot; and &quot;000&quot; with &quot;0&quot;
+<span class="nc bnc" id="L466" title="All 8 branches missed.">            else if (currentCalculationValueText.value!!.split(&quot; &quot;).last().isEmpty() &amp;&amp; (value == &quot;00&quot; || value == &quot;000&quot;))</span>
+<span class="nc" id="L467">                currentCalculationValueText.value += 0</span>
+            else
+<span class="nc" id="L469">                currentCalculationValueText.value += value</span>
+        }
+        // else: add to lower row
+        else {
+<span class="nc" id="L473">            currentBaseValueText.value =</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">                if (currentBaseValueText.value == &quot;0&quot;) {</span>
+<span class="nc bnc" id="L475" title="All 4 branches missed.">                    if (value == &quot;00&quot; || value == &quot;000&quot;) &quot;0&quot;</span>
+<span class="nc" id="L476">                    else value</span>
+<span class="nc" id="L477">                } else currentBaseValueText.value.plus(value)</span>
+        }
+<span class="nc" id="L479">    }</span>
+
+    internal fun paste(value: Number) {
+        // clear base value (but not calculation row!)
+<span class="nc" id="L483">        currentBaseValueText.value = &quot;0&quot;</span>
+        // paste
+<span class="nc" id="L485">        value.toString().forEach {</span>
+<span class="nc" id="L486">            addNumber(it.toString())</span>
+<span class="nc" id="L487">        }</span>
+<span class="nc" id="L488">    }</span>
+
+    internal fun addDecimal() {
+        // in calculation mode: add to upper row
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        if (isInCalculationMode()) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">            if (!currentCalculationValueText.value!!.substringAfterLast(&quot; &quot;).contains(&quot;.&quot;)) {</span>
+                // if last char is not a number: add 0
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                if (currentCalculationValueText.value!!.trim().last().isDigit().not())</span>
+<span class="nc" id="L496">                    currentCalculationValueText.value += &quot;0&quot;</span>
+<span class="nc" id="L497">                currentCalculationValueText.value += &quot;.&quot;</span>
+            }
+        }
+        // add to lower row
+        else
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            if (!currentBaseValueText.value!!.contains(&quot;.&quot;))</span>
+<span class="nc" id="L503">                currentBaseValueText.value += &quot;.&quot;</span>
+<span class="nc" id="L504">    }</span>
+
+    internal fun delete() {
+        // in calculation mode: delete from upper row
+<span class="nc bnc" id="L508" title="All 2 branches missed.">        if (isInCalculationMode()) {</span>
+<span class="nc" id="L509">            currentCalculationValueText.value = currentCalculationValueText.value!!.trim().dropLast(1)</span>
+            // if last char is a number: trim!
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            if (currentCalculationValueText.value!!.trim().last().isDigit())</span>
+<span class="nc" id="L512">                currentCalculationValueText.value = currentCalculationValueText.value!!.trim()</span>
+            // if only a number is left without an operator, delete it completely
+<span class="nc bnc" id="L514" title="All 2 branches missed.">            if (!currentCalculationValueText.value!!.contains(&quot;[\\u002B\\u2212\\u00D7\\u00F7]&quot;.toRegex()))</span>
+<span class="nc" id="L515">                currentCalculationValueText.value = null</span>
+        }
+        // delete from lower row
+        else {
+<span class="nc bnc" id="L519" title="All 2 branches missed.">            if (currentBaseValueText.value!!.length &gt; 1)</span>
+<span class="nc bnc" id="L520" title="All 2 branches missed.">                currentBaseValueText.value = currentBaseValueText.value?.dropLast(1)</span>
+            else
+<span class="nc" id="L522">                clear()</span>
+        }
+<span class="nc" id="L524">    }</span>
+
+    internal fun clear() {
+<span class="nc" id="L527">        currentBaseValueText.value = &quot;0&quot;</span>
+<span class="nc" id="L528">        currentCalculationValueText.value = null</span>
+<span class="nc" id="L529">    }</span>
+
+    internal fun addition() {
+<span class="nc" id="L532">        addOperator(&quot;\u002B&quot;)</span>
+<span class="nc" id="L533">    }</span>
+
+    internal fun subtraction() {
+<span class="nc" id="L536">        addOperator(&quot;\u2212&quot;)</span>
+<span class="nc" id="L537">    }</span>
+
+    internal fun multiplication() {
+<span class="nc" id="L540">        addOperator(&quot;\u00D7&quot;)</span>
+<span class="nc" id="L541">    }</span>
+
+    internal fun division() {
+<span class="nc" id="L544">        addOperator(&quot;\u00F7&quot;)</span>
+<span class="nc" id="L545">    }</span>
+
+    private fun addOperator(operator: String) {
+
+        fun Char.isOperator(): Boolean {
+<span class="nc bnc" id="L550" title="All 5 branches missed.">            return when (this) {</span>
+<span class="nc" id="L551">                '\u002B' -&gt; true // +</span>
+<span class="nc" id="L552">                '\u2212' -&gt; true // -</span>
+<span class="nc" id="L553">                '\u00D7' -&gt; true // *</span>
+<span class="nc" id="L554">                '\u00F7' -&gt; true // /</span>
+<span class="nc" id="L555">                else -&gt; false</span>
+            }
+        }
+
+        // in calculation mode &amp; already has operator at end position: exchange it!
+<span class="nc bnc" id="L560" title="All 4 branches missed.">        if (isInCalculationMode() &amp;&amp; currentCalculationValueText.value!!.trim().last().isOperator())</span>
+<span class="nc bnc" id="L561" title="All 4 branches missed.">            currentCalculationValueText.value = currentCalculationValueText.value?.trim()?.dropLast(1) + &quot;$operator &quot;</span>
+        // in calculation mode &amp; last position is '.' -&gt; remove it and add operator
+<span class="nc bnc" id="L563" title="All 4 branches missed.">        else if (isInCalculationMode() &amp;&amp; currentCalculationValueText.value!!.trim().last() == '.')</span>
+<span class="nc bnc" id="L564" title="All 4 branches missed.">            currentCalculationValueText.value = currentCalculationValueText.value?.trim()?.dropLast(1) + &quot; $operator &quot;</span>
+        else {
+            // switch to calculation mode if necessary
+<span class="nc bnc" id="L567" title="All 2 branches missed.">            if (!isInCalculationMode())</span>
+<span class="nc" id="L568">                currentCalculationValueText.value = currentBaseValueText.value</span>
+            // add operator
+<span class="nc bnc" id="L570" title="All 2 branches missed.">            currentCalculationValueText.value = currentCalculationValueText.value?.trim().plus(&quot; $operator &quot;)</span>
+        }
+<span class="nc" id="L572">    }</span>
+
+    /*
+     * selected currencies *************************************************************************
+     */
+
+    internal fun setBaseCurrency(currency: Currency) {
+<span class="nc" id="L579">        Database(getApplication()).saveLastUsedRates(</span>
+<span class="nc" id="L580">            currency,</span>
+<span class="nc" id="L581">            currentDestinationCurrency.value</span>
+        )
+<span class="nc" id="L583">    }</span>
+
+    internal fun setDestinationCurrency(currency: Currency) {
+<span class="nc" id="L586">        Database(getApplication()).saveLastUsedRates(</span>
+<span class="nc" id="L587">            currentBaseCurrency.value,</span>
+<span class="nc" id="L588">            currency</span>
+        )
+<span class="nc" id="L590">    }</span>
+
+    internal fun getBaseCurrency(): LiveData&lt;Currency?&gt; {
+<span class="fc" id="L593">        return  currentBaseCurrency</span>
+    }
+
+    internal fun getDestinationCurrency(): LiveData&lt;Currency?&gt; {
+<span class="fc" id="L597">        return  currentDestinationCurrency</span>
+    }
+
+    /*
+     * historical rates
+     */
+
+    internal fun setHistoricalDate(date: LocalDate?) {
+        // check if previous date was &quot;latest&quot; or historical
+<span class="nc bnc" id="L606" title="All 2 branches missed.">        val wasLatestActive = Database(app).getHistoricalDate() == null</span>
+        // save selected historical date to db
+<span class="nc" id="L608">        Database(getApplication()).setHistoricalDate(date)</span>
+        // refresh, if new date != cached date or if last state was &quot;latest&quot;
+<span class="nc bnc" id="L610" title="All 4 branches missed.">        if (date != Database(app).getDate() || wasLatestActive)</span>
+<span class="nc" id="L611">            forceUpdateExchangeRate()</span>
+<span class="nc" id="L612">    }</span>
+
+    internal fun getHistoricalDate(): LocalDate? {
+<span class="nc" id="L615">        return Database(getApplication()).getHistoricalDate()</span>
+    }
+
+    internal fun getHistoricalLiveDate(): LiveData&lt;LocalDate?&gt; {
+<span class="nc" id="L619">        return Database(getApplication()).getHistoricalLiveDate()</span>
+    }
+
+
+    /*
+     * helpers =====================================================================================
+     */
+
+    private fun isInCalculationMode(): Boolean {
+<span class="pc bpc" id="L628" title="4 of 6 branches missed.">        return currentCalculationValueText.value.isNullOrBlank().not()</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

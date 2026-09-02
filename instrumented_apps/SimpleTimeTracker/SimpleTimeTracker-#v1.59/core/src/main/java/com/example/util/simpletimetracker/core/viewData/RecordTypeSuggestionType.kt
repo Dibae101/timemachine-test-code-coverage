@@ -1,0 +1,5 @@
+package com.example.util.simpletimetracker.core.viewData
+
+import com.example.util.simpletimetracker.feature_base_adapter.recordTypeSuggestion.RecordTypeSuggestionViewData
+
+data object RecordTypeSuggestionType : RecordTypeSuggestionViewData.Type

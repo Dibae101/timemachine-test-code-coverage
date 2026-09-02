@@ -1,0 +1,859 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LoginActivity.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ownCloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.presentation.authentication</a> &gt; <span class="el_source">LoginActivity.kt</span></div><h1>LoginActivity.kt</h1><pre class="source lang-java linenums">/**
+ * ownCloud Android client application
+ *
+ * @author Bartek Przybylski
+ * @author David A. Velasco
+ * @author masensio
+ * @author David González Verdugo
+ * @author Christian Schabesberger
+ * @author Shashvat Kedia
+ * @author Abel García de Prada
+ * @author Juan Carlos Garrote Gascón
+ * @author Jorge Aguado Recio
+ *
+ * Copyright (C) 2012  Bartek Przybylski
+ * Copyright (C) 2024 ownCloud GmbH.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2,
+ * as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.presentation.authentication
+
+import android.accounts.Account
+import android.accounts.AccountAuthenticatorResponse
+import android.accounts.AccountManager
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.view.View.INVISIBLE
+import android.view.WindowManager.LayoutParams.FLAG_SECURE
+import androidx.appcompat.app.AppCompatActivity
+import androidx.browser.customtabs.CustomTabsIntent
+import androidx.core.net.toUri
+import androidx.core.view.isVisible
+import androidx.core.widget.doAfterTextChanged
+import com.owncloud.android.BuildConfig
+import com.owncloud.android.MainApp.Companion.accountType
+import com.owncloud.android.R
+import com.owncloud.android.data.authentication.KEY_USER_ID
+import com.owncloud.android.databinding.AccountSetupBinding
+import com.owncloud.android.domain.authentication.oauth.model.ResponseType
+import com.owncloud.android.domain.authentication.oauth.model.TokenRequest
+import com.owncloud.android.domain.exceptions.NoNetworkConnectionException
+import com.owncloud.android.domain.exceptions.OwncloudVersionNotSupportedException
+import com.owncloud.android.domain.exceptions.SSLErrorCode
+import com.owncloud.android.domain.exceptions.SSLErrorException
+import com.owncloud.android.domain.exceptions.ServerNotReachableException
+import com.owncloud.android.domain.exceptions.StateMismatchException
+import com.owncloud.android.domain.exceptions.UnauthorizedException
+import com.owncloud.android.domain.server.model.ServerInfo
+import com.owncloud.android.extensions.checkPasscodeEnforced
+import com.owncloud.android.extensions.goToUrl
+import com.owncloud.android.extensions.manageOptionLockSelected
+import com.owncloud.android.extensions.parseError
+import com.owncloud.android.extensions.showErrorInToast
+import com.owncloud.android.extensions.showMessageInSnackbar
+import com.owncloud.android.lib.common.accounts.AccountTypeUtils
+import com.owncloud.android.lib.common.accounts.AccountUtils
+import com.owncloud.android.lib.common.network.CertificateCombinedException
+import com.owncloud.android.presentation.authentication.AccountUtils.getAccounts
+import com.owncloud.android.presentation.authentication.AccountUtils.getUsernameOfAccount
+import com.owncloud.android.presentation.authentication.oauth.OAuthUtils
+import com.owncloud.android.presentation.common.UIResult
+import com.owncloud.android.presentation.documentsprovider.DocumentsProviderUtils.Companion.notifyDocumentsProviderRoots
+import com.owncloud.android.presentation.security.LockType
+import com.owncloud.android.presentation.security.SecurityEnforced
+import com.owncloud.android.presentation.settings.SettingsActivity
+import com.owncloud.android.providers.ContextProvider
+import com.owncloud.android.providers.MdmProvider
+import com.owncloud.android.ui.activity.FileDisplayActivity
+import com.owncloud.android.ui.dialog.SslUntrustedCertDialog
+import com.owncloud.android.utils.CONFIGURATION_OAUTH2_OPEN_ID_PROMPT
+import com.owncloud.android.utils.CONFIGURATION_OAUTH2_OPEN_ID_SCOPE
+import com.owncloud.android.utils.CONFIGURATION_SEND_LOGIN_HINT_AND_USER
+import com.owncloud.android.utils.CONFIGURATION_SERVER_URL
+import com.owncloud.android.utils.CONFIGURATION_SERVER_URL_INPUT_VISIBILITY
+import com.owncloud.android.utils.NO_MDM_RESTRICTION_YET
+import com.owncloud.android.utils.PreferenceUtils
+import org.koin.android.ext.android.inject
+import org.koin.androidx.viewmodel.ext.android.viewModel
+import timber.log.Timber
+import java.io.File
+
+<span class="fc" id="L96">class LoginActivity : AppCompatActivity(), SslUntrustedCertDialog.OnSslUntrustedCertListener, SecurityEnforced {</span>
+
+<span class="fc" id="L98">    private val authenticationViewModel by viewModel&lt;AuthenticationViewModel&gt;()</span>
+<span class="fc" id="L99">    private val contextProvider by inject&lt;ContextProvider&gt;()</span>
+<span class="fc" id="L100">    private val mdmProvider by inject&lt;MdmProvider&gt;()</span>
+
+    private var loginAction: Byte = ACTION_CREATE
+    private var authTokenType: String? = null
+    private var userAccount: Account? = null
+    private var username: String? = null
+    private lateinit var serverBaseUrl: String
+
+    private var oidcSupported = false
+
+    private lateinit var binding: AccountSetupBinding
+
+    // For handling AbstractAccountAuthenticator responses
+    private var accountAuthenticatorResponse: AccountAuthenticatorResponse? = null
+    private var resultBundle: Bundle? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+<span class="fc" id="L117">        super.onCreate(savedInstanceState)</span>
+
+<span class="fc" id="L119">        checkPasscodeEnforced(this)</span>
+
+        // Protection against screen recording
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">        if (!BuildConfig.DEBUG) {</span>
+<span class="nc" id="L123">            window.addFlags(FLAG_SECURE)</span>
+        } // else, let it go, or taking screenshots &amp; testing will not be possible
+
+        // Get values from intent
+<span class="fc" id="L127">        handleDeepLink()</span>
+<span class="fc" id="L128">        loginAction = intent.getByteExtra(EXTRA_ACTION, ACTION_CREATE)</span>
+<span class="fc" id="L129">        authTokenType = intent.getStringExtra(KEY_AUTH_TOKEN_TYPE)</span>
+<span class="fc" id="L130">        userAccount = intent.getParcelableExtra(EXTRA_ACCOUNT)</span>
+
+        // Get values from savedInstanceState
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">        if (savedInstanceState == null) {</span>
+<span class="pc bpc" id="L134" title="2 of 4 branches missed.">            if (authTokenType == null &amp;&amp; userAccount != null) {</span>
+<span class="nc" id="L135">                authenticationViewModel.supportsOAuth2((userAccount as Account).name)</span>
+            }
+        } else {
+<span class="nc" id="L138">            authTokenType = savedInstanceState.getString(KEY_AUTH_TOKEN_TYPE)</span>
+        }
+
+        // UI initialization
+<span class="fc" id="L142">        binding = AccountSetupBinding.inflate(layoutInflater)</span>
+<span class="fc" id="L143">        val view = binding.root</span>
+<span class="fc" id="L144">        setContentView(view)</span>
+
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">        if (loginAction != ACTION_CREATE) {</span>
+<span class="nc" id="L147">            binding.accountUsername.isEnabled = false</span>
+<span class="nc" id="L148">            binding.accountUsername.isFocusable = false</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">            userAccount?.name?.let {</span>
+<span class="nc" id="L150">                username = getUsernameOfAccount(it)</span>
+<span class="nc" id="L151">            }</span>
+
+        }
+
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">        if (savedInstanceState == null) {</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">            if (userAccount != null) {</span>
+<span class="nc" id="L157">                authenticationViewModel.getBaseUrl((userAccount as Account).name)</span>
+            } else {
+<span class="fc" id="L159">                serverBaseUrl = getString(R.string.server_url).trim()</span>
+            }
+
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">            userAccount?.let {</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                AccountUtils.getUsernameForAccount(it)?.let { username -&gt;</span>
+<span class="nc" id="L164">                    binding.accountUsername.setText(username)</span>
+<span class="nc" id="L165">                }</span>
+            }
+        }
+
+<span class="fc" id="L169">        binding.root.filterTouchesWhenObscured =</span>
+<span class="fc" id="L170">            PreferenceUtils.shouldDisallowTouchesWithOtherVisibleWindows(this@LoginActivity)</span>
+
+<span class="fc" id="L172">        initBrandableOptionsUI()</span>
+
+<span class="pc" id="L174">        binding.thumbnail.setOnClickListener { checkOcServer() }</span>
+
+<span class="pc" id="L176">        binding.embeddedCheckServerButton.setOnClickListener { checkOcServer() }</span>
+
+<span class="fc" id="L178">        binding.loginButton.setOnClickListener {</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            if (AccountTypeUtils.getAuthTokenTypeAccessToken(accountType) != authTokenType) { // Basic</span>
+<span class="nc" id="L180">                authenticationViewModel.loginBasic(</span>
+<span class="nc" id="L181">                    binding.accountUsername.text.toString().trim(),</span>
+<span class="nc" id="L182">                    binding.accountPassword.text.toString(),</span>
+<span class="nc bnc" id="L183" title="All 4 branches missed.">                    if (loginAction != ACTION_CREATE) userAccount?.name else null</span>
+                )
+            }
+<span class="nc" id="L186">        }</span>
+
+<span class="fc" id="L188">        binding.settingsLink.setOnClickListener {</span>
+<span class="nc" id="L189">            val settingsIntent = Intent(this, SettingsActivity::class.java)</span>
+<span class="nc" id="L190">            startActivity(settingsIntent)</span>
+<span class="nc" id="L191">        }</span>
+
+<span class="fc" id="L193">        accountAuthenticatorResponse = intent.getParcelableExtra(AccountManager.KEY_ACCOUNT_AUTHENTICATOR_RESPONSE)</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">        accountAuthenticatorResponse?.onRequestContinued()</span>
+
+<span class="fc" id="L196">        initLiveDataObservers()</span>
+<span class="fc" id="L197">    }</span>
+
+    private fun handleDeepLink() {
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">        if (intent.data != null) {</span>
+<span class="nc" id="L201">            authenticationViewModel.launchedFromDeepLink = true</span>
+<span class="nc bnc" id="L202" title="All 6 branches missed.">            if (getAccounts(baseContext).isNotEmpty()) {</span>
+<span class="nc" id="L203">                launchFileDisplayActivity()</span>
+            } else {
+<span class="nc" id="L205">                showMessageInSnackbar(message = baseContext.getString(R.string.uploader_wrn_no_account_title))</span>
+            }
+        }
+<span class="fc" id="L208">    }</span>
+
+    private fun launchFileDisplayActivity() {
+<span class="nc" id="L211">        val newIntent = Intent(this, FileDisplayActivity::class.java)</span>
+<span class="nc" id="L212">        newIntent.data = intent.data</span>
+<span class="nc" id="L213">        startActivity(newIntent)</span>
+<span class="nc" id="L214">        finish()</span>
+<span class="nc" id="L215">    }</span>
+
+    private fun initLiveDataObservers() {
+        // LiveData observers
+<span class="pc" id="L219">        authenticationViewModel.legacyWebfingerHost.observe(this) { event -&gt;</span>
+<span class="nc" id="L220">            when (val uiResult = event.peekContent()) {</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                is UIResult.Loading -&gt; getLegacyWebfingerIsLoading()</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                is UIResult.Success -&gt; getLegacyWebfingerIsSuccess(uiResult)</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                is UIResult.Error -&gt; getLegacyWebfingerIsError(uiResult)</span>
+            }
+<span class="nc" id="L225">        }</span>
+
+<span class="pc" id="L227">        authenticationViewModel.serverInfo.observe(this) { event -&gt;</span>
+<span class="nc" id="L228">            when (val uiResult = event.peekContent()) {</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                is UIResult.Loading -&gt; getServerInfoIsLoading()</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                is UIResult.Success -&gt; getServerInfoIsSuccess(uiResult)</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                is UIResult.Error -&gt; getServerInfoIsError(uiResult)</span>
+            }
+<span class="nc" id="L233">        }</span>
+
+<span class="pc" id="L235">        authenticationViewModel.loginResult.observe(this) { event -&gt;</span>
+<span class="nc" id="L236">            when (val uiResult = event.peekContent()) {</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">                is UIResult.Loading -&gt; loginIsLoading()</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                is UIResult.Success -&gt; loginIsSuccess(uiResult)</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">                is UIResult.Error -&gt; loginIsError(uiResult)</span>
+            }
+<span class="nc" id="L241">        }</span>
+
+<span class="pc" id="L243">        authenticationViewModel.accountDiscovery.observe(this) {</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">            if (it.peekContent() is UIResult.Success) {</span>
+<span class="nc" id="L245">                notifyDocumentsProviderRoots(applicationContext)</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                if (authenticationViewModel.launchedFromDeepLink) {</span>
+<span class="nc" id="L247">                    launchFileDisplayActivity()</span>
+                } else {
+<span class="nc" id="L249">                    finish()</span>
+                }
+            } else {
+<span class="nc" id="L252">                binding.authStatusText.run {</span>
+<span class="nc" id="L253">                    text = context.getString(R.string.login_account_preparing)</span>
+<span class="nc" id="L254">                    isVisible = true</span>
+<span class="nc" id="L255">                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.progress_small, 0, 0, 0)</span>
+<span class="nc" id="L256">                }</span>
+            }
+<span class="nc" id="L258">        }</span>
+
+<span class="pc" id="L260">        authenticationViewModel.supportsOAuth2.observe(this) { event -&gt;</span>
+<span class="nc" id="L261">            when (val uiResult = event.peekContent()) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                is UIResult.Loading -&gt; {}</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                is UIResult.Success -&gt; updateAuthTokenTypeAndInstructions(uiResult)</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                is UIResult.Error -&gt; showErrorInToast(</span>
+<span class="nc" id="L265">                    genericErrorMessageId = R.string.supports_oauth2_error,</span>
+<span class="nc" id="L266">                    throwable = uiResult.error</span>
+                )
+            }
+<span class="nc" id="L269">        }</span>
+
+<span class="pc" id="L271">        authenticationViewModel.baseUrl.observe(this) { event -&gt;</span>
+<span class="nc" id="L272">            when (val uiResult = event.peekContent()) {</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">                is UIResult.Loading -&gt; {}</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                is UIResult.Success -&gt; updateBaseUrlAndHostInput(uiResult)</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                is UIResult.Error -&gt; showErrorInToast(</span>
+<span class="nc" id="L276">                    genericErrorMessageId = R.string.get_base_url_error,</span>
+<span class="nc" id="L277">                    throwable = uiResult.error</span>
+                )
+            }
+<span class="nc" id="L280">        }</span>
+<span class="fc" id="L281">    }</span>
+
+    private fun getLegacyWebfingerIsLoading() {
+<span class="nc" id="L284">        binding.webfingerStatusText.run {</span>
+<span class="nc" id="L285">            text = getString(R.string.auth_testing_connection)</span>
+<span class="nc" id="L286">            setCompoundDrawablesWithIntrinsicBounds(R.drawable.progress_small, 0, 0, 0)</span>
+<span class="nc" id="L287">            isVisible = true</span>
+<span class="nc" id="L288">        }</span>
+<span class="nc" id="L289">    }</span>
+
+    private fun getLegacyWebfingerIsSuccess(uiResult: UIResult.Success&lt;String&gt;) {
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        val serverUrl = uiResult.data ?: return</span>
+<span class="nc" id="L293">        username = binding.webfingerUsername.text.toString()</span>
+<span class="nc" id="L294">        binding.webfingerLayout.isVisible = false</span>
+<span class="nc" id="L295">        binding.mainLoginLayout.isVisible = true</span>
+<span class="nc" id="L296">        binding.hostUrlInput.setText(serverUrl)</span>
+<span class="nc" id="L297">        checkOcServer()</span>
+<span class="nc" id="L298">    }</span>
+
+    private fun getLegacyWebfingerIsError(uiResult: UIResult.Error&lt;String&gt;) {
+<span class="nc" id="L301">        when (uiResult.error) {</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">            is NoNetworkConnectionException -&gt; binding.webfingerStatusText.run {</span>
+<span class="nc" id="L303">                text = getString(R.string.error_no_network_connection)</span>
+<span class="nc" id="L304">                setCompoundDrawablesWithIntrinsicBounds(R.drawable.no_network, 0, 0, 0)</span>
+<span class="nc" id="L305">            }</span>
+
+<span class="nc" id="L307">            else -&gt; binding.webfingerStatusText.run {</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                text = uiResult.getThrowableOrNull()?.parseError(&quot;&quot;, resources, true)</span>
+<span class="nc" id="L309">                setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L310">            }</span>
+        }
+<span class="nc" id="L312">        binding.webfingerStatusText.isVisible = true</span>
+<span class="nc" id="L313">    }</span>
+
+    private fun checkOcServer() {
+<span class="nc" id="L316">        val uri = binding.hostUrlInput.text.toString().trim()</span>
+<span class="nc bnc" id="L317" title="All 4 branches missed.">        if (uri.isNotEmpty()) {</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            authenticationViewModel.getServerInfo(serverUrl = uri, loginAction == ACTION_CREATE)</span>
+        } else {
+<span class="nc" id="L320">            binding.serverStatusText.run {</span>
+<span class="nc" id="L321">                text = getString(R.string.auth_can_not_auth_against_server).also { Timber.d(it) }</span>
+<span class="nc" id="L322">                isVisible = true</span>
+<span class="nc" id="L323">            }</span>
+        }
+<span class="nc" id="L325">    }</span>
+
+    private fun getServerInfoIsSuccess(uiResult: UIResult.Success&lt;ServerInfo&gt;) {
+<span class="nc" id="L328">        updateCenteredRefreshButtonVisibility(shouldBeVisible = false)</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        uiResult.data?.run {</span>
+<span class="nc" id="L330">            val serverInfo = this</span>
+<span class="nc" id="L331">            serverBaseUrl = baseUrl</span>
+<span class="nc" id="L332">            binding.hostUrlInput.run {</span>
+<span class="nc" id="L333">                setText(baseUrl)</span>
+<span class="nc" id="L334">                doAfterTextChanged {</span>
+                    //If user modifies url, reset fields and force him to check url again
+<span class="nc" id="L336">                    if (authenticationViewModel.serverInfo.value == null || baseUrl != binding.hostUrlInput.text.toString()) {</span>
+<span class="nc" id="L337">                        showOrHideBasicAuthFields(shouldBeVisible = false)</span>
+<span class="nc" id="L338">                        binding.loginButton.isVisible = false</span>
+<span class="nc" id="L339">                        binding.serverStatusText.run {</span>
+<span class="nc" id="L340">                            text = &quot;&quot;</span>
+<span class="nc" id="L341">                            visibility = INVISIBLE</span>
+<span class="nc" id="L342">                        }</span>
+                    }
+<span class="nc" id="L344">                }</span>
+            }
+
+<span class="nc" id="L347">            binding.serverStatusText.run {</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">                if (isSecureConnection) {</span>
+<span class="nc" id="L349">                    text = getString(R.string.auth_secure_connection)</span>
+<span class="nc" id="L350">                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_lock, 0, 0, 0)</span>
+<span class="nc" id="L351">                    checkServerType(serverInfo)</span>
+                } else {
+<span class="nc" id="L353">                    text = getString(R.string.auth_connection_established)</span>
+<span class="nc" id="L354">                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_lock_open, 0, 0, 0)</span>
+<span class="nc" id="L355">                    val builder = AlertDialog.Builder(context)</span>
+<span class="nc" id="L356">                    builder.apply {</span>
+<span class="nc" id="L357">                        setTitle(context.getString(R.string.insecure_http_url_title_dialog))</span>
+<span class="nc" id="L358">                        setMessage(context.getString(R.string.insecure_http_url_message_dialog))</span>
+<span class="nc" id="L359">                        setPositiveButton(R.string.insecure_http_url_continue_button) { dialog, which -&gt;</span>
+<span class="nc" id="L360">                            checkServerType(serverInfo)</span>
+<span class="nc" id="L361">                        }</span>
+<span class="nc" id="L362">                        setNegativeButton(android.R.string.cancel) { dialog, which -&gt;</span>
+<span class="nc" id="L363">                            showOrHideBasicAuthFields(shouldBeVisible = false)</span>
+<span class="nc" id="L364">                        }</span>
+<span class="nc" id="L365">                        setCancelable(false)</span>
+<span class="nc" id="L366">                        show()</span>
+<span class="nc" id="L367">                    }</span>
+                }
+<span class="nc" id="L369">                isVisible = true</span>
+<span class="nc" id="L370">            }</span>
+<span class="nc" id="L371">        }</span>
+<span class="nc" id="L372">    }</span>
+
+    private fun checkServerType(serverInfo: ServerInfo) {
+<span class="nc" id="L375">        when (serverInfo) {</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">            is ServerInfo.BasicServer -&gt; {</span>
+<span class="nc" id="L377">                authTokenType = BASIC_TOKEN_TYPE</span>
+<span class="nc" id="L378">                oidcSupported = false</span>
+<span class="nc" id="L379">                showOrHideBasicAuthFields(shouldBeVisible = true)</span>
+<span class="nc" id="L380">                binding.accountUsername.doAfterTextChanged { updateLoginButtonVisibility() }</span>
+<span class="nc" id="L381">                binding.accountPassword.doAfterTextChanged { updateLoginButtonVisibility() }</span>
+            }
+
+<span class="nc bnc" id="L384" title="All 2 branches missed.">            is ServerInfo.OAuth2Server -&gt; {</span>
+<span class="nc" id="L385">                showOrHideBasicAuthFields(shouldBeVisible = false)</span>
+<span class="nc" id="L386">                authTokenType = OAUTH_TOKEN_TYPE</span>
+<span class="nc" id="L387">                oidcSupported = false</span>
+
+<span class="nc" id="L389">                val oauth2authorizationEndpoint =</span>
+<span class="nc" id="L390">                    Uri.parse(&quot;$serverBaseUrl${File.separator}${getString(R.string.oauth2_url_endpoint_auth)}&quot;)</span>
+<span class="nc" id="L391">                performGetAuthorizationCodeRequest(oauth2authorizationEndpoint)</span>
+            }
+
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            is ServerInfo.OIDCServer -&gt; {</span>
+<span class="nc" id="L395">                showOrHideBasicAuthFields(shouldBeVisible = false)</span>
+<span class="nc" id="L396">                authTokenType = OAUTH_TOKEN_TYPE</span>
+<span class="nc" id="L397">                oidcSupported = true</span>
+<span class="nc" id="L398">                val registrationEndpoint = serverInfo.oidcServerConfiguration.registrationEndpoint</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                if (registrationEndpoint != null) {</span>
+<span class="nc" id="L400">                    registerClient(</span>
+<span class="nc" id="L401">                        authorizationEndpoint = serverInfo.oidcServerConfiguration.authorizationEndpoint.toUri(),</span>
+<span class="nc" id="L402">                        registrationEndpoint = registrationEndpoint</span>
+                    )
+                } else {
+<span class="nc" id="L405">                    performGetAuthorizationCodeRequest(serverInfo.oidcServerConfiguration.authorizationEndpoint.toUri())</span>
+                }
+            }
+
+            else -&gt; {
+<span class="nc" id="L410">                binding.serverStatusText.run {</span>
+<span class="nc" id="L411">                    text = getString(R.string.auth_unsupported_auth_method)</span>
+<span class="nc" id="L412">                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L413">                    isVisible = true</span>
+<span class="nc" id="L414">                }</span>
+            }
+        }
+<span class="nc" id="L417">    }</span>
+
+    private fun getServerInfoIsLoading() {
+<span class="nc" id="L420">        binding.serverStatusText.run {</span>
+<span class="nc" id="L421">            text = getString(R.string.auth_testing_connection)</span>
+<span class="nc" id="L422">            setCompoundDrawablesWithIntrinsicBounds(R.drawable.progress_small, 0, 0, 0)</span>
+<span class="nc" id="L423">            isVisible = true</span>
+<span class="nc" id="L424">        }</span>
+<span class="nc" id="L425">    }</span>
+
+    private fun getServerInfoIsError(uiResult: UIResult.Error&lt;ServerInfo&gt;) {
+<span class="nc" id="L428">        updateCenteredRefreshButtonVisibility(shouldBeVisible = true)</span>
+<span class="nc" id="L429">        when {</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            uiResult.error is CertificateCombinedException -&gt;</span>
+<span class="nc" id="L431">                showUntrustedCertDialog(uiResult.error)</span>
+
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            uiResult.error is OwncloudVersionNotSupportedException -&gt; binding.serverStatusText.run {</span>
+<span class="nc" id="L434">                text = getString(R.string.server_not_supported)</span>
+<span class="nc" id="L435">                setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L436">            }</span>
+
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            uiResult.error is NoNetworkConnectionException -&gt; binding.serverStatusText.run {</span>
+<span class="nc" id="L439">                text = getString(R.string.error_no_network_connection)</span>
+<span class="nc" id="L440">                setCompoundDrawablesWithIntrinsicBounds(R.drawable.no_network, 0, 0, 0)</span>
+<span class="nc" id="L441">            }</span>
+
+<span class="nc bnc" id="L443" title="All 4 branches missed.">            uiResult.error is SSLErrorException &amp;&amp; uiResult.error.code == SSLErrorCode.NOT_HTTP_ALLOWED -&gt; binding.serverStatusText.run {</span>
+<span class="nc" id="L444">                text = getString(R.string.ssl_connection_not_secure)</span>
+<span class="nc" id="L445">                setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L446">            }</span>
+
+<span class="nc" id="L448">            else -&gt; binding.serverStatusText.run {</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">                text = uiResult.error?.parseError(&quot;&quot;, resources, true)</span>
+<span class="nc" id="L450">                setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L451">            }</span>
+        }
+<span class="nc" id="L453">        binding.serverStatusText.isVisible = true</span>
+<span class="nc" id="L454">        showOrHideBasicAuthFields(shouldBeVisible = false)</span>
+<span class="nc" id="L455">    }</span>
+
+    private fun loginIsSuccess(uiResult: UIResult.Success&lt;String&gt;) {
+<span class="nc" id="L458">        binding.authStatusText.run {</span>
+<span class="nc" id="L459">            isVisible = false</span>
+<span class="nc" id="L460">            text = &quot;&quot;</span>
+<span class="nc" id="L461">        }</span>
+
+        // Return result to account authenticator, multiaccount does not work without this
+<span class="nc" id="L464">        val accountName = uiResult.data!!</span>
+<span class="nc" id="L465">        val intent = Intent()</span>
+<span class="nc" id="L466">        intent.putExtra(AccountManager.KEY_ACCOUNT_NAME, accountName)</span>
+<span class="nc" id="L467">        intent.putExtra(AccountManager.KEY_ACCOUNT_TYPE, contextProvider.getString(R.string.account_type))</span>
+<span class="nc" id="L468">        resultBundle = intent.extras</span>
+<span class="nc" id="L469">        setResult(Activity.RESULT_OK, intent)</span>
+
+<span class="nc bnc" id="L471" title="All 2 branches missed.">        authenticationViewModel.discoverAccount(accountName = accountName, discoveryNeeded = loginAction == ACTION_CREATE)</span>
+<span class="nc" id="L472">    }</span>
+
+    private fun loginIsLoading() {
+<span class="nc" id="L475">        binding.authStatusText.run {</span>
+<span class="nc" id="L476">            setCompoundDrawablesWithIntrinsicBounds(R.drawable.progress_small, 0, 0, 0)</span>
+<span class="nc" id="L477">            isVisible = true</span>
+<span class="nc" id="L478">            text = getString(R.string.auth_trying_to_login)</span>
+<span class="nc" id="L479">        }</span>
+<span class="nc" id="L480">    }</span>
+
+    private fun loginIsError(uiResult: UIResult.Error&lt;String&gt;) {
+<span class="nc" id="L483">        when (uiResult.error) {</span>
+<span class="nc bnc" id="L484" title="All 4 branches missed.">            is NoNetworkConnectionException, is ServerNotReachableException -&gt; {</span>
+<span class="nc" id="L485">                binding.serverStatusText.run {</span>
+<span class="nc" id="L486">                    text = getString(R.string.error_no_network_connection)</span>
+<span class="nc" id="L487">                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.no_network, 0, 0, 0)</span>
+<span class="nc" id="L488">                }</span>
+<span class="nc" id="L489">                showOrHideBasicAuthFields(shouldBeVisible = false)</span>
+            }
+
+            else -&gt; {
+<span class="nc" id="L493">                binding.serverStatusText.isVisible = false</span>
+<span class="nc" id="L494">                binding.authStatusText.run {</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                    text = uiResult.error?.parseError(&quot;&quot;, resources, true)</span>
+<span class="nc" id="L496">                    isVisible = true</span>
+<span class="nc" id="L497">                    setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L498">                }</span>
+            }
+        }
+<span class="nc" id="L501">    }</span>
+
+    /**
+     * Register client if possible.
+     */
+    private fun registerClient(
+        authorizationEndpoint: Uri,
+        registrationEndpoint: String
+    ) {
+<span class="nc" id="L510">        authenticationViewModel.registerClient(registrationEndpoint)</span>
+<span class="nc" id="L511">        authenticationViewModel.registerClient.observe(this) {</span>
+<span class="nc" id="L512">            when (val uiResult = it.peekContent()) {</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                is UIResult.Loading -&gt; {}</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                is UIResult.Success -&gt; {</span>
+<span class="nc" id="L515">                    Timber.d(&quot;Client registered: ${it.peekContent().getStoredData()}&quot;)</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">                    uiResult.data?.let { clientRegistrationInfo -&gt;</span>
+<span class="nc" id="L517">                        performGetAuthorizationCodeRequest(</span>
+<span class="nc" id="L518">                            authorizationEndpoint = authorizationEndpoint,</span>
+<span class="nc" id="L519">                            clientId = clientRegistrationInfo.clientId</span>
+                        )
+<span class="nc" id="L521">                    }</span>
+                }
+
+<span class="nc bnc" id="L524" title="All 2 branches missed.">                is UIResult.Error -&gt; {</span>
+<span class="nc" id="L525">                    Timber.e(uiResult.error, &quot;Client registration failed.&quot;)</span>
+<span class="nc" id="L526">                    performGetAuthorizationCodeRequest(authorizationEndpoint)</span>
+                }
+            }
+<span class="nc" id="L529">        }</span>
+<span class="nc" id="L530">    }</span>
+
+<span class="nc" id="L532">    private fun performGetAuthorizationCodeRequest(</span>
+        authorizationEndpoint: Uri,
+<span class="nc" id="L534">        clientId: String = getString(R.string.oauth2_client_id)</span>
+    ) {
+<span class="nc" id="L536">        Timber.d(&quot;A browser should be opened now to authenticate this user.&quot;)</span>
+
+<span class="nc" id="L538">        val customTabsBuilder: CustomTabsIntent.Builder = CustomTabsIntent.Builder()</span>
+<span class="nc" id="L539">        val customTabsIntent: CustomTabsIntent = customTabsBuilder.build()</span>
+
+<span class="nc" id="L541">        val authorizationEndpointUri = OAuthUtils.buildAuthorizationRequest(</span>
+<span class="nc" id="L542">            authorizationEndpoint = authorizationEndpoint,</span>
+<span class="nc" id="L543">            redirectUri = OAuthUtils.buildRedirectUri(applicationContext).toString(),</span>
+<span class="nc" id="L544">            clientId = clientId,</span>
+<span class="nc" id="L545">            responseType = ResponseType.CODE.string,</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">            scope = if (oidcSupported) mdmProvider.getBrandingString(CONFIGURATION_OAUTH2_OPEN_ID_SCOPE, R.string.oauth2_openid_scope) else &quot;&quot;,</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">            prompt = if (oidcSupported) mdmProvider.getBrandingString(CONFIGURATION_OAUTH2_OPEN_ID_PROMPT, R.string.oauth2_openid_prompt) else &quot;&quot;,</span>
+<span class="nc" id="L548">            codeChallenge = authenticationViewModel.codeChallenge,</span>
+<span class="nc" id="L549">            state = authenticationViewModel.oidcState,</span>
+<span class="nc" id="L550">            username = username,</span>
+<span class="nc" id="L551">            sendLoginHintAndUser = mdmProvider.getBrandingBoolean(mdmKey = CONFIGURATION_SEND_LOGIN_HINT_AND_USER, booleanKey = R.bool.send_login_hint_and_user),</span>
+        )
+
+<span class="nc" id="L554">        try {</span>
+<span class="nc" id="L555">            customTabsIntent.launchUrl(</span>
+<span class="nc" id="L556">                this,</span>
+<span class="nc" id="L557">                authorizationEndpointUri</span>
+            )
+<span class="nc" id="L559">        } catch (e: ActivityNotFoundException) {</span>
+<span class="nc" id="L560">            binding.serverStatusText.visibility = INVISIBLE</span>
+<span class="nc" id="L561">            showMessageInSnackbar(message = this.getString(R.string.file_list_no_app_for_perform_action))</span>
+<span class="nc" id="L562">            Timber.e(&quot;No Activity found to handle Intent&quot;)</span>
+        }
+<span class="nc" id="L564">    }</span>
+
+    override fun onNewIntent(intent: Intent?) {
+<span class="fc" id="L567">        super.onNewIntent(intent)</span>
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">        intent?.let {</span>
+<span class="fc" id="L569">            handleGetAuthorizationCodeResponse(it)</span>
+<span class="fc" id="L570">        }</span>
+<span class="fc" id="L571">    }</span>
+
+    private fun handleGetAuthorizationCodeResponse(intent: Intent) {
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">        val authorizationCode = intent.data?.getQueryParameter(&quot;code&quot;)</span>
+<span class="pc bpc" id="L575" title="1 of 2 branches missed.">        val state = intent.data?.getQueryParameter(&quot;state&quot;)</span>
+
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">        if (state != authenticationViewModel.oidcState) {</span>
+<span class="fc" id="L578">            Timber.e(&quot;OAuth request to get authorization code failed. State mismatching, maybe somebody is trying a CSRF attack.&quot;)</span>
+<span class="fc" id="L579">            updateOAuthStatusIconAndText(StateMismatchException())</span>
+        } else {
+<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (authorizationCode != null) {</span>
+<span class="nc" id="L582">                Timber.d(&quot;Authorization code received [$authorizationCode]. Let's exchange it for access token&quot;)</span>
+<span class="nc" id="L583">                exchangeAuthorizationCodeForTokens(authorizationCode)</span>
+            } else {
+<span class="nc bnc" id="L585" title="All 2 branches missed.">                val authorizationError = intent.data?.getQueryParameter(&quot;error&quot;)</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                val authorizationErrorDescription = intent.data?.getQueryParameter(&quot;error_description&quot;)</span>
+
+<span class="nc" id="L588">                Timber.e(&quot;OAuth request to get authorization code failed. Error: [$authorizationError]. Error description: [$authorizationErrorDescription]&quot;)</span>
+<span class="nc" id="L589">                val authorizationException =</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">                    if (authorizationError == &quot;access_denied&quot;) UnauthorizedException() else Throwable()</span>
+<span class="nc" id="L591">                updateOAuthStatusIconAndText(authorizationException)</span>
+            }
+        }
+<span class="fc" id="L594">    }</span>
+
+    /**
+     * OAuth step 2: Exchange the received authorization code for access and refresh tokens
+     */
+    private fun exchangeAuthorizationCodeForTokens(authorizationCode: String) {
+<span class="nc" id="L600">        binding.serverStatusText.text = getString(R.string.auth_getting_authorization)</span>
+
+<span class="nc bnc" id="L602" title="All 4 branches missed.">        val clientRegistrationInfo = authenticationViewModel.registerClient.value?.peekContent()?.getStoredData()</span>
+
+<span class="nc bnc" id="L604" title="All 6 branches missed.">        val clientAuth = if (clientRegistrationInfo?.clientId != null &amp;&amp; clientRegistrationInfo.clientSecret != null) {</span>
+<span class="nc" id="L605">            OAuthUtils.getClientAuth(clientRegistrationInfo.clientSecret as String, clientRegistrationInfo.clientId)</span>
+
+        } else {
+<span class="nc" id="L608">            OAuthUtils.getClientAuth(getString(R.string.oauth2_client_secret), getString(R.string.oauth2_client_id))</span>
+        }
+
+        // Use oidc discovery one, or build an oauth endpoint using serverBaseUrl + Setup string.
+<span class="nc bnc" id="L612" title="All 4 branches missed.">        val tokenEndPoint = when (val serverInfo = authenticationViewModel.serverInfo.value?.peekContent()?.getStoredData()) {</span>
+<span class="nc bnc" id="L613" title="All 2 branches missed.">            is ServerInfo.OIDCServer -&gt; serverInfo.oidcServerConfiguration.tokenEndpoint</span>
+<span class="nc" id="L614">            else -&gt; &quot;$serverBaseUrl${File.separator}${contextProvider.getString(R.string.oauth2_url_endpoint_access)}&quot;</span>
+        }
+
+<span class="nc" id="L617">        val scope = resources.getString(R.string.oauth2_openid_scope)</span>
+
+<span class="nc" id="L619">        val requestToken = TokenRequest.AccessToken(</span>
+<span class="nc" id="L620">            baseUrl = serverBaseUrl,</span>
+<span class="nc" id="L621">            tokenEndpoint = tokenEndPoint,</span>
+<span class="nc" id="L622">            authorizationCode = authorizationCode,</span>
+<span class="nc" id="L623">            redirectUri = OAuthUtils.buildRedirectUri(applicationContext).toString(),</span>
+<span class="nc" id="L624">            clientAuth = clientAuth,</span>
+<span class="nc" id="L625">            scope = scope,</span>
+<span class="nc" id="L626">            codeVerifier = authenticationViewModel.codeVerifier</span>
+        )
+
+<span class="nc" id="L629">        authenticationViewModel.requestToken(requestToken)</span>
+
+<span class="nc" id="L631">        authenticationViewModel.requestToken.observe(this) {</span>
+<span class="nc" id="L632">            when (val uiResult = it.peekContent()) {</span>
+<span class="nc bnc" id="L633" title="All 2 branches missed.">                is UIResult.Loading -&gt; {}</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">                is UIResult.Success -&gt; {</span>
+<span class="nc" id="L635">                    Timber.d(&quot;Tokens received ${uiResult.data}, trying to login, creating account and adding it to account manager&quot;)</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">                    val tokenResponse = uiResult.data ?: return@observe</span>
+
+<span class="nc" id="L638">                    authenticationViewModel.loginOAuth(</span>
+<span class="nc" id="L639">                        serverBaseUrl = serverBaseUrl,</span>
+<span class="nc bnc" id="L640" title="All 4 branches missed.">                        username = tokenResponse.additionalParameters?.get(KEY_USER_ID).orEmpty(),</span>
+<span class="nc" id="L641">                        authTokenType = OAUTH_TOKEN_TYPE,</span>
+<span class="nc" id="L642">                        accessToken = tokenResponse.accessToken,</span>
+<span class="nc bnc" id="L643" title="All 2 branches missed.">                        refreshToken = tokenResponse.refreshToken.orEmpty(),</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">                        scope = if (oidcSupported) mdmProvider.getBrandingString(</span>
+<span class="nc" id="L645">                            CONFIGURATION_OAUTH2_OPEN_ID_SCOPE,</span>
+<span class="nc" id="L646">                            R.string.oauth2_openid_scope,</span>
+<span class="nc" id="L647">                        ) else tokenResponse.scope,</span>
+<span class="nc bnc" id="L648" title="All 4 branches missed.">                        updateAccountWithUsername = if (loginAction != ACTION_CREATE) userAccount?.name else null,</span>
+<span class="nc" id="L649">                        clientRegistrationInfo = clientRegistrationInfo</span>
+                    )
+                }
+
+<span class="nc bnc" id="L653" title="All 2 branches missed.">                is UIResult.Error -&gt; {</span>
+<span class="nc" id="L654">                    Timber.e(uiResult.error, &quot;OAuth request to exchange authorization code for tokens failed&quot;)</span>
+<span class="nc" id="L655">                    updateOAuthStatusIconAndText(uiResult.error)</span>
+                }
+            }
+<span class="nc" id="L658">        }</span>
+<span class="nc" id="L659">    }</span>
+
+    private fun updateAuthTokenTypeAndInstructions(uiResult: UIResult&lt;Boolean?&gt;) {
+<span class="nc" id="L662">        val supportsOAuth2 = uiResult.getStoredData()</span>
+<span class="nc bnc" id="L663" title="All 4 branches missed.">        authTokenType = if (supportsOAuth2 != null &amp;&amp; supportsOAuth2) OAUTH_TOKEN_TYPE else BASIC_TOKEN_TYPE</span>
+
+<span class="nc" id="L665">        binding.instructionsMessage.run {</span>
+<span class="nc bnc" id="L666" title="All 2 branches missed.">            if (loginAction == ACTION_UPDATE_EXPIRED_TOKEN) {</span>
+<span class="nc" id="L667">                text =</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">                    if (AccountTypeUtils.getAuthTokenTypeAccessToken(accountType) == authTokenType) {</span>
+<span class="nc" id="L669">                        getString(R.string.auth_expired_oauth_token_toast)</span>
+                    } else {
+<span class="nc" id="L671">                        getString(R.string.auth_expired_basic_auth_toast)</span>
+                    }
+<span class="nc" id="L673">                isVisible = true</span>
+            } else {
+<span class="nc" id="L675">                isVisible = false</span>
+            }
+<span class="nc" id="L677">        }</span>
+<span class="nc" id="L678">    }</span>
+
+    private fun updateBaseUrlAndHostInput(uiResult: UIResult&lt;String&gt;) {
+<span class="nc bnc" id="L681" title="All 2 branches missed.">        uiResult.getStoredData()?.let { serverUrl -&gt;</span>
+<span class="nc" id="L682">            serverBaseUrl = serverUrl</span>
+
+<span class="nc" id="L684">            binding.hostUrlInput.run {</span>
+<span class="nc" id="L685">                setText(serverBaseUrl)</span>
+<span class="nc" id="L686">                isEnabled = false</span>
+<span class="nc" id="L687">                isFocusable = false</span>
+<span class="nc" id="L688">            }</span>
+
+<span class="nc bnc" id="L690" title="All 6 branches missed.">            if (loginAction != ACTION_CREATE &amp;&amp; serverBaseUrl.isNotEmpty()) {</span>
+<span class="nc" id="L691">                checkOcServer()</span>
+            }
+<span class="nc" id="L693">        }</span>
+<span class="nc" id="L694">    }</span>
+
+    /**
+     * Show untrusted cert dialog
+     */
+    private fun showUntrustedCertDialog(certificateCombinedException: CertificateCombinedException) { // Show a dialog with the certificate info
+<span class="nc" id="L700">        val dialog = SslUntrustedCertDialog.newInstanceForFullSslError(certificateCombinedException)</span>
+<span class="nc" id="L701">        val fm = supportFragmentManager</span>
+<span class="nc" id="L702">        val ft = fm.beginTransaction()</span>
+<span class="nc" id="L703">        ft.addToBackStack(null)</span>
+<span class="nc" id="L704">        dialog.show(ft, UNTRUSTED_CERT_DIALOG_TAG)</span>
+<span class="nc" id="L705">    }</span>
+
+    override fun onSavedCertificate() {
+<span class="nc" id="L708">        Timber.d(&quot;Server certificate is trusted&quot;)</span>
+<span class="nc" id="L709">        checkOcServer()</span>
+<span class="nc" id="L710">    }</span>
+
+    override fun onCancelCertificate() {
+<span class="nc" id="L713">        Timber.d(&quot;Server certificate is not trusted&quot;)</span>
+<span class="nc" id="L714">        binding.serverStatusText.run {</span>
+<span class="nc" id="L715">            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_warning, 0, 0, 0)</span>
+<span class="nc" id="L716">            text = getString(R.string.ssl_certificate_not_trusted)</span>
+<span class="nc" id="L717">        }</span>
+<span class="nc" id="L718">    }</span>
+
+    override fun onFailedSavingCertificate() {
+<span class="nc" id="L721">        Timber.d(&quot;Server certificate could not be saved&quot;)</span>
+<span class="nc" id="L722">        binding.serverStatusText.run {</span>
+<span class="nc" id="L723">            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_warning, 0, 0, 0)</span>
+<span class="nc" id="L724">            text = getString(R.string.ssl_validator_not_saved)</span>
+<span class="nc" id="L725">        }</span>
+<span class="nc" id="L726">    }</span>
+
+    /* Show or hide Basic Auth fields and reset its values */
+    private fun showOrHideBasicAuthFields(shouldBeVisible: Boolean) {
+<span class="nc" id="L730">        binding.accountUsernameContainer.run {</span>
+<span class="nc" id="L731">            isVisible = shouldBeVisible</span>
+<span class="nc" id="L732">            isFocusable = shouldBeVisible</span>
+<span class="nc" id="L733">            isEnabled = shouldBeVisible</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">            if (shouldBeVisible) requestFocus()</span>
+<span class="nc" id="L735">        }</span>
+<span class="nc" id="L736">        binding.accountPasswordContainer.run {</span>
+<span class="nc" id="L737">            isVisible = shouldBeVisible</span>
+<span class="nc" id="L738">            isFocusable = shouldBeVisible</span>
+<span class="nc" id="L739">            isEnabled = shouldBeVisible</span>
+<span class="nc" id="L740">        }</span>
+
+<span class="nc bnc" id="L742" title="All 2 branches missed.">        if (!shouldBeVisible) {</span>
+<span class="nc" id="L743">            binding.accountUsername.setText(&quot;&quot;)</span>
+<span class="nc" id="L744">            binding.accountPassword.setText(&quot;&quot;)</span>
+        }
+
+<span class="nc" id="L747">        binding.authStatusText.run {</span>
+<span class="nc" id="L748">            isVisible = false</span>
+<span class="nc" id="L749">            text = &quot;&quot;</span>
+<span class="nc" id="L750">        }</span>
+<span class="nc" id="L751">        binding.loginButton.isVisible = false</span>
+<span class="nc" id="L752">    }</span>
+
+    private fun updateCenteredRefreshButtonVisibility(shouldBeVisible: Boolean) {
+<span class="nc bnc" id="L755" title="All 2 branches missed.">        if (!contextProvider.getBoolean(R.bool.show_server_url_input)) {</span>
+<span class="nc" id="L756">            binding.centeredRefreshButton.isVisible = shouldBeVisible</span>
+        }
+<span class="nc" id="L758">    }</span>
+
+    private fun initBrandableOptionsUI() {
+<span class="fc" id="L761">        val showInput = mdmProvider.getBrandingBoolean(mdmKey = CONFIGURATION_SERVER_URL_INPUT_VISIBILITY, booleanKey = R.bool.show_server_url_input)</span>
+<span class="fc" id="L762">        binding.hostUrlFrame.isVisible = showInput</span>
+<span class="pc bpc" id="L763" title="1 of 2 branches missed.">        binding.centeredRefreshButton.isVisible = !showInput</span>
+<span class="pc bpc" id="L764" title="1 of 2 branches missed.">        if (!showInput) {</span>
+<span class="nc" id="L765">            binding.centeredRefreshButton.setOnClickListener { checkOcServer() }</span>
+        }
+
+<span class="fc" id="L768">        val url = mdmProvider.getBrandingString(mdmKey = CONFIGURATION_SERVER_URL, stringKey = R.string.server_url)</span>
+<span class="pc bpc" id="L769" title="2 of 4 branches missed.">        if (url.isNotEmpty()) {</span>
+<span class="nc" id="L770">            binding.hostUrlInput.setText(url)</span>
+        }
+
+<span class="fc" id="L773">        binding.loginLayout.run {</span>
+<span class="pc bpc" id="L774" title="1 of 2 branches missed.">            if (contextProvider.getBoolean(R.bool.use_login_background_image)) {</span>
+<span class="fc" id="L775">                binding.loginBackgroundImage.isVisible = true</span>
+            } else {
+<span class="nc" id="L777">                setBackgroundColor(resources.getColor(R.color.login_background_color))</span>
+            }
+<span class="fc" id="L779">        }</span>
+
+<span class="fc" id="L781">        binding.welcomeLink.run {</span>
+<span class="pc bpc" id="L782" title="1 of 2 branches missed.">            if (contextProvider.getBoolean(R.bool.show_welcome_link)) {</span>
+<span class="fc" id="L783">                isVisible = true</span>
+<span class="pc bpc" id="L784" title="2 of 4 branches missed.">                text = contextProvider.getString(R.string.login_welcome_text).takeUnless { it.isBlank() }</span>
+<span class="fc" id="L785">                    ?: String.format(contextProvider.getString(R.string.auth_register), contextProvider.getString(R.string.app_name))</span>
+<span class="fc" id="L786">                setOnClickListener {</span>
+<span class="nc" id="L787">                    setResult(Activity.RESULT_CANCELED)</span>
+<span class="nc" id="L788">                    goToUrl(url = getString(R.string.welcome_link_url))</span>
+<span class="nc" id="L789">                }</span>
+<span class="nc" id="L790">            } else isVisible = false</span>
+<span class="fc" id="L791">        }</span>
+
+<span class="fc" id="L793">        val legacyWebfingerLookupServer = mdmProvider.getBrandingString(NO_MDM_RESTRICTION_YET, R.string.webfinger_lookup_server)</span>
+<span class="pc bpc" id="L794" title="3 of 6 branches missed.">        val shouldShowLegacyWebfingerFlow = loginAction == ACTION_CREATE &amp;&amp; legacyWebfingerLookupServer.isNotBlank()</span>
+<span class="fc" id="L795">        binding.webfingerLayout.isVisible = shouldShowLegacyWebfingerFlow</span>
+<span class="pc bpc" id="L796" title="1 of 2 branches missed.">        binding.mainLoginLayout.isVisible = !shouldShowLegacyWebfingerFlow</span>
+
+<span class="pc bpc" id="L798" title="1 of 2 branches missed.">        if (shouldShowLegacyWebfingerFlow) {</span>
+<span class="nc" id="L799">            binding.webfingerButton.setOnClickListener {</span>
+<span class="nc" id="L800">                val webfingerUsername = binding.webfingerUsername.text.toString()</span>
+<span class="nc bnc" id="L801" title="All 4 branches missed.">                if (webfingerUsername.isNotEmpty()) {</span>
+<span class="nc" id="L802">                    authenticationViewModel.getLegacyWebfingerHost(</span>
+<span class="nc" id="L803">                        legacyWebfingerLookupServer,</span>
+<span class="nc" id="L804">                        webfingerUsername</span>
+                    )
+                } else {
+<span class="nc" id="L807">                    binding.webfingerStatusText.run {</span>
+<span class="nc" id="L808">                        text = getString(R.string.error_webfinger_username_empty).also { Timber.d(it) }</span>
+<span class="nc" id="L809">                        setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="nc" id="L810">                        isVisible = true</span>
+<span class="nc" id="L811">                    }</span>
+                }
+<span class="nc" id="L813">            }</span>
+        }
+<span class="fc" id="L815">    }</span>
+
+    private fun updateOAuthStatusIconAndText(authorizationException: Throwable?) {
+<span class="fc" id="L818">        binding.serverStatusText.run {</span>
+<span class="fc" id="L819">            setCompoundDrawablesWithIntrinsicBounds(R.drawable.common_error, 0, 0, 0)</span>
+<span class="fc" id="L820">            text =</span>
+<span class="pc bpc" id="L821" title="1 of 2 branches missed.">                if (authorizationException is UnauthorizedException) {</span>
+<span class="nc" id="L822">                    getString(R.string.auth_oauth_error_access_denied)</span>
+                } else {
+<span class="fc" id="L824">                    getString(R.string.auth_oauth_error)</span>
+                }
+<span class="fc" id="L826">        }</span>
+<span class="fc" id="L827">    }</span>
+
+    private fun updateLoginButtonVisibility() {
+<span class="nc" id="L830">        binding.loginButton.run {</span>
+<span class="nc bnc" id="L831" title="All 8 branches missed.">            isVisible = binding.accountUsername.text.toString().isNotBlank() &amp;&amp; binding.accountPassword.text.toString().isNotBlank()</span>
+<span class="nc" id="L832">        }</span>
+<span class="nc" id="L833">    }</span>
+
+    override fun onSaveInstanceState(outState: Bundle) {
+<span class="fc" id="L836">        super.onSaveInstanceState(outState)</span>
+<span class="fc" id="L837">        outState.putString(KEY_AUTH_TOKEN_TYPE, authTokenType)</span>
+<span class="fc" id="L838">    }</span>
+
+    override fun finish() {
+<span class="nc bnc" id="L841" title="All 2 branches missed.">        if (accountAuthenticatorResponse != null) { // send the result bundle back if set, otherwise send an error.</span>
+<span class="nc bnc" id="L842" title="All 2 branches missed.">            if (resultBundle != null) {</span>
+<span class="nc bnc" id="L843" title="All 2 branches missed.">                accountAuthenticatorResponse?.onResult(resultBundle)</span>
+            } else {
+<span class="nc bnc" id="L845" title="All 2 branches missed.">                accountAuthenticatorResponse?.onError(</span>
+<span class="nc" id="L846">                    AccountManager.ERROR_CODE_CANCELED,</span>
+<span class="nc" id="L847">                    &quot;canceled&quot;</span>
+                )
+            }
+<span class="nc" id="L850">            accountAuthenticatorResponse = null</span>
+        }
+<span class="nc" id="L852">        super.finish()</span>
+<span class="nc" id="L853">    }</span>
+
+    override fun optionLockSelected(type: LockType) {
+<span class="nc" id="L856">        manageOptionLockSelected(type)</span>
+<span class="nc" id="L857">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

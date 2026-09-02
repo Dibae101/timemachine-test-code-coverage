@@ -1,0 +1,761 @@
+/*
+ * This file is part of Track & Graph
+ *
+ * Track & Graph is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Track & Graph is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package com.samco.trackandgraph.featurehistory
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Velocity
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation3.runtime.NavKey
+import com.samco.trackandgraph.R
+import com.samco.trackandgraph.adddatapoint.AddDataPointsDialog
+import com.samco.trackandgraph.adddatapoint.AddDataPointsNavigationViewModel
+import com.samco.trackandgraph.adddatapoint.AddDataPointsViewModelImpl
+import com.samco.trackandgraph.data.lua.dto.LuaEngineDisabledException
+import com.samco.trackandgraph.ui.compose.appbar.AppBarConfig
+import com.samco.trackandgraph.ui.compose.appbar.LocalTopBarController
+import com.samco.trackandgraph.ui.theming.TnGComposeTheme
+import com.samco.trackandgraph.ui.theming.tngColors
+import com.samco.trackandgraph.ui.ui.ContinueCancelDialog
+import com.samco.trackandgraph.ui.ui.DataPointInfoDialog
+import com.samco.trackandgraph.ui.ui.DataPointValueAndDescription
+import com.samco.trackandgraph.ui.ui.DateDisplayResolution
+import com.samco.trackandgraph.ui.ui.DateScrollData
+import com.samco.trackandgraph.ui.ui.DateScrollLazyColumn
+import com.samco.trackandgraph.ui.ui.DialogInputSpacing
+import com.samco.trackandgraph.ui.ui.EmptyScreenText
+import com.samco.trackandgraph.ui.ui.FeatureInfoDialog
+import com.samco.trackandgraph.ui.ui.LoadingOverlay
+import com.samco.trackandgraph.selectitemdialog.SelectItemDialog
+import com.samco.trackandgraph.selectitemdialog.SelectableItemType
+import com.samco.trackandgraph.ui.ui.cardMarginSmall
+import com.samco.trackandgraph.ui.ui.fabEnterTransition
+import com.samco.trackandgraph.ui.ui.fabExitTransition
+import com.samco.trackandgraph.ui.ui.inputSpacingLarge
+import kotlinx.serialization.Serializable
+import org.threeten.bp.OffsetDateTime
+
+@Serializable
+data class FeatureHistoryNavKey(
+    val featureId: Long,
+    val featureName: String
+) : NavKey
+
+@Composable
+fun FeatureHistoryScreen(navArgs: FeatureHistoryNavKey) {
+    val viewModel: FeatureHistoryViewModel = hiltViewModel<FeatureHistoryViewModelImpl>()
+    val addDataPointsDialogViewModel: AddDataPointsNavigationViewModel =
+        hiltViewModel<AddDataPointsViewModelImpl>()
+
+    // Initialize ViewModel with the featureId from NavKey
+    LaunchedEffect(navArgs.featureId) {
+        viewModel.initViewModel(navArgs.featureId)
+    }
+
+    // Local state for FAB visibility based on scroll behavior
+    val showFab = remember { mutableStateOf(true) }
+    val scrollToTopRequest = remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(addDataPointsDialogViewModel) {
+        addDataPointsDialogViewModel.dataPointAddedEvent.collect {
+            scrollToTopRequest.intValue++
+        }
+    }
+
+    // Collect all state from ViewModel
+    val dateScrollData by viewModel.dateScrollData.collectAsStateWithLifecycle()
+    val isDuration by viewModel.isDuration.observeAsState(false)
+    val tracker by viewModel.tracker.collectAsStateWithLifecycle()
+    val isTracker = tracker != null
+    val featureInfo by viewModel.showFeatureInfo.collectAsStateWithLifecycle()
+    val dataPointInfo by viewModel.showDataPointInfo.collectAsStateWithLifecycle()
+    val error by viewModel.error.collectAsStateWithLifecycle()
+    val isMultiSelectMode by viewModel.isMultiSelectMode.collectAsStateWithLifecycle()
+    val isSearchVisible by viewModel.isSearchVisible.collectAsStateWithLifecycle()
+    val selectedDataPoints by viewModel.selectedDataPoints.collectAsStateWithLifecycle()
+    val showDeleteConfirmDialog by viewModel.showDeleteConfirmDialog.collectAsStateWithLifecycle()
+    val showDeleteSelectedConfirmDialog by viewModel.showDeleteSelectedConfirmDialog.collectAsStateWithLifecycle()
+    val showCopyToDialog by viewModel.showCopyToDialog.collectAsStateWithLifecycle()
+    val showMoveToDialog by viewModel.showMoveToDialog.collectAsStateWithLifecycle()
+    val showUpdateDialog by viewModel.showUpdateDialog.collectAsStateWithLifecycle()
+    val showUpdateWarning by viewModel.showUpdateWarning.observeAsState(false)
+    val isUpdating by viewModel.isUpdating.observeAsState(false)
+
+    val dataPointsCount = dateScrollData?.items?.size ?: 0
+    val hasLoadedHistory = dateScrollData != null
+    val hasActiveSearchQuery = isSearchVisible && viewModel.searchQuery.text.isNotBlank()
+
+    if (isSearchVisible) {
+        BackHandler(onBack = viewModel::hideSearch)
+    }
+
+    TopAppBarContent(
+        navArgs = navArgs,
+        featureName = navArgs.featureName,
+        dataPointsCount = dataPointsCount,
+        isTracker = isTracker,
+        isMultiSelectMode = isMultiSelectMode,
+        isSearchVisible = isSearchVisible,
+        selectedCount = selectedDataPoints.size,
+        showFab = showFab,
+        viewModel = viewModel,
+        onInfoClick = viewModel::onShowFeatureInfo,
+        onSearchClick = viewModel::showSearch,
+        onUpdateClick = viewModel::showUpdateAllDialog,
+        onSelectAll = viewModel::selectAllDataPoints,
+        onDeselectAll = viewModel::deselectAllDataPoints,
+        onExitMultiSelect = viewModel::exitMultiSelectMode,
+        appBarPinned = hasLoadedHistory && dataPointsCount == 0,
+    )
+
+    FeatureHistoryView(
+        dateScrollData = dateScrollData,
+        isDuration = isDuration,
+        isTracker = isTracker,
+        isMultiSelectMode = isMultiSelectMode,
+        selectedDataPoints = selectedDataPoints,
+        scrollToTopRequest = scrollToTopRequest.intValue.takeIf { it > 0 },
+        showTrackFab = showFab.value && isTracker && !isMultiSelectMode && !isSearchVisible,
+        isSearchResult = hasActiveSearchQuery,
+        errorMessage = when {
+            error is LuaEngineDisabledException -> stringResource(R.string.lua_engine_disabled)
+            error != null -> error?.message ?: ""
+            else -> null
+        },
+        onDataPointClick = viewModel::onDataPointClicked,
+        onDataPointLongPress = if (isSearchVisible) {
+            { _ -> }
+        } else {
+            viewModel::onDataPointLongPressed
+        },
+        onDataPointSelected = viewModel::onDataPointSelected,
+        onEditClick = { dataPoint ->
+            viewModel.tracker.value?.let { tracker ->
+                addDataPointsDialogViewModel.showAddDataPointDialog(
+                    trackerId = tracker.id,
+                    dataPointTimestamp = dataPoint.date
+                )
+            }
+        },
+        onDeleteClick = viewModel::onDeleteClicked,
+        onDeleteSelectedClick = viewModel::onDeleteSelectedClicked,
+        onCopySelectedClick = viewModel::onCopySelectedClicked,
+        onMoveSelectedClick = viewModel::onMoveSelectedClicked,
+        onTrackClick = {
+            viewModel.tracker.value?.let { tracker ->
+                addDataPointsDialogViewModel.showAddDataPointDialog(
+                    trackerId = tracker.id
+                )
+            }
+        }
+    )
+
+    // Dialogs
+    featureInfo?.let {
+        FeatureInfoDialog(
+            featureName = it.name,
+            featureDescription = it.description,
+            onDismissRequest = viewModel::onHideFeatureInfo
+        )
+    }
+
+    dataPointInfo?.let {
+        DataPointInfoDialog(
+            dataPoint = it.toDataPoint(),
+            isDuration = isDuration,
+            onDismissRequest = viewModel::onDismissDataPoint
+        )
+    }
+
+    if (showDeleteConfirmDialog) {
+        ContinueCancelDialog(
+            body = R.string.ru_sure_del_data_point,
+            onDismissRequest = viewModel::onDeleteDismissed,
+            onConfirm = viewModel::onDeleteConfirmed
+        )
+    }
+
+    if (showDeleteSelectedConfirmDialog) {
+        ContinueCancelDialog(
+            body = R.string.ru_sure_del_data_points,
+            onDismissRequest = viewModel::onDeleteSelectedDismissed,
+            onConfirm = viewModel::onDeleteSelectedConfirmed
+        )
+    }
+
+    if (showCopyToDialog) {
+        SelectItemDialog(
+            title = stringResource(R.string.copy_to),
+            selectableTypes = setOf(SelectableItemType.TRACKER),
+            onTrackerSelected = viewModel::onCopyToTrackerSelected,
+            onDismissRequest = viewModel::onDismissCopyToDialog
+        )
+    }
+
+    if (showMoveToDialog) {
+        SelectItemDialog(
+            title = stringResource(R.string.move_to),
+            selectableTypes = setOf(SelectableItemType.TRACKER),
+            onTrackerSelected = viewModel::onMoveToTrackerSelected,
+            onDismissRequest = viewModel::onDismissMoveToDialog
+        )
+    }
+
+    if (showUpdateDialog) {
+        UpdateDialog(viewModel = viewModel)
+    }
+
+    if (showUpdateWarning) {
+        UpdateWarningDialog(
+            onDismissRequest = viewModel::onCancelUpdateWarning,
+            onConfirm = viewModel::onConfirmUpdateWarning
+        )
+    }
+
+    if (isUpdating) {
+        LoadingOverlay()
+    }
+
+    if (!addDataPointsDialogViewModel.hidden.observeAsState(true).value) {
+        AddDataPointsDialog(
+            viewModel = addDataPointsDialogViewModel,
+            onDismissRequest = { addDataPointsDialogViewModel.reset() }
+        )
+    }
+}
+
+@Composable
+internal fun UpdateWarningDialog(
+    onDismissRequest: () -> Unit,
+    onConfirm: () -> Unit
+) = ContinueCancelDialog(
+    body = R.string.ru_sure_update_data,
+    onDismissRequest = onDismissRequest,
+    onConfirm = onConfirm
+)
+
+@Composable
+private fun TopAppBarContent(
+    navArgs: FeatureHistoryNavKey,
+    featureName: String,
+    dataPointsCount: Int,
+    isTracker: Boolean,
+    isMultiSelectMode: Boolean,
+    isSearchVisible: Boolean,
+    selectedCount: Int,
+    showFab: MutableState<Boolean>,
+    viewModel: FeatureHistoryViewModel,
+    onInfoClick: () -> Unit,
+    onSearchClick: () -> Unit,
+    onUpdateClick: () -> Unit,
+    onSelectAll: () -> Unit,
+    onDeselectAll: () -> Unit,
+    onExitMultiSelect: () -> Unit,
+    appBarPinned: Boolean = false,
+) {
+    val topBarController = LocalTopBarController.current
+
+    val nestedScrollConnection = remember(showFab) {
+        createNestedScrollConnection(showFab)
+    }
+
+    val subtitle = when {
+        isMultiSelectMode -> stringResource(R.string.items_selected, selectedCount)
+        dataPointsCount > 0 -> stringResource(R.string.data_points, dataPointsCount)
+        else -> null
+    }
+
+    val actions: @Composable RowScope.() -> Unit = remember(
+        isTracker,
+        isMultiSelectMode,
+        isSearchVisible,
+        viewModel,
+        onInfoClick,
+        onSearchClick,
+        onUpdateClick,
+        onSelectAll,
+        onDeselectAll,
+        onExitMultiSelect
+    ) {
+        {
+            if (isMultiSelectMode) {
+                IconButton(onClick = onSelectAll) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.select_all_24px),
+                        contentDescription = stringResource(id = R.string.select_all)
+                    )
+                }
+                IconButton(onClick = onDeselectAll) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.deselect_24px),
+                        contentDescription = stringResource(id = R.string.deselect_all)
+                    )
+                }
+                IconButton(onClick = onExitMultiSelect) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.close),
+                        contentDescription = stringResource(id = R.string.cancel)
+                    )
+                }
+            } else if (isSearchVisible) {
+                if (viewModel.searchQuery.text.isNotEmpty()) {
+                    IconButton(onClick = { viewModel.searchQuery.clearText() }) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = null,
+                        )
+                    }
+                }
+            } else {
+                IconButton(onClick = onInfoClick) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.about_icon),
+                        contentDescription = stringResource(id = R.string.info)
+                    )
+                }
+                IconButton(onClick = onSearchClick) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.search_icon),
+                        contentDescription = stringResource(id = R.string.search)
+                    )
+                }
+                if (isTracker) {
+                    IconButton(onClick = onUpdateClick) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.edit_icon),
+                            contentDescription = stringResource(id = R.string.update)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    topBarController.Set(
+        navArgs,
+        AppBarConfig(
+            title = featureName,
+            backNavigationAction = true,
+            subtitle = subtitle,
+            actions = actions,
+            nestedScrollConnection = nestedScrollConnection,
+            appBarPinned = appBarPinned || isSearchVisible,
+            searchBarText = if (isSearchVisible) viewModel.searchQuery else null,
+            overrideBackNavigationAction = if (isSearchVisible) viewModel::hideSearch else null,
+        )
+    )
+}
+
+@Composable
+private fun FeatureHistoryView(
+    dateScrollData: DateScrollData<DataPointInfo>?,
+    isDuration: Boolean = false,
+    isTracker: Boolean = true,
+    isMultiSelectMode: Boolean = false,
+    selectedDataPoints: Set<DataPointInfo> = emptySet(),
+    scrollToTopRequest: Int? = null,
+    showTrackFab: Boolean = false,
+    isSearchResult: Boolean = false,
+    errorMessage: String? = null,
+    onDataPointClick: (DataPointInfo) -> Unit = {},
+    onDataPointLongPress: (DataPointInfo) -> Unit = {},
+    onDataPointSelected: (DataPointInfo, Boolean) -> Unit = { _, _ -> },
+    onEditClick: (DataPointInfo) -> Unit = {},
+    onDeleteClick: (DataPointInfo) -> Unit = {},
+    onDeleteSelectedClick: () -> Unit = {},
+    onCopySelectedClick: () -> Unit = {},
+    onMoveSelectedClick: () -> Unit = {},
+    onTrackClick: () -> Unit = {}
+) = TnGComposeTheme {
+    Box(modifier = Modifier.fillMaxSize()) {
+        when {
+            dateScrollData != null && dateScrollData.items.isEmpty() -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .imePadding()
+                ) {
+                    EmptyScreenText(
+                        textId = if (isSearchResult) {
+                            R.string.no_results
+                        } else {
+                            R.string.no_data_points_history_fragment_hint
+                        }
+                    )
+                }
+            }
+
+            dateScrollData != null -> {
+                DataPointList(
+                    dateScrollData = dateScrollData,
+                    isDuration = isDuration,
+                    isTracker = isTracker,
+                    isMultiSelectMode = isMultiSelectMode,
+                    selectedDataPoints = selectedDataPoints,
+                    scrollToTopRequest = scrollToTopRequest,
+                    onDataPointClick = onDataPointClick,
+                    onDataPointLongPress = onDataPointLongPress,
+                    onDataPointSelected = onDataPointSelected,
+                    onEditClick = onEditClick,
+                    onDeleteClick = onDeleteClick
+                )
+            }
+
+            errorMessage != null -> {
+                EmptyScreenText(
+                    text = stringResource(R.string.data_resolution_error, errorMessage),
+                    color = MaterialTheme.colorScheme.error,
+                    alpha = 1f
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = showTrackFab,
+            modifier = Modifier.align(Alignment.BottomEnd),
+            enter = fabEnterTransition,
+            exit = fabExitTransition
+        ) {
+            FloatingActionButton(
+                onClick = onTrackClick,
+                containerColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .padding(WindowInsets.navigationBars.asPaddingValues())
+                    .then(Modifier.padding(inputSpacingLarge))
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.add_box),
+                    contentDescription = stringResource(id = R.string.track_feature)
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            modifier = Modifier.align(Alignment.BottomEnd),
+            visible = isMultiSelectMode && selectedDataPoints.isNotEmpty(),
+            enter = fabEnterTransition,
+            exit = fabExitTransition,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.End,
+                modifier = Modifier
+                    .padding(WindowInsets.navigationBars.asPaddingValues())
+                    .padding(inputSpacingLarge)
+            ) {
+                FloatingActionButton(
+                    onClick = onCopySelectedClick,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.content_copy_24px),
+                        contentDescription = stringResource(id = R.string.copy_selected_content_description)
+                    )
+                }
+                if (isTracker) {
+                    Spacer(modifier = Modifier.height(cardMarginSmall))
+                    FloatingActionButton(
+                        onClick = onMoveSelectedClick,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.move_item_24px),
+                            contentDescription = stringResource(id = R.string.move_selected_content_description)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(cardMarginSmall))
+                    FloatingActionButton(
+                        onClick = onDeleteSelectedClick,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.delete_icon),
+                            contentDescription = stringResource(id = R.string.delete_selected_content_description)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DataPointList(
+    dateScrollData: DateScrollData<DataPointInfo>,
+    isDuration: Boolean,
+    isTracker: Boolean,
+    isMultiSelectMode: Boolean,
+    selectedDataPoints: Set<DataPointInfo>,
+    scrollToTopRequest: Int?,
+    onDataPointClick: (DataPointInfo) -> Unit,
+    onDataPointLongPress: (DataPointInfo) -> Unit,
+    onDataPointSelected: (DataPointInfo, Boolean) -> Unit,
+    onEditClick: (DataPointInfo) -> Unit,
+    onDeleteClick: (DataPointInfo) -> Unit
+) {
+    DateScrollLazyColumn(
+        modifier = Modifier.padding(cardMarginSmall),
+        contentPadding = WindowInsets.safeDrawing
+            .only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+            .asPaddingValues(),
+        data = dateScrollData,
+        itemKey = { dataPoint ->
+            "${dataPoint.featureId}:${dataPoint.date}:${dataPoint.duplicateKeyOrdinal}"
+        },
+        animateItems = true,
+        scrollToTopRequest = scrollToTopRequest,
+    ) { dataPoint ->
+        DataPointCard(
+            dataPoint = dataPoint,
+            isDuration = isDuration,
+            isTracker = isTracker,
+            isMultiSelectMode = isMultiSelectMode,
+            isSelected = dataPoint in selectedDataPoints,
+            onClick = { onDataPointClick(dataPoint) },
+            onLongClick = { onDataPointLongPress(dataPoint) },
+            onSelectedChange = { selected -> onDataPointSelected(dataPoint, selected) },
+            onEditClick = { onEditClick(dataPoint) },
+            onDeleteClick = { onDeleteClick(dataPoint) }
+        )
+        Spacer(modifier = Modifier.height(cardMarginSmall))
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DataPointCard(
+    dataPoint: DataPointInfo,
+    isDuration: Boolean,
+    isTracker: Boolean,
+    isMultiSelectMode: Boolean,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onSelectedChange: (Boolean) -> Unit,
+    onEditClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) = Card(
+    modifier = Modifier
+        .combinedClickable(
+            onClick = {
+                if (isMultiSelectMode) {
+                    onSelectedChange(!isSelected)
+                } else {
+                    onClick()
+                }
+            },
+            onLongClick = {
+                if (!isMultiSelectMode) {
+                    onLongClick()
+                }
+            }
+        ),
+    elevation = CardDefaults.cardElevation(defaultElevation = cardMarginSmall),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(cardMarginSmall)
+    ) {
+        Text(
+            text = dataPoint.displayDateTime,
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        DialogInputSpacing()
+        DataPointValueAndDescription(
+            modifier = Modifier.weight(1f),
+            dataPoint = dataPoint.toDataPoint(),
+            isDuration = isDuration
+        )
+        if (isMultiSelectMode) {
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = onSelectedChange
+            )
+        } else if (isTracker) {
+            IconButton(onClick = onEditClick) {
+                Icon(
+                    painter = painterResource(id = R.drawable.edit_icon),
+                    contentDescription = stringResource(id = R.string.edit_data_point_button_content_description),
+                    tint = MaterialTheme.tngColors.secondary
+                )
+            }
+            IconButton(onClick = onDeleteClick) {
+                Icon(
+                    painter = painterResource(id = R.drawable.delete_icon),
+                    contentDescription = stringResource(id = R.string.delete_data_point_button_content_description),
+                    tint = MaterialTheme.tngColors.primary
+                )
+            }
+        }
+    }
+}
+
+private fun createNestedScrollConnection(showFab: MutableState<Boolean>): NestedScrollConnection {
+    return object : NestedScrollConnection {
+        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+            val dy = available.y
+            when {
+                dy < 0 -> showFab.value = false
+                dy > 0 -> showFab.value = true
+            }
+            return Offset.Zero
+        }
+
+        override suspend fun onPreFling(available: Velocity): Velocity {
+            val vy = available.y
+            when {
+                vy < 0 -> showFab.value = true
+                vy > 0 -> showFab.value = false
+            }
+            return Velocity.Zero
+        }
+    }
+}
+
+// region Previews
+
+private val sampleDataPoints = listOf(
+    DataPointInfo(
+        duplicateKeyOrdinal = 0,
+        date = OffsetDateTime.parse("2024-01-15T10:30:00Z"),
+        featureId = 1L,
+        value = 75.5,
+        label = "Morning",
+        note = "Feeling good today",
+        displayDateTime = "15/01/24 (Mon)\n10:30",
+    ),
+    DataPointInfo(
+        duplicateKeyOrdinal = 0,
+        date = OffsetDateTime.parse("2024-01-14T18:45:00Z"),
+        featureId = 1L,
+        value = 82.0,
+        label = "Evening",
+        note = "",
+        displayDateTime = "14/01/24 (Sun)\n18:45",
+    ),
+    DataPointInfo(
+        duplicateKeyOrdinal = 0,
+        date = OffsetDateTime.parse("2024-01-13T09:00:00Z"),
+        featureId = 1L,
+        value = 70.0,
+        label = "",
+        note = "After workout",
+        displayDateTime = "13/01/24 (Sat)\n09:00",
+    ),
+    DataPointInfo(
+        duplicateKeyOrdinal = 0,
+        date = OffsetDateTime.parse("2024-01-12T14:20:00Z"),
+        featureId = 1L,
+        value = 78.5,
+        label = "Afternoon",
+        note = "",
+        displayDateTime = "12/01/24 (Fri)\n14:20",
+    ),
+)
+
+private val sampleDateScrollData = DateScrollData(
+    dateDisplayResolution = DateDisplayResolution.MONTH_DAY,
+    items = sampleDataPoints
+)
+
+@Preview(showBackground = true)
+@Composable
+private fun TrackerHistoryPreview() {
+    FeatureHistoryView(
+        dateScrollData = sampleDateScrollData,
+        showTrackFab = true
+    )
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun TrackerHistoryMultiSelectPreview() {
+    FeatureHistoryView(
+        dateScrollData = sampleDateScrollData,
+        isMultiSelectMode = true,
+        selectedDataPoints = setOf(sampleDataPoints[0], sampleDataPoints[2])
+    )
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun FunctionHistoryPreview() {
+    FeatureHistoryView(
+        dateScrollData = sampleDateScrollData,
+        isTracker = false
+    )
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun EmptyHistoryPreview() {
+    FeatureHistoryView(
+        dateScrollData = DateScrollData(
+            dateDisplayResolution = DateDisplayResolution.MONTH_DAY,
+            items = emptyList()
+        )
+    )
+}
+
+// endregion

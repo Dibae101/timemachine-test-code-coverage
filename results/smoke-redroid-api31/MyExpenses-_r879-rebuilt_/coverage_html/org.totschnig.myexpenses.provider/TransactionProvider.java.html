@@ -1,0 +1,1952 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionProvider.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.provider</a> &gt; <span class="el_source">TransactionProvider.java</span></div><h1>TransactionProvider.java</h1><pre class="source lang-java linenums">/*   This file is part of My Expenses.
+ *   My Expenses is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation, either version 3 of the License, or
+ *   (at your option) any later version.
+ *
+ *   My Expenses is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with My Expenses.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package org.totschnig.myexpenses.provider;
+
+import android.content.ContentProviderOperation;
+import android.content.ContentProviderResult;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
+import android.content.OperationApplicationException;
+import android.content.UriMatcher;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteConstraintException;
+import android.net.Uri;
+import android.os.Bundle;
+import android.text.TextUtils;
+
+import org.totschnig.myexpenses.BuildConfig;
+import org.totschnig.myexpenses.db2.RepositoryPaymentMethodKt;
+import org.totschnig.myexpenses.model.AccountGrouping;
+import org.totschnig.myexpenses.model.CrStatus;
+import org.totschnig.myexpenses.model.sort.Sort;
+import org.totschnig.myexpenses.preference.PrefKey;
+import org.totschnig.myexpenses.provider.filter.Operation;
+import org.totschnig.myexpenses.sync.json.TransactionChange;
+import org.totschnig.myexpenses.util.Preconditions;
+import org.totschnig.myexpenses.util.Utils;
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler;
+import org.totschnig.myexpenses.util.cursor.PlanInfoCursorWrapper;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
+import androidx.sqlite.db.SupportSQLiteDatabase;
+import androidx.sqlite.db.SupportSQLiteOpenHelper;
+import androidx.sqlite.db.SupportSQLiteQueryBuilder;
+import timber.log.Timber;
+
+import static android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE;
+import static android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE;
+import static org.totschnig.myexpenses.provider.ArchiveKt.archive;
+import static org.totschnig.myexpenses.provider.ArchiveKt.canBeArchived;
+import static org.totschnig.myexpenses.provider.ArchiveKt.unarchive;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_ACCOUNTID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_AMOUNT;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_ATTACHMENT_ID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_BUDGET;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_BUDGETID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_CATID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_CODE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_COLOR;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_COMMODITY;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_COMMODITY_TYPE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_COUNT;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_CR_STATUS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_CURRENCY;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_CURRENCY_OTHER;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_CURRENCY_SELF;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_DATE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_DYNAMIC;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_EQUIVALENT_AMOUNT;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_EXCHANGE_RATE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_EXCLUDE_FROM_TOTALS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_FLAG;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_FLAG_SORT_KEY;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_FRACTION_DIGITS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_GROUPING;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_INSTANCEID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_IS_NUMBERED;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_LABEL;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_LAST_USED;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_METHODID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_OPENING_BALANCE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_PARENTID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_PAYEEID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_PAYEE_NAME;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_ROWID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SEALED;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SORT_BY;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SORT_DIRECTION;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SORT_KEY;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_STATUS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SUM;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SYMBOL;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_SYNC_SEQUENCE_LOCAL;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TAGID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TAGLIST;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TEMPLATEID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TITLE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TRANSACTIONID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TRANSFER_ACCOUNT;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TYPE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_TYPE_SORT_KEY;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_URI;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_URI_LIST;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_USAGES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.KEY_UUID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.METHOD_FLAG_SORT;
+import static org.totschnig.myexpenses.provider.ConstantsKt.METHOD_TYPE_SORT;
+import static org.totschnig.myexpenses.provider.ConstantsKt.NULL_ROW_ID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.SPLIT_CATID;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ACCOUNTS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ACCOUNTS_TAGS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ACCOUNTTYES_METHODS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ACCOUNT_EXCHANGE_RATES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ACCOUNT_FLAGS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ACCOUNT_TYPES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_ATTACHMENTS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_BANKS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_BUDGETS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_BUDGET_ALLOCATIONS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_CATEGORIES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_CHANGES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_CURRENCIES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_DEBTS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_EVENT_CACHE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_METHODS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_PAYEES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_PLAN_INSTANCE_STATUS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_PRICES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_SETTINGS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_SYNC_STATE;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_TAGS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_TEMPLATES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_TEMPLATES_TAGS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_TRANSACTIONS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_TRANSACTIONS_TAGS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.TABLE_TRANSACTION_ATTACHMENTS;
+import static org.totschnig.myexpenses.provider.ConstantsKt.VIEW_CHANGES_EXTENDED;
+import static org.totschnig.myexpenses.provider.ConstantsKt.VIEW_COMMITTED;
+import static org.totschnig.myexpenses.provider.ConstantsKt.VIEW_EXTENDED;
+import static org.totschnig.myexpenses.provider.ConstantsKt.VIEW_PRIORITIZED_PRICES;
+import static org.totschnig.myexpenses.provider.ConstantsKt.VIEW_TEMPLATES_ALL;
+import static org.totschnig.myexpenses.provider.ConstantsKt.VIEW_TEMPLATES_EXTENDED;
+import static org.totschnig.myexpenses.provider.DataBaseAccount.HOME_AGGREGATE_ID;
+import static org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_SPLIT;
+import static org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_SELF_OR_RELATED;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.CATEGORY_DEPTH_QUERY;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.CTE_SEARCH;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.accountWithTypeAndFlag;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.amountCteForDebts;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.budgetAllocation;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.buildSearchCte;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.categoryPathFromLeave;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.categoryTreeSelect;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.categoryTreeWithMappedObjects;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.categoryTreeWithSum;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.equivalentAmountJoin;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.exchangeRateJoin;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.getAccountSelector;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.getPayeeWithDuplicatesCTE;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.getTemplateQuerySelector;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.latestPricesQuery;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.totalBudgetAllocation;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.transactionListAsCTE;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.transactionMappedObjectQuery;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.transactionQuerySelector;
+import static org.totschnig.myexpenses.provider.DbConstantsKt.transactionSumQuery;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.computeWhere;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.dualQuery;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.groupByForPaymentMethodQuery;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.havingForPaymentMethodQuery;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.mapAccountProjection;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.mapPaymentMethodProjection;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.suggestNewCategoryColor;
+import static org.totschnig.myexpenses.provider.MoreDbUtilsKt.tableForPaymentMethodQuery;
+import static org.totschnig.myexpenses.provider.SyncContract.METHOD_APPLY_CHANGES;
+import static org.totschnig.myexpenses.util.PermissionHelper.PermissionGroup.CALENDAR;
+
+<span class="fc" id="L190">public class TransactionProvider extends BaseTransactionProvider {</span>
+
+  public static final String AUTHORITY = BuildConfig.APPLICATION_ID;
+<span class="fc" id="L193">  public static final Uri ACCOUNTS_URI =</span>
+<span class="fc" id="L194">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accounts&quot;);</span>
+  //when we need the accounts cursor without the current balance
+  //we do not want the cursor to be reloaded when a transaction is added
+  //hence we access it through a different URI
+<span class="fc" id="L198">  public static final Uri ACCOUNTS_BASE_URI =</span>
+<span class="fc" id="L199">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accountsbase&quot;);</span>
+<span class="fc" id="L200">  public static final Uri ACCOUNTS_AGGREGATE_URI =</span>
+<span class="fc" id="L201">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accounts/aggregates&quot;);</span>
+<span class="fc" id="L202">  public static final Uri AGGREGATE_V2_URI =</span>
+<span class="fc" id="L203">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/aggregates&quot;);</span>
+  //returns accounts with aggregate accounts, limited to id and label
+<span class="fc" id="L205">  public static final Uri ACCOUNTS_MINIMAL_URI =</span>
+<span class="fc" id="L206">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accountsMinimal&quot;);</span>
+
+<span class="fc" id="L208">  public static final Uri TRANSACTIONS_URI =</span>
+<span class="fc" id="L209">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions&quot;);</span>
+<span class="fc" id="L210">  public static final Uri EXTENDED_URI =</span>
+<span class="fc" id="L211">          TRANSACTIONS_URI.buildUpon().appendQueryParameter(</span>
+<span class="fc" id="L212">                  TransactionProvider.QUERY_PARAMETER_EXTENDED, &quot;1&quot;).build();</span>
+<span class="fc" id="L213">  public static final Uri TEMPLATES_URI =</span>
+<span class="fc" id="L214">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/templates&quot;);</span>
+<span class="fc" id="L215">  public static final Uri CATEGORIES_URI =</span>
+<span class="fc" id="L216">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/categories&quot;);</span>
+<span class="fc" id="L217">  public static final Uri PAYEES_URI =</span>
+<span class="fc" id="L218">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/payees&quot;);</span>
+<span class="fc" id="L219">  public static final Uri METHODS_URI =</span>
+<span class="fc" id="L220">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/methods&quot;);</span>
+<span class="fc" id="L221">  public static final Uri MAPPED_METHODS_URI =</span>
+<span class="fc" id="L222">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/methods_transactions&quot;);</span>
+<span class="fc" id="L223">  public static final Uri ACCOUNTTYPES_METHODS_URI =</span>
+<span class="fc" id="L224">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accounttypes_methods&quot;);</span>
+<span class="fc" id="L225">  public static final Uri SQLITE_SEQUENCE_TRANSACTIONS_URI =</span>
+<span class="fc" id="L226">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/sqlite_sequence/&quot; + TABLE_TRANSACTIONS);</span>
+<span class="fc" id="L227">  public static final Uri PLAN_INSTANCE_STATUS_URI =</span>
+<span class="fc" id="L228">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/planinstance_transaction&quot;);</span>
+
+  public static Uri PLAN_INSTANCE_SINGLE_URI(long templateId, long instanceId) {
+<span class="nc" id="L231">    return ContentUris.appendId(ContentUris.appendId(</span>
+<span class="nc" id="L232">        PLAN_INSTANCE_STATUS_URI.buildUpon(), templateId), instanceId)</span>
+<span class="nc" id="L233">        .build();</span>
+  }
+
+  public static Uri TRANSACTION_ATTACHMENT_SINGLE_URI(long transactionId, long attachmentId) {
+<span class="nc" id="L237">    return ContentUris.appendId(ContentUris.appendId(</span>
+<span class="nc" id="L238">                    TRANSACTIONS_ATTACHMENTS_URI.buildUpon(), transactionId), attachmentId)</span>
+<span class="nc" id="L239">            .build();</span>
+  }
+
+  public static final String URI_SEGMENT_SORT = &quot;sortBy&quot;;
+  public static final String URI_SEGMENT_GROUPING = &quot;accountGrouping&quot;;
+  public static final String URI_SEGMENT_SUMS_FOR_ACCOUNTS = &quot;sumsForAccounts&quot;;
+  public static final String URI_SEGMENT_SUMS_FOR_ARCHIVE = &quot;sumsForArchive&quot;;
+
+<span class="fc" id="L247">  public static final Uri CURRENCIES_URI =</span>
+<span class="fc" id="L248">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/currencies&quot;);</span>
+<span class="fc" id="L249">  public static final Uri TRANSACTIONS_SUM_URI =</span>
+<span class="fc" id="L250">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions/&quot; + URI_SEGMENT_SUMS_FOR_ACCOUNTS);</span>
+  public static Uri ARCHIVE_SUMS_URI(long archiveId) {
+<span class="nc" id="L252">    return Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions/&quot; + archiveId + &quot;/&quot;+ URI_SEGMENT_SUMS_FOR_ARCHIVE);</span>
+  }
+
+<span class="fc" id="L255">  public static final Uri EVENT_CACHE_URI =</span>
+<span class="fc" id="L256">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/eventcache&quot;);</span>
+<span class="fc" id="L257">  public static final Uri DEBUG_SCHEMA_URI =</span>
+<span class="fc" id="L258">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/debug_schema&quot;);</span>
+<span class="fc" id="L259">  public static final Uri STALE_IMAGES_URI =</span>
+<span class="fc" id="L260">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/stale_images&quot;);</span>
+<span class="fc" id="L261">  public static final Uri MAPPED_TRANSFER_ACCOUNTS_URI =</span>
+<span class="fc" id="L262">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transfer_account_transactions&quot;);</span>
+<span class="fc" id="L263">  public static final Uri CHANGES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/changes&quot;);</span>
+
+<span class="fc" id="L265">  public static final Uri SETTINGS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/settings&quot;);</span>
+
+<span class="fc" id="L267">  public static final Uri AUTOFILL_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/autofill&quot;);</span>
+  /**
+   * select info from DB without table, e.g. CategoryList#DATEINFO_CURSOR
+   * or set control flags like sync_state
+   */
+<span class="fc" id="L272">  public static final Uri DUAL_URI =</span>
+<span class="fc" id="L273">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/dual&quot;);</span>
+
+<span class="fc" id="L275">  public static final Uri ACCOUNT_EXCHANGE_RATE_URI =</span>
+<span class="fc" id="L276">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/account_exchangerates&quot;);</span>
+
+
+<span class="fc" id="L279">  public static final Uri SORT_URI =</span>
+<span class="fc" id="L280">          Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/&quot; + URI_SEGMENT_SORT);</span>
+<span class="fc" id="L281">  public static final Uri ACCOUNT_GROUPINGS_URI =</span>
+<span class="fc" id="L282">      Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/&quot; + URI_SEGMENT_GROUPING);</span>
+
+<span class="fc" id="L284">  public static final Uri BUDGETS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/budgets&quot;);</span>
+
+<span class="fc" id="L286">  public static final Uri TAGS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/tags&quot;);</span>
+
+<span class="fc" id="L288">  public static final Uri TRANSACTIONS_TAGS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions/tags&quot;);</span>
+
+<span class="fc" id="L290">  public static final Uri TEMPLATES_TAGS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/templates/tags&quot;);</span>
+
+<span class="fc" id="L292">  public static final Uri ACCOUNTS_TAGS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accounts/tags&quot;);</span>
+
+<span class="fc" id="L294">  public static final Uri DEBTS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/debts&quot;);</span>
+
+<span class="fc" id="L296">  public static final Uri BANKS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/banks&quot;);</span>
+
+<span class="fc" id="L298">  public static final Uri TRANSACTIONS_ATTRIBUTES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions/attributes&quot;);</span>
+
+<span class="fc" id="L300">  public static final Uri ACCOUNTS_ATTRIBUTES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accounts/attributes&quot;);</span>
+
+<span class="fc" id="L302">  public static final Uri ATTRIBUTES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/attributes&quot;);</span>
+
+<span class="fc" id="L304">  public static final Uri ATTACHMENTS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/attachments&quot;);</span>
+
+<span class="fc" id="L306">  public static final Uri TRANSACTIONS_ATTACHMENTS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions/attachments&quot;);</span>
+
+<span class="fc" id="L308">  public static final Uri PRICES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/prices&quot;);</span>
+<span class="fc" id="L309">  public static final Uri LATEST_PRICES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/latest_prices&quot;);</span>
+<span class="fc" id="L310">  public static final Uri DYNAMIC_CURRENCIES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/dynamicCurrencies&quot;);</span>
+<span class="fc" id="L311">  public static final Uri ACCOUNT_TYPES_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accountTypes&quot;);</span>
+<span class="fc" id="L312">  public static final Uri ACCOUNT_FLAGS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/accountFlags&quot;);</span>
+
+  public static final String URI_SEGMENT_MOVE = &quot;move&quot;;
+  public static final String URI_SEGMENT_TOGGLE_CRSTATUS = &quot;toggleCrStatus&quot;;
+  public static final String URI_SEGMENT_UNDELETE = &quot;undelete&quot;;
+  public static final String URI_SEGMENT_INCREASE_USAGE = &quot;increaseUsage&quot;;
+  public static final String URI_SEGMENT_TYPE_FILTER = &quot;typeFilter&quot;;
+  public static final String URI_SEGMENT_BUDGET_ALLOCATIONS = &quot;allocations&quot;;
+  public static final String URI_SEGMENT_DEFAULT_BUDGET_ALLOCATIONS = &quot;defaultBudgetAllocations&quot;;
+<span class="fc" id="L321">  public static final Uri UNSPLIT_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/transactions/unsplit&quot;);</span>
+  public static final String URI_SEGMENT_LINK_TRANSFER = &quot;link_transfer&quot;;
+  public static final String URI_SEGMENT_UNLINK_TRANSFER = &quot;unlink_transfer&quot;;
+  public static final String URI_SEGMENT_TRANSFORM_TO_TRANSFER = &quot;transform_to_transfer&quot;;
+  public static final String URI_SEGMENT_UNARCHIVE = &quot;unarchive&quot;;
+
+<span class="fc" id="L327">  public static final Uri BUDGET_ALLOCATIONS_URI = Uri.parse(&quot;content://&quot; + AUTHORITY + &quot;/budgets/&quot; + URI_SEGMENT_BUDGET_ALLOCATIONS);</span>
+
+  //&quot;1&quot; merge all currency aggregates, &lt; 0 only return one specific aggregate
+  public static final String QUERY_PARAMETER_MERGE_CURRENCY_AGGREGATES = &quot;mergeCurrencyAggregates&quot;;
+  public static final String QUERY_PARAMETER_FULL_PROJECTION_WITH_SUMS = &quot;fullProjectionWithSums&quot;;
+  public static final String QUERY_PARAMETER_BALANCE_SHEET = &quot;balanceSheet&quot;;
+  //uses full projection with sums for each account
+<span class="fc" id="L334">  public static final Uri ACCOUNTS_FULL_URI = BaseTransactionProvider.Companion.balanceUri(&quot;now&quot;, false);</span>
+  public static final String QUERY_PARAMETER_EXTENDED = &quot;extended&quot;;
+  public static final String QUERY_PARAMETER_DISTINCT = &quot;distinct&quot;;
+  public static final String QUERY_PARAMETER_GROUP_BY = &quot;groupBy&quot;;
+  public static final String QUERY_PARAMETER_MARK_VOID = &quot;markVoid&quot;;
+  //&quot;1&quot; from production, &quot;2&quot; from test
+  public static final String QUERY_PARAMETER_WITH_PLAN_INFO = &quot;withPlanInfo&quot;;
+  public static final String QUERY_PARAMETER_INIT = &quot;init&quot;;
+  public static final String QUERY_PARAMETER_CALLER_IS_SYNCADAPTER = &quot;caller_is_syncadapter&quot;;
+
+  public static final String QUERY_PARAMETER_CALLER_IS_IN_BULK = &quot;caller_is_in_bulk&quot;;
+  private static final String QUERY_PARAMETER_SYNC_BEGIN = &quot;syncBegin&quot;;
+  private static final String QUERY_PARAMETER_SYNC_END = &quot;syncEnd&quot;;
+  public static final String QUERY_PARAMETER_WITH_JULIAN_START = &quot;withJulianStart&quot;;
+  public static final String QUERY_PARAMETER_WITH_COUNT = &quot;count&quot;;
+  public static final String QUERY_PARAMETER_WITH_INSTANCE = &quot;withInstance&quot;;
+  public static final String QUERY_PARAMETER_HIERARCHICAL = &quot;hierarchical&quot;;
+  public static final String QUERY_PARAMETER_DEPTH = &quot;depth&quot;;
+  public static final String QUERY_PARAMETER_CATEGORY_SEPARATOR = &quot;categorySeparator&quot;;
+  public static final String QUERY_PARAMETER_SHORTEN_COMMENT = &quot;shortenComment&quot;;
+  public static final String QUERY_PARAMETER_SEARCH = &quot;search&quot;;
+  public static final String QUERY_PARAMETER_COUNT_UNUSED = &quot;countUnused&quot;;
+  public static final String QUERY_PARAMETER_OLD_FRACTION_DIGITS = &quot;oldFractionDigits&quot;;
+  public static final String QUERY_PARAMETER_OLD_CODE = &quot;oldCode&quot;;
+
+  /**
+   * do not honour EXCLUDE_FROM_TOTAL flag
+   */
+  public static final String QUERY_PARAMETER_INCLUDE_ALL = &quot;includeAll&quot;;
+
+  /**
+   * 1 -&gt; mapped objects for each row
+   * 2 -&gt; aggregate sums for all mapped objects
+   */
+  public static final String QUERY_PARAMETER_MAPPED_OBJECTS = &quot;mappedObjects&quot;;
+
+  /**
+   * Transfers are included into in and out sums, instead of reported in extra field
+   */
+  public static final String QUERY_PARAMETER_INCLUDE_TRANSFERS = &quot;includeTransfers&quot;;
+
+  public static final String QUERY_PARAMETER_AGGREGATE_NEUTRAL = &quot;aggregateNeutral&quot;;
+
+  /**
+   * Colon separated list of account types
+   */
+  public static final String QUERY_PARAMETER_ACCOUNT_TYPE_LIST = &quot;accountTypeList&quot;;
+
+  public static final String QUERY_PARAMETER_WITH_FILTER = &quot;withFilter&quot;;
+
+  public static final String QUERY_PARAMETER_BREAKDOWN_BY_ACCOUNT = &quot;breakdownByAccount&quot;;
+
+  @Deprecated
+  public static final String METHOD_BULK_START = &quot;bulkStart&quot;;
+  @Deprecated
+  public static final String METHOD_BULK_END = &quot;bulkEnd&quot;;
+  public static final String METHOD_SORT_ACCOUNTS = &quot;sort_accounts&quot;;
+  public static final String METHOD_SETUP_CATEGORIES = &quot;setup_categories&quot;;
+  public static final String METHOD_SETUP_CATEGORIES_DRY_RUN = &quot;setup_categories_dry_run&quot;;
+  public static final String METHOD_CHECK_CORRUPTED_DATA_987 = &quot;checkCorruptedData&quot;;
+
+  public static final String METHOD_DELETE_ATTACHMENTS = &quot;deleteAttachments&quot;;
+
+  public static final String METHOD_SAVE_CATEGORY = &quot;saveCategory&quot;;
+  public static final String KEY_CATEGORY = &quot;category&quot;;
+  public static final String METHOD_ENSURE_CATEGORY = &quot;ensureCategory&quot;;
+  public static final String KEY_CATEGORY_INFO = &quot;categoryInfo&quot;;
+  public static final String METHOD_ENSURE_CATEGORY_TREE = &quot;ensureCategoryTree&quot;;
+  public static final String KEY_CATEGORY_EXPORT = &quot;categoryExport&quot;;
+  public static final String METHOD_SAVE_TRANSACTION_TAGS = &quot;saveTransactionTags&quot;;
+  public static final String KEY_REPLACE = &quot;replace&quot;;
+
+  public static final String KEY_RESULT = &quot;result&quot;;
+
+  public static final String METHOD_MERGE_CATEGORIES = &quot;mergeCategories&quot;;
+  public static final String KEY_MERGE_SOURCE = &quot;mergeSource&quot;;
+  public static final String KEY_MERGE_TARGET = &quot;mergeTarget&quot;;
+
+  public static final String METHOD_ARCHIVE = &quot;archive&quot;;
+  public static final String METHOD_CAN_BE_ARCHIVED = &quot;canBeArchived&quot;;
+
+  public static final String METHOD_RECALCULATE_EQUIVALENT_AMOUNTS = &quot;recalculateEquivalentAmounts&quot;;
+  public static final String METHOD_RECALCULATE_EQUIVALENT_AMOUNTS_FOR_DATE = &quot;recalculateEquivalentAmountsForDate&quot;;
+
+  public static final String METHOD_CLEANUP_UNUSED_PAYEES = &quot;cleanupUnusedPayees&quot;;
+
+  public static final String METHOD_UPDATE_CURRENCY = &quot;updateCurrency&quot;;
+  public static final String KEY_UPDATED_ACCOUNTS_COUNT = &quot;updatedAccountsCount&quot;;
+
+  public static final String METHOD_CHECK_CURRENCY_IN_USE = &quot;checkCurrencyInUse&quot;;
+  public static final String METHOD_STORE_FRACTION_DIGITS = &quot;storeFractionDigits&quot;;
+
+  private static final UriMatcher URI_MATCHER;
+
+  @Override
+  public Cursor query(@NonNull Uri uri, @Nullable String[] projection, @Nullable String selection,
+                      @Nullable String[] selectionArgs, @Nullable String sortOrder) {
+    SupportSQLiteQueryBuilder qb;
+<span class="fc" id="L432">    StringBuilder additionalWhere = new StringBuilder();</span>
+    SupportSQLiteDatabase db;
+<span class="fc" id="L434">    db = getHelper().getReadableDatabase();</span>
+
+    Cursor c;
+
+<span class="fc" id="L438">    String groupBy = uri.getQueryParameter(QUERY_PARAMETER_GROUP_BY);</span>
+<span class="fc" id="L439">    String having = null;</span>
+<span class="fc" id="L440">    String limit = null;</span>
+<span class="fc" id="L441">    String cte = null;</span>
+<span class="fc" id="L442">    Bundle extras = new Bundle();</span>
+
+<span class="fc" id="L444">    String aggregateFunction = getAggregateFunction();</span>
+
+<span class="fc" id="L446">    int uriMatch = URI_MATCHER.match(uri);</span>
+    //noinspection InlinedApi
+<span class="fc" id="L448">    String queryParameterLimit = uri.getQueryParameter(ContentResolver.QUERY_ARG_LIMIT);</span>
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">    if (queryParameterLimit != null) {</span>
+      //noinspection InlinedApi
+<span class="nc" id="L451">      String queryParameterOffset = uri.getQueryParameter(ContentResolver.QUERY_ARG_OFFSET);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">      limit = (queryParameterOffset == null) ? queryParameterLimit : queryParameterOffset + &quot;,&quot; + queryParameterLimit;</span>
+<span class="nc" id="L453">      log(&quot;limit %s&quot;, limit);</span>
+    }
+<span class="pc bpc" id="L455" title="56 of 59 branches missed.">    switch (uriMatch) {</span>
+      case TRANSACTIONS: {
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_MAPPED_OBJECTS, false)) {</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">          if (selection != null) CrashHandler.throwOrReport(&quot;mapped object query ignores selection&quot;);</span>
+<span class="nc" id="L459">          String sql = transactionMappedObjectQuery(getAccountSelector(uri));</span>
+<span class="nc" id="L460">          c = measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+<span class="nc" id="L461">          return c;</span>
+        }
+<span class="nc" id="L463">        boolean hasSearch = uri.getBooleanQueryParameter(QUERY_PARAMETER_SEARCH, false);</span>
+<span class="nc" id="L464">        String forCatId = uri.getQueryParameter(KEY_CATID);</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        boolean extended = uri.getQueryParameter(QUERY_PARAMETER_EXTENDED) != null;</span>
+<span class="nc bnc" id="L466" title="All 6 branches missed.">        boolean forHome = uri.getQueryParameter(KEY_ACCOUNTID) == null &amp;&amp; uri.getQueryParameter(KEY_CURRENCY) == null &amp;&amp; uri.getQueryParameter(KEY_PARENTID) == null;</span>
+<span class="nc bnc" id="L467" title="All 4 branches missed.">        String table = forHome || extended ? VIEW_EXTENDED : VIEW_COMMITTED;</span>
+
+<span class="nc bnc" id="L469" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">          projection = extended ? DatabaseConstants.getProjectionExtended() : DatabaseConstants.getProjectionBase();</span>
+        }
+<span class="nc bnc" id="L472" title="All 2 branches missed.">        if (sortOrder == null) {</span>
+<span class="nc" id="L473">          sortOrder = KEY_DATE + &quot; DESC&quot;;</span>
+        }
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        sortOrder += &quot;, &quot; + KEY_ROWID + (sortOrder.contains(&quot; DESC&quot;) ? &quot; DESC&quot; : &quot; ASC&quot;);</span>
+
+<span class="nc bnc" id="L477" title="All 2 branches missed.">        if (forCatId != null) {</span>
+<span class="nc" id="L478">          String selector = transactionQuerySelector(uri, CTE_SEARCH);</span>
+<span class="nc bnc" id="L479" title="All 4 branches missed.">          selection = TextUtils.isEmpty(selection) ? selector : (TextUtils.isEmpty(selector) ? selection : (selection + &quot; AND &quot; + selector));</span>
+<span class="nc" id="L480">          projection = prepareProjectionForTransactions(projection, CTE_SEARCH, uri.getBooleanQueryParameter(QUERY_PARAMETER_SHORTEN_COMMENT, false), false);</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">          String sql = transactionListAsCTE(forCatId, forHome  ? getHomeCurrency() : null) + &quot; &quot; + SupportSQLiteQueryBuilder.builder(CTE_SEARCH).columns(projection)</span>
+<span class="nc" id="L482">                  .selection(computeWhere(selection, KEY_CATID + &quot; IN (SELECT &quot; + KEY_ROWID + &quot; FROM Tree )&quot;), selectionArgs).groupBy(groupBy)</span>
+<span class="nc" id="L483">                  .orderBy(sortOrder).create().getSql();</span>
+<span class="nc" id="L484">          c = measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+<span class="nc" id="L485">          return c;</span>
+        }
+        String tableForQueryBuilder;
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if (hasSearch) {</span>
+<span class="nc" id="L489">            cte = buildSearchCte(table, getHomeCurrency(), forHome);</span>
+<span class="nc" id="L490">            table = CTE_SEARCH;</span>
+<span class="nc" id="L491">            tableForQueryBuilder = CTE_SEARCH;</span>
+        } else {
+<span class="nc bnc" id="L493" title="All 2 branches missed.">          tableForQueryBuilder = needsExtendedJoin(projection) ?</span>
+<span class="nc" id="L494">                  exchangeRateJoin(table, KEY_ACCOUNTID, getHomeCurrency(), table) + equivalentAmountJoin(getHomeCurrency()) : table;</span>
+        }
+<span class="nc" id="L496">        String selector = transactionQuerySelector(uri, table);</span>
+<span class="nc bnc" id="L497" title="All 4 branches missed.">        selection = TextUtils.isEmpty(selection) ? selector : (TextUtils.isEmpty(selector) ? selection : (selection + &quot; AND &quot; + selector));</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        projection = prepareProjectionForTransactions(projection, table, uri.getBooleanQueryParameter(QUERY_PARAMETER_SHORTEN_COMMENT, false), !hasSearch);</span>
+<span class="nc" id="L499">        qb = SupportSQLiteQueryBuilder.builder(tableForQueryBuilder);</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        if (uri.getQueryParameter(QUERY_PARAMETER_DISTINCT) != null) {</span>
+<span class="nc" id="L501">          qb.distinct();</span>
+        }
+        break;
+      }
+      case TRANSACTION_ID:
+<span class="nc" id="L506">        qb = SupportSQLiteQueryBuilder.builder(VIEW_EXTENDED  + equivalentAmountJoin(getHomeCurrency()));</span>
+<span class="nc" id="L507">        projection = prepareProjectionForTransactions(projection, VIEW_EXTENDED, false, true);</span>
+<span class="nc" id="L508">        additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L509">        break;</span>
+      case TRANSACTIONS_SUMS: {
+        // if type flag is passed in, then we only return one type, otherwise two rows for expense and income are returned
+<span class="nc" id="L512">        String sql = transactionSumQuery(</span>
+                uri,
+                projection,
+                selection,
+<span class="nc" id="L516">                getTypeWithFallBack(),</span>
+                aggregateFunction,
+<span class="nc" id="L518">                getHomeCurrency()</span>
+        );
+<span class="nc" id="L520">        c = measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+<span class="nc" id="L521">        return c;</span>
+      }
+      case ARCHIVE_SUMS: {
+<span class="nc" id="L524">        return archiveSumQuery(db, uri, getTypeWithFallBack());</span>
+      }
+      case TRANSACTIONS_GROUPS: {
+<span class="nc" id="L527">        return transactionGroupsQuery(db, uri, selection, selectionArgs);</span>
+      }
+      case CATEGORIES: {
+<span class="nc" id="L530">        String mappedObjects = uri.getQueryParameter(QUERY_PARAMETER_MAPPED_OBJECTS);</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">        if (mappedObjects != null) {</span>
+<span class="nc" id="L532">          String sql = categoryTreeWithMappedObjects(selection, projection, mappedObjects.equals(&quot;2&quot;));</span>
+<span class="nc" id="L533">          return measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+        }
+<span class="nc bnc" id="L535" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_DEPTH, false)) {</span>
+<span class="nc" id="L536">          return measureAndLogQuery(db, uri, CATEGORY_DEPTH_QUERY, null, null);</span>
+        }
+<span class="nc bnc" id="L538" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_HIERARCHICAL, false)) {</span>
+<span class="nc bnc" id="L539" title="All 4 branches missed.">          final boolean withSum = projection != null &amp;&amp; Arrays.asList(projection).contains(KEY_SUM);</span>
+
+<span class="nc" id="L541">          String withType = uri.getQueryParameter(KEY_TYPE);</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">          String sql = withSum ?</span>
+<span class="nc" id="L543">                  categoryTreeWithSum(</span>
+                          aggregateFunction,
+<span class="nc" id="L545">                          currencyContext.getHomeCurrencyString(),</span>
+                          sortOrder,
+                          selection,
+                          projection,
+                          uri
+                  ) :
+<span class="nc" id="L551">                  categoryTreeSelect(</span>
+                          sortOrder,
+                          selection,
+                          projection,
+                          null,
+                          null,
+<span class="nc" id="L557">                          uri.getQueryParameter(QUERY_PARAMETER_CATEGORY_SEPARATOR),</span>
+                          withType
+                  );
+<span class="nc" id="L560">          c = measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+<span class="nc" id="L561">          c.setNotificationUri(getContext().getContentResolver(), uri);</span>
+<span class="nc bnc" id="L562" title="All 4 branches missed.">          return (withType != null &amp;&amp; c.getCount() == 0) ? wrapWithResultCompat(c, hasCategories(db)) :  c;</span>
+        } else {
+<span class="nc" id="L564">          qb = SupportSQLiteQueryBuilder.builder(TABLE_CATEGORIES);</span>
+          //split transaction: list Categories of split parts
+<span class="nc" id="L566">          String transactionId = uri.getQueryParameter(KEY_TRANSACTIONID);</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">          if (transactionId != null) {</span>
+<span class="nc" id="L568">            selection = KEY_ROWID</span>
+                    + &quot; IN (SELECT distinct &quot;
+                    + KEY_CATID
+                    + &quot; FROM &quot;
+                    + TABLE_TRANSACTIONS
+                    + &quot; WHERE &quot;
+                    + KEY_PARENTID
+                    + &quot; = ?)&quot;;
+<span class="nc" id="L576">            selectionArgs = new String[]{transactionId};</span>
+          } else {
+<span class="nc" id="L578">              additionalWhere.append(KEY_ROWID).append(&quot; != &quot;).append(SPLIT_CATID);</span>
+          }
+<span class="nc bnc" id="L580" title="All 2 branches missed.">          if (projection == null) {</span>
+<span class="nc" id="L581">            projection = new String[]{KEY_ROWID, KEY_LABEL, KEY_PARENTID};</span>
+          }
+          break;
+        }
+      }
+      case CATEGORY_ID:
+<span class="nc" id="L587">        String rowId = uri.getPathSegments().get(1);</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_HIERARCHICAL, false)) {</span>
+<span class="nc" id="L589">          c = measureAndLogQuery(db, uri, categoryPathFromLeave(rowId), selection, selectionArgs);</span>
+<span class="nc" id="L590">          c.setNotificationUri(getContext().getContentResolver(), uri);</span>
+<span class="nc" id="L591">          return c;</span>
+        } else {
+<span class="nc" id="L593">          qb = SupportSQLiteQueryBuilder.builder(TABLE_CATEGORIES);</span>
+<span class="nc" id="L594">          additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(rowId);</span>
+<span class="nc" id="L595">          break;</span>
+        }
+      case ACCOUNTS:
+      case ACCOUNTS_BASE:
+      case ACCOUNTS_MINIMAL:
+<span class="pc bpc" id="L600" title="1 of 2 branches missed.">        final boolean minimal = uriMatch == ACCOUNTS_MINIMAL;</span>
+<span class="fc" id="L601">        final String sumsForDate = uri.getQueryParameter(QUERY_PARAMETER_FULL_PROJECTION_WITH_SUMS);</span>
+<span class="fc" id="L602">        final String mergeAggregate = uri.getQueryParameter(QUERY_PARAMETER_MERGE_CURRENCY_AGGREGATES);</span>
+<span class="pc bpc" id="L603" title="2 of 4 branches missed.">        if (mergeAggregate != null || sumsForDate != null) {</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">          if (sortOrder == null) {</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">            sortOrder = minimal ? KEY_LABEL :</span>
+<span class="nc" id="L606">                    Sort.Companion.preferredOrderByForAccounts(PrefKey.SORT_ORDER_ACCOUNTS, prefHandler, Sort.LABEL, getCollate(), null);</span>
+<span class="nc bnc" id="L607" title="All 2 branches missed.">            if (uri.getBooleanQueryParameter(QUERY_PARAMETER_BALANCE_SHEET, false)) {</span>
+<span class="nc" id="L608">              sortOrder = KEY_TYPE_SORT_KEY + &quot; DESC, &quot; + sortOrder;</span>
+            } else {
+<span class="nc" id="L610">              sortOrder = getSortByFlag() + sortOrder;</span>
+            }
+          }
+<span class="nc bnc" id="L613" title="All 2 branches missed.">          if (projection != null) {</span>
+<span class="nc" id="L614">            CrashHandler.throwOrReport(</span>
+                    &quot;When calling accounts cursor with sums or aggregates, projection is ignored &quot;, TAG
+            );
+          }
+<span class="nc" id="L618">          String sql = buildAccountQuery(minimal, mergeAggregate, selection, sortOrder, sumsForDate);</span>
+<span class="nc" id="L619">          c = measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+<span class="nc" id="L620">          c.setNotificationUri(getContext().getContentResolver(), uri);</span>
+<span class="nc" id="L621">          return c;</span>
+        } else {
+<span class="pc bpc" id="L623" title="1 of 2 branches missed.">          if (sortOrder == null) {</span>
+<span class="pc bpc" id="L624" title="1 of 2 branches missed.">            sortOrder = minimal ? (TABLE_ACCOUNTS + &quot;.&quot; + KEY_LABEL) :</span>
+<span class="fc" id="L625">                    Sort.Companion.preferredOrderByForAccounts(PrefKey.SORT_ORDER_ACCOUNTS, prefHandler, Sort.LABEL, getCollate(), TABLE_ACCOUNTS);</span>
+<span class="fc" id="L626">            sortOrder = KEY_FLAG_SORT_KEY + &quot; DESC, &quot; + sortOrder;</span>
+          }
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">          qb = SupportSQLiteQueryBuilder.builder(minimal ? accountWithTypeAndFlag : getAccountsWithExchangeRate());</span>
+<span class="pc bpc" id="L629" title="1 of 2 branches missed.">          if (projection == null) {</span>
+<span class="nc" id="L630">              projection =  org.totschnig.myexpenses.model2.Account.Companion.getProjection(minimal);</span>
+          }
+<span class="fc" id="L632">          projection = mapAccountProjection(projection);</span>
+<span class="fc" id="L633">          break;</span>
+        }
+
+      case AGGREGATE_ID:
+<span class="nc" id="L637">        String currencyId = uri.getPathSegments().get(2);</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">        if (Integer.parseInt(currencyId) == HOME_AGGREGATE_ID) {</span>
+<span class="nc bnc" id="L639" title="All 2 branches missed.">          if (uri.getBooleanQueryParameter(QUERY_PARAMETER_BREAKDOWN_BY_ACCOUNT, false)) {</span>
+<span class="nc" id="L640">            qb = SupportSQLiteQueryBuilder.builder(exchangeRateJoin(TABLE_ACCOUNTS, KEY_ROWID, getHomeCurrency()));</span>
+<span class="nc" id="L641">            projection = new String[]{KEY_ROWID, KEY_CURRENCY, KEY_OPENING_BALANCE, KEY_DYNAMIC, KEY_EXCHANGE_RATE};</span>
+<span class="nc" id="L642">            additionalWhere.append(KEY_EXCLUDE_FROM_TOTALS).append(&quot;=0 AND &quot;).append(KEY_PARENTID).append(&quot; IS NULL&quot;);</span>
+          } else {
+<span class="nc" id="L644">            qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNTS);</span>
+<span class="nc" id="L645">            projection = aggregateHomeProjection(projection);</span>
+          }
+        } else {
+<span class="nc" id="L648">          qb = SupportSQLiteQueryBuilder.builder(TABLE_CURRENCIES);</span>
+<span class="nc" id="L649">          projection = aggregateCurrencyProjection(projection);</span>
+<span class="nc" id="L650">          additionalWhere.append(TABLE_CURRENCIES + &quot;.&quot; + KEY_ROWID + &quot;= abs(&quot;).append(currencyId).append(&quot;)&quot;);</span>
+        }
+<span class="nc" id="L652">        break;</span>
+      case AGGREGATE_V2:
+<span class="nc" id="L654">        AccountGrouping&lt;?&gt; grouping = AccountGrouping.Companion.valueOf(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L655">        String group = uri.getPathSegments().get(2);</span>
+<span class="nc bnc" id="L656" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_BREAKDOWN_BY_ACCOUNT, false)) {</span>
+<span class="nc" id="L657">          qb = SupportSQLiteQueryBuilder.builder(exchangeRateJoin(TABLE_ACCOUNTS, KEY_ROWID, getHomeCurrency()));</span>
+<span class="nc" id="L658">          projection = new String[]{KEY_ROWID, KEY_CURRENCY, KEY_OPENING_BALANCE, KEY_DYNAMIC, KEY_EXCHANGE_RATE};</span>
+<span class="nc" id="L659">          additionalWhere.append(KEY_EXCLUDE_FROM_TOTALS).append(&quot;=0 AND &quot;).append(KEY_PARENTID).append(&quot; IS NULL&quot;);</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">          if (grouping.equals(AccountGrouping.FLAG.INSTANCE)) {</span>
+<span class="nc" id="L661">            additionalWhere.append(&quot; AND &quot;).append(KEY_FLAG).append(&quot;=&quot;).append(group);</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">          } else if (grouping.equals(AccountGrouping.TYPE.INSTANCE)) {</span>
+<span class="nc" id="L663">            additionalWhere.append(&quot; AND &quot;).append(KEY_TYPE).append(&quot;=&quot;).append(group);</span>
+<span class="nc bnc" id="L664" title="All 2 branches missed.">          } else if (grouping.equals(AccountGrouping.CURRENCY.INSTANCE)) {</span>
+<span class="nc" id="L665">            additionalWhere.append(&quot; AND &quot;).append(KEY_CURRENCY).append(&quot;='&quot;).append(group).append(&quot;'&quot;);</span>
+          }
+        } else {
+<span class="nc bnc" id="L668" title="All 2 branches missed.">          if (grouping.equals(AccountGrouping.CURRENCY.INSTANCE)) {</span>
+<span class="nc" id="L669">            qb = SupportSQLiteQueryBuilder.builder(TABLE_CURRENCIES);</span>
+<span class="nc" id="L670">            projection = aggregateCurrencyProjection(projection);</span>
+            //group is currency code
+<span class="nc" id="L672">            additionalWhere.append(KEY_CODE).append(&quot;='&quot;).append(group).append(&quot;'&quot;);</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">          } else if (grouping.equals(AccountGrouping.FLAG.INSTANCE)) {</span>
+<span class="nc" id="L674">            qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNT_FLAGS);</span>
+<span class="nc" id="L675">            projection = aggregateFlagProjection(projection);</span>
+            //group is flag id
+<span class="nc" id="L677">            additionalWhere.append(KEY_ROWID).append(&quot;=&quot;).append(group);</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">          } else if (grouping.equals(AccountGrouping.TYPE.INSTANCE)) {</span>
+<span class="nc" id="L679">            qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNT_TYPES);</span>
+<span class="nc" id="L680">            projection = aggregateTypeProjection(projection);</span>
+            //group is type id
+<span class="nc" id="L682">            additionalWhere.append(KEY_ROWID).append(&quot;=&quot;).append(group);</span>
+          } else {
+<span class="nc" id="L684">            qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNTS);</span>
+<span class="nc" id="L685">            additionalWhere.append(KEY_EXCLUDE_FROM_TOTALS).append(&quot;=0&quot;);</span>
+<span class="nc" id="L686">            projection = aggregateHomeProjection(projection);</span>
+          }
+        }
+<span class="nc" id="L689">        break;</span>
+      case ACCOUNT_ID:
+<span class="nc" id="L691">        qb = SupportSQLiteQueryBuilder.builder(getAccountsWithExchangeRate());</span>
+<span class="nc" id="L692">        additionalWhere.append(TABLE_ACCOUNTS + &quot;.&quot; + KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L693">        projection = mapAccountProjection(projection);</span>
+<span class="nc" id="L694">        break;</span>
+      case PAYEES:
+<span class="nc bnc" id="L696" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_HIERARCHICAL, false)) {</span>
+<span class="nc" id="L697">          String sql = getPayeeWithDuplicatesCTE(selection, getCollate());</span>
+<span class="nc" id="L698">          c = measureAndLogQuery(db, uri, sql, selection, selectionArgs);</span>
+<span class="nc" id="L699">          c.setNotificationUri(getContext().getContentResolver(), uri);</span>
+<span class="nc" id="L700">          return c;</span>
+        }
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_COUNT_UNUSED, false)) {</span>
+<span class="nc" id="L703">          c = measureAndLogQuery(db, uri, COUNT_UNUSED_PAYEE_QUERY, selection, selectionArgs);</span>
+<span class="nc" id="L704">          c.setNotificationUri(getContext().getContentResolver(), uri);</span>
+<span class="nc" id="L705">          return c;</span>
+        }
+
+<span class="nc" id="L708">        qb = SupportSQLiteQueryBuilder.builder(TABLE_PAYEES);</span>
+<span class="nc bnc" id="L709" title="All 2 branches missed.">        if (sortOrder == null) {</span>
+<span class="nc" id="L710">          sortOrder = KEY_PAYEE_NAME + &quot; COLLATE &quot; + getCollate();</span>
+        }
+<span class="nc bnc" id="L712" title="All 2 branches missed.">        if (projection == null)</span>
+<span class="nc" id="L713">          projection = Companion.payeeProjection(TABLE_PAYEES);</span>
+<span class="nc" id="L714">        additionalWhere.append(KEY_ROWID + &quot;!=&quot; + NULL_ROW_ID);</span>
+<span class="nc" id="L715">        break;</span>
+      case PAYEE_ID:
+<span class="nc" id="L717">        qb = SupportSQLiteQueryBuilder.builder(TABLE_PAYEES);</span>
+<span class="nc" id="L718">        additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L719">        break;</span>
+      case MAPPED_TRANSFER_ACCOUNTS:
+<span class="nc" id="L721">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNTS + &quot; JOIN &quot; + TABLE_TRANSACTIONS + &quot; ON (&quot; + KEY_TRANSFER_ACCOUNT + &quot; = &quot; + TABLE_ACCOUNTS + &quot;.&quot; + KEY_ROWID + &quot;)&quot;);</span>
+<span class="nc" id="L722">        projection = new String[]{&quot;DISTINCT &quot; + TABLE_ACCOUNTS + &quot;.&quot; + KEY_ROWID, KEY_LABEL};</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">        if (sortOrder == null) {</span>
+<span class="nc" id="L724">          sortOrder = KEY_LABEL;</span>
+        }
+        break;
+      case METHODS:
+<span class="nc" id="L728">        qb = SupportSQLiteQueryBuilder.builder(tableForPaymentMethodQuery(projection));</span>
+<span class="nc" id="L729">        groupBy = groupByForPaymentMethodQuery(projection);</span>
+<span class="nc" id="L730">        having = havingForPaymentMethodQuery(projection);</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc" id="L732">          projection = RepositoryPaymentMethodKt.fullProjection(getWrappedContext());</span>
+        } else {
+<span class="nc" id="L734">          projection = mapPaymentMethodProjection(projection, getWrappedContext());</span>
+        }
+<span class="nc bnc" id="L736" title="All 2 branches missed.">        if (sortOrder == null) {</span>
+<span class="nc" id="L737">          sortOrder = RepositoryPaymentMethodKt.localizedLabelForPaymentMethod(getWrappedContext(), KEY_LABEL) + &quot; COLLATE &quot; + getCollate();</span>
+        }
+<span class="nc" id="L739">        additionalWhere.append(KEY_ROWID + &quot;!=&quot; + NULL_ROW_ID);</span>
+<span class="nc" id="L740">        break;</span>
+      case MAPPED_METHODS:
+<span class="nc" id="L742">        String localizedLabel = RepositoryPaymentMethodKt.localizedLabelForPaymentMethod(getWrappedContext(), KEY_LABEL);</span>
+<span class="nc" id="L743">        qb = SupportSQLiteQueryBuilder.builder(TABLE_METHODS + &quot; JOIN &quot; + TABLE_TRANSACTIONS + &quot; ON (&quot; + KEY_METHODID + &quot; = &quot; + TABLE_METHODS + &quot;.&quot; + KEY_ROWID + &quot;)&quot;);</span>
+<span class="nc" id="L744">        projection = new String[]{&quot;DISTINCT &quot; + TABLE_METHODS + &quot;.&quot; + KEY_ROWID, localizedLabel + &quot; AS &quot; + KEY_LABEL};</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        if (sortOrder == null) {</span>
+<span class="nc" id="L746">          sortOrder = localizedLabel + &quot; COLLATE &quot; + getCollate();</span>
+        }
+        break;
+      case METHOD_ID:
+<span class="nc" id="L750">        qb = SupportSQLiteQueryBuilder.builder(TABLE_METHODS);</span>
+<span class="nc bnc" id="L751" title="All 2 branches missed.">        if (projection == null)</span>
+<span class="nc" id="L752">          projection =  RepositoryPaymentMethodKt.basePaymentMethodProjection(getWrappedContext());</span>
+<span class="nc" id="L753">        additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L754">        break;</span>
+      case METHODS_FILTERED:
+<span class="nc" id="L756">        localizedLabel = RepositoryPaymentMethodKt.localizedLabelForPaymentMethod(getWrappedContext(), KEY_LABEL);</span>
+<span class="nc" id="L757">        qb = SupportSQLiteQueryBuilder.builder(TABLE_METHODS + &quot; JOIN &quot; + TABLE_ACCOUNTTYES_METHODS + &quot; ON (&quot; + KEY_ROWID + &quot; = &quot; + KEY_METHODID + &quot;)&quot;);</span>
+<span class="nc" id="L758">        projection = new String[]{KEY_ROWID, localizedLabel + &quot; AS &quot; + KEY_LABEL, KEY_IS_NUMBERED};</span>
+<span class="nc" id="L759">        String paymentType = uri.getPathSegments().get(2);</span>
+        String typeSelect;
+<span class="nc bnc" id="L761" title="All 3 branches missed.">        switch (paymentType) {</span>
+<span class="nc" id="L762">          case &quot;1&quot; -&gt; typeSelect = &quot;&gt; -1&quot;;</span>
+<span class="nc" id="L763">          case &quot;-1&quot; -&gt; typeSelect = &quot;&lt; 1&quot;;</span>
+<span class="nc" id="L764">          default -&gt; typeSelect = &quot;= 0&quot;;</span>
+        }
+<span class="nc" id="L766">        selection = String.format(&quot;%s.%s %s&quot;, TABLE_METHODS, KEY_TYPE, typeSelect);</span>
+<span class="nc" id="L767">        String[] accountTypes = uri.getQueryParameter(QUERY_PARAMETER_ACCOUNT_TYPE_LIST).split(&quot;;&quot;);</span>
+
+<span class="nc" id="L769">        selection += &quot; AND &quot; + TABLE_ACCOUNTTYES_METHODS + &quot;.type &quot; + Operation.IN.getOp(accountTypes.length);</span>
+<span class="nc" id="L770">        selectionArgs = accountTypes;</span>
+<span class="nc bnc" id="L771" title="All 2 branches missed.">        if (sortOrder == null) {</span>
+<span class="nc" id="L772">          sortOrder = localizedLabel + &quot; COLLATE &quot; + getCollate();</span>
+        }
+<span class="nc" id="L774">        groupBy = KEY_ROWID;</span>
+<span class="nc" id="L775">        having = &quot;count(*) = &quot; + accountTypes.length;</span>
+<span class="nc" id="L776">        break;</span>
+      case ACCOUNTTYPES_METHODS:
+<span class="nc" id="L778">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNTTYES_METHODS);</span>
+<span class="nc" id="L779">        break;</span>
+      case TEMPLATES:
+<span class="nc" id="L781">        String instanceId = uri.getQueryParameter(QUERY_PARAMETER_WITH_INSTANCE);</span>
+<span class="nc bnc" id="L782" title="All 2 branches missed.">        if (instanceId == null) {</span>
+<span class="nc" id="L783">          String selector = getTemplateQuerySelector(uri);</span>
+<span class="nc bnc" id="L784" title="All 2 branches missed.">          selection = TextUtils.isEmpty(selection) ? selector : (selection +</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">                  (TextUtils.isEmpty(selector) ? &quot;&quot; : &quot; AND &quot; + selector));</span>
+<span class="nc" id="L786">          qb = SupportSQLiteQueryBuilder.builder(VIEW_TEMPLATES_EXTENDED);</span>
+<span class="nc bnc" id="L787" title="All 2 branches missed.">          if (projection == null) {</span>
+<span class="nc" id="L788">            projection = templateProjection(VIEW_TEMPLATES_EXTENDED);</span>
+          }
+<span class="nc" id="L790">        } else {</span>
+<span class="nc" id="L791">          qb = SupportSQLiteQueryBuilder.builder(String.format(Locale.ROOT, &quot;%1$s LEFT JOIN %2$s ON %1$s.%3$s = %4$s AND %5$s = %6$s LEFT JOIN %7$s ON %7$s.%3$s = %2$s.%8$s&quot;,</span>
+              VIEW_TEMPLATES_EXTENDED, TABLE_PLAN_INSTANCE_STATUS, KEY_ROWID, KEY_TEMPLATEID, KEY_INSTANCEID, instanceId,
+              TABLE_TRANSACTIONS, KEY_TRANSACTIONID));
+<span class="nc bnc" id="L794" title="All 2 branches missed.">          if (projection != null) {</span>
+<span class="nc" id="L795">            report(&quot;When calling templates cursor with QUERY_PARAMETER_WITH_INSTANCE, projection is ignored &quot;);</span>
+          }
+<span class="nc" id="L797">          projection = new String[]{KEY_TITLE, KEY_INSTANCEID, KEY_TRANSACTIONID, KEY_COLOR, KEY_CURRENCY,</span>
+<span class="nc" id="L798">              String.format(Locale.ROOT, &quot;coalesce(%1$s.%2$s, %3$s.%2$s) AS %2$s&quot;, TABLE_TRANSACTIONS, KEY_AMOUNT, VIEW_TEMPLATES_EXTENDED),</span>
+              VIEW_TEMPLATES_EXTENDED + &quot;.&quot; + KEY_ROWID + &quot; AS &quot; + KEY_ROWID, KEY_SEALED};
+        }
+
+<span class="nc" id="L802">        break;</span>
+      case TEMPLATE_ID:
+<span class="nc" id="L804">        qb = SupportSQLiteQueryBuilder.builder(VIEW_TEMPLATES_ALL);</span>
+<span class="nc" id="L805">        additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc bnc" id="L806" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc" id="L807">          projection = templateProjection(VIEW_TEMPLATES_ALL);</span>
+        }
+        break;
+      case SQLITE_SEQUENCE_TABLE:
+<span class="nc" id="L811">        qb = SupportSQLiteQueryBuilder.builder(&quot;SQLITE_SEQUENCE&quot;);</span>
+<span class="nc" id="L812">        projection = new String[]{&quot;seq&quot;};</span>
+<span class="nc" id="L813">        selection = &quot;name = ?&quot;;</span>
+<span class="nc" id="L814">        selectionArgs = new String[]{uri.getPathSegments().get(1)};</span>
+<span class="nc" id="L815">        break;</span>
+      case PLANINSTANCE_TRANSACTION_STATUS:
+<span class="nc" id="L817">        qb = SupportSQLiteQueryBuilder.builder(TABLE_PLAN_INSTANCE_STATUS);</span>
+<span class="nc" id="L818">        break;</span>
+      case PLANINSTANCE_STATUS_SINGLE:
+<span class="nc" id="L820">        qb = SupportSQLiteQueryBuilder.builder(String.format(Locale.ROOT, &quot;%1$s LEFT JOIN %2$s ON %3$s = %4$s&quot;, TABLE_PLAN_INSTANCE_STATUS, TABLE_TRANSACTIONS, KEY_ROWID, KEY_TRANSACTIONID));</span>
+<span class="nc" id="L821">        additionalWhere.append(String.format(Locale.ROOT, &quot;%s = %s AND %s = %s&quot;, KEY_TEMPLATEID,</span>
+<span class="nc" id="L822">            uri.getPathSegments().get(1), KEY_INSTANCEID, uri.getPathSegments().get(2)));</span>
+<span class="nc" id="L823">        projection = new String[]{KEY_TRANSACTIONID, KEY_AMOUNT};</span>
+<span class="nc" id="L824">        break;</span>
+      case CURRENCIES:
+<span class="pc bpc" id="L826" title="1 of 2 branches missed.">        if (projection == null) {</span>
+<span class="fc" id="L827">          projection = new String[] {</span>
+              KEY_ROWID, KEY_CODE, KEY_GROUPING, KEY_LABEL, KEY_USAGES, KEY_SYMBOL, KEY_FRACTION_DIGITS, KEY_COMMODITY_TYPE
+          };
+<span class="fc" id="L830">          qb = SupportSQLiteQueryBuilder.builder(CURRENCIES_USAGES_TABLE_EXPRESSION);</span>
+        } else {
+<span class="nc" id="L832">          qb = SupportSQLiteQueryBuilder.builder(TABLE_CURRENCIES);</span>
+        }
+<span class="nc" id="L834">        break;</span>
+      case DUAL:
+<span class="nc" id="L836">        return dualQuery(db, projection);</span>
+      case EVENT_CACHE:
+<span class="nc" id="L838">        qb = SupportSQLiteQueryBuilder.builder(TABLE_EVENT_CACHE);</span>
+<span class="nc" id="L839">        break;</span>
+      case DEBUG_SCHEMA:
+<span class="nc" id="L841">        return db.query(SupportSQLiteQueryBuilder.builder(&quot;sqlite_master&quot;).columns(new String[]{&quot;name&quot;, &quot;sql&quot;}).selection(&quot;type = 'table'&quot;, new Object[]{}).create());</span>
+      case STALE_IMAGES:
+<span class="nc" id="L843">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ATTACHMENTS);</span>
+<span class="nc" id="L844">        selection = Companion.getSTALE_ATTACHMENT_SELECTION();</span>
+<span class="nc bnc" id="L845" title="All 2 branches missed.">        if (projection == null)</span>
+<span class="nc" id="L846">          projection = new String[]{KEY_ROWID, KEY_URI};</span>
+        break;
+      case STALE_IMAGES_ID:
+<span class="nc" id="L849">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ATTACHMENTS);</span>
+<span class="nc" id="L850">        selection = Companion.getSTALE_ATTACHMENT_SELECTION() + &quot; AND &quot; + KEY_ROWID + &quot; = ?&quot;;</span>
+<span class="nc" id="L851">        selectionArgs = new String[] { uri.getPathSegments().get(1) };</span>
+<span class="nc" id="L852">        projection = new String[]{KEY_URI};</span>
+<span class="nc" id="L853">        break;</span>
+      case CHANGES:
+<span class="nc" id="L855">        selection = KEY_ACCOUNTID + &quot; = ? AND &quot; + KEY_SYNC_SEQUENCE_LOCAL + &quot; = ?&quot;;</span>
+<span class="nc" id="L856">        selectionArgs = new String[]{uri.getQueryParameter(KEY_ACCOUNTID), uri.getQueryParameter(KEY_SYNC_SEQUENCE_LOCAL)};</span>
+<span class="nc" id="L857">        qb = SupportSQLiteQueryBuilder.builder(VIEW_CHANGES_EXTENDED);</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc" id="L859">          projection = TransactionChange.Companion.getPROJECTION();</span>
+        }
+        break;
+      case SETTINGS: {
+<span class="nc" id="L863">        qb = SupportSQLiteQueryBuilder.builder(TABLE_SETTINGS);</span>
+<span class="nc" id="L864">        break;</span>
+      }
+      case CURRENCIES_CODE: {
+<span class="nc" id="L867">        qb = SupportSQLiteQueryBuilder.builder(TABLE_CURRENCIES);</span>
+<span class="nc" id="L868">        selection = KEY_CODE + &quot; = ?&quot;;</span>
+<span class="nc" id="L869">        selectionArgs = new String[]{uri.getPathSegments().get(1)};</span>
+<span class="nc" id="L870">        break;</span>
+      }
+      case AUTOFILL:
+<span class="nc" id="L873">        qb = SupportSQLiteQueryBuilder.builder(VIEW_EXTENDED);</span>
+<span class="nc" id="L874">        selection = KEY_ROWID + &quot;= (SELECT max(&quot; + KEY_ROWID + &quot;) FROM &quot; + TABLE_TRANSACTIONS</span>
+            + &quot; WHERE &quot; + WHERE_NOT_SPLIT + &quot; AND &quot; + KEY_PAYEEID + &quot; IN (?, (SELECT &quot; + KEY_PARENTID  +&quot; FROM &quot; + TABLE_PAYEES +
+                &quot; WHERE &quot; + KEY_ROWID + &quot; = ?)))&quot;;
+<span class="nc" id="L877">        String id = uri.getPathSegments().get(1);</span>
+<span class="nc" id="L878">        selectionArgs = new String[]{id,id};</span>
+<span class="nc" id="L879">        break;</span>
+      case ACCOUNT_EXCHANGE_RATE:
+<span class="nc" id="L881">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNT_EXCHANGE_RATES);</span>
+<span class="nc" id="L882">        additionalWhere.append(KEY_ACCOUNTID + &quot;=&quot;).append(uri.getPathSegments().get(1))</span>
+<span class="nc" id="L883">                .append(&quot; AND &quot; + KEY_CURRENCY_SELF + &quot;='&quot;).append(uri.getPathSegments().get(2)).append(&quot;'&quot;)</span>
+<span class="nc" id="L884">                .append(&quot; AND &quot; + KEY_CURRENCY_OTHER + &quot;='&quot;).append(uri.getPathSegments().get(3)).append(&quot;'&quot;);</span>
+<span class="nc" id="L885">        projection = new String[]{KEY_EXCHANGE_RATE};</span>
+<span class="nc" id="L886">        break;</span>
+      case BUDGETS:
+<span class="nc" id="L888">        qb = SupportSQLiteQueryBuilder.builder(getBudgetTableJoin());</span>
+<span class="nc bnc" id="L889" title="All 2 branches missed.">        projection = projection == null ? getBudgetProjection() : projection;</span>
+<span class="nc" id="L890">        break;</span>
+      case BUDGET_ID:
+<span class="nc" id="L892">        qb = SupportSQLiteQueryBuilder.builder(getBudgetTableJoin());</span>
+<span class="nc bnc" id="L893" title="All 2 branches missed.">        projection = projection == null ? getBudgetProjection() : projection;</span>
+<span class="nc" id="L894">        additionalWhere.append(TABLE_BUDGETS + &quot;.&quot; + KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L895">        break;</span>
+      case ACCOUNT_DEFAULT_BUDGET_ALLOCATIONS: {
+<span class="nc" id="L897">        return budgetAllocationGroupsQuery(db, uri);</span>
+      }
+      case BUDGET_FOR_PERIOD: {
+<span class="nc bnc" id="L900" title="All 6 branches missed.">        String sql = (projection != null &amp;&amp; projection.length == 1 &amp;&amp; projection[0].equals(KEY_BUDGET)) ? totalBudgetAllocation(uri) : budgetAllocation(uri);</span>
+<span class="nc" id="L901">        c = measureAndLogQuery(db, uri, sql, null, null);</span>
+<span class="nc" id="L902">        return c;</span>
+      }
+      case TAGS:
+<span class="nc" id="L905">        boolean withCount = uri.getBooleanQueryParameter(QUERY_PARAMETER_WITH_COUNT, false);</span>
+<span class="nc" id="L906">        boolean withFilter = uri.getBooleanQueryParameter(QUERY_PARAMETER_WITH_FILTER, false);</span>
+        String tableName;
+<span class="nc bnc" id="L908" title="All 2 branches missed.">        if (withCount) {</span>
+<span class="nc" id="L909">          tableName = TABLE_TAGS + &quot; LEFT JOIN &quot; + TABLE_TRANSACTIONS_TAGS + &quot; ON (&quot; + KEY_ROWID + &quot; = &quot; + KEY_TAGID + &quot;)&quot;;</span>
+<span class="nc" id="L910">          projection = new String[]{KEY_ROWID, KEY_LABEL, KEY_COLOR, String.format(&quot;count(%s) AS %s&quot;, KEY_TAGID, KEY_COUNT)};</span>
+<span class="nc" id="L911">          groupBy = KEY_ROWID;</span>
+        }
+<span class="nc bnc" id="L913" title="All 2 branches missed.">        else if (withFilter) {</span>
+<span class="nc" id="L914">          tableName = TABLE_TAGS + &quot; LEFT JOIN &quot; + TABLE_TRANSACTIONS_TAGS + &quot; ON (&quot; + TABLE_TAGS + &quot;.&quot; + KEY_ROWID + &quot; = &quot; + KEY_TAGID + &quot;) LEFT JOIN &quot; +</span>
+                  TABLE_TRANSACTIONS + &quot; ON (&quot; + TABLE_TRANSACTIONS + &quot;.&quot; + KEY_ROWID + &quot; = &quot; + KEY_TRANSACTIONID  + &quot;)&quot;;
+<span class="nc" id="L916">          projection = new String[]{TABLE_TAGS + &quot;.&quot; + KEY_ROWID, KEY_LABEL, KEY_COLOR };</span>
+<span class="nc" id="L917">          groupBy = TABLE_TAGS + &quot;.&quot; + KEY_ROWID;</span>
+        } else {
+<span class="nc" id="L919">          tableName = TABLE_TAGS;</span>
+        }
+<span class="nc" id="L921">        qb = SupportSQLiteQueryBuilder.builder(tableName);</span>
+<span class="nc" id="L922">        break;</span>
+      case TRANSACTIONS_TAGS:
+<span class="nc" id="L924">        qb = SupportSQLiteQueryBuilder.builder(TABLE_TRANSACTIONS_TAGS + &quot; LEFT JOIN &quot; + TABLE_TAGS + &quot; ON (&quot; + KEY_TAGID + &quot; = &quot; + KEY_ROWID + &quot;)&quot;);</span>
+<span class="nc" id="L925">        break;</span>
+      case TEMPLATES_TAGS:
+<span class="nc" id="L927">        qb = SupportSQLiteQueryBuilder.builder(TABLE_TEMPLATES_TAGS + &quot; LEFT JOIN &quot; + TABLE_TAGS + &quot; ON (&quot; + KEY_TAGID + &quot; = &quot; + KEY_ROWID + &quot;)&quot;);</span>
+<span class="nc" id="L928">        break;</span>
+      case ACCOUNTS_TAGS:
+<span class="nc" id="L930">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNTS_TAGS + &quot; LEFT JOIN &quot; + TABLE_TAGS + &quot; ON (&quot; + KEY_TAGID + &quot; = &quot; + KEY_ROWID + &quot;)&quot;);</span>
+<span class="nc" id="L931">        break;</span>
+      case TAG_ID:
+<span class="nc" id="L933">        qb = SupportSQLiteQueryBuilder.builder(TABLE_TAGS);</span>
+<span class="nc" id="L934">        additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L935">        break;</span>
+      case DEBTS: {
+<span class="nc" id="L937">        String date = uri.getQueryParameter(KEY_DATE);</span>
+<span class="nc bnc" id="L938" title="All 2 branches missed.">        String dateExpression = date != null ? &quot;cast(strftime('%s', '&quot; + date + &quot;', 'localtime', 'start of day', '+1 day', '-1 second', 'utc') as integer)&quot; : null;</span>
+<span class="nc" id="L939">        cte = amountCteForDebts(getHomeCurrency(), dateExpression);</span>
+<span class="nc bnc" id="L940" title="All 2 branches missed.">        if (dateExpression != null) {</span>
+<span class="nc" id="L941">          additionalWhere.append(KEY_DATE).append(&quot; &lt;= &quot;).append(dateExpression);</span>
+        }
+<span class="nc" id="L943">        String transactionId = uri.getQueryParameter(KEY_TRANSACTIONID);</span>
+<span class="nc bnc" id="L944" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc" id="L945">          projection = debtProjection(transactionId, true);</span>
+        }
+<span class="nc" id="L947">        qb = SupportSQLiteQueryBuilder.builder(DEBT_PAYEE_JOIN);</span>
+<span class="nc" id="L948">        break;</span>
+      }
+      case DEBT_ID: {
+<span class="nc bnc" id="L951" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc" id="L952">          projection = debtProjection(null,false);</span>
+        }
+<span class="nc" id="L954">        qb = SupportSQLiteQueryBuilder.builder(DEBT_PAYEE_JOIN);</span>
+<span class="nc" id="L955">        additionalWhere.append(TABLE_DEBTS + &quot;.&quot; + KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L956">        break;</span>
+      }
+      case BANKS: {
+<span class="nc" id="L959">        projection = Companion.getBANK_PROJECTION();</span>
+<span class="nc" id="L960">        qb = SupportSQLiteQueryBuilder.builder(TABLE_BANKS);</span>
+<span class="nc" id="L961">        break;</span>
+      }
+      case TRANSACTION_ATTRIBUTES: {
+<span class="nc" id="L964">        qb = SupportSQLiteQueryBuilder.builder(TRANSACTION_ATTRIBUTES_JOIN);</span>
+<span class="nc" id="L965">        break;</span>
+      }
+      case ACCOUNT_ATTRIBUTES: {
+<span class="nc" id="L968">        qb = SupportSQLiteQueryBuilder.builder(ACCOUNT_ATTRIBUTES_JOIN);</span>
+<span class="nc" id="L969">        break;</span>
+      }
+      case ATTACHMENTS: {
+<span class="nc" id="L972">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ATTACHMENTS);</span>
+<span class="nc bnc" id="L973" title="All 2 branches missed.">        if (selection == null) {</span>
+<span class="nc" id="L974">          String uuidSelection = uri.getQueryParameter(KEY_UUID);</span>
+<span class="nc bnc" id="L975" title="All 2 branches missed.">          selection = Companion.LIVE_ATTACHMENT_SELECTION(uuidSelection != null);</span>
+<span class="nc bnc" id="L976" title="All 2 branches missed.">          selectionArgs = uuidSelection != null ? new String[]{uuidSelection} : null;</span>
+<span class="nc" id="L977">        }</span>
+        break;
+      }
+      case TRANSACTION_ATTACHMENTS: {
+<span class="nc bnc" id="L981" title="All 2 branches missed.">        if (projection == null) {</span>
+<span class="nc" id="L982">          projection = new String[] { KEY_URI };</span>
+        }
+<span class="nc" id="L984">        qb = SupportSQLiteQueryBuilder.builder(TABLE_TRANSACTION_ATTACHMENTS + &quot; LEFT JOIN &quot; + TABLE_ATTACHMENTS + &quot; ON (&quot; + KEY_ATTACHMENT_ID + &quot; = &quot; + KEY_ROWID + &quot;)&quot;);</span>
+<span class="nc" id="L985">        break;</span>
+      }
+      case BUDGET_ALLOCATIONS: {
+<span class="nc" id="L988">        qb = SupportSQLiteQueryBuilder.builder(TABLE_BUDGET_ALLOCATIONS);</span>
+<span class="nc" id="L989">        break;</span>
+      }
+      case PRICES: {
+<span class="nc" id="L992">        qb = SupportSQLiteQueryBuilder.builder(VIEW_PRIORITIZED_PRICES);</span>
+<span class="nc" id="L993">        String commodity = uri.getQueryParameter(KEY_COMMODITY);</span>
+<span class="nc" id="L994">        String currency = uri.getQueryParameter(KEY_CURRENCY);</span>
+<span class="nc bnc" id="L995" title="All 2 branches missed.">        if (commodity != null) {</span>
+<span class="nc" id="L996">          selection = KEY_CURRENCY + &quot; = ? AND &quot; + KEY_COMMODITY + &quot;= ?&quot;;</span>
+<span class="nc" id="L997">          selectionArgs = new String[]{currency, commodity};</span>
+<span class="nc" id="L998">          extras = oldestTransactionForCurrency(db, commodity);</span>
+        }
+        break;
+      }
+      case LATEST_PRICES: {
+<span class="nc" id="L1003">        return measureAndLogQuery(db, uri, latestPricesQuery(uri), selection, selectionArgs);</span>
+      }
+
+      // This uses a separate Uri so that notify can be called on it and triggers reload with new home currency
+      case DYNAMIC_CURRENCIES: {
+<span class="nc" id="L1008">        String homeCurrency = getHomeCurrency();</span>
+<span class="nc" id="L1009">        String dynamicFilter = getDynamicExchangeRatesDefault();</span>
+        // If dynamicFilter is &quot;dynamic&quot;, we need to qualify it with the table alias
+<span class="nc bnc" id="L1011" title="All 2 branches missed.">        if (dynamicFilter.equals(KEY_DYNAMIC)) {</span>
+<span class="nc" id="L1012">          dynamicFilter = &quot;a.&quot; + dynamicFilter;</span>
+        }
+<span class="nc" id="L1014">        String sql = &quot;WITH pairs AS (&quot; +</span>
+                &quot;SELECT a.&quot; + KEY_CURRENCY + &quot; AS commodity, &quot; +
+                &quot;COALESCE(p.&quot; + KEY_CURRENCY + &quot;, ?) AS base &quot; +
+                &quot;FROM &quot; + TABLE_ACCOUNTS + &quot; a &quot; +
+                &quot;LEFT JOIN &quot; + TABLE_ACCOUNTS + &quot; p ON a.&quot; + KEY_PARENTID + &quot; = p.&quot; + KEY_ROWID + &quot; &quot; +
+                &quot;WHERE &quot; + dynamicFilter + &quot;) &quot; +
+                &quot;SELECT DISTINCT commodity, base FROM pairs WHERE commodity != base&quot;;
+<span class="nc" id="L1021">        return measureAndLogQuery(db, uri, sql, null, new Object[]{homeCurrency});</span>
+      }
+      case ACCOUNT_TYPES: {
+<span class="fc" id="L1024">        projection = new String[]{&quot;*&quot;, &quot;(SELECT count(*) FROM &quot; + TABLE_ACCOUNTS + &quot; WHERE &quot; + KEY_TYPE + &quot; = &quot; + TABLE_ACCOUNT_TYPES + &quot;.&quot; + KEY_ROWID + &quot;) AS &quot; + KEY_COUNT};</span>
+<span class="fc" id="L1025">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNT_TYPES);</span>
+<span class="fc" id="L1026">        break;</span>
+      }
+      case ACCOUNT_TYPE_ID: {
+<span class="nc" id="L1029">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNT_TYPES);</span>
+<span class="nc" id="L1030">        additionalWhere.append(KEY_ROWID + &quot;=&quot;).append(uri.getPathSegments().get(1));</span>
+<span class="nc" id="L1031">        break;</span>
+      }
+      case ACCOUNT_FLAGS: {
+<span class="nc" id="L1034">        projection = new String[]{&quot;*&quot;, &quot;(SELECT count(*) FROM &quot; + TABLE_ACCOUNTS + &quot; WHERE &quot; + KEY_FLAG + &quot; = &quot; + TABLE_ACCOUNT_FLAGS + &quot;.&quot; + KEY_ROWID + &quot;) AS &quot; + KEY_COUNT};</span>
+<span class="nc" id="L1035">        qb = SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNT_FLAGS);</span>
+<span class="nc" id="L1036">        break;</span>
+      }
+      default:
+<span class="nc" id="L1039">        throw unknownUri(uri);</span>
+    }
+
+<span class="fc" id="L1042">    c = measureAndLogQuery(qb, uri, db, projection, computeWhere(selection, additionalWhere), selectionArgs, groupBy, having, sortOrder, limit, cte);</span>
+
+<span class="fc" id="L1044">    c = wrapWithResultCompat(c, extras);</span>
+
+<span class="fc" id="L1046">    final String withPlanInfo = uri.getQueryParameter(QUERY_PARAMETER_WITH_PLAN_INFO);</span>
+<span class="pc bpc" id="L1047" title="3 of 4 branches missed.">    if (uriMatch == TEMPLATES &amp;&amp; withPlanInfo != null) {</span>
+<span class="nc bnc" id="L1048" title="All 6 branches missed.">      c = new PlanInfoCursorWrapper(getWrappedContext(), c, sortOrder == null, withPlanInfo.equals(&quot;2&quot;) || CALENDAR.hasPermission(getContext()));</span>
+    }
+<span class="fc" id="L1050">    c.setNotificationUri(getContext().getContentResolver(), uri);</span>
+<span class="fc" id="L1051">    return c;</span>
+  }
+
+  @Override
+  public String getType(@NonNull Uri uri) {
+<span class="nc" id="L1056">    return null;</span>
+  }
+
+  private IllegalArgumentException unknownUri(@NonNull Uri uri) {
+<span class="nc" id="L1060">    return new IllegalArgumentException(&quot;Unknown URL &quot; + uri);</span>
+  }
+
+  @Override
+  public Uri insert(@NonNull Uri uri, @Nullable ContentValues values) {
+<span class="nc" id="L1065">    log(&quot;INSERT Uri: %s, values: %s&quot;, uri, values);</span>
+<span class="nc" id="L1066">    SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+    long id;
+    Uri newUri;
+<span class="nc" id="L1069">    int uriMatch = URI_MATCHER.match(uri);</span>
+<span class="nc" id="L1070">    maybeSetDirty(uriMatch);</span>
+<span class="nc bnc" id="L1071" title="All 29 branches missed.">    switch (uriMatch) {</span>
+      case TRANSACTIONS -&gt; {
+<span class="nc" id="L1073">        Long equivalentAmount = values.getAsLong(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1074">        values.remove(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1075">        String tagList = values.getAsString(KEY_TAGLIST);</span>
+<span class="nc" id="L1076">        values.remove(KEY_TAGLIST);</span>
+<span class="nc bnc" id="L1077" title="All 2 branches missed.">        if (!values.containsKey(KEY_UUID)) {</span>
+<span class="nc" id="L1078">          throw new IllegalStateException(&quot;required value uuid is missing&quot;);</span>
+        }
+<span class="nc" id="L1080">        db.beginTransaction();</span>
+        try {
+<span class="nc" id="L1082">          id = MoreDbUtilsKt.insert(db, TABLE_TRANSACTIONS, values);</span>
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">          if (equivalentAmount != null) {</span>
+<span class="nc" id="L1084">            insertEquivalentAmount(db, id, equivalentAmount);</span>
+          }
+<span class="nc" id="L1086">          saveTransactionTags(db, id, tagList, true);</span>
+<span class="nc" id="L1087">          db.setTransactionSuccessful();</span>
+        } finally {
+<span class="nc" id="L1089">          db.endTransaction();</span>
+        }
+
+<span class="nc" id="L1092">        newUri = ContentUris.withAppendedId(TRANSACTIONS_URI, id);</span>
+
+<span class="nc" id="L1094">      }</span>
+      case ACCOUNTS -&gt; {
+<span class="nc bnc" id="L1096" title="All 2 branches missed.">        Preconditions.checkArgument(!values.containsKey(KEY_GROUPING));</span>
+<span class="nc" id="L1097">        id = MoreDbUtilsKt.insert(db, TABLE_ACCOUNTS, values);</span>
+<span class="nc" id="L1098">        newUri = ContentUris.withAppendedId(ACCOUNTS_URI, id);</span>
+<span class="nc" id="L1099">      }</span>
+      case METHODS -&gt; {
+<span class="nc" id="L1101">        id = MoreDbUtilsKt.insert(db, TABLE_METHODS, values);</span>
+<span class="nc" id="L1102">        newUri = ContentUris.withAppendedId(METHODS_URI, id);</span>
+<span class="nc" id="L1103">      }</span>
+      case ACCOUNTTYPES_METHODS -&gt; {
+<span class="nc" id="L1105">        id = MoreDbUtilsKt.insert(db, TABLE_ACCOUNTTYES_METHODS, values);</span>
+        //we are not interested in accessing individual entries in this table, but have to return a uri
+<span class="nc" id="L1107">        newUri = ContentUris.withAppendedId(ACCOUNTTYPES_METHODS_URI, id);</span>
+<span class="nc" id="L1108">      }</span>
+      case TEMPLATES -&gt; {
+<span class="nc" id="L1110">        String tagList = values.getAsString(KEY_TAGLIST);</span>
+<span class="nc" id="L1111">        values.remove(KEY_TAGLIST);</span>
+<span class="nc" id="L1112">        db.beginTransaction();</span>
+        try {
+<span class="nc" id="L1114">          id = MoreDbUtilsKt.insert(db, TABLE_TEMPLATES, values);</span>
+<span class="nc" id="L1115">          saveTransactionTags(db, id, tagList, true, true);</span>
+<span class="nc" id="L1116">          db.setTransactionSuccessful();</span>
+        } finally {
+<span class="nc" id="L1118">          db.endTransaction();</span>
+        }
+<span class="nc" id="L1120">        newUri = ContentUris.withAppendedId(TEMPLATES_URI, id);</span>
+<span class="nc" id="L1121">      }</span>
+      case PAYEES -&gt; {
+<span class="nc" id="L1123">        id = MoreDbUtilsKt.insert(db, TABLE_PAYEES, values);</span>
+<span class="nc" id="L1124">        newUri = ContentUris.withAppendedId(PAYEES_URI, id);</span>
+<span class="nc" id="L1125">      }</span>
+      case PLANINSTANCE_TRANSACTION_STATUS -&gt; {
+<span class="nc" id="L1127">        long templateId = values.getAsLong(KEY_TEMPLATEID);</span>
+<span class="nc" id="L1128">        long instanceId = values.getAsLong(KEY_INSTANCEID);</span>
+<span class="nc" id="L1129">        db.insert(TABLE_PLAN_INSTANCE_STATUS, CONFLICT_REPLACE, values);</span>
+<span class="nc" id="L1130">        Uri changeUri = Uri.parse(PLAN_INSTANCE_STATUS_URI + &quot;/&quot; + templateId + &quot;/&quot; + instanceId);</span>
+<span class="nc" id="L1131">        notifyChange(changeUri, false);</span>
+<span class="nc" id="L1132">        return changeUri;</span>
+      }
+      case EVENT_CACHE -&gt; {
+<span class="nc" id="L1135">        id = MoreDbUtilsKt.insert(db, TABLE_EVENT_CACHE, values);</span>
+<span class="nc" id="L1136">        newUri = ContentUris.withAppendedId(EVENT_CACHE_URI, id);</span>
+<span class="nc" id="L1137">      }</span>
+      case ACCOUNT_EXCHANGE_RATE -&gt; {
+<span class="nc" id="L1139">        values.put(KEY_ACCOUNTID, uri.getPathSegments().get(1));</span>
+<span class="nc" id="L1140">        values.put(KEY_CURRENCY_SELF, uri.getPathSegments().get(2));</span>
+<span class="nc" id="L1141">        values.put(KEY_CURRENCY_OTHER, uri.getPathSegments().get(3));</span>
+<span class="nc" id="L1142">        id = db.insert(TABLE_ACCOUNT_EXCHANGE_RATES, CONFLICT_REPLACE, values);</span>
+<span class="nc" id="L1143">        newUri = uri;</span>
+<span class="nc" id="L1144">      }</span>
+      case DUAL -&gt; {
+<span class="nc bnc" id="L1146" title="All 2 branches missed.">        if (&quot;1&quot;.equals(uri.getQueryParameter(QUERY_PARAMETER_SYNC_BEGIN))) {</span>
+<span class="nc" id="L1147">          id = pauseChangeTrigger(db);</span>
+<span class="nc" id="L1148">          newUri = uri;</span>
+        } else {
+<span class="nc" id="L1150">          throw unknownUri(uri);</span>
+        }
+      }
+      case SETTINGS -&gt; {
+<span class="nc" id="L1154">        id = db.insert(TABLE_SETTINGS, CONFLICT_REPLACE, values);</span>
+<span class="nc" id="L1155">        newUri = ContentUris.withAppendedId(SETTINGS_URI, id);</span>
+<span class="nc" id="L1156">      }</span>
+      case BUDGETS -&gt; {
+<span class="nc" id="L1158">        Long budget = values.getAsLong(KEY_BUDGET);</span>
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">        if (budget != null) {</span>
+<span class="nc" id="L1160">          values.remove(KEY_BUDGET);</span>
+        }
+<span class="nc" id="L1162">        id = MoreDbUtilsKt.insert(db, TABLE_BUDGETS, values);</span>
+<span class="nc bnc" id="L1163" title="All 2 branches missed.">        if (budget != null) {</span>
+<span class="nc" id="L1164">          ContentValues budgetInitialAmount = new ContentValues(2);</span>
+<span class="nc" id="L1165">          budgetInitialAmount.put(KEY_BUDGETID, id);</span>
+<span class="nc" id="L1166">          budgetInitialAmount.put(KEY_BUDGET, budget);</span>
+<span class="nc" id="L1167">          budgetInitialAmount.put(KEY_CATID, 0);</span>
+<span class="nc" id="L1168">          MoreDbUtilsKt.insert(db, TABLE_BUDGET_ALLOCATIONS, budgetInitialAmount);</span>
+        }
+<span class="nc" id="L1170">        newUri = BaseTransactionProvider.Companion.budgetUri(id);</span>
+<span class="nc" id="L1171">      }</span>
+      case CURRENCIES -&gt; {
+        try {
+<span class="nc" id="L1174">          id = MoreDbUtilsKt.insert(db, TABLE_CURRENCIES, values);</span>
+<span class="nc" id="L1175">        } catch (SQLiteConstraintException e) {</span>
+<span class="nc" id="L1176">          return null;</span>
+<span class="nc" id="L1177">        }</span>
+<span class="nc" id="L1178">        newUri = ContentUris.withAppendedId(CURRENCIES_URI, id);</span>
+<span class="nc" id="L1179">      }</span>
+      case TAGS -&gt; {
+<span class="nc" id="L1181">        id = MoreDbUtilsKt.insert(db, TABLE_TAGS, values);</span>
+<span class="nc" id="L1182">        newUri = ContentUris.withAppendedId(TAGS_URI, id);</span>
+<span class="nc" id="L1183">      }</span>
+      case TRANSACTIONS_TAGS -&gt; {
+<span class="nc bnc" id="L1185" title="All 2 branches missed.">        if (callerIsNotSyncAdapter(uri)) throw new IllegalArgumentException(&quot;Can only be called from sync adapter&quot;);</span>
+<span class="nc" id="L1186">        db.insert(TABLE_TRANSACTIONS_TAGS, CONFLICT_IGNORE, values);</span>
+        //the table does not have primary ids, we return the base uri
+<span class="nc" id="L1188">        notifyChange(uri, callerIsNotSyncAdapter(uri));</span>
+<span class="nc" id="L1189">        return TRANSACTIONS_TAGS_URI;</span>
+      }
+      case TEMPLATES_TAGS -&gt; {
+<span class="nc" id="L1192">        db.insert(TABLE_TEMPLATES_TAGS, CONFLICT_IGNORE, values);</span>
+        //the table does not have primary ids, we return the base uri
+<span class="nc" id="L1194">        notifyChange(uri, false);</span>
+<span class="nc" id="L1195">        return TEMPLATES_TAGS_URI;</span>
+      }
+      case ACCOUNTS_TAGS -&gt; {
+<span class="nc" id="L1198">        db.insert(TABLE_ACCOUNTS_TAGS, CONFLICT_IGNORE, values);</span>
+        //the table does not have primary ids, we return the base uri
+<span class="nc" id="L1200">        notifyChange(uri, false);</span>
+<span class="nc" id="L1201">        return ACCOUNTS_TAGS_URI;</span>
+      }
+      case DEBTS -&gt; {
+<span class="nc" id="L1204">        id = MoreDbUtilsKt.insert(db, TABLE_DEBTS, values);</span>
+<span class="nc" id="L1205">        newUri = ContentUris.withAppendedId(DEBTS_URI, id);</span>
+<span class="nc" id="L1206">      }</span>
+      case BANKS -&gt; {
+<span class="nc" id="L1208">        id = MoreDbUtilsKt.insert(db, TABLE_BANKS, values);</span>
+<span class="nc" id="L1209">        newUri = ContentUris.withAppendedId(BANKS_URI, id);</span>
+<span class="nc" id="L1210">      }</span>
+      // Currently not needed, until we implement Custom attributes
+/*      case ATTRIBUTES -&gt; {
+        insertAttribute(db, values);
+        return ATTRIBUTES_URI;
+      }*/
+      case TRANSACTION_ATTRIBUTES -&gt;  {
+<span class="nc" id="L1217">        insertTransactionAttribute(db, values);</span>
+<span class="nc" id="L1218">        notifyChange(TRANSACTIONS_ATTRIBUTES_URI, false);</span>
+<span class="nc" id="L1219">        return TRANSACTIONS_ATTRIBUTES_URI;</span>
+      }
+      case ACCOUNT_ATTRIBUTES -&gt;  {
+<span class="nc" id="L1222">        insertAccountAttribute(db, values);</span>
+<span class="nc" id="L1223">        notifyChange(ACCOUNTS_ATTRIBUTES_URI, false);</span>
+<span class="nc" id="L1224">        return ACCOUNTS_ATTRIBUTES_URI;</span>
+      }
+      case ATTACHMENTS -&gt;  {
+<span class="nc" id="L1227">        id = requireAttachment(db, values.getAsString(KEY_URI), values.getAsString(KEY_UUID));</span>
+<span class="nc" id="L1228">        newUri = ContentUris.withAppendedId(ATTACHMENTS_URI, id);</span>
+<span class="nc" id="L1229">      }</span>
+      case TRANSACTION_ATTACHMENTS -&gt; {
+<span class="nc" id="L1231">        String uuid = values.getAsString(KEY_UUID);</span>
+<span class="nc bnc" id="L1232" title="All 2 branches missed.">        if (uuid != null) {</span>
+<span class="nc" id="L1233">          Long attachmentByUuid = findAttachmentByUuid(db, uuid);</span>
+<span class="nc bnc" id="L1234" title="All 2 branches missed.">          if (attachmentByUuid == null) {</span>
+<span class="nc" id="L1235">            id = -1;</span>
+          } else {
+<span class="nc" id="L1237">            values.remove(KEY_UUID);</span>
+<span class="nc" id="L1238">            id = attachmentByUuid;</span>
+          }
+<span class="nc" id="L1240">        } else {</span>
+<span class="nc" id="L1241">          id = requireAttachment(db, values.getAsString(KEY_URI), null);</span>
+<span class="nc" id="L1242">          values.remove(KEY_URI);</span>
+        }
+<span class="nc bnc" id="L1244" title="All 2 branches missed.">        if (id != -1) {</span>
+<span class="nc" id="L1245">          values.put(KEY_ATTACHMENT_ID, id);</span>
+<span class="nc" id="L1246">          db.insert(TABLE_TRANSACTION_ATTACHMENTS, CONFLICT_IGNORE, values);</span>
+        }
+<span class="nc" id="L1248">        newUri = ContentUris.withAppendedId(ATTACHMENTS_URI, id);</span>
+<span class="nc" id="L1249">      }</span>
+      case TRANSACTION_TRANSFORM_TO_TRANSFER -&gt; {
+<span class="nc" id="L1251">        id = MoreDbUtilsKt.transformToTransfer(db, uri, prefHandler.getDefaultTransferCategory());</span>
+<span class="nc" id="L1252">        newUri = ContentUris.withAppendedId(TRANSACTIONS_URI, id);</span>
+<span class="nc" id="L1253">      }</span>
+      case BUDGET_ALLOCATIONS -&gt; {
+<span class="nc" id="L1255">        MoreDbUtilsKt.insert(db, TABLE_BUDGET_ALLOCATIONS, Objects.requireNonNull(values));</span>
+<span class="nc" id="L1256">        return BUDGET_ALLOCATIONS_URI;</span>
+      }
+      case PRICES -&gt; {
+<span class="nc" id="L1259">        id = db.insert(TABLE_PRICES, CONFLICT_REPLACE, Objects.requireNonNull(values));</span>
+<span class="nc" id="L1260">        newUri = ContentUris.withAppendedId(PRICES_URI, id);</span>
+<span class="nc" id="L1261">      }</span>
+      case ACCOUNT_TYPES -&gt; {
+<span class="nc" id="L1263">        id = MoreDbUtilsKt.insert(db, TABLE_ACCOUNT_TYPES, Objects.requireNonNull(values));</span>
+<span class="nc" id="L1264">        newUri = ContentUris.withAppendedId(ACCOUNT_TYPES_URI, id);</span>
+<span class="nc" id="L1265">      }</span>
+      case ACCOUNT_FLAGS -&gt; {
+<span class="nc" id="L1267">        id = MoreDbUtilsKt.insert(db, TABLE_ACCOUNT_FLAGS, Objects.requireNonNull(values));</span>
+<span class="nc" id="L1268">        newUri = ContentUris.withAppendedId(ACCOUNT_FLAGS_URI, id);</span>
+<span class="nc" id="L1269">      }</span>
+<span class="nc" id="L1270">      default -&gt; throw unknownUri(uri);</span>
+    }
+<span class="nc bnc" id="L1272" title="All 4 branches missed.">    notifyChange(uri, uriMatch == TRANSACTIONS &amp;&amp; callerIsNotSyncAdapter(uri));</span>
+    //the accounts cursor contains aggregates about transactions
+    //we need to notify it when transactions change
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">    if (uriMatch == TRANSACTIONS) {</span>
+<span class="nc" id="L1276">      notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1277">      notifyChange(DEBTS_URI, false);</span>
+<span class="nc bnc" id="L1278" title="All 2 branches missed.">    } else if (uriMatch == ACCOUNTS) {</span>
+<span class="nc" id="L1279">      notifyAccountChange();</span>
+<span class="nc" id="L1280">      notifyChange(BANKS_URI, false);</span>
+<span class="nc bnc" id="L1281" title="All 2 branches missed.">    } else if (uriMatch == DEBTS) {</span>
+<span class="nc" id="L1282">      notifyChange(PAYEES_URI, false);</span>
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">    } else if (uriMatch == TRANSACTION_ATTACHMENTS) {</span>
+<span class="nc" id="L1284">      notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc bnc" id="L1285" title="All 2 branches missed.">    } else if (uriMatch == TRANSACTION_TRANSFORM_TO_TRANSFER) {</span>
+<span class="nc" id="L1286">      notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1287">      notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1288">      notifyChange(DEBTS_URI, false);</span>
+<span class="nc bnc" id="L1289" title="All 2 branches missed.">    } else if (uriMatch == PRICES) {</span>
+<span class="nc" id="L1290">      notifyChange(LATEST_PRICES_URI, false);</span>
+<span class="nc" id="L1291">      notifyAccountChange();</span>
+    }
+<span class="nc" id="L1293">    return newUri;</span>
+  }
+
+  @Override
+  public int delete(@NonNull Uri uri, @Nullable String where, @Nullable String[] whereArgs) {
+<span class="nc" id="L1298">    log(&quot;Delete for URL: %s&quot;, uri);</span>
+<span class="nc" id="L1299">    SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+    int count;
+    String segment;
+<span class="nc" id="L1302">    int uriMatch = URI_MATCHER.match(uri);</span>
+<span class="nc" id="L1303">    maybeSetDirty(uriMatch);</span>
+<span class="nc bnc" id="L1304" title="All 35 branches missed.">    switch (uriMatch) {</span>
+<span class="nc" id="L1305">      case TRANSACTIONS -&gt; count = db.delete(TABLE_TRANSACTIONS, where, whereArgs);</span>
+<span class="nc" id="L1306">      case TRANSACTION_ID -&gt; count = deleteTransaction(db, uri);</span>
+<span class="nc" id="L1307">      case TEMPLATES -&gt; count = db.delete(TABLE_TEMPLATES, where, whereArgs);</span>
+<span class="nc" id="L1308">      case TEMPLATE_ID -&gt; count = db.delete(TABLE_TEMPLATES,</span>
+<span class="nc" id="L1309">              KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1310">      case ACCOUNTTYPES_METHODS -&gt; count = db.delete(TABLE_ACCOUNTTYES_METHODS, where, whereArgs);</span>
+<span class="nc" id="L1311">      case ACCOUNTS -&gt; count = db.delete(TABLE_ACCOUNTS, where, whereArgs);</span>
+<span class="nc" id="L1312">      case ACCOUNT_ID -&gt; count = db.delete(TABLE_ACCOUNTS,</span>
+<span class="nc" id="L1313">              KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+      case CATEGORIES -&gt;
+<span class="nc" id="L1315">              count = db.delete(TABLE_CATEGORIES, KEY_ROWID + &quot; != &quot; + SPLIT_CATID + prefixAnd(where),</span>
+                      whereArgs);
+      case CATEGORY_ID -&gt; {
+<span class="nc" id="L1318">        String lastPathSegment = uri.getLastPathSegment();</span>
+<span class="nc bnc" id="L1319" title="All 2 branches missed.">        if (Long.parseLong(lastPathSegment) == SPLIT_CATID)</span>
+<span class="nc" id="L1320">          throw new IllegalArgumentException(&quot;split category can not be deleted&quot;);</span>
+<span class="nc" id="L1321">        count = db.delete(TABLE_CATEGORIES,</span>
+<span class="nc" id="L1322">                KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1323">      }</span>
+<span class="nc" id="L1324">      case PAYEE_ID -&gt; count = db.delete(TABLE_PAYEES,</span>
+<span class="nc" id="L1325">              KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1326">      case METHOD_ID -&gt; count = db.delete(TABLE_METHODS,</span>
+<span class="nc" id="L1327">              KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+      case PLANINSTANCE_TRANSACTION_STATUS -&gt;
+<span class="nc" id="L1329">              count = db.delete(TABLE_PLAN_INSTANCE_STATUS, where, whereArgs);</span>
+      case PLANINSTANCE_STATUS_SINGLE -&gt; {
+<span class="nc" id="L1331">        count = db.delete(TABLE_PLAN_INSTANCE_STATUS,</span>
+<span class="nc" id="L1332">                String.format(Locale.ROOT, &quot;%s = ? AND %s = ?&quot;, KEY_TEMPLATEID, KEY_INSTANCEID),</span>
+<span class="nc" id="L1333">                new String[]{uri.getPathSegments().get(1), uri.getPathSegments().get(2)});</span>
+<span class="nc" id="L1334">        notifyChange(uri, false);</span>
+<span class="nc" id="L1335">        return count;</span>
+      }
+<span class="nc" id="L1337">      case EVENT_CACHE -&gt; count = db.delete(TABLE_EVENT_CACHE, where, whereArgs);</span>
+      case STALE_IMAGES_ID -&gt; {
+        //will fail if attachment is not stale
+<span class="nc" id="L1340">        segment = uri.getPathSegments().get(1);</span>
+<span class="nc" id="L1341">        count = db.delete(TABLE_ATTACHMENTS, KEY_ROWID + &quot; = ?&quot;, new String[] { segment});</span>
+<span class="nc" id="L1342">      }</span>
+<span class="nc" id="L1343">      case STALE_IMAGES -&gt; count = db.delete(TABLE_ATTACHMENTS, Companion.getSTALE_ATTACHMENT_SELECTION(), null);</span>
+
+<span class="nc" id="L1345">      case CHANGES -&gt; count = db.delete(TABLE_CHANGES, where, whereArgs);</span>
+<span class="nc" id="L1346">      case SETTINGS -&gt; count = db.delete(TABLE_SETTINGS, where, whereArgs);</span>
+      case BUDGET_ID -&gt;
+<span class="nc" id="L1348">              count = db.delete(TABLE_BUDGETS, KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1349">      case PAYEES -&gt; count = db.delete(TABLE_PAYEES, where, whereArgs);</span>
+<span class="nc" id="L1350">      case TAG_ID -&gt; count = db.delete(TABLE_TAGS,</span>
+<span class="nc" id="L1351">              KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+      case DUAL -&gt; {
+<span class="nc bnc" id="L1353" title="All 2 branches missed.">        if (&quot;1&quot;.equals(uri.getQueryParameter(QUERY_PARAMETER_SYNC_END))) {</span>
+<span class="nc" id="L1354">          count = resumeChangeTrigger(db);</span>
+        } else {
+<span class="nc" id="L1356">          throw unknownUri(uri);</span>
+        }
+      }
+      case TRANSACTIONS_TAGS -&gt; {
+<span class="nc bnc" id="L1360" title="All 2 branches missed.">        if (callerIsNotSyncAdapter(uri)) throw new IllegalArgumentException(&quot;Can only be called from sync adapter&quot;);</span>
+<span class="nc" id="L1361">        count = db.delete(TABLE_TRANSACTIONS_TAGS, where, whereArgs);</span>
+<span class="nc" id="L1362">      }</span>
+<span class="nc" id="L1363">      case TEMPLATES_TAGS -&gt; count = db.delete(TABLE_TEMPLATES_TAGS, where, whereArgs);</span>
+<span class="nc" id="L1364">      case ACCOUNTS_TAGS -&gt; count = db.delete(TABLE_ACCOUNTS_TAGS, where, whereArgs);</span>
+<span class="nc" id="L1365">      case DEBT_ID -&gt; count = deleteDebt(db, uri.getLastPathSegment(), where, whereArgs);</span>
+<span class="nc" id="L1366">      case BANK_ID -&gt; count = db.delete(TABLE_BANKS,</span>
+<span class="nc" id="L1367">              KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+      case TRANSACTION_ID_ATTACHMENT_ID -&gt; {
+<span class="nc" id="L1369">        String transactionId = uri.getPathSegments().get(2);</span>
+<span class="nc" id="L1370">        String attachmentId = uri.getPathSegments().get(3);</span>
+<span class="nc" id="L1371">        count = db.delete(TABLE_TRANSACTION_ATTACHMENTS,</span>
+                KEY_TRANSACTIONID + &quot; = ? AND &quot; + KEY_ATTACHMENT_ID + &quot; = ?&quot;,
+                new String[] { transactionId, attachmentId }
+        );
+<span class="nc" id="L1375">        deleteAttachment(db, Long.parseLong(attachmentId), null);</span>
+<span class="nc" id="L1376">      }</span>
+<span class="nc" id="L1377">      case TAGS -&gt; count = db.delete(TABLE_TAGS, where, whereArgs);</span>
+<span class="nc" id="L1378">      case BUDGET_ALLOCATIONS -&gt; count = db.delete(TABLE_BUDGET_ALLOCATIONS, where, whereArgs);</span>
+<span class="nc" id="L1379">      case PRICES -&gt;  count = db.delete(TABLE_PRICES, where, whereArgs);</span>
+<span class="nc" id="L1380">      case ACCOUNT_TYPE_ID -&gt; count = db.delete(TABLE_ACCOUNT_TYPES, KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1381">      case ACCOUNT_FLAG_ID -&gt; count = db.delete(TABLE_ACCOUNT_FLAGS, KEY_ROWID + &quot; = &quot; + uri.getLastPathSegment() + prefixAnd(where), whereArgs);</span>
+      case CURRENCIES_CODE -&gt; {
+<span class="nc" id="L1383">        String currency = uri.getLastPathSegment();</span>
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">        if (Utils.isKnownCurrency(currency)) {</span>
+<span class="nc" id="L1385">          throw new IllegalArgumentException(&quot;Can only delete custom currencies&quot;);</span>
+        }
+        try {
+<span class="nc" id="L1388">          count = db.delete(TABLE_CURRENCIES, String.format(&quot;%s = '%s'%s&quot;, KEY_CODE,</span>
+<span class="nc" id="L1389">                  currency, prefixAnd(where)), whereArgs);</span>
+<span class="nc" id="L1390">        } catch (SQLiteConstraintException e) {</span>
+<span class="nc" id="L1391">          return 0;</span>
+<span class="nc" id="L1392">        }</span>
+<span class="nc" id="L1393">      }</span>
+
+<span class="nc" id="L1395">      default -&gt; throw unknownUri(uri);</span>
+    }
+<span class="nc bnc" id="L1397" title="All 6 branches missed.">    if (uriMatch == TRANSACTIONS || (uriMatch == TRANSACTION_ID &amp;&amp; callerIsNotInBulkOperation(uri))) {</span>
+<span class="nc" id="L1398">      notifyChange(TRANSACTIONS_URI, callerIsNotSyncAdapter(uri));</span>
+<span class="nc" id="L1399">      notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1400">      notifyChange(DEBTS_URI, false);</span>
+    } else {
+<span class="nc bnc" id="L1402" title="All 4 branches missed.">      if (uriMatch == ACCOUNTS || uriMatch == ACCOUNT_ID) {</span>
+<span class="nc" id="L1403">        notifyAccountChange();</span>
+      }
+<span class="nc bnc" id="L1405" title="All 2 branches missed.">      if (uriMatch == DEBT_ID) {</span>
+<span class="nc" id="L1406">        notifyChange(PAYEES_URI, false);</span>
+<span class="nc bnc" id="L1407" title="All 2 branches missed.">      } else if (uriMatch == TRANSACTION_ID_ATTACHMENT_ID) {</span>
+<span class="nc" id="L1408">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc bnc" id="L1409" title="All 2 branches missed.">      } else if (uriMatch == BANK_ID) {</span>
+<span class="nc" id="L1410">        notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">      } else if (uriMatch == PRICES) {</span>
+<span class="nc" id="L1412">        notifyChange(LATEST_PRICES_URI, false);</span>
+<span class="nc" id="L1413">        notifyAccountChange();</span>
+      }
+<span class="nc bnc" id="L1415" title="All 2 branches missed.">      notifyChange(uri, uriMatch == TRANSACTION_ID);</span>
+    }
+<span class="nc" id="L1417">    return count;</span>
+  }
+
+  @Override
+  public int update(@NonNull Uri uri, @Nullable ContentValues values, @Nullable String where,
+                    @Nullable String[] whereArgs) {
+<span class="nc" id="L1423">    SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+    String segment; // contains rowId
+    int count;
+<span class="nc" id="L1426">    int uriMatch = URI_MATCHER.match(uri);</span>
+<span class="nc" id="L1427">    maybeSetDirty(uriMatch);</span>
+<span class="nc" id="L1428">    log(&quot;UPDATE Uri: %s, values: %s&quot;, uri, values);</span>
+<span class="nc" id="L1429">    final String lastPathSegment = uri.getLastPathSegment();</span>
+<span class="nc bnc" id="L1430" title="All 33 branches missed.">    switch (uriMatch) {</span>
+      case TRANSACTIONS -&gt; {
+<span class="nc" id="L1432">        boolean hasEquivalentAmount = values.containsKey(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1433">        @Nullable Long equivalentAmount = values.getAsLong(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1434">        values.remove(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1435">        db.beginTransaction();</span>
+        try {
+          //noinspection SizeReplaceableByIsEmpty
+<span class="nc bnc" id="L1438" title="All 2 branches missed.">          if (values.size() &gt; 0) {</span>
+<span class="nc" id="L1439">            count = MoreDbUtilsKt.update(db, TABLE_TRANSACTIONS, values, where, whereArgs);</span>
+          } else {
+<span class="nc" id="L1441">            count = 0;</span>
+          }
+<span class="nc bnc" id="L1443" title="All 2 branches missed.">          if (hasEquivalentAmount) {</span>
+<span class="nc" id="L1444">            count = insertOrReplaceEquivalentAmount(db, equivalentAmount, where, whereArgs);</span>
+          }
+<span class="nc" id="L1446">          db.setTransactionSuccessful();</span>
+        } finally {
+<span class="nc" id="L1448">            db.endTransaction();</span>
+          }
+<span class="nc" id="L1450">      }</span>
+      case TRANSACTION_ID -&gt; {
+<span class="nc" id="L1452">        boolean hasEquivalentAmount = values.containsKey(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1453">        @Nullable Long equivalentAmount = values.getAsLong(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1454">        values.remove(KEY_EQUIVALENT_AMOUNT);</span>
+<span class="nc" id="L1455">        String tagList = values.getAsString(KEY_TAGLIST);</span>
+<span class="nc" id="L1456">        values.remove(KEY_TAGLIST);</span>
+<span class="nc" id="L1457">        db.beginTransaction();</span>
+        try {
+<span class="nc" id="L1459">          long id = Long.parseLong(lastPathSegment);</span>
+          //noinspection SizeReplaceableByIsEmpty
+<span class="nc bnc" id="L1461" title="All 2 branches missed.">          if (values.size() &gt; 0) {</span>
+<span class="nc" id="L1462">              count = MoreDbUtilsKt.update(db, TABLE_TRANSACTIONS, values,</span>
+<span class="nc" id="L1463">                      KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where),</span>
+                      whereArgs);
+          } else {
+<span class="nc" id="L1466">            count = 0;</span>
+          }
+<span class="nc bnc" id="L1468" title="All 2 branches missed.">          if (hasEquivalentAmount) {</span>
+<span class="nc" id="L1469">            count = insertOrReplaceEquivalentAmount(db, id, equivalentAmount);</span>
+          }
+<span class="nc" id="L1471">          saveTransactionTags(db, id, tagList, true);</span>
+<span class="nc" id="L1472">          db.setTransactionSuccessful();</span>
+        } finally {
+<span class="nc" id="L1474">          db.endTransaction();</span>
+        }
+<span class="nc" id="L1476">    }</span>
+      case TRANSACTION_UNDELETE -&gt; {
+<span class="nc" id="L1478">        segment = uri.getPathSegments().get(1);</span>
+<span class="nc" id="L1479">        whereArgs = new String[]{segment, segment, segment, segment};</span>
+<span class="nc" id="L1480">        ContentValues v = new ContentValues();</span>
+<span class="nc" id="L1481">        v.put(KEY_CR_STATUS, CrStatus.UNRECONCILED.name());</span>
+<span class="nc" id="L1482">        count = MoreDbUtilsKt.update(db, TABLE_TRANSACTIONS, v, &quot;(&quot; + WHERE_SELF_OR_RELATED + &quot;) AND &quot; + KEY_CR_STATUS + &quot;='&quot; + CrStatus.VOID.name() + &quot;'&quot;, whereArgs);</span>
+<span class="nc" id="L1483">      }</span>
+<span class="nc" id="L1484">      case ACCOUNTS -&gt; count = MoreDbUtilsKt.update(db, TABLE_ACCOUNTS, values, where, whereArgs);</span>
+<span class="nc" id="L1485">      case ACCOUNT_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_ACCOUNTS, values,</span>
+<span class="nc" id="L1486">              KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1487">      case TEMPLATES -&gt; count = MoreDbUtilsKt.update(db, TABLE_TEMPLATES, values, where, whereArgs);</span>
+      case TEMPLATE_ID -&gt; {
+<span class="nc" id="L1489">        String tagList = values.getAsString(KEY_TAGLIST);</span>
+<span class="nc" id="L1490">        values.remove(KEY_TAGLIST);</span>
+<span class="nc" id="L1491">        db.beginTransaction();</span>
+        try {
+<span class="nc" id="L1493">          count = MoreDbUtilsKt.update(db, TABLE_TEMPLATES, values,</span>
+<span class="nc" id="L1494">                  KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1495">          saveTransactionTags(db, Long.parseLong(lastPathSegment), tagList, true, true);</span>
+<span class="nc" id="L1496">          db.setTransactionSuccessful();</span>
+        } finally {
+<span class="nc" id="L1498">          db.endTransaction();</span>
+        }
+<span class="nc" id="L1500">      }</span>
+      case PAYEE_ID -&gt; {
+<span class="nc" id="L1502">        count = MoreDbUtilsKt.update(db, TABLE_PAYEES, values,</span>
+<span class="nc" id="L1503">                KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1504">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1505">      }</span>
+      case CATEGORIES -&gt;
+<span class="nc" id="L1507">              throw new UnsupportedOperationException(&quot;Bulk update of categories is not supported&quot;);</span>
+      case CATEGORY_ID -&gt; {
+        //called from RepositoryCategory.moveCategory
+<span class="nc bnc" id="L1510" title="All 2 branches missed.">        if (values.containsKey(KEY_PARENTID)) {</span>
+<span class="nc" id="L1511">          Long parentId = values.getAsLong(KEY_PARENTID);</span>
+<span class="nc bnc" id="L1512" title="All 4 branches missed.">          if (parentId == null &amp;&amp; !values.containsKey(KEY_COLOR)) {</span>
+<span class="nc" id="L1513">            values.put(KEY_COLOR, suggestNewCategoryColor(db));</span>
+          }
+<span class="nc bnc" id="L1515" title="All 2 branches missed.">          if (parentId != null) {</span>
+<span class="nc" id="L1516">            values.putNull(KEY_COLOR);</span>
+          }
+        }
+<span class="nc" id="L1519">        segment = lastPathSegment;</span>
+<span class="nc" id="L1520">        count = MoreDbUtilsKt.update(db, TABLE_CATEGORIES, values, KEY_ROWID + &quot; = &quot; + segment + prefixAnd(where),</span>
+                whereArgs);
+<span class="nc" id="L1522">      }</span>
+      case METHOD_ID -&gt;
+<span class="nc" id="L1524">              count = MoreDbUtilsKt.update(db, TABLE_METHODS, values, KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where),</span>
+                      whereArgs);
+      case TEMPLATES_INCREASE_USAGE -&gt; {
+<span class="nc" id="L1527">        db.execSQL(&quot;UPDATE &quot; + TABLE_TEMPLATES + &quot; SET &quot; + KEY_USAGES + &quot; = &quot; + KEY_USAGES + &quot; + 1, &quot; +</span>
+<span class="nc" id="L1528">                KEY_LAST_USED + &quot; = strftime('%s', 'now') WHERE &quot; + KEY_ROWID + &quot; = &quot; + uri.getPathSegments().get(1));</span>
+<span class="nc" id="L1529">        count = 1;</span>
+<span class="nc" id="L1530">      }</span>
+      //   when we move a transaction to a new target we apply two checks
+      //1) we do not move a transfer to its own transfer_account
+      //2) we check if the transactions method_id is also available in the target account, if not we set it to null
+      case TRANSACTION_MOVE -&gt; {
+<span class="nc" id="L1535">        segment = uri.getPathSegments().get(1);</span>
+<span class="nc" id="L1536">        String target = uri.getPathSegments().get(3);</span>
+<span class="nc" id="L1537">        db.execSQL(&quot;UPDATE &quot; + TABLE_TRANSACTIONS +</span>
+                        &quot; SET &quot; +
+                        KEY_ACCOUNTID + &quot; = ?, &quot; +
+                        KEY_METHODID + &quot; = &quot; +
+                        &quot; CASE &quot; +
+                        &quot; WHEN exists &quot; +
+                        &quot; (SELECT 1 FROM &quot; + TABLE_ACCOUNTTYES_METHODS +
+                        &quot; WHERE &quot; + KEY_TYPE + &quot; = &quot; +
+                        &quot; (SELECT &quot; + KEY_TYPE + &quot; FROM &quot; + TABLE_ACCOUNTS +
+                        &quot; WHERE &quot; + KEY_ROWID + &quot; = ?) &quot; +
+                        &quot; AND &quot; + KEY_METHODID + &quot; = &quot; + TABLE_TRANSACTIONS + &quot;.&quot; + KEY_METHODID + &quot;)&quot; +
+                        &quot; THEN &quot; + KEY_METHODID +
+                        &quot; ELSE null &quot; +
+                        &quot; END &quot; +
+                        &quot; WHERE &quot; + KEY_ROWID + &quot; = ? &quot; +
+                        &quot; AND ( &quot; + KEY_TRANSFER_ACCOUNT + &quot; IS NULL OR &quot; + KEY_TRANSFER_ACCOUNT + &quot;  != ? )&quot;,
+                new String[]{target, target, segment, target});
+<span class="nc" id="L1554">        count = 1;</span>
+<span class="nc" id="L1555">      }</span>
+      case TRANSACTION_TOGGLE_CRSTATUS -&gt; {
+<span class="nc" id="L1557">        db.execSQL(&quot;UPDATE &quot; + TABLE_TRANSACTIONS +</span>
+                        &quot; SET &quot; + KEY_CR_STATUS +
+                        &quot; = CASE &quot; + KEY_CR_STATUS +
+                        &quot; WHEN '&quot; + &quot;CLEARED&quot; + &quot;'&quot; +
+                        &quot; THEN '&quot; + &quot;UNRECONCILED&quot; + &quot;'&quot; +
+                        &quot; WHEN '&quot; + &quot;UNRECONCILED&quot; + &quot;'&quot; +
+                        &quot; THEN '&quot; + &quot;CLEARED&quot; + &quot;'&quot; +
+                        &quot; ELSE &quot; + KEY_CR_STATUS +
+                        &quot; END&quot; +
+                        &quot; WHERE &quot; + KEY_ROWID + &quot; = ? &quot;,
+<span class="nc" id="L1567">                new String[]{uri.getPathSegments().get(1)});</span>
+<span class="nc" id="L1568">        count = 1;</span>
+<span class="nc" id="L1569">      }</span>
+      case CHANGES -&gt; {
+<span class="nc bnc" id="L1571" title="All 2 branches missed.">        if (uri.getBooleanQueryParameter(QUERY_PARAMETER_INIT, false)) {</span>
+<span class="nc" id="L1572">          initChangeLog(db, uri.getQueryParameter(KEY_ACCOUNTID));</span>
+<span class="nc" id="L1573">          count = 1;</span>
+        } else {
+<span class="nc" id="L1575">          count = MoreDbUtilsKt.update(db, TABLE_CHANGES, values, where, whereArgs);</span>
+        }
+<span class="nc" id="L1577">      }</span>
+<span class="nc" id="L1578">      case ACCOUNT_ID_GROUPING -&gt; count = handleAccountProperty(db, uri, KEY_GROUPING);</span>
+<span class="nc" id="L1579">      case ACCOUNT_ID_SORT -&gt; count = handleAccountProperty(db, uri, KEY_SORT_BY, KEY_SORT_DIRECTION);</span>
+<span class="nc" id="L1580">      case UNSPLIT -&gt; count = unsplit(db, values, callerIsNotSyncAdapter(uri));</span>
+<span class="nc" id="L1581">      case UNARCHIVE -&gt; count = unarchive(db, values, callerIsNotSyncAdapter(uri));</span>
+<span class="nc" id="L1582">      case BUDGET_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_BUDGETS, values,</span>
+<span class="nc" id="L1583">              KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1584">      case BANK_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_BANKS, values,</span>
+<span class="nc" id="L1585">              KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1586">      case BUDGET_CATEGORY -&gt; count = budgetCategoryUpsert(db, uri, values);</span>
+<span class="nc" id="L1587">      case BUDGET_ALLOCATIONS -&gt; count = MoreDbUtilsKt.update(db, TABLE_BUDGET_ALLOCATIONS, values, where, whereArgs);</span>
+<span class="nc" id="L1588">      case TAG_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_TAGS, values,</span>
+<span class="nc" id="L1589">              KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1590">      case TRANSACTION_LINK_TRANSFER -&gt; count = MoreDbUtilsKt.linkTransfers(db, uri.getPathSegments().get(2), values.getAsString(KEY_UUID), callerIsNotSyncAdapter(uri));</span>
+<span class="nc" id="L1591">      case TRANSACTION_UNLINK_TRANSFER -&gt; count = MoreDbUtilsKt.unlinkTransfers(db, Objects.requireNonNull(lastPathSegment));</span>
+<span class="nc" id="L1592">      case DEBTS -&gt; count = MoreDbUtilsKt.update(db, TABLE_DEBTS, values, where, whereArgs);</span>
+<span class="nc" id="L1593">      case DEBT_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_DEBTS, values,</span>
+<span class="nc" id="L1594">              KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1595">      case PLANINSTANCE_TRANSACTION_STATUS -&gt; count = MoreDbUtilsKt.update(db, TABLE_PLAN_INSTANCE_STATUS, values, where, whereArgs);</span>
+
+      //used during restore
+<span class="nc" id="L1598">      case ATTACHMENTS -&gt; count = MoreDbUtilsKt.update(db, TABLE_ATTACHMENTS, values, where, whereArgs);</span>
+<span class="nc" id="L1599">      case ACCOUNT_TYPE_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_ACCOUNT_TYPES, values, KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1600">      case ACCOUNT_FLAG_ID -&gt; count = MoreDbUtilsKt.update(db, TABLE_ACCOUNT_FLAGS, values, KEY_ROWID + &quot; = &quot; + lastPathSegment + prefixAnd(where), whereArgs);</span>
+<span class="nc" id="L1601">      default -&gt; throw unknownUri(uri);</span>
+    }
+<span class="nc bnc" id="L1603" title="All 22 branches missed.">    if (uriMatch == TRANSACTIONS || uriMatch == TRANSACTION_ID || uriMatch == ACCOUNTS || uriMatch == ACCOUNT_ID ||</span>
+        uriMatch == CURRENCIES || uriMatch == TRANSACTION_UNDELETE ||
+        uriMatch == TRANSACTION_MOVE || uriMatch == TRANSACTION_TOGGLE_CRSTATUS ||
+        uriMatch == TRANSACTION_LINK_TRANSFER  || uriMatch == TRANSACTION_UNLINK_TRANSFER || uriMatch == UNARCHIVE) {
+<span class="nc" id="L1607">      notifyChange(TRANSACTIONS_URI, callerIsNotSyncAdapter(uri));</span>
+<span class="nc" id="L1608">      notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1609">      notifyChange(DEBTS_URI, false);</span>
+<span class="nc" id="L1610">      notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc bnc" id="L1611" title="All 2 branches missed.">    } else if (</span>
+      //we do not need to refresh cursors on the usage counters
+        uriMatch != TEMPLATES_INCREASE_USAGE) {
+<span class="nc" id="L1614">      notifyChange(uri, false);</span>
+    }
+<span class="nc bnc" id="L1616" title="All 4 branches missed.">    if (uriMatch == ACCOUNT_ID_GROUPING || uriMatch == ACCOUNT_ID_SORT) {</span>
+<span class="nc" id="L1617">      notifyChange(ACCOUNTS_URI, false);</span>
+    }
+<span class="nc bnc" id="L1619" title="All 4 branches missed.">    if (uriMatch == CURRENCIES || uriMatch == TEMPLATES_INCREASE_USAGE) {</span>
+<span class="nc" id="L1620">      notifyChange(TEMPLATES_URI, false);</span>
+    }
+<span class="nc bnc" id="L1622" title="All 2 branches missed.">    if (uriMatch == BUDGET_CATEGORY) {</span>
+<span class="nc" id="L1623">      notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1624">      notifyChange(BUDGETS_URI, false);</span>
+    }
+<span class="nc bnc" id="L1626" title="All 2 branches missed.">    if (uriMatch == BUDGET_ALLOCATIONS) {</span>
+<span class="nc" id="L1627">      notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1628">      notifyChange(BUDGETS_URI, false);</span>
+    }
+<span class="nc bnc" id="L1630" title="All 4 branches missed.">    if (uriMatch == ACCOUNTS || uriMatch == ACCOUNT_ID) {</span>
+<span class="nc" id="L1631">      notifyAccountChange();</span>
+    }
+<span class="nc bnc" id="L1633" title="All 4 branches missed.">    if (uriMatch == CATEGORY_ID || uriMatch == METHOD_ID) {</span>
+<span class="nc" id="L1634">      notifyChange(TRANSACTIONS_URI, false);</span>
+    }
+<span class="nc bnc" id="L1636" title="All 2 branches missed.">    if (uriMatch == ACCOUNT_TYPE_ID) {</span>
+<span class="nc" id="L1637">      notifyChange(ACCOUNTS_URI, false);</span>
+    }
+<span class="nc bnc" id="L1639" title="All 2 branches missed.">    if (uriMatch == ACCOUNT_FLAG_ID) {</span>
+<span class="nc" id="L1640">      notifyChange(ACCOUNTS_URI, false);</span>
+    }
+<span class="nc bnc" id="L1642" title="All 2 branches missed.">    if (uriMatch == BUDGET_ID) {</span>
+<span class="nc" id="L1643">        notifyChange(BUDGETS_URI.buildUpon()</span>
+<span class="nc" id="L1644">                .appendPath(&quot;defaultBudgetAllocations&quot;)</span>
+<span class="nc" id="L1645">                .build(), false);</span>
+    }
+<span class="nc" id="L1647">    return count;</span>
+  }
+
+  /**
+   * Apply the given set of {@link ContentProviderOperation}, executing inside
+   * a transaction. All changes will be rolled back if
+   * any single one fails.
+   */
+  @NonNull
+  @Override
+  public ContentProviderResult[] applyBatch(@NonNull ArrayList&lt;ContentProviderOperation&gt; operations)
+      throws OperationApplicationException {
+<span class="nc" id="L1659">    final SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+<span class="nc" id="L1660">    final boolean alreadyInBulk = getBulkInProgress();</span>
+<span class="nc bnc" id="L1661" title="All 2 branches missed.">    if (!alreadyInBulk) {</span>
+<span class="nc" id="L1662">      setBulkInProgress(true);</span>
+    }
+<span class="nc" id="L1664">    db.beginTransaction();</span>
+    try {
+<span class="nc" id="L1666">      final int numOperations = operations.size();</span>
+<span class="nc" id="L1667">      final ContentProviderResult[] results = new ContentProviderResult[numOperations];</span>
+<span class="nc bnc" id="L1668" title="All 2 branches missed.">      for (int i = 0; i &lt; numOperations; i++) {</span>
+<span class="nc" id="L1669">        final ContentProviderOperation contentProviderOperation = operations.get(i);</span>
+        try {
+<span class="nc" id="L1671">          Timber.d(&quot;URI: %s&quot;, contentProviderOperation.getUri());</span>
+<span class="nc" id="L1672">          ContentProviderResult result = contentProviderOperation.apply(this, results, i);</span>
+<span class="nc" id="L1673">          Timber.d(&quot;Result: %s&quot;, result);</span>
+<span class="nc" id="L1674">          results[i] = result;</span>
+<span class="nc" id="L1675">        } catch (Exception e) {</span>
+<span class="nc" id="L1676">          Map&lt;String, String&gt; customData = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L1677">          customData.put(&quot;i&quot;, String.valueOf(i));</span>
+<span class="nc" id="L1678">          customData.put(&quot;operation&quot;, contentProviderOperation.toString());</span>
+<span class="nc" id="L1679">          CrashHandler.report(e, customData, TAG);</span>
+<span class="nc" id="L1680">          throw e;</span>
+<span class="nc" id="L1681">        }</span>
+      }
+<span class="nc" id="L1683">      db.setTransactionSuccessful();</span>
+<span class="nc" id="L1684">      return results;</span>
+    } finally {
+<span class="nc" id="L1686">      db.endTransaction();</span>
+<span class="nc bnc" id="L1687" title="All 2 branches missed.">      if (!alreadyInBulk) {</span>
+<span class="nc" id="L1688">        setBulkInProgress(false);</span>
+<span class="nc" id="L1689">        notifyBulk();</span>
+      }
+    }
+  }
+
+  @Nullable
+  @Override
+  public Bundle call(@NonNull String method, @Nullable String arg, @Nullable Bundle extras) {
+<span class="nc" id="L1697">    log(&quot;Call method: %s, arg: %s, extras: %s&quot;, method, arg, extras);</span>
+<span class="nc bnc" id="L1698" title="All 24 branches missed.">    switch (method) {</span>
+<span class="nc" id="L1699">      case METHOD_BULK_START -&gt; setBulkInProgress(true);</span>
+      case METHOD_BULK_END -&gt; {
+<span class="nc" id="L1701">        setBulkInProgress(false);</span>
+<span class="nc" id="L1702">        notifyBulk();</span>
+<span class="nc" id="L1703">      }</span>
+      case METHOD_SORT_ACCOUNTS -&gt; {
+<span class="nc" id="L1705">        final SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+<span class="nc bnc" id="L1706" title="All 2 branches missed.">        if (extras != null) {</span>
+<span class="nc" id="L1707">          long[] sortedIds = extras.getLongArray(KEY_SORT_KEY);</span>
+<span class="nc bnc" id="L1708" title="All 2 branches missed.">          if (sortedIds != null) {</span>
+<span class="nc" id="L1709">            ContentValues values = new ContentValues(1);</span>
+<span class="nc bnc" id="L1710" title="All 2 branches missed.">            for (int i = 0; i &lt; sortedIds.length; i++) {</span>
+<span class="nc" id="L1711">              values.put(KEY_SORT_KEY, i);</span>
+<span class="nc" id="L1712">              MoreDbUtilsKt.update(db, TABLE_ACCOUNTS, values, KEY_ROWID + &quot; = ?&quot;, new String[]{String.valueOf(sortedIds[i])});</span>
+            }
+<span class="nc" id="L1714">            notifyChange(ACCOUNTS_URI, false);</span>
+          }
+        }
+<span class="nc" id="L1717">      }</span>
+      case METHOD_SETUP_CATEGORIES -&gt; {
+<span class="nc" id="L1719">        Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1720">        result.putSerializable(KEY_RESULT, MoreDbUtilsKt.setupDefaultCategories(getHelper().getWritableDatabase(), getWrappedContext().getResources()));</span>
+<span class="nc" id="L1721">        notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1722">        return result;</span>
+      }
+      case METHOD_SETUP_CATEGORIES_DRY_RUN -&gt;  {
+<span class="nc" id="L1725">        Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1726">        result.putParcelable(KEY_RESULT, MoreDbUtilsKt.getImportableCategories(getHelper().getWritableDatabase(), getWrappedContext().getResources()));</span>
+<span class="nc" id="L1727">        return result;</span>
+      }
+      case METHOD_CHECK_CORRUPTED_DATA_987 -&gt; {
+<span class="nc" id="L1730">        return checkCorruptedData987();</span>
+      }
+      case METHOD_DELETE_ATTACHMENTS -&gt;  {
+<span class="nc" id="L1733">        Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1734">        result.putBoolean(KEY_RESULT, deleteAttachments(getHelper().getWritableDatabase(), extras.getLong(KEY_TRANSACTIONID), Arrays.asList(extras.getStringArray(KEY_URI_LIST))));</span>
+<span class="nc" id="L1735">        return result;</span>
+      }
+      case METHOD_SAVE_CATEGORY -&gt;  {
+<span class="nc" id="L1738">        Bundle bundle = saveCategory(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1739">        notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1740">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1741">        return bundle;</span>
+      }
+      case METHOD_ENSURE_CATEGORY -&gt; {
+<span class="nc" id="L1744">        Bundle bundle = ensureCategory(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1745">        notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1746">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1747">        return bundle;</span>
+      }
+      case METHOD_ENSURE_CATEGORY_TREE -&gt; {
+<span class="nc" id="L1750">        Bundle bundle = ensureCategoryTree(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1751">        notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1752">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1753">        return bundle;</span>
+      }
+      case METHOD_SAVE_TRANSACTION_TAGS -&gt;  {
+<span class="nc" id="L1756">        saveTransactionTags(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1757">        notifyChange(TRANSACTIONS_URI, true);</span>
+<span class="nc" id="L1758">      }</span>
+      case METHOD_MERGE_CATEGORIES -&gt; {
+<span class="nc" id="L1760">        mergeCategories(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1761">        notifyChange(CATEGORIES_URI, false);</span>
+<span class="nc" id="L1762">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1763">      }</span>
+      case METHOD_ARCHIVE -&gt; {
+<span class="nc" id="L1765">        Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1766">        result.putLong(KEY_TRANSACTIONID, archive(getHelper().getWritableDatabase(), Objects.requireNonNull(extras)));</span>
+<span class="nc" id="L1767">        notifyChange(TRANSACTIONS_URI, true);</span>
+<span class="nc" id="L1768">        notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1769">        return result;</span>
+      }
+      case METHOD_CAN_BE_ARCHIVED -&gt; {
+<span class="nc" id="L1772">         Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1773">         result.putParcelable(KEY_RESULT, canBeArchived(getHelper().getWritableDatabase(), Objects.requireNonNull(extras)));</span>
+<span class="nc" id="L1774">         return result;</span>
+      }
+      case METHOD_RECALCULATE_EQUIVALENT_AMOUNTS -&gt; {
+<span class="nc" id="L1777">        Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1778">        result.putSerializable(KEY_RESULT, recalculateEquivalentAmounts(getHelper().getWritableDatabase(), Objects.requireNonNull(extras)));</span>
+<span class="nc" id="L1779">        notifyChange(TRANSACTIONS_URI, true);</span>
+<span class="nc" id="L1780">        notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1781">        return result;</span>
+      }
+      case METHOD_RECALCULATE_EQUIVALENT_AMOUNTS_FOR_DATE -&gt; {
+<span class="nc" id="L1784">        Bundle result = new Bundle(1);</span>
+<span class="nc" id="L1785">        result.putInt(KEY_RESULT, recalculateEquivalentAmountsForDate(getHelper().getWritableDatabase(), Objects.requireNonNull(extras)));</span>
+<span class="nc" id="L1786">        notifyChange(TRANSACTIONS_URI, true);</span>
+<span class="nc" id="L1787">        notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1788">        return result;</span>
+      }
+      case METHOD_FLAG_SORT -&gt; {
+<span class="nc" id="L1791">        Bundle result = setFlagSort(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1792">        notifyChange(ACCOUNT_FLAGS_URI, false);</span>
+<span class="nc" id="L1793">        return result;</span>
+      }
+      case METHOD_TYPE_SORT -&gt;  {
+<span class="nc" id="L1796">        Bundle result = setTypeSort(getHelper().getWritableDatabase(), Objects.requireNonNull(extras));</span>
+<span class="nc" id="L1797">        notifyChange(ACCOUNT_TYPES_URI, false);</span>
+<span class="nc" id="L1798">        notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1799">        return result;</span>
+      }
+      case METHOD_CLEANUP_UNUSED_PAYEES -&gt; {
+<span class="nc" id="L1802">        cleanupUnusedPayees(getHelper().getWritableDatabase());</span>
+<span class="nc" id="L1803">        notifyChange(PAYEES_URI, false);</span>
+<span class="nc" id="L1804">        return null;</span>
+      }
+      case METHOD_APPLY_CHANGES -&gt;  {
+<span class="nc" id="L1807">        return applyChangesFromSync(Objects.requireNonNull(extras));</span>
+      }
+      case METHOD_UPDATE_CURRENCY -&gt; {
+<span class="nc" id="L1810">        SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+<span class="nc" id="L1811">        Bundle result = updateCurrency(db, extras);</span>
+<span class="nc" id="L1812">        notifyChange(TRANSACTIONS_URI, false);</span>
+<span class="nc" id="L1813">        notifyChange(ACCOUNTS_URI, false);</span>
+<span class="nc" id="L1814">        notifyChange(CURRENCIES_URI, false);</span>
+<span class="nc" id="L1815">        notifyChange(TEMPLATES_URI, false);</span>
+<span class="nc" id="L1816">        return result;</span>
+      }
+      case METHOD_CHECK_CURRENCY_IN_USE -&gt; {
+<span class="nc" id="L1819">        SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+<span class="nc" id="L1820">        return checkCurrencyInUse(db, arg);</span>
+      }
+      case METHOD_STORE_FRACTION_DIGITS -&gt; {
+<span class="nc" id="L1823">        SupportSQLiteDatabase db = getHelper().getWritableDatabase();</span>
+<span class="nc" id="L1824">        BaseTransactionProvider.Companion.storeFractionDigits(db, arg, extras);</span>
+<span class="nc" id="L1825">        return null;</span>
+      }
+    }
+<span class="nc" id="L1828">    return null;</span>
+  }
+
+  static {
+<span class="fc" id="L1832">    URI_MATCHER = new UriMatcher(UriMatcher.NO_MATCH);</span>
+<span class="fc" id="L1833">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions&quot;, TRANSACTIONS);</span>
+<span class="fc" id="L1834">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/&quot; + URI_SEGMENT_GROUPS + &quot;/*&quot;, TRANSACTIONS_GROUPS);</span>
+<span class="fc" id="L1835">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/&quot; + URI_SEGMENT_SUMS_FOR_ACCOUNTS, TRANSACTIONS_SUMS);</span>
+<span class="fc" id="L1836">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/#&quot;, TRANSACTION_ID);</span>
+<span class="fc" id="L1837">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/#/&quot; + URI_SEGMENT_MOVE + &quot;/#&quot;, TRANSACTION_MOVE);</span>
+<span class="fc" id="L1838">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/#/&quot; + URI_SEGMENT_TOGGLE_CRSTATUS, TRANSACTION_TOGGLE_CRSTATUS);</span>
+<span class="fc" id="L1839">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/#/&quot; + URI_SEGMENT_UNDELETE, TRANSACTION_UNDELETE);</span>
+    //uses uuid in order to be usable from sync adapter
+<span class="fc" id="L1841">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/unsplit&quot;, UNSPLIT);</span>
+<span class="fc" id="L1842">    URI_MATCHER.addURI(AUTHORITY, &quot;categories&quot;, CATEGORIES);</span>
+<span class="fc" id="L1843">    URI_MATCHER.addURI(AUTHORITY, &quot;categories/#&quot;, CATEGORY_ID);</span>
+<span class="fc" id="L1844">    URI_MATCHER.addURI(AUTHORITY, &quot;accounts&quot;, ACCOUNTS);</span>
+<span class="fc" id="L1845">    URI_MATCHER.addURI(AUTHORITY, &quot;accountsbase&quot;, ACCOUNTS_BASE);</span>
+<span class="fc" id="L1846">    URI_MATCHER.addURI(AUTHORITY, &quot;accounts/#&quot;, ACCOUNT_ID);</span>
+<span class="fc" id="L1847">    URI_MATCHER.addURI(AUTHORITY, URI_SEGMENT_GROUPING + &quot;/*/*&quot;, ACCOUNT_ID_GROUPING);</span>
+<span class="fc" id="L1848">    URI_MATCHER.addURI(AUTHORITY, URI_SEGMENT_SORT + &quot;/*/*/*&quot;, ACCOUNT_ID_SORT);</span>
+<span class="fc" id="L1849">    URI_MATCHER.addURI(AUTHORITY, &quot;payees&quot;, PAYEES);</span>
+<span class="fc" id="L1850">    URI_MATCHER.addURI(AUTHORITY, &quot;payees/#&quot;, PAYEE_ID);</span>
+<span class="fc" id="L1851">    URI_MATCHER.addURI(AUTHORITY, &quot;methods&quot;, METHODS);</span>
+<span class="fc" id="L1852">    URI_MATCHER.addURI(AUTHORITY, &quot;methods/#&quot;, METHOD_ID);</span>
+    //methods/typeFilter/{TransactionType}/{AccountType}
+    //TransactionType: 1 Income, -1 Expense
+    //AccountType: CASH BANK CCARD ASSET LIABILITY
+<span class="fc" id="L1856">    URI_MATCHER.addURI(AUTHORITY, &quot;methods/&quot; + URI_SEGMENT_TYPE_FILTER + &quot;/*&quot;, METHODS_FILTERED);</span>
+<span class="fc" id="L1857">    URI_MATCHER.addURI(AUTHORITY, &quot;accounttypes_methods&quot;, ACCOUNTTYPES_METHODS);</span>
+<span class="fc" id="L1858">    URI_MATCHER.addURI(AUTHORITY, &quot;templates&quot;, TEMPLATES);</span>
+<span class="fc" id="L1859">    URI_MATCHER.addURI(AUTHORITY, &quot;templates/#&quot;, TEMPLATE_ID);</span>
+<span class="fc" id="L1860">    URI_MATCHER.addURI(AUTHORITY, &quot;templates/#/&quot; + URI_SEGMENT_INCREASE_USAGE, TEMPLATES_INCREASE_USAGE);</span>
+<span class="fc" id="L1861">    URI_MATCHER.addURI(AUTHORITY, &quot;sqlite_sequence/*&quot;, SQLITE_SEQUENCE_TABLE);</span>
+<span class="fc" id="L1862">    URI_MATCHER.addURI(AUTHORITY, &quot;planinstance_transaction&quot;, PLANINSTANCE_TRANSACTION_STATUS);</span>
+<span class="fc" id="L1863">    URI_MATCHER.addURI(AUTHORITY, &quot;planinstance_transaction/#/#&quot;, PLANINSTANCE_STATUS_SINGLE);</span>
+<span class="fc" id="L1864">    URI_MATCHER.addURI(AUTHORITY, &quot;currencies&quot;, CURRENCIES);</span>
+<span class="fc" id="L1865">    URI_MATCHER.addURI(AUTHORITY, &quot;accounts/aggregates/*&quot;, AGGREGATE_ID);</span>
+<span class="fc" id="L1866">    URI_MATCHER.addURI(AUTHORITY, &quot;aggregates/*/*&quot;, AGGREGATE_V2);</span>
+<span class="fc" id="L1867">    URI_MATCHER.addURI(AUTHORITY, &quot;methods_transactions&quot;, MAPPED_METHODS);</span>
+<span class="fc" id="L1868">    URI_MATCHER.addURI(AUTHORITY, &quot;dual&quot;, DUAL);</span>
+<span class="fc" id="L1869">    URI_MATCHER.addURI(AUTHORITY, &quot;eventcache&quot;, EVENT_CACHE);</span>
+<span class="fc" id="L1870">    URI_MATCHER.addURI(AUTHORITY, &quot;debug_schema&quot;, DEBUG_SCHEMA);</span>
+<span class="fc" id="L1871">    URI_MATCHER.addURI(AUTHORITY, &quot;stale_images&quot;, STALE_IMAGES);</span>
+<span class="fc" id="L1872">    URI_MATCHER.addURI(AUTHORITY, &quot;stale_images/#&quot;, STALE_IMAGES_ID);</span>
+<span class="fc" id="L1873">    URI_MATCHER.addURI(AUTHORITY, &quot;transfer_account_transactions&quot;, MAPPED_TRANSFER_ACCOUNTS);</span>
+<span class="fc" id="L1874">    URI_MATCHER.addURI(AUTHORITY, &quot;changes&quot;, CHANGES);</span>
+<span class="fc" id="L1875">    URI_MATCHER.addURI(AUTHORITY, &quot;settings&quot;, SETTINGS);</span>
+<span class="fc" id="L1876">    URI_MATCHER.addURI(AUTHORITY, &quot;autofill/#&quot;, AUTOFILL);</span>
+<span class="fc" id="L1877">    URI_MATCHER.addURI(AUTHORITY, &quot;account_exchangerates/#/*/*&quot;, ACCOUNT_EXCHANGE_RATE);</span>
+<span class="fc" id="L1878">    URI_MATCHER.addURI(AUTHORITY, &quot;budgets&quot;, BUDGETS);</span>
+<span class="fc" id="L1879">    URI_MATCHER.addURI(AUTHORITY, &quot;budgets/#&quot;, BUDGET_ID);</span>
+<span class="fc" id="L1880">    URI_MATCHER.addURI(AUTHORITY, &quot;budgets/#/#&quot;, BUDGET_CATEGORY);</span>
+<span class="fc" id="L1881">    URI_MATCHER.addURI(AUTHORITY, &quot;budgets/#/&quot; + URI_SEGMENT_BUDGET_ALLOCATIONS, BUDGET_FOR_PERIOD);</span>
+<span class="fc" id="L1882">    URI_MATCHER.addURI(AUTHORITY, &quot;currencies/*&quot;, CURRENCIES_CODE);</span>
+<span class="fc" id="L1883">    URI_MATCHER.addURI(AUTHORITY, &quot;accountsMinimal&quot;, ACCOUNTS_MINIMAL);</span>
+<span class="fc" id="L1884">    URI_MATCHER.addURI(AUTHORITY, &quot;tags&quot;, TAGS);</span>
+<span class="fc" id="L1885">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/tags&quot;, TRANSACTIONS_TAGS);</span>
+<span class="fc" id="L1886">    URI_MATCHER.addURI(AUTHORITY, &quot;tags/#&quot;, TAG_ID);</span>
+<span class="fc" id="L1887">    URI_MATCHER.addURI(AUTHORITY, &quot;templates/tags&quot;, TEMPLATES_TAGS);</span>
+<span class="fc" id="L1888">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/&quot; + URI_SEGMENT_LINK_TRANSFER + &quot;/*&quot;, TRANSACTION_LINK_TRANSFER);</span>
+<span class="fc" id="L1889">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/&quot; + URI_SEGMENT_UNLINK_TRANSFER + &quot;/*&quot;, TRANSACTION_UNLINK_TRANSFER);</span>
+<span class="fc" id="L1890">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/#/&quot; + URI_SEGMENT_TRANSFORM_TO_TRANSFER + &quot;/#&quot;, TRANSACTION_TRANSFORM_TO_TRANSFER);</span>
+<span class="fc" id="L1891">    URI_MATCHER.addURI(AUTHORITY, &quot;accounts/tags&quot;, ACCOUNTS_TAGS);</span>
+<span class="fc" id="L1892">    URI_MATCHER.addURI(AUTHORITY, &quot;debts&quot;, DEBTS);</span>
+<span class="fc" id="L1893">    URI_MATCHER.addURI(AUTHORITY, &quot;debts/#&quot;, DEBT_ID);</span>
+<span class="fc" id="L1894">    URI_MATCHER.addURI(AUTHORITY, &quot;budgets/&quot; + URI_SEGMENT_BUDGET_ALLOCATIONS, BUDGET_ALLOCATIONS);</span>
+<span class="fc" id="L1895">    URI_MATCHER.addURI(AUTHORITY, &quot;budgets/&quot; + URI_SEGMENT_DEFAULT_BUDGET_ALLOCATIONS + &quot;/*/*&quot;, ACCOUNT_DEFAULT_BUDGET_ALLOCATIONS);</span>
+<span class="fc" id="L1896">    URI_MATCHER.addURI(AUTHORITY, &quot;banks&quot;, BANKS);</span>
+<span class="fc" id="L1897">    URI_MATCHER.addURI(AUTHORITY, &quot;banks/#&quot;, BANK_ID);</span>
+<span class="fc" id="L1898">    URI_MATCHER.addURI(AUTHORITY, &quot;attributes&quot;, ATTRIBUTES);</span>
+<span class="fc" id="L1899">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/attributes&quot;, TRANSACTION_ATTRIBUTES);</span>
+<span class="fc" id="L1900">    URI_MATCHER.addURI(AUTHORITY, &quot;accounts/attributes&quot;, ACCOUNT_ATTRIBUTES);</span>
+<span class="fc" id="L1901">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/attachments&quot;, TRANSACTION_ATTACHMENTS);</span>
+<span class="fc" id="L1902">    URI_MATCHER.addURI(AUTHORITY, &quot;attachments&quot;, ATTACHMENTS);</span>
+<span class="fc" id="L1903">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/attachments/#/#&quot;, TRANSACTION_ID_ATTACHMENT_ID);</span>
+<span class="fc" id="L1904">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/&quot; + URI_SEGMENT_UNARCHIVE, UNARCHIVE);</span>
+<span class="fc" id="L1905">    URI_MATCHER.addURI(AUTHORITY, &quot;transactions/#/&quot; + URI_SEGMENT_SUMS_FOR_ARCHIVE, ARCHIVE_SUMS);</span>
+<span class="fc" id="L1906">    URI_MATCHER.addURI(AUTHORITY, &quot;prices&quot;, PRICES);</span>
+<span class="fc" id="L1907">    URI_MATCHER.addURI(AUTHORITY, &quot;latest_prices&quot;, LATEST_PRICES);</span>
+<span class="fc" id="L1908">    URI_MATCHER.addURI(AUTHORITY, &quot;dynamicCurrencies&quot;, DYNAMIC_CURRENCIES);</span>
+<span class="fc" id="L1909">    URI_MATCHER.addURI(AUTHORITY, &quot;accountTypes&quot;, ACCOUNT_TYPES);</span>
+<span class="fc" id="L1910">    URI_MATCHER.addURI(AUTHORITY, &quot;accountTypes/#&quot;, ACCOUNT_TYPE_ID);</span>
+<span class="fc" id="L1911">    URI_MATCHER.addURI(AUTHORITY, &quot;accountFlags&quot;, ACCOUNT_FLAGS);</span>
+<span class="fc" id="L1912">    URI_MATCHER.addURI(AUTHORITY, &quot;accountFlags/#&quot;, ACCOUNT_FLAG_ID);</span>
+<span class="fc" id="L1913">  }</span>
+
+  /**
+   * A test package can call this to get a handle to the database underlying TransactionProvider,
+   * so it can insert test data into the database. The test case class is responsible for
+   * instantiating the provider in a test context; ProviderTestCase2 does
+   * this during the call to setUp()
+   *
+   * @return a handle to the database helper object for the provider's data.
+   */
+  @VisibleForTesting
+  public SupportSQLiteOpenHelper getOpenHelperForTest() {
+<span class="nc" id="L1925">    return getHelper();</span>
+  }
+
+  public static ContentProviderOperation resumeChangeTrigger() {
+<span class="nc" id="L1929">    return ContentProviderOperation.newDelete(</span>
+<span class="nc" id="L1930">        DUAL_URI.buildUpon()</span>
+<span class="nc" id="L1931">            .appendQueryParameter(QUERY_PARAMETER_SYNC_END, &quot;1&quot;).build())</span>
+<span class="nc" id="L1932">        .build();</span>
+  }
+
+  static int resumeChangeTrigger(SupportSQLiteDatabase db) {
+<span class="nc" id="L1936">    return db.delete(TABLE_SYNC_STATE, null, null);</span>
+  }
+
+  public static ContentProviderOperation pauseChangeTrigger() {
+<span class="nc" id="L1940">    return ContentProviderOperation.newInsert(</span>
+<span class="nc" id="L1941">        DUAL_URI.buildUpon()</span>
+<span class="nc" id="L1942">            .appendQueryParameter(QUERY_PARAMETER_SYNC_BEGIN, &quot;1&quot;).build())</span>
+<span class="nc" id="L1943">        .build();</span>
+  }
+
+  static long pauseChangeTrigger(SupportSQLiteDatabase db) {
+<span class="nc" id="L1947">    ContentValues values = new ContentValues(1);</span>
+<span class="nc" id="L1948">    values.put(KEY_STATUS, &quot;1&quot;);</span>
+<span class="nc" id="L1949">    return MoreDbUtilsKt.insert(db, TABLE_SYNC_STATE, values);</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

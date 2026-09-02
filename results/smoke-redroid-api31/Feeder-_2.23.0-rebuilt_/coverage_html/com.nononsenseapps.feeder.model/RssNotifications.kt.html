@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RssNotifications.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.model</a> &gt; <span class="el_source">RssNotifications.kt</span></div><h1>RssNotifications.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.model
+
+import android.Manifest
+import android.annotation.TargetApi
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.PendingIntent.FLAG_IMMUTABLE
+import android.content.Context
+import android.content.Context.NOTIFICATION_SERVICE
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.os.Build
+import android.os.TransactionTooLargeException
+import android.provider.Browser.EXTRA_CREATE_NEW_TAB
+import android.util.Log
+import androidx.annotation.RequiresApi
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationCompat.GROUP_ALERT_SUMMARY
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
+import androidx.navigation.NavDeepLinkBuilder
+import com.nononsenseapps.feeder.R
+import com.nononsenseapps.feeder.archmodel.ItemOpener
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.db.COL_LINK
+import com.nononsenseapps.feeder.db.URI_FEEDITEMS
+import com.nononsenseapps.feeder.db.room.FeedDao
+import com.nononsenseapps.feeder.db.room.FeedItemDao
+import com.nononsenseapps.feeder.db.room.FeedItemWithFeed
+import com.nononsenseapps.feeder.db.room.ID_ALL_FEEDS
+import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.ui.EXTRA_FEEDITEMS_TO_MARK_AS_NOTIFIED
+import com.nononsenseapps.feeder.ui.MainActivity
+import com.nononsenseapps.feeder.ui.OpenLinkInDefaultActivity
+import com.nononsenseapps.feeder.util.DEEP_LINK_BASE_URI
+import com.nononsenseapps.feeder.util.notificationManager
+import com.nononsenseapps.feeder.util.urlEncode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.kodein.di.DI
+import org.kodein.di.android.closestDI
+import org.kodein.di.instance
+
+const val SUMMARY_NOTIFICATION_ID = 2_147_483_646
+private const val CHANNEL_ID = &quot;feederNotifications&quot;
+private const val ARTICLE_NOTIFICATION_GROUP = &quot;com.nononsenseapps.feeder.ARTICLE&quot;
+internal const val ACTION_OPEN_IN_CUSTOM_TAB = &quot;com.nononsenseapps.feeder.OPEN_IN_CUSTOM_TAB&quot;
+
+private const val LOG_TAG = &quot;FEEDER_NOTIFY&quot;
+
+<span class="fc" id="L56">suspend fun notify(</span>
+    appContext: Context,
+<span class="fc" id="L58">    updateSummaryOnly: Boolean = false,</span>
+<span class="pc" id="L59">) = withContext(Dispatchers.Default) {</span>
+<span class="pc bpc" id="L60" title="1 of 2 branches missed.">    if (ContextCompat.checkSelfPermission(</span>
+<span class="fc" id="L61">            appContext,</span>
+<span class="fc" id="L62">            Manifest.permission.POST_NOTIFICATIONS,</span>
+        ) != PackageManager.PERMISSION_GRANTED
+    ) {
+<span class="nc" id="L65">        return@withContext</span>
+    }
+
+<span class="fc" id="L68">    createNotificationChannel(appContext)</span>
+
+<span class="fc" id="L70">    val di by closestDI(appContext)</span>
+
+<span class="pc" id="L72">    val nm: NotificationManagerCompat by di.instance()</span>
+
+    // If too many it can cause a crash, so it's limited to 20
+<span class="fc" id="L75">    val feedItems = getItemsToNotify(di)</span>
+
+<span class="fc" id="L77">    try {</span>
+<span class="pc bpc" id="L78" title="2 of 4 branches missed.">        if (feedItems.isNotEmpty()) {</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            if (!updateSummaryOnly) {</span>
+<span class="nc" id="L80">                feedItems</span>
+<span class="nc" id="L81">                    .map {</span>
+<span class="nc" id="L82">                        it.id.toInt() to singleNotification(appContext, it)</span>
+<span class="nc" id="L83">                    }.forEach { (id, notification) -&gt;</span>
+<span class="nc" id="L84">                        nm.notify(id, notification)</span>
+<span class="nc" id="L85">                    }</span>
+            }
+            // Shown on API Level &lt; 24
+<span class="nc" id="L88">            nm.notify(SUMMARY_NOTIFICATION_ID, inboxNotification(appContext, feedItems))</span>
+        }
+<span class="nc" id="L90">    } catch (e: TransactionTooLargeException) {</span>
+        // This can happen if there are too many notifications
+<span class="nc" id="L92">        Log.e(LOG_TAG, &quot;Too many notifications&quot;, e)</span>
+    }
+<span class="pc" id="L94">}</span>
+
+suspend fun cancelNotification(
+    context: Context,
+    feedItemId: Long,
+<span class="fc" id="L99">) = cancelNotifications(context, listOf(feedItemId))</span>
+
+suspend fun cancelNotifications(
+    context: Context,
+    feedItemIds: List&lt;Long&gt;,
+<span class="fc" id="L104">) = withContext(Dispatchers.Default) {</span>
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">    if (ContextCompat.checkSelfPermission(</span>
+<span class="fc" id="L106">            context,</span>
+<span class="fc" id="L107">            Manifest.permission.POST_NOTIFICATIONS,</span>
+        ) != PackageManager.PERMISSION_GRANTED
+    ) {
+<span class="nc" id="L110">        return@withContext</span>
+    }
+
+<span class="fc" id="L113">    val nm = context.notificationManager</span>
+
+<span class="fc bfc" id="L115" title="All 2 branches covered.">    for (feedItemId in feedItemIds) {</span>
+<span class="fc" id="L116">        nm.cancel(feedItemId.toInt())</span>
+    }
+<span class="fc" id="L118">}</span>
+
+/**
+ * This is an update operation if channel already exists so it's safe to call multiple times
+ */
+@TargetApi(Build.VERSION_CODES.O)
+@RequiresApi(Build.VERSION_CODES.O)
+private fun createNotificationChannel(context: Context) {
+<span class="fc" id="L126">    val name = context.getString(R.string.notification_channel_name)</span>
+<span class="fc" id="L127">    val description = context.getString(R.string.notification_channel_description)</span>
+
+<span class="fc" id="L129">    val notificationManager: NotificationManager =</span>
+<span class="fc" id="L130">        context.getSystemService(NOTIFICATION_SERVICE) as NotificationManager</span>
+
+<span class="fc" id="L132">    val channel = NotificationChannel(CHANNEL_ID, name, NotificationManager.IMPORTANCE_LOW)</span>
+<span class="fc" id="L133">    channel.description = description</span>
+
+<span class="fc" id="L135">    notificationManager.createNotificationChannel(channel)</span>
+<span class="fc" id="L136">}</span>
+
+<span class="nc" id="L138">private suspend fun singleNotification(</span>
+    context: Context,
+    item: FeedItemWithFeed,
+): Notification {
+<span class="nc" id="L142">    val di by closestDI(context)</span>
+<span class="nc" id="L143">    val repository: Repository by di.instance()</span>
+<span class="nc" id="L144">    val articleOpener = repository.getArticleOpener(item.id)</span>
+
+<span class="nc" id="L146">    val style = NotificationCompat.BigTextStyle()</span>
+<span class="nc" id="L147">    val title = item.plainTitle</span>
+<span class="nc" id="L148">    val text = item.feedDisplayTitle</span>
+
+<span class="nc" id="L150">    style.bigText(text)</span>
+<span class="nc" id="L151">    style.setBigContentTitle(title)</span>
+
+<span class="nc" id="L153">    val contentIntent = getArticleNotificationIntent(context, item.id, item.link, articleOpener)</span>
+
+<span class="nc" id="L155">    val pendingIntent =</span>
+<span class="nc" id="L156">        PendingIntent.getActivity(</span>
+<span class="nc" id="L157">            context,</span>
+<span class="nc" id="L158">            item.id.toInt(),</span>
+<span class="nc" id="L159">            contentIntent,</span>
+<span class="nc" id="L160">            PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+        )
+
+<span class="nc" id="L163">    val builder = notificationBuilder(context)</span>
+
+<span class="nc" id="L165">    builder</span>
+<span class="nc" id="L166">        .setContentText(text)</span>
+<span class="nc" id="L167">        .setContentTitle(title)</span>
+<span class="nc" id="L168">        .setContentIntent(pendingIntent)</span>
+<span class="nc" id="L169">        .setGroup(ARTICLE_NOTIFICATION_GROUP)</span>
+<span class="nc" id="L170">        .setGroupAlertBehavior(GROUP_ALERT_SUMMARY)</span>
+<span class="nc" id="L171">        .setDeleteIntent(getPendingDeleteIntent(context, item))</span>
+<span class="nc" id="L172">        .setSilent(true)</span>
+<span class="nc" id="L173">        .setNumber(1)</span>
+
+    // Note that notifications must use PNG resources, because there is no compatibility for vector drawables here
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">    item.enclosureLink?.let { enclosureLink -&gt;</span>
+<span class="nc" id="L178">        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(enclosureLink))</span>
+<span class="nc" id="L179">        intent.putExtra(EXTRA_CREATE_NEW_TAB, true)</span>
+<span class="nc" id="L180">        builder.addAction(</span>
+<span class="nc" id="L181">            R.drawable.notification_play_circle_outline,</span>
+<span class="nc" id="L182">            context.getString(R.string.open_enclosed_media),</span>
+<span class="nc" id="L183">            PendingIntent.getActivity(</span>
+<span class="nc" id="L184">                context,</span>
+<span class="nc" id="L185">                item.id.toInt(),</span>
+<span class="nc" id="L186">                getOpenInDefaultActivityIntent(context, item.id, enclosureLink),</span>
+<span class="nc" id="L187">                PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+            ),
+<span class="nc" id="L189">        )</span>
+    }
+
+<span class="nc bnc" id="L192" title="All 2 branches missed.">    if (articleOpener != ItemOpener.DEFAULT_BROWSER) {</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        item.link?.let { link -&gt;</span>
+<span class="nc" id="L194">            builder.addAction(</span>
+<span class="nc" id="L195">                R.drawable.notification_open_in_browser,</span>
+<span class="nc" id="L196">                context.getString(R.string.open_link_in_browser),</span>
+<span class="nc" id="L197">                PendingIntent.getActivity(</span>
+<span class="nc" id="L198">                    context,</span>
+<span class="nc" id="L199">                    item.id.toInt(),</span>
+<span class="nc" id="L200">                    getOpenInDefaultActivityIntent(context, item.id, link),</span>
+<span class="nc" id="L201">                    PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+                ),
+<span class="nc" id="L203">            )</span>
+        }
+    }
+
+<span class="nc" id="L207">    builder.addAction(</span>
+<span class="nc" id="L208">        R.drawable.notification_check,</span>
+<span class="nc" id="L209">        context.getString(R.string.mark_as_read),</span>
+<span class="nc" id="L210">        PendingIntent.getBroadcast(</span>
+<span class="nc" id="L211">            context,</span>
+<span class="nc" id="L212">            item.id.toInt(),</span>
+<span class="nc" id="L213">            getMarkAsReadIntent(context, item.id),</span>
+<span class="nc" id="L214">            PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+        ),
+    )
+
+<span class="nc" id="L218">    style.setBuilder(builder)</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">    return style.build() ?: error(&quot;Null??&quot;)</span>
+}
+
+internal fun getArticleNotificationIntent(
+    context: Context,
+    feedItemId: Long,
+    link: String?,
+    articleOpener: ItemOpener,
+): Intent =
+<span class="nc" id="L228">    when {</span>
+<span class="nc bnc" id="L229" title="All 4 branches missed.">        link == null || articleOpener == ItemOpener.READER -&gt;</span>
+<span class="nc" id="L230">            Intent(</span>
+<span class="nc" id="L231">                Intent.ACTION_VIEW,</span>
+<span class="nc" id="L232">                &quot;$DEEP_LINK_BASE_URI/article/$feedItemId&quot;.toUri(),</span>
+<span class="nc" id="L233">                context,</span>
+<span class="nc" id="L234">                MainActivity::class.java,</span>
+<span class="nc" id="L235">            ).apply {</span>
+<span class="nc" id="L236">                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)</span>
+<span class="nc" id="L237">            }</span>
+
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        articleOpener == ItemOpener.CUSTOM_TAB -&gt;</span>
+<span class="nc" id="L240">            getOpenInDefaultActivityIntent(context, feedItemId, link).apply {</span>
+<span class="nc" id="L241">                action = ACTION_OPEN_IN_CUSTOM_TAB</span>
+<span class="nc" id="L242">            }</span>
+
+<span class="nc" id="L244">        else -&gt; getOpenInDefaultActivityIntent(context, feedItemId, link)</span>
+<span class="nc" id="L245">    }</span>
+
+<span class="nc" id="L247">internal fun getOpenInDefaultActivityIntent(</span>
+    context: Context,
+    feedItemId: Long,
+<span class="nc" id="L250">    link: String? = null,</span>
+): Intent =
+<span class="nc" id="L252">    Intent(</span>
+<span class="nc" id="L253">        Intent.ACTION_VIEW,</span>
+        // Important to keep the URI different so PendingIntents don't collide
+<span class="nc" id="L255">        URI_FEEDITEMS</span>
+<span class="nc" id="L256">            .buildUpon()</span>
+<span class="nc" id="L257">            .appendPath(&quot;$feedItemId&quot;)</span>
+<span class="nc" id="L258">            .also {</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                if (link != null) {</span>
+<span class="nc" id="L260">                    it.appendQueryParameter(COL_LINK, link)</span>
+                }
+<span class="nc" id="L262">            }.build(),</span>
+<span class="nc" id="L263">        context,</span>
+<span class="nc" id="L264">        OpenLinkInDefaultActivity::class.java,</span>
+<span class="nc" id="L265">    )</span>
+
+internal fun getMarkAsReadIntent(
+    context: Context,
+    feedItemId: Long,
+): Intent =
+<span class="nc" id="L271">    Intent(</span>
+<span class="nc" id="L272">        ACTION_MARK_AS_READ,</span>
+        // Important to keep the URI different so PendingIntents don't collide
+<span class="nc" id="L274">        URI_FEEDITEMS.buildUpon().appendPath(&quot;$feedItemId&quot;).build(),</span>
+<span class="nc" id="L275">        context,</span>
+<span class="nc" id="L276">        RssNotificationBroadcastReceiver::class.java,</span>
+<span class="nc" id="L277">    )</span>
+
+/**
+ * Use this on platforms older than 24 to bundle notifications together
+ */
+private fun inboxNotification(
+    context: Context,
+    feedItems: List&lt;FeedItemWithFeed&gt;,
+): Notification {
+<span class="nc" id="L286">    val style = NotificationCompat.InboxStyle()</span>
+<span class="nc" id="L287">    val title = context.getString(R.string.updated_feeds)</span>
+<span class="nc" id="L288">    val text = feedItems.map { it.feedDisplayTitle }.toSet().joinToString(separator = &quot;, &quot;)</span>
+
+<span class="nc" id="L290">    style.setBigContentTitle(title)</span>
+<span class="nc" id="L291">    feedItems.forEach {</span>
+<span class="nc" id="L292">        style.addLine(&quot;${it.feedDisplayTitle} \u2014 ${it.plainTitle}&quot;)</span>
+<span class="nc" id="L293">    }</span>
+
+    // We can be a little bit smart - if all items are from the same feed then go to that feed
+    // Otherwise we should go to All feeds
+<span class="nc" id="L297">    val feedTags = feedItems.map { it.tag }.toSet()</span>
+
+<span class="nc" id="L299">    val deepLinkTag =</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (feedTags.size == 1) {</span>
+<span class="nc" id="L301">            feedTags.first()</span>
+        } else {
+<span class="nc" id="L303">            &quot;&quot;</span>
+        }
+
+<span class="nc" id="L306">    val feedIds = feedItems.map { it.feedId }.toSet()</span>
+
+<span class="nc" id="L308">    val deepLinkId =</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">        if (feedIds.size == 1) {</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            feedIds.first() ?: ID_UNSET</span>
+        } else {
+<span class="nc bnc" id="L312" title="All 4 branches missed.">            if (deepLinkTag.isNotEmpty()) {</span>
+<span class="nc" id="L313">                ID_ALL_FEEDS // Tag will take precedence</span>
+            } else {
+<span class="nc" id="L315">                ID_UNSET // Will default to last open when tag is empty too</span>
+            }
+        }
+
+<span class="nc" id="L319">    val deepLinkUri =</span>
+<span class="nc" id="L320">        &quot;$DEEP_LINK_BASE_URI/feed?id=$deepLinkId&amp;tag=${deepLinkTag.urlEncode()}&quot;</span>
+
+<span class="nc" id="L322">    val contentIntent =</span>
+<span class="nc" id="L323">        Intent(</span>
+<span class="nc" id="L324">            Intent.ACTION_VIEW,</span>
+<span class="nc" id="L325">            deepLinkUri.toUri(),</span>
+<span class="nc" id="L326">            context,</span>
+            // Proxy activity to mark as read
+<span class="nc" id="L328">            OpenLinkInDefaultActivity::class.java,</span>
+<span class="nc" id="L329">        ).apply {</span>
+<span class="nc" id="L330">            putExtra(</span>
+<span class="nc" id="L331">                EXTRA_FEEDITEMS_TO_MARK_AS_NOTIFIED,</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">                LongArray(feedItems.size) { i -&gt; feedItems[i].id },</span>
+            )
+<span class="nc" id="L334">            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)</span>
+<span class="nc" id="L335">        }</span>
+
+<span class="nc" id="L337">    val pendingIntent =</span>
+<span class="nc" id="L338">        PendingIntent.getActivity(</span>
+<span class="nc" id="L339">            context,</span>
+<span class="nc" id="L340">            SUMMARY_NOTIFICATION_ID,</span>
+<span class="nc" id="L341">            contentIntent,</span>
+<span class="nc" id="L342">            PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+        )
+
+<span class="nc" id="L345">    val builder = notificationBuilder(context)</span>
+
+<span class="nc" id="L347">    builder</span>
+<span class="nc" id="L348">        .setContentText(text)</span>
+<span class="nc" id="L349">        .setContentTitle(title)</span>
+<span class="nc" id="L350">        .setContentIntent(pendingIntent)</span>
+<span class="nc" id="L351">        .setGroup(ARTICLE_NOTIFICATION_GROUP)</span>
+<span class="nc" id="L352">        .setGroupAlertBehavior(GROUP_ALERT_SUMMARY)</span>
+<span class="nc" id="L353">        .setGroupSummary(true)</span>
+<span class="nc" id="L354">        .setDeleteIntent(getDeleteIntent(context, feedItems))</span>
+<span class="nc" id="L355">        .setNumber(feedItems.size)</span>
+
+<span class="nc" id="L357">    style.setBuilder(builder)</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">    return style.build() ?: error(&quot;How null??&quot;)</span>
+}
+
+private fun getDeleteIntent(
+    context: Context,
+    feedItems: List&lt;FeedItemWithFeed&gt;,
+): PendingIntent {
+<span class="nc" id="L365">    val intent = Intent(context, RssNotificationBroadcastReceiver::class.java)</span>
+<span class="nc" id="L366">    intent.action = ACTION_MARK_AS_NOTIFIED</span>
+
+<span class="nc bnc" id="L368" title="All 2 branches missed.">    val ids = LongArray(feedItems.size) { i -&gt; feedItems[i].id }</span>
+<span class="nc" id="L369">    intent.putExtra(EXTRA_FEEDITEM_ID_ARRAY, ids)</span>
+
+<span class="nc" id="L371">    return PendingIntent.getBroadcast(</span>
+<span class="nc" id="L372">        context,</span>
+<span class="nc" id="L373">        0,</span>
+<span class="nc" id="L374">        intent,</span>
+<span class="nc" id="L375">        PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+    )
+}
+
+internal fun getDeleteIntent(
+    context: Context,
+    feedItem: FeedItemWithFeed,
+): Intent {
+<span class="nc" id="L383">    val intent = Intent(context, RssNotificationBroadcastReceiver::class.java)</span>
+<span class="nc" id="L384">    intent.action = ACTION_MARK_AS_NOTIFIED</span>
+<span class="nc" id="L385">    intent.data = Uri.withAppendedPath(URI_FEEDITEMS, &quot;${feedItem.id}&quot;)</span>
+<span class="nc" id="L386">    val ids: LongArray = longArrayOf(feedItem.id)</span>
+<span class="nc" id="L387">    intent.putExtra(EXTRA_FEEDITEM_ID_ARRAY, ids)</span>
+
+<span class="nc" id="L389">    return intent</span>
+}
+
+private fun getPendingDeleteIntent(
+    context: Context,
+    feedItem: FeedItemWithFeed,
+): PendingIntent =
+<span class="nc" id="L396">    PendingIntent.getBroadcast(</span>
+<span class="nc" id="L397">        context,</span>
+<span class="nc" id="L398">        0,</span>
+<span class="nc" id="L399">        getDeleteIntent(context, feedItem),</span>
+<span class="nc" id="L400">        PendingIntent.FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE,</span>
+<span class="nc" id="L401">    )</span>
+
+private fun notificationBuilder(context: Context): NotificationCompat.Builder {
+<span class="nc" id="L404">    val bm = BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher)</span>
+
+<span class="nc" id="L406">    return NotificationCompat</span>
+<span class="nc" id="L407">        .Builder(context, CHANNEL_ID)</span>
+<span class="nc" id="L408">        .setSmallIcon(R.drawable.ic_stat_f)</span>
+<span class="nc" id="L409">        .setLargeIcon(bm)</span>
+<span class="nc" id="L410">        .setAutoCancel(true)</span>
+<span class="nc" id="L411">        .setCategory(NotificationCompat.CATEGORY_SOCIAL)</span>
+<span class="nc" id="L412">        .setPriority(NotificationCompat.PRIORITY_LOW)</span>
+}
+
+<span class="fc" id="L415">private suspend fun getItemsToNotify(di: DI): List&lt;FeedItemWithFeed&gt; {</span>
+<span class="fc" id="L416">    val feedDao: FeedDao by di.instance()</span>
+<span class="pc" id="L417">    val feedItemDao: FeedItemDao by di.instance()</span>
+
+<span class="fc" id="L419">    val feeds = feedDao.loadFeedIdsToNotify()</span>
+
+<span class="pc" id="L421">    return when (feeds.isEmpty()) {</span>
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">        true -&gt; emptyList()</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">        false -&gt; feedItemDao.loadItemsToNotify(feeds)</span>
+    }
+<span class="nc" id="L425">}</span>
+
+<span class="nc" id="L427">fun NavDeepLinkBuilder.createPendingIntent(requestCode: Int): PendingIntent? = this.createTaskStackBuilder().getPendingIntent(requestCode, PendingIntent.FLAG_UPDATE_CURRENT)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

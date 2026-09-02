@@ -1,0 +1,624 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalTranslator.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.localtranslation</a> &gt; <span class="el_source">LocalTranslator.kt</span></div><h1>LocalTranslator.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.localtranslation
+
+import android.app.Application
+import android.icu.util.ULocale
+import android.os.Build
+import android.view.translation.TranslationCapability
+import android.view.translation.TranslationContext
+import android.view.translation.TranslationManager
+import android.view.translation.TranslationRequest
+import android.view.translation.TranslationRequestValue
+import android.view.translation.TranslationResponse
+import android.view.translation.TranslationResponseValue
+import android.view.translation.TranslationSpec
+import androidx.annotation.RequiresApi
+import androidx.annotation.StringRes
+import com.nononsenseapps.feeder.R
+import com.nononsenseapps.feeder.model.detectLocaleFromText
+import com.nononsenseapps.feeder.model.hasEnoughTextForLanguageDetection
+import com.nononsenseapps.feeder.model.prepareTextForLanguageDetection
+import com.nononsenseapps.feeder.model.prepareTextSamplesForLanguageDetection
+import com.nononsenseapps.feeder.openai.OpenAIApi.TranslationResult
+import com.nononsenseapps.feeder.openai.OpenAIApi.TranslationResult.ErrorAction
+import com.nononsenseapps.feeder.util.logDebug
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.util.concurrent.Executor
+
+<span class="nc" id="L36">class LocalTranslator(</span>
+<span class="nc" id="L37">    override val di: DI,</span>
+) : DIAware {
+<span class="nc" id="L39">    private val application: Application by instance()</span>
+<span class="nc" id="L40">    private val directExecutor = Executor { runnable -&gt; runnable.run() }</span>
+<span class="nc" id="L41">    private val bergamotModelManager: BergamotModelManager by instance()</span>
+<span class="nc" id="L42">    private val bergamotWebTranslator: BergamotWebTranslator by instance()</span>
+
+<span class="nc" id="L44">    suspend fun translate(</span>
+        content: String,
+        targetLanguage: String,
+<span class="nc" id="L47">        sourceLangHint: String = &quot;&quot;,</span>
+<span class="nc" id="L48">        preserveHtml: Boolean = false,</span>
+    ): TranslationResult =
+<span class="nc" id="L50">        withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">            if (Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.S) {</span>
+<span class="nc" id="L52">                return@withContext TranslationResult.Error(</span>
+<span class="nc" id="L53">                    content = application.getString(R.string.local_translation_requires_android_12),</span>
+                )
+            }
+
+<span class="nc" id="L57">            val text = prepareTextForLanguageDetection(content, preserveHtml)</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">            if (text.isBlank()) {</span>
+<span class="nc" id="L59">                return@withContext TranslationResult.Success(</span>
+<span class="nc" id="L60">                    content = content,</span>
+<span class="nc" id="L61">                    detectedLanguage = &quot;&quot;,</span>
+                )
+            }
+
+<span class="nc" id="L65">            val targetLang = normalizeLanguageCode(targetLanguage)</span>
+<span class="nc" id="L66">            val sourceLang =</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                sourceLangHint.ifBlank {</span>
+<span class="nc" id="L68">                    detectSourceLanguage(</span>
+<span class="nc" id="L69">                        content = content,</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                        preserveHtml = preserveHtml,</span>
+<span class="nc" id="L71">                    )</span>
+                }
+
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            if (sourceLang == targetLang) {</span>
+<span class="nc" id="L75">                return@withContext TranslationResult.Success(</span>
+<span class="nc" id="L76">                    content = content,</span>
+<span class="nc" id="L77">                    detectedLanguage = sourceLang,</span>
+                )
+            }
+
+<span class="nc" id="L81">            val androidSystemResult =</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                if (preserveHtml) {</span>
+<span class="nc" id="L83">                    translateHtmlWithAndroidSystem(</span>
+<span class="nc" id="L84">                        html = content,</span>
+<span class="nc" id="L85">                        sourceLang = sourceLang,</span>
+<span class="nc" id="L86">                        targetLang = targetLang,</span>
+                    )
+                } else {
+<span class="nc" id="L89">                    translatePlainTextWithAndroidSystem(</span>
+<span class="nc" id="L90">                        content = content,</span>
+<span class="nc" id="L91">                        sourceLang = sourceLang,</span>
+<span class="nc" id="L92">                        targetLang = targetLang,</span>
+                    )
+                }
+
+<span class="nc bnc" id="L96" title="All 2 branches missed.">            if (androidSystemResult is TranslationResult.Success) {</span>
+<span class="nc" id="L97">                androidSystemResult</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            } else if (preserveHtml) {</span>
+<span class="nc" id="L99">                translateHtmlWithBergamot(</span>
+<span class="nc" id="L100">                    html = content,</span>
+<span class="nc" id="L101">                    sourceLang = sourceLang,</span>
+<span class="nc" id="L102">                    targetLang = targetLang,</span>
+                )
+            } else {
+<span class="nc" id="L105">                translatePlainTextWithBergamot(</span>
+<span class="nc" id="L106">                    content = content,</span>
+<span class="nc" id="L107">                    sourceLang = sourceLang,</span>
+<span class="nc" id="L108">                    targetLang = targetLang,</span>
+                )
+<span class="nc" id="L110">            }</span>
+<span class="nc" id="L111">        }</span>
+
+<span class="nc" id="L113">    suspend fun canTranslateWithoutBergamotDownload(</span>
+        content: String,
+        targetLanguage: String,
+<span class="nc" id="L116">        sourceLangHint: String = &quot;&quot;,</span>
+<span class="nc" id="L117">        preserveHtml: Boolean = false,</span>
+    ): Boolean =
+<span class="nc" id="L119">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L120">            val text = prepareTextForLanguageDetection(content, preserveHtml)</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            if (text.isBlank()) {</span>
+<span class="nc" id="L122">                return@withContext true</span>
+            }
+
+<span class="nc" id="L125">            val targetLang = normalizeLanguageCode(targetLanguage)</span>
+<span class="nc" id="L126">            val sourceLang =</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                sourceLangHint.ifBlank {</span>
+<span class="nc" id="L128">                    detectSourceLanguage(</span>
+<span class="nc" id="L129">                        content = content,</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                        preserveHtml = preserveHtml,</span>
+<span class="nc" id="L131">                    )</span>
+                }
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (sourceLang == targetLang) {</span>
+<span class="nc" id="L134">                return@withContext true</span>
+            }
+
+<span class="nc bnc" id="L137" title="All 4 branches missed.">            if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.S &amp;&amp; hasAndroidSystemModel(sourceLang, targetLang)) {</span>
+<span class="nc" id="L138">                return@withContext true</span>
+            }
+
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            bergamotModelManager.languagePairStatus(</span>
+<span class="nc" id="L142">                sourceLanguage = sourceLang,</span>
+<span class="nc" id="L143">                targetLanguage = targetLang,</span>
+<span class="nc" id="L144">                allowNetwork = false,</span>
+<span class="nc" id="L145">            ) == BergamotLanguagePairStatus.Downloaded</span>
+<span class="nc" id="L146">        }</span>
+
+    @RequiresApi(Build.VERSION_CODES.S)
+<span class="nc" id="L149">    private suspend fun translateHtmlWithAndroidSystem(</span>
+        html: String,
+        sourceLang: String,
+        targetLang: String,
+    ): TranslationResult {
+<span class="nc" id="L154">        val document = Jsoup.parseBodyFragment(html)</span>
+<span class="nc" id="L155">        val translationTargets =</span>
+<span class="nc" id="L156">            document</span>
+<span class="nc" id="L157">                .body()</span>
+<span class="nc" id="L158">                .let(::collectTextNodes)</span>
+<span class="nc" id="L159">                .mapNotNull { textNode -&gt;</span>
+<span class="nc" id="L160">                    HtmlTextNodeTranslation</span>
+<span class="nc" id="L161">                        .from(textNode)</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                        .takeIf { hasEnoughTextForLanguageDetection(it.text) }</span>
+                }
+
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (translationTargets.isEmpty()) {</span>
+<span class="nc" id="L166">            return TranslationResult.Success(</span>
+<span class="nc" id="L167">                content = html,</span>
+<span class="nc" id="L168">                detectedLanguage = sourceLang,</span>
+            )
+        }
+
+<span class="nc" id="L172">        val translatedTexts =</span>
+<span class="nc" id="L173">            translateTextValues(</span>
+<span class="nc" id="L174">                content = translationTargets.map(HtmlTextNodeTranslation::text),</span>
+<span class="nc" id="L175">                sourceLang = sourceLang,</span>
+<span class="nc" id="L176">                targetLang = targetLang,</span>
+            )
+
+<span class="nc" id="L179">        return when (translatedTexts) {</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">            is LocalTranslationResult.Success -&gt; {</span>
+<span class="nc" id="L181">                translationTargets.zip(translatedTexts.values).forEach { (target, translatedText) -&gt;</span>
+<span class="nc" id="L182">                    target.textNode.text(target.leadingWhitespace + translatedText + target.trailingWhitespace)</span>
+<span class="nc" id="L183">                }</span>
+<span class="nc" id="L184">                TranslationResult.Success(</span>
+<span class="nc" id="L185">                    content = document.body().html(),</span>
+<span class="nc" id="L186">                    detectedLanguage = sourceLang,</span>
+                )
+            }
+
+<span class="nc" id="L190">            is LocalTranslationResult.Error -&gt;</span>
+<span class="nc" id="L191">                TranslationResult.Error(</span>
+<span class="nc" id="L192">                    content = translatedTexts.message,</span>
+<span class="nc" id="L193">                    action = translatedTexts.action,</span>
+                )
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+<span class="nc" id="L199">    private suspend fun translatePlainTextWithAndroidSystem(</span>
+        content: String,
+        sourceLang: String,
+        targetLang: String,
+    ): TranslationResult =
+<span class="nc" id="L204">        when (</span>
+<span class="nc" id="L205">            val result =</span>
+<span class="nc" id="L206">                translateTextValues(</span>
+<span class="nc" id="L207">                    content = listOf(content),</span>
+<span class="nc" id="L208">                    sourceLang = sourceLang,</span>
+<span class="nc" id="L209">                    targetLang = targetLang,</span>
+                )
+        ) {
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            is LocalTranslationResult.Success -&gt;</span>
+<span class="nc" id="L213">                TranslationResult.Success(</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                    content = result.values.firstOrNull().orEmpty(),</span>
+<span class="nc" id="L215">                    detectedLanguage = sourceLang,</span>
+                )
+
+<span class="nc" id="L218">            is LocalTranslationResult.Error -&gt;</span>
+<span class="nc" id="L219">                TranslationResult.Error(</span>
+<span class="nc" id="L220">                    content = result.message,</span>
+<span class="nc" id="L221">                    action = result.action,</span>
+                )
+<span class="nc" id="L223">        }</span>
+
+<span class="nc" id="L225">    private suspend fun translateHtmlWithBergamot(</span>
+        html: String,
+        sourceLang: String,
+        targetLang: String,
+    ): TranslationResult {
+<span class="nc" id="L230">        val document = Jsoup.parseBodyFragment(html)</span>
+<span class="nc" id="L231">        val translationTargets =</span>
+<span class="nc" id="L232">            document</span>
+<span class="nc" id="L233">                .body()</span>
+<span class="nc" id="L234">                .let(::collectTextNodes)</span>
+<span class="nc" id="L235">                .mapNotNull { textNode -&gt;</span>
+<span class="nc" id="L236">                    HtmlTextNodeTranslation</span>
+<span class="nc" id="L237">                        .from(textNode)</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                        .takeIf { hasEnoughTextForLanguageDetection(it.text) }</span>
+                }
+
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        if (translationTargets.isEmpty()) {</span>
+<span class="nc" id="L242">            return TranslationResult.Success(</span>
+<span class="nc" id="L243">                content = html,</span>
+<span class="nc" id="L244">                detectedLanguage = sourceLang,</span>
+            )
+        }
+
+<span class="nc" id="L248">        val translatedTexts =</span>
+<span class="nc" id="L249">            translateTextValuesWithBergamot(</span>
+<span class="nc" id="L250">                content = translationTargets.map(HtmlTextNodeTranslation::text),</span>
+<span class="nc" id="L251">                sourceLang = sourceLang,</span>
+<span class="nc" id="L252">                targetLang = targetLang,</span>
+<span class="nc" id="L253">                preserveHtml = false,</span>
+            )
+
+<span class="nc" id="L256">        return when (translatedTexts) {</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            is LocalTranslationResult.Success -&gt; {</span>
+<span class="nc" id="L258">                translationTargets.zip(translatedTexts.values).forEach { (target, translatedText) -&gt;</span>
+<span class="nc" id="L259">                    target.textNode.text(target.leadingWhitespace + translatedText + target.trailingWhitespace)</span>
+<span class="nc" id="L260">                }</span>
+<span class="nc" id="L261">                TranslationResult.Success(</span>
+<span class="nc" id="L262">                    content = document.body().html(),</span>
+<span class="nc" id="L263">                    detectedLanguage = sourceLang,</span>
+                )
+            }
+
+<span class="nc" id="L267">            is LocalTranslationResult.Error -&gt;</span>
+<span class="nc" id="L268">                TranslationResult.Error(</span>
+<span class="nc" id="L269">                    content = translatedTexts.message,</span>
+<span class="nc" id="L270">                    action = translatedTexts.action,</span>
+                )
+        }
+    }
+
+<span class="nc" id="L275">    private suspend fun translatePlainTextWithBergamot(</span>
+        content: String,
+        sourceLang: String,
+        targetLang: String,
+    ): TranslationResult =
+<span class="nc" id="L280">        when (</span>
+<span class="nc" id="L281">            val result =</span>
+<span class="nc" id="L282">                translateTextValuesWithBergamot(</span>
+<span class="nc" id="L283">                    content = listOf(content),</span>
+<span class="nc" id="L284">                    sourceLang = sourceLang,</span>
+<span class="nc" id="L285">                    targetLang = targetLang,</span>
+<span class="nc" id="L286">                    preserveHtml = false,</span>
+                )
+        ) {
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            is LocalTranslationResult.Success -&gt;</span>
+<span class="nc" id="L290">                TranslationResult.Success(</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">                    content = result.values.firstOrNull().orEmpty(),</span>
+<span class="nc" id="L292">                    detectedLanguage = sourceLang,</span>
+                )
+
+<span class="nc" id="L295">            is LocalTranslationResult.Error -&gt;</span>
+<span class="nc" id="L296">                TranslationResult.Error(</span>
+<span class="nc" id="L297">                    content = result.message,</span>
+<span class="nc" id="L298">                    action = result.action,</span>
+                )
+<span class="nc" id="L300">        }</span>
+
+<span class="nc" id="L302">    private suspend fun translateTextValuesWithBergamot(</span>
+        content: List&lt;String&gt;,
+        sourceLang: String,
+        targetLang: String,
+        preserveHtml: Boolean,
+    ): LocalTranslationResult {
+<span class="nc" id="L308">        val preparation =</span>
+<span class="nc" id="L309">            bergamotModelManager.prepare(</span>
+<span class="nc" id="L310">                sourceLanguage = sourceLang,</span>
+<span class="nc" id="L311">                targetLanguage = targetLang,</span>
+            )
+
+<span class="nc" id="L314">        val modelRegistry =</span>
+<span class="nc" id="L315">            when (preparation) {</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                is BergamotModelPreparation.Ready -&gt; preparation.modelRegistry</span>
+<span class="nc" id="L317">                is BergamotModelPreparation.Error -&gt;</span>
+<span class="nc bnc" id="L318" title="All 3 branches missed.">                    return when (preparation.reason) {</span>
+                        BergamotModelPreparation.ErrorReason.NoAppModel -&gt;
+<span class="nc" id="L320">                            LocalTranslationResult.Error(</span>
+                                message =
+<span class="nc" id="L322">                                    application.getString(</span>
+<span class="nc" id="L323">                                        R.string.no_bergamot_translation_model,</span>
+<span class="nc" id="L324">                                        sourceLang,</span>
+<span class="nc" id="L325">                                        targetLang,</span>
+                                    ),
+<span class="nc" id="L327">                                action = ErrorAction.OpenSystemTranslationSettings,</span>
+                            )
+                        BergamotModelPreparation.ErrorReason.RegistryMissing -&gt;
+<span class="nc" id="L330">                            LocalTranslationResult.Error(</span>
+<span class="nc" id="L331">                                application.getString(R.string.bergamot_model_registry_unavailable),</span>
+                            )
+                        BergamotModelPreparation.ErrorReason.DownloadFailed -&gt;
+<span class="nc" id="L334">                            LocalTranslationResult.Error(</span>
+<span class="nc" id="L335">                                application.getString(</span>
+<span class="nc" id="L336">                                    R.string.bergamot_model_download_failed,</span>
+<span class="nc" id="L337">                                    preparation.sourceLanguage,</span>
+<span class="nc" id="L338">                                    preparation.targetLanguage,</span>
+                                ),
+                            )
+                    }
+            }
+
+<span class="nc" id="L344">        return try {</span>
+<span class="nc" id="L345">            when (</span>
+<span class="nc" id="L346">                val result =</span>
+<span class="nc bnc" id="L347" title="All 4 branches missed.">                    withTimeoutOrNull(TRANSLATION_TIMEOUT_MS) {</span>
+<span class="nc" id="L348">                        bergamotWebTranslator.translate(</span>
+<span class="nc" id="L349">                            content = content,</span>
+<span class="nc" id="L350">                            sourceLanguage = sourceLang,</span>
+<span class="nc" id="L351">                            targetLanguage = targetLang,</span>
+<span class="nc" id="L352">                            preserveHtml = preserveHtml,</span>
+<span class="nc" id="L353">                            modelRegistry = modelRegistry,</span>
+<span class="nc" id="L354">                        )</span>
+<span class="nc" id="L355">                    } ?: return LocalTranslationResult.Error(</span>
+<span class="nc" id="L356">                        application.getString(R.string.bergamot_translation_timed_out),</span>
+                    )
+            ) {
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                is BergamotWebTranslationResult.Success -&gt; LocalTranslationResult.Success(result.values)</span>
+<span class="nc" id="L360">                is BergamotWebTranslationResult.Error -&gt;</span>
+<span class="nc" id="L361">                    LocalTranslationResult.Error(</span>
+<span class="nc" id="L362">                        result.message.toLocalTranslationError(R.string.bergamot_translation_failed),</span>
+                    )
+            }
+<span class="nc" id="L365">        } catch (e: Exception) {</span>
+<span class="nc" id="L366">            LocalTranslationResult.Error(</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                e.message.orEmpty().toLocalTranslationError(R.string.bergamot_translation_failed),</span>
+            )
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private suspend fun translateTextValues(
+        content: List&lt;String&gt;,
+        sourceLang: String,
+        targetLang: String,
+    ): LocalTranslationResult {
+<span class="nc" id="L378">        val translationManager =</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">            application.getSystemService(TranslationManager::class.java)</span>
+<span class="nc" id="L380">                ?: return LocalTranslationResult.Error(</span>
+<span class="nc" id="L381">                    application.getString(R.string.local_translation_unavailable),</span>
+                )
+
+<span class="nc" id="L384">        val sourceSpec = TranslationSpec(ULocale.forLanguageTag(sourceLang), TranslationSpec.DATA_FORMAT_TEXT)</span>
+<span class="nc" id="L385">        val targetSpec = TranslationSpec(ULocale.forLanguageTag(targetLang), TranslationSpec.DATA_FORMAT_TEXT)</span>
+
+<span class="nc" id="L387">        val capabilities =</span>
+<span class="nc" id="L388">            translationManager.getOnDeviceTranslationCapabilities(</span>
+<span class="nc" id="L389">                TranslationSpec.DATA_FORMAT_TEXT,</span>
+<span class="nc" id="L390">                TranslationSpec.DATA_FORMAT_TEXT,</span>
+            )
+<span class="nc" id="L392">        val capability =</span>
+<span class="nc" id="L393">            capabilities.firstOrNull { capability -&gt;</span>
+<span class="nc" id="L394">                capability.sourceSpec.locale.language</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                    .equals(sourceLang, ignoreCase = true) &amp;&amp;</span>
+<span class="nc" id="L396">                    capability.targetSpec.locale.language</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                        .equals(targetLang, ignoreCase = true)</span>
+            }
+
+<span class="nc bnc" id="L400" title="All 6 branches missed.">        if (capability?.state != TranslationCapability.STATE_ON_DEVICE) {</span>
+<span class="nc" id="L401">            logDebug(</span>
+<span class="nc" id="L402">                LOG_TAG,</span>
+<span class="nc" id="L403">                &quot;System translation unavailable for $sourceLang -&gt; $targetLang. &quot; +</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                    &quot;Match=${capability?.state.translationCapabilityStateName()}. &quot; +</span>
+<span class="nc" id="L405">                    &quot;Capabilities=${capabilities.toDebugSummary()}&quot;,</span>
+            )
+        }
+
+<span class="nc" id="L409">        val translationContext =</span>
+            TranslationContext
+<span class="nc" id="L411">                .Builder(sourceSpec, targetSpec)</span>
+<span class="nc" id="L412">                .build()</span>
+
+<span class="nc" id="L414">        val translatorDeferred = CompletableDeferred&lt;android.view.translation.Translator?&gt;()</span>
+<span class="nc" id="L415">        translationManager.createOnDeviceTranslator(</span>
+<span class="nc" id="L416">            translationContext,</span>
+<span class="nc" id="L417">            directExecutor,</span>
+        ) { translator -&gt;
+<span class="nc" id="L419">            translatorDeferred.complete(translator)</span>
+<span class="nc" id="L420">        }</span>
+
+<span class="nc" id="L422">        val translator =</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">            withTimeoutOrNull(ANDROID_TRANSLATOR_CREATION_TIMEOUT_MS) { translatorDeferred.await() }</span>
+<span class="nc" id="L424">                ?: return LocalTranslationResult.Error(</span>
+<span class="nc" id="L425">                    application.getString(R.string.local_translator_creation_failed),</span>
+                )
+
+<span class="nc" id="L428">        return try {</span>
+<span class="nc" id="L429">            val responseDeferred = CompletableDeferred&lt;TranslationResponse&gt;()</span>
+<span class="nc" id="L430">            val request =</span>
+                TranslationRequest
+<span class="nc" id="L432">                    .Builder()</span>
+<span class="nc" id="L433">                    .setFlags(TranslationRequest.FLAG_TRANSLATION_RESULT)</span>
+<span class="nc" id="L434">                    .setTranslationRequestValues(content.map(TranslationRequestValue::forText))</span>
+<span class="nc" id="L435">                    .build()</span>
+
+<span class="nc" id="L437">            translator.translate(</span>
+<span class="nc" id="L438">                request,</span>
+<span class="nc" id="L439">                null,</span>
+<span class="nc" id="L440">                directExecutor,</span>
+            ) { response -&gt;
+<span class="nc" id="L442">                responseDeferred.complete(response)</span>
+<span class="nc" id="L443">            }</span>
+
+<span class="nc" id="L445">            val response =</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                withTimeoutOrNull(ANDROID_TRANSLATION_TIMEOUT_MS) { responseDeferred.await() }</span>
+<span class="nc" id="L447">                    ?: return LocalTranslationResult.Error(</span>
+<span class="nc" id="L448">                        application.getString(R.string.local_translation_timed_out),</span>
+                    )
+
+<span class="nc bnc" id="L451" title="All 2 branches missed.">            if (response.translationStatus != TranslationResponse.TRANSLATION_STATUS_SUCCESS) {</span>
+<span class="nc" id="L452">                return LocalTranslationResult.Error(</span>
+<span class="nc" id="L453">                    application.getString(R.string.local_translation_failed),</span>
+                )
+            }
+
+<span class="nc" id="L457">            val translatedTexts =</span>
+<span class="nc" id="L458">                content.indices.map { index -&gt;</span>
+<span class="nc" id="L459">                    val value = response.translationResponseValues[index]</span>
+<span class="nc bnc" id="L460" title="All 6 branches missed.">                    val translatedText = value?.text?.toString().orEmpty()</span>
+<span class="nc bnc" id="L461" title="All 8 branches missed.">                    if (value?.statusCode != TranslationResponseValue.STATUS_SUCCESS || translatedText.isBlank()) {</span>
+<span class="nc" id="L462">                        return LocalTranslationResult.Error(</span>
+<span class="nc" id="L463">                            application.getString(R.string.local_translation_empty_result),</span>
+                        )
+                    }
+<span class="nc" id="L466">                    translatedText</span>
+                }
+
+<span class="nc" id="L469">            LocalTranslationResult.Success(translatedTexts)</span>
+<span class="nc" id="L470">        } catch (e: IllegalStateException) {</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            val message = e.message.orEmpty()</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">            if (message.contains(&quot;destroyed&quot;, ignoreCase = true)) {</span>
+<span class="nc" id="L473">                LocalTranslationResult.Error(</span>
+<span class="nc" id="L474">                    application.getString(R.string.local_translator_not_ready),</span>
+                )
+            } else {
+<span class="nc" id="L477">                LocalTranslationResult.Error(</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">                    message.ifBlank { application.getString(R.string.local_translation_failed) },</span>
+                )
+            }
+<span class="nc" id="L481">        } catch (e: Exception) {</span>
+<span class="nc" id="L482">            LocalTranslationResult.Error(</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">                e.message ?: application.getString(R.string.local_translation_failed),</span>
+            )
+        } finally {
+<span class="nc" id="L486">            translator.destroy()</span>
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun hasAndroidSystemModel(
+        sourceLang: String,
+        targetLang: String,
+    ): Boolean {
+<span class="nc" id="L495">        val translationManager =</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">            application.getSystemService(TranslationManager::class.java)</span>
+<span class="nc" id="L497">                ?: return false</span>
+
+<span class="nc" id="L499">        return translationManager</span>
+<span class="nc" id="L500">            .getOnDeviceTranslationCapabilities(</span>
+<span class="nc" id="L501">                TranslationSpec.DATA_FORMAT_TEXT,</span>
+<span class="nc" id="L502">                TranslationSpec.DATA_FORMAT_TEXT,</span>
+<span class="nc" id="L503">            ).any { capability -&gt;</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">                capability.state == TranslationCapability.STATE_ON_DEVICE &amp;&amp;</span>
+<span class="nc" id="L505">                    capability.sourceSpec.locale.language</span>
+<span class="nc bnc" id="L506" title="All 2 branches missed.">                        .equals(sourceLang, ignoreCase = true) &amp;&amp;</span>
+<span class="nc" id="L507">                    capability.targetSpec.locale.language</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">                        .equals(targetLang, ignoreCase = true)</span>
+            }
+    }
+
+    private fun collectTextNodes(node: Node): List&lt;TextNode&gt; =
+<span class="nc" id="L513">        buildList {</span>
+            fun visit(current: Node) {
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                if (current is TextNode) {</span>
+<span class="nc" id="L516">                    add(current)</span>
+                }
+<span class="nc" id="L518">                current.childNodes().forEach(::visit)</span>
+<span class="nc" id="L519">            }</span>
+<span class="nc" id="L520">            visit(node)</span>
+<span class="nc" id="L521">        }</span>
+
+    private fun detectSourceLanguage(
+        content: String,
+        preserveHtml: Boolean,
+    ): String =
+<span class="nc" id="L527">        runCatching {</span>
+<span class="nc" id="L528">            val detectedLanguages =</span>
+<span class="nc" id="L529">                prepareTextSamplesForLanguageDetection(</span>
+<span class="nc" id="L530">                    content = content,</span>
+<span class="nc" id="L531">                    preserveHtml = preserveHtml,</span>
+<span class="nc" id="L532">                ).filter(::hasEnoughTextForLanguageDetection)</span>
+<span class="nc" id="L533">                    .mapNotNull { sample -&gt;</span>
+<span class="nc" id="L534">                        application</span>
+<span class="nc" id="L535">                            .detectLocaleFromText(</span>
+<span class="nc" id="L536">                                text = sample,</span>
+<span class="nc" id="L537">                                minConfidence = 60.0f,</span>
+<span class="nc" id="L538">                            ).firstOrNull()</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">                            ?.locale</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">                            ?.language</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">                            ?.let(::normalizeLanguageCode)</span>
+<span class="nc bnc" id="L542" title="All 6 branches missed.">                            ?.takeIf { it != &quot;und&quot; }</span>
+                    }
+
+<span class="nc" id="L545">            val languageCounts = detectedLanguages.groupingBy { it }.eachCount()</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">            detectedLanguages.maxByOrNull { languageCounts.getValue(it) }</span>
+<span class="nc" id="L547">                ?: &quot;und&quot;</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        }.getOrDefault(&quot;und&quot;)</span>
+
+    private fun String.toLocalTranslationError(
+        @StringRes fallbackStringId: Int,
+    ): String =
+<span class="nc" id="L553">        lineSequence()</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">            .firstOrNull(String::isNotBlank)</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">            .orEmpty()</span>
+<span class="nc" id="L556">            .take(MAX_LOCAL_TRANSLATION_ERROR_LENGTH)</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">            .ifBlank { application.getString(fallbackStringId) }</span>
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_LOCAL_TRANSLATION&quot;
+        private const val ANDROID_TRANSLATOR_CREATION_TIMEOUT_MS = 5_000L
+        private const val ANDROID_TRANSLATION_TIMEOUT_MS = 20_000L
+        private const val TRANSLATION_TIMEOUT_MS = 5 * 60_000L
+    }
+}
+
+private sealed interface LocalTranslationResult {
+<span class="nc" id="L568">    data class Success(</span>
+<span class="nc" id="L569">        val values: List&lt;String&gt;,</span>
+    ) : LocalTranslationResult
+
+<span class="nc" id="L572">    data class Error(</span>
+<span class="nc" id="L573">        val message: String,</span>
+<span class="nc" id="L574">        val action: ErrorAction = ErrorAction.None,</span>
+<span class="nc" id="L575">    ) : LocalTranslationResult</span>
+}
+
+@RequiresApi(Build.VERSION_CODES.S)
+private fun Int?.translationCapabilityStateName(): String =
+<span class="nc" id="L580">    when (this) {</span>
+<span class="nc bnc" id="L581" title="All 4 branches missed.">        TranslationCapability.STATE_ON_DEVICE -&gt; &quot;ON_DEVICE&quot;</span>
+<span class="nc bnc" id="L582" title="All 4 branches missed.">        TranslationCapability.STATE_AVAILABLE_TO_DOWNLOAD -&gt; &quot;AVAILABLE_TO_DOWNLOAD&quot;</span>
+<span class="nc bnc" id="L583" title="All 4 branches missed.">        TranslationCapability.STATE_DOWNLOADING -&gt; &quot;DOWNLOADING&quot;</span>
+<span class="nc bnc" id="L584" title="All 4 branches missed.">        TranslationCapability.STATE_NOT_AVAILABLE -&gt; &quot;NOT_AVAILABLE&quot;</span>
+<span class="nc" id="L585">        else -&gt; &quot;NONE&quot;</span>
+<span class="nc" id="L586">    }</span>
+
+@RequiresApi(Build.VERSION_CODES.S)
+private fun Collection&lt;TranslationCapability&gt;.toDebugSummary(): String =
+<span class="nc" id="L590">    joinToString(</span>
+<span class="nc" id="L591">        separator = &quot;, &quot;,</span>
+<span class="nc" id="L592">        limit = 20,</span>
+<span class="nc" id="L593">        truncated = &quot;... ($size total)&quot;,</span>
+    ) { capability -&gt;
+<span class="nc" id="L595">        &quot;${capability.sourceSpec.locale.toLanguageTag()}-&gt;${capability.targetSpec.locale.toLanguageTag()}:&quot; +</span>
+<span class="nc" id="L596">            capability.state.translationCapabilityStateName()</span>
+<span class="nc" id="L597">    }</span>
+
+<span class="nc" id="L599">private data class HtmlTextNodeTranslation(</span>
+<span class="nc" id="L600">    val textNode: TextNode,</span>
+<span class="nc" id="L601">    val leadingWhitespace: String,</span>
+<span class="nc" id="L602">    val text: String,</span>
+<span class="nc" id="L603">    val trailingWhitespace: String,</span>
+) {
+    companion object {
+        fun from(textNode: TextNode): HtmlTextNodeTranslation {
+<span class="nc" id="L607">            val wholeText = textNode.wholeText</span>
+<span class="nc" id="L608">            val leadingWhitespace = wholeText.takeWhile(Char::isWhitespace)</span>
+<span class="nc" id="L609">            val trailingWhitespace = wholeText.takeLastWhile(Char::isWhitespace)</span>
+<span class="nc" id="L610">            return HtmlTextNodeTranslation(</span>
+<span class="nc" id="L611">                textNode = textNode,</span>
+<span class="nc" id="L612">                leadingWhitespace = leadingWhitespace,</span>
+                text =
+<span class="nc" id="L614">                    wholeText</span>
+<span class="nc" id="L615">                        .drop(leadingWhitespace.length)</span>
+<span class="nc" id="L616">                        .dropLast(trailingWhitespace.length),</span>
+<span class="nc" id="L617">                trailingWhitespace = trailingWhitespace,</span>
+            )
+        }
+    }
+}
+
+private const val MAX_LOCAL_TRANSLATION_ERROR_LENGTH = 80
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

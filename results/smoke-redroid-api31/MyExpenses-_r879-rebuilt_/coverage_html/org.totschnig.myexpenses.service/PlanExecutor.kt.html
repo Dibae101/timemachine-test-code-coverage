@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlanExecutor.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.service</a> &gt; <span class="el_source">PlanExecutor.kt</span></div><h1>PlanExecutor.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.service
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.PendingIntent
+import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.Context
+import android.content.Intent
+import android.provider.CalendarContract
+import androidx.annotation.RequiresPermission
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import org.totschnig.myexpenses.BuildConfig
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.activity.ExpenseEdit
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.createTransaction
+import org.totschnig.myexpenses.db2.getLabelForAccount
+import org.totschnig.myexpenses.db2.linkTemplateWithTransaction
+import org.totschnig.myexpenses.db2.loadTemplateForPlanIfInstanceIsOpen
+import org.totschnig.myexpenses.db2.planCount
+import org.totschnig.myexpenses.injector
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.preference.TimePreference
+import org.totschnig.myexpenses.provider.CalendarProviderProxy
+import org.totschnig.myexpenses.provider.INVALID_CALENDAR_ID
+import org.totschnig.myexpenses.provider.KEY_DATE
+import org.totschnig.myexpenses.provider.KEY_INSTANCEID
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_TEMPLATEID
+import org.totschnig.myexpenses.provider.KEY_TRANSACTIONID
+import org.totschnig.myexpenses.provider.PlannerUtils
+import org.totschnig.myexpenses.util.ExchangeRateHandler
+import org.totschnig.myexpenses.util.ICurrencyFormatter
+import org.totschnig.myexpenses.util.NotificationBuilderWrapper
+import org.totschnig.myexpenses.util.PermissionHelper.PermissionGroup
+import org.totschnig.myexpenses.util.PermissionHelper.hasCalendarPermission
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler.Companion.report
+import org.totschnig.myexpenses.util.epochMillis2LocalDate
+import org.totschnig.myexpenses.util.formatMoney
+import org.totschnig.myexpenses.util.safeMessage
+import org.totschnig.myexpenses.util.toEpochMillis
+import org.totschnig.myexpenses.viewmodel.PlanInstanceInfo
+import timber.log.Timber
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZonedDateTime
+import java.time.temporal.ChronoUnit
+import java.util.concurrent.TimeUnit
+import javax.inject.Inject
+
+
+<span class="nc" id="L62">class PlanExecutor(context: Context, workerParameters: WorkerParameters) :</span>
+<span class="nc" id="L63">    NotifyingBaseWorker(context, workerParameters) {</span>
+    @Inject
+<span class="nc" id="L65">    lateinit var currencyFormatter: ICurrencyFormatter</span>
+    @Inject
+<span class="nc" id="L67">    lateinit var repository: Repository</span>
+    @Inject
+<span class="nc" id="L69">    lateinit var plannerUtils: PlannerUtils</span>
+    @Inject
+<span class="nc" id="L71">    lateinit var currencyContext: CurrencyContext</span>
+    @Inject
+<span class="nc" id="L73">    lateinit var exchangeRateHandler: ExchangeRateHandler</span>
+
+    val contentResolver: ContentResolver
+<span class="nc" id="L76">        get() = repository.contentResolver</span>
+
+<span class="nc" id="L78">    init {</span>
+<span class="nc" id="L79">        context.injector.inject(this)</span>
+<span class="nc" id="L80">    }</span>
+
+<span class="nc" id="L82">    override val channelId: String = NotificationBuilderWrapper.CHANNEL_ID_PLANNER</span>
+<span class="nc" id="L83">    override val notificationId = NotificationBuilderWrapper.NOTIFICATION_PLANNER_ERROR</span>
+<span class="nc" id="L84">    override val notificationTitleResId = R.string.planner_notification_channel_name</span>
+
+    companion object {
+        const val TAG = &quot;PlanExecutor&quot;
+        private const val WORK_NAME = &quot;PlanExecutor&quot;
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        private val OVERLAPPING_WINDOW = ((if (BuildConfig.DEBUG) 1 else 5) * 60 * 1000).toLong()</span>
+        const val ACTION_CANCEL = &quot;Cancel&quot;
+        const val ACTION_APPLY = &quot;Apply&quot;
+        const val KEY_TITLE = &quot;title&quot;
+        const val H24 = (24 * 60 * 60 * 1000).toLong()
+        const val ADVANCE_DAYS = 30
+
+        private fun buildWorkRequest(initialDelayMillis: Long?): OneTimeWorkRequest {
+<span class="nc" id="L97">            return OneTimeWorkRequestBuilder&lt;PlanExecutor&gt;().apply {</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">                initialDelayMillis?.let {</span>
+<span class="nc" id="L99">                    setInitialDelay(it, TimeUnit.MILLISECONDS)</span>
+<span class="nc" id="L100">                }</span>
+<span class="nc" id="L101">            }.build()</span>
+        }
+
+<span class="nc" id="L104">        fun enqueueSelf(</span>
+            context: Context,
+            prefHandler: PrefHandler,
+<span class="nc" id="L107">            forceImmediate: Boolean = false</span>
+        ) {
+<span class="nc" id="L109">            val hasPermission = PermissionGroup.CALENDAR.hasPermission(context)</span>
+<span class="nc" id="L110">            val planCount = context.injector.repository().planCount()</span>
+<span class="nc bnc" id="L111" title="All 4 branches missed.">            if (hasPermission &amp;&amp; planCount &gt; 0) {</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                val scheduledTime = if (forceImmediate) null else TimePreference.getScheduledTime(</span>
+<span class="nc" id="L113">                    prefHandler, PrefKey.PLANNER_EXECUTION_TIME</span>
+                )
+<span class="nc" id="L115">                log(&quot;enqueueSelf %d&quot;, scheduledTime)</span>
+<span class="nc" id="L116">                WorkManager.getInstance(context).enqueueUniqueWork(</span>
+<span class="nc" id="L117">                    WORK_NAME,</span>
+<span class="nc" id="L118">                    ExistingWorkPolicy.REPLACE,</span>
+<span class="nc" id="L119">                    buildWorkRequest(scheduledTime)</span>
+                )
+            } else {
+<span class="nc" id="L122">                log(&quot;not enqueueing, has calendar permission: %b, planCount: %d&quot;, hasPermission, planCount)</span>
+            }
+<span class="nc" id="L124">        }</span>
+
+        fun cancel(context: Context) {
+<span class="nc" id="L127">            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)</span>
+<span class="nc" id="L128">        }</span>
+
+        private fun log(message: String, vararg args: Any?) {
+<span class="nc" id="L131">            Timber.tag(TAG).i(message, *args)</span>
+<span class="nc" id="L132">        }</span>
+    }
+
+    private fun scheduleNextRun() {
+<span class="nc" id="L136">        enqueueSelf(applicationContext, prefHandler)</span>
+<span class="nc" id="L137">    }</span>
+
+    private fun logAndNotifyError(message: String) {
+<span class="nc" id="L140">        log(message)</span>
+<span class="nc" id="L141">        notify(message)</span>
+<span class="nc" id="L142">    }</span>
+
+    @RequiresPermission(allOf = [Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR])
+    @SuppressLint(&quot;InlinedApi&quot;)
+    override suspend fun doWork(): Result {
+<span class="nc" id="L147">        val nowZDT = ZonedDateTime.now()</span>
+<span class="nc" id="L148">        val beginningOfDay = nowZDT.toLocalDate().atTime(LocalTime.MIN).toEpochMillis()</span>
+<span class="nc" id="L149">        val endOfDay = nowZDT.toLocalDate().atTime(LocalTime.MAX).toEpochMillis()</span>
+<span class="nc" id="L150">        val nowMillis = nowZDT.toEpochSecond() * 1000</span>
+<span class="nc" id="L151">        val lastExecution = prefHandler.getLong(</span>
+<span class="nc" id="L152">            PrefKey.PLANNER_LAST_EXECUTION_TIMESTAMP,</span>
+<span class="nc" id="L153">            nowMillis - H24</span>
+        )
+<span class="nc" id="L155">        log(&quot;now %d compared to System.currentTimeMillis %d&quot;, nowMillis, System.currentTimeMillis())</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (!hasCalendarPermission(applicationContext)) {</span>
+<span class="nc" id="L157">            logAndNotifyError(&quot;Calendar permission not granted&quot;)</span>
+<span class="nc" id="L158">            return Result.failure()</span>
+        }
+        //noinspection MissingPermission
+<span class="nc" id="L161">        val plannerCalendarId: String? = plannerUtils.checkPlanner()</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (plannerCalendarId == null) {</span>
+<span class="nc" id="L163">            logAndNotifyError(&quot;planner verification failed, will try later&quot;)</span>
+<span class="nc" id="L164">            scheduleNextRun()</span>
+<span class="nc" id="L165">            return Result.failure()</span>
+        }
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (plannerCalendarId == INVALID_CALENDAR_ID) {</span>
+<span class="nc" id="L168">            logAndNotifyError(&quot;no planner set, nothing to do&quot;)</span>
+<span class="nc" id="L169">            return Result.failure()</span>
+        }
+        //we use an overlapping window of 5 minutes to prevent plans that are just created by the user while
+        //we are running from falling through
+<span class="nc" id="L173">        val instancesFrom =</span>
+<span class="nc" id="L174">            (lastExecution - OVERLAPPING_WINDOW).coerceAtMost(beginningOfDay)</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (nowMillis &lt; instancesFrom) {</span>
+<span class="nc" id="L176">            logAndNotifyError(&quot;Broken system time? Cannot execute plans.&quot;)</span>
+<span class="nc" id="L177">            return Result.failure()</span>
+        }
+<span class="nc" id="L179">        log(&quot;now %d compared to end of day %d&quot;, nowMillis, endOfDay)</span>
+<span class="nc" id="L180">        val instancesUntil = endOfDay + ADVANCE_DAYS * H24</span>
+<span class="nc" id="L181">        log(&quot;executing plans from %d to %d&quot;, instancesFrom, instancesUntil)</span>
+
+<span class="nc" id="L183">        val eventsUriBuilder = CalendarProviderProxy.INSTANCES_URI.buildUpon()</span>
+<span class="nc" id="L184">        ContentUris.appendId(eventsUriBuilder, instancesFrom)</span>
+<span class="nc" id="L185">        ContentUris.appendId(eventsUriBuilder, instancesUntil)</span>
+<span class="nc" id="L186">        val eventsUri = eventsUriBuilder.build()</span>
+<span class="nc" id="L187">        try {</span>
+<span class="nc" id="L188">            contentResolver.query(</span>
+<span class="nc" id="L189">                eventsUri, null,</span>
+<span class="nc" id="L190">                CalendarContract.Events.CALENDAR_ID + &quot; = &quot; + plannerCalendarId,</span>
+<span class="nc" id="L191">                null,</span>
+<span class="nc" id="L192">                CalendarContract.Instances.BEGIN + &quot; ASC&quot;</span>
+            )
+<span class="nc" id="L194">        } catch (e: Exception) {</span>
+            //} catch (SecurityException | IllegalArgumentException e) {
+<span class="nc" id="L196">            report(e, TAG)</span>
+<span class="nc" id="L197">            notify(e.safeMessage)</span>
+            //android.permission.READ_CALENDAR or android.permission.WRITE_CALENDAR missing (SecurityException)
+            //buggy calendar provider implementation on Sony (IllegalArgumentException)
+            //sqlite database not yet available observed on samsung GT-N7100 (SQLiteException)
+<span class="nc" id="L201">            return Result.failure()</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        }?.use { cursor -&gt;</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">            if (cursor.moveToFirst()) {</span>
+<span class="nc" id="L204">                val today = LocalDate.now()</span>
+<span class="nc bnc" id="L205" title="All 4 branches missed.">                while (!cursor.isAfterLast &amp;&amp; !isStopped) {</span>
+<span class="nc" id="L206">                    val planId =</span>
+<span class="nc" id="L207">                        cursor.getLong(cursor.getColumnIndexOrThrow(CalendarContract.Instances.EVENT_ID))</span>
+<span class="nc" id="L208">                    val date =</span>
+<span class="nc" id="L209">                        cursor.getLong(cursor.getColumnIndexOrThrow(CalendarContract.Instances.BEGIN))</span>
+<span class="nc" id="L210">                    val localDate = epochMillis2LocalDate(date)</span>
+<span class="nc" id="L211">                    val diff = ChronoUnit.DAYS.between(today, localDate)</span>
+<span class="nc" id="L212">                    val instanceId = CalendarProviderProxy.calculateId(date)</span>
+                    //2) check if they are part of a plan linked to a template
+                    //3) execute the template
+<span class="nc" id="L215">                    log(&quot;found instance %d of plan %d&quot;, instanceId, planId)</span>
+                    //TODO if we have multiple Event instances for one plan, we should maybe cache the template objects
+<span class="nc" id="L217">                    val template = repository.loadTemplateForPlanIfInstanceIsOpen(planId, instanceId)</span>
+<span class="nc bnc" id="L218" title="All 4 branches missed.">                    if (!(template == null || template.data.sealed)) {</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">                        if (template.data.planExecutionAdvance &gt;= diff) {</span>
+<span class="nc" id="L220">                            val accountLabel = repository.getLabelForAccount(template.data.accountId)</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                            if (accountLabel != null) {</span>
+<span class="nc" id="L222">                                log(&quot;belongs to template %d&quot;, template.id)</span>
+<span class="nc" id="L223">                                var notification: Notification</span>
+<span class="nc" id="L224">                                val notificationId = (instanceId * planId % Int.MAX_VALUE).toInt()</span>
+<span class="nc" id="L225">                                log(&quot;notification id %d&quot;, notificationId)</span>
+<span class="nc" id="L226">                                var resultIntent: PendingIntent?</span>
+<span class="nc" id="L227">                                val title = accountLabel + &quot; : &quot; + template.title</span>
+<span class="nc" id="L228">                                val builder = NotificationBuilderWrapper(</span>
+<span class="nc" id="L229">                                    applicationContext,</span>
+<span class="nc" id="L230">                                    NotificationBuilderWrapper.CHANNEL_ID_PLANNER</span>
+                                )
+<span class="nc" id="L232">                                    .setSmallIcon(R.drawable.ic_stat_notification_sigma)</span>
+<span class="nc" id="L233">                                    .setContentTitle(title)</span>
+<span class="nc" id="L234">                                builder.setWhen(date)</span>
+<span class="nc bnc" id="L235" title="All 4 branches missed.">                                var content: String = template.data.categoryPath?.let { &quot;$it : &quot; } ?: &quot;&quot;</span>
+<span class="nc" id="L236">                                content += currencyFormatter.formatMoney(</span>
+<span class="nc" id="L237">                                    Money(</span>
+<span class="nc" id="L238">                                        currencyContext[template.data.currency!!],</span>
+<span class="nc" id="L239">                                        template.data.amount</span>
+                                    )
+                                )
+<span class="nc" id="L242">                                builder.setContentText(content)</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                                if (template.data.planExecutionAutomatic) {</span>
+<span class="nc" id="L244">                                    val transaction = repository.createTransaction(template.instantiate(</span>
+<span class="nc" id="L245">                                        currencyContext, exchangeRateHandler, PlanInstanceInfo(template.id, instanceId, date)</span>
+                                    ))
+<span class="nc" id="L247">                                    repository.linkTemplateWithTransaction(template.id, transaction.id, instanceId)</span>
+
+<span class="nc" id="L249">                                    resultIntent = prefHandler.createShowDetailsIntent(applicationContext, notificationId, transaction.data)</span>
+<span class="nc" id="L250">                                    builder.setContentIntent(resultIntent)</span>
+<span class="nc" id="L251">                                    builder.setAutoCancel(true)</span>
+<span class="nc" id="L252">                                    notification = builder.build()</span>
+                                } else {
+<span class="nc" id="L254">                                    val cancelIntent: Intent =</span>
+<span class="nc" id="L255">                                        Intent(</span>
+<span class="nc" id="L256">                                            applicationContext,</span>
+<span class="nc" id="L257">                                            PlanNotificationClickHandler::class.java</span>
+                                        )
+<span class="nc" id="L259">                                            .setAction(ACTION_CANCEL)</span>
+<span class="nc" id="L260">                                            .putExtra(</span>
+<span class="nc" id="L261">                                                MyApplication.KEY_NOTIFICATION_ID,</span>
+<span class="nc" id="L262">                                                notificationId</span>
+                                            )
+<span class="nc" id="L264">                                            .putExtra(</span>
+<span class="nc" id="L265">                                                KEY_TEMPLATEID,</span>
+<span class="nc" id="L266">                                                template.id</span>
+                                            )
+<span class="nc" id="L268">                                            .putExtra(</span>
+<span class="nc" id="L269">                                                KEY_INSTANCEID,</span>
+<span class="nc" id="L270">                                                instanceId</span>
+                                            ) //we also put the title in the intent, because we need it while we update the notification
+<span class="nc" id="L272">                                            .putExtra(KEY_TITLE, title)</span>
+<span class="nc" id="L273">                                    builder.addAction(</span>
+<span class="nc" id="L274">                                        R.drawable.ic_menu_close_clear_cancel,</span>
+<span class="nc" id="L275">                                        wrappedContext.getString(android.R.string.cancel),</span>
+<span class="nc" id="L276">                                        PendingIntent.getService(</span>
+<span class="nc" id="L277">                                            applicationContext,</span>
+<span class="nc" id="L278">                                            notificationId,</span>
+<span class="nc" id="L279">                                            cancelIntent,</span>
+<span class="nc" id="L280">                                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+                                        )
+                                    )
+<span class="nc" id="L283">                                    val editIntent: Intent =</span>
+<span class="nc" id="L284">                                        Intent(applicationContext, ExpenseEdit::class.java)</span>
+<span class="nc" id="L285">                                            .putExtra(</span>
+<span class="nc" id="L286">                                                MyApplication.KEY_NOTIFICATION_ID,</span>
+<span class="nc" id="L287">                                                notificationId</span>
+                                            )
+<span class="nc" id="L289">                                            .putExtra(</span>
+<span class="nc" id="L290">                                                KEY_TEMPLATEID,</span>
+<span class="nc" id="L291">                                                template.id</span>
+                                            )
+<span class="nc" id="L293">                                            .putExtra(KEY_INSTANCEID, instanceId)</span>
+<span class="nc" id="L294">                                    val useDateFromPlan =</span>
+<span class="nc" id="L295">                                        &quot;noon&quot; == prefHandler.getString(</span>
+<span class="nc" id="L296">                                            PrefKey.PLANNER_MANUAL_TIME,</span>
+<span class="nc" id="L297">                                            &quot;noon&quot;</span>
+                                        )
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                                    if (useDateFromPlan) {</span>
+<span class="nc" id="L300">                                        editIntent.putExtra(KEY_DATE, date / 1000)</span>
+                                    }
+<span class="nc" id="L302">                                    resultIntent = PendingIntent.getActivity(</span>
+<span class="nc" id="L303">                                        applicationContext,</span>
+<span class="nc" id="L304">                                        notificationId,</span>
+<span class="nc" id="L305">                                        editIntent,</span>
+<span class="nc" id="L306">                                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+                                    )
+<span class="nc" id="L308">                                    builder.addAction(</span>
+<span class="nc" id="L309">                                        R.drawable.ic_menu_edit,</span>
+<span class="nc" id="L310">                                        wrappedContext.getString(R.string.menu_edit),</span>
+<span class="nc" id="L311">                                        resultIntent</span>
+                                    )
+<span class="nc" id="L313">                                    val applyIntent =</span>
+<span class="nc" id="L314">                                        Intent(</span>
+<span class="nc" id="L315">                                            applicationContext,</span>
+<span class="nc" id="L316">                                            PlanNotificationClickHandler::class.java</span>
+                                        )
+<span class="nc" id="L318">                                    applyIntent.setAction(ACTION_APPLY)</span>
+<span class="nc" id="L319">                                        .putExtra(MyApplication.KEY_NOTIFICATION_ID, notificationId)</span>
+<span class="nc" id="L320">                                        .putExtra(KEY_TITLE, title)</span>
+<span class="nc" id="L321">                                        .putExtra(</span>
+<span class="nc" id="L322">                                            KEY_TEMPLATEID,</span>
+<span class="nc" id="L323">                                            template.id</span>
+                                        )
+<span class="nc" id="L325">                                        .putExtra(KEY_INSTANCEID, instanceId)</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                                    if (useDateFromPlan) {</span>
+<span class="nc" id="L327">                                        applyIntent.putExtra(KEY_DATE, date)</span>
+                                    }
+<span class="nc" id="L329">                                    builder.addAction(</span>
+<span class="nc" id="L330">                                        R.drawable.ic_menu_save,</span>
+<span class="nc" id="L331">                                        wrappedContext.getString(R.string.menu_apply_template),</span>
+<span class="nc" id="L332">                                        PendingIntent.getService(</span>
+<span class="nc" id="L333">                                            applicationContext,</span>
+<span class="nc" id="L334">                                            notificationId,</span>
+<span class="nc" id="L335">                                            applyIntent,</span>
+<span class="nc" id="L336">                                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+                                        )
+                                    )
+<span class="nc" id="L339">                                    builder.setContentIntent(resultIntent)</span>
+<span class="nc" id="L340">                                    notification = builder.build()</span>
+<span class="nc" id="L341">                                    notification.flags =</span>
+<span class="nc" id="L342">                                        notification.flags or Notification.FLAG_NO_CLEAR</span>
+                                }
+<span class="nc" id="L344">                                notificationManager.notify(notificationId, notification)</span>
+                            } else {
+<span class="nc" id="L346">                                log(&quot;Account.getInstanceFromDb returned null&quot;)</span>
+                            }
+                        } else {
+<span class="nc" id="L349">                            log(</span>
+<span class="nc" id="L350">                                &quot;Instance is not ready yet (%d days in the future), advance execution is %d&quot;,</span>
+<span class="nc" id="L351">                                diff,</span>
+<span class="nc" id="L352">                                template.data.planExecutionAdvance</span>
+                            )
+                        }
+                    } else {
+<span class="nc bnc" id="L356" title="All 2 branches missed.">                        log(if (template == null) &quot;Template.getInstanceForPlanIfInstanceIsOpen returned null, instance might already have been dealt with&quot; else &quot;Plan refers to a closed account or debt&quot;)</span>
+                    }
+<span class="nc" id="L358">                    cursor.moveToNext()</span>
+                }
+            }
+<span class="nc" id="L361">        }</span>
+
+<span class="nc" id="L363">        prefHandler.putLong(PrefKey.PLANNER_LAST_EXECUTION_TIMESTAMP, nowMillis)</span>
+<span class="nc" id="L364">        scheduleNextRun()</span>
+<span class="nc" id="L365">        return Result.success()</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

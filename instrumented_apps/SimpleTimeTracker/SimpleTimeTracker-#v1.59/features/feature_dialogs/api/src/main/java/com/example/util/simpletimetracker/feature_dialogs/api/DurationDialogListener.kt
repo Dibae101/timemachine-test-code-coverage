@@ -1,0 +1,10 @@
+package com.example.util.simpletimetracker.feature_dialogs.api
+
+interface DurationDialogListener {
+
+    fun onDurationSet(durationSeconds: Long, tag: String? = null) {}
+
+    fun onCountSet(count: Long, tag: String? = null) {}
+
+    fun onDisable(tag: String?) {}
+}

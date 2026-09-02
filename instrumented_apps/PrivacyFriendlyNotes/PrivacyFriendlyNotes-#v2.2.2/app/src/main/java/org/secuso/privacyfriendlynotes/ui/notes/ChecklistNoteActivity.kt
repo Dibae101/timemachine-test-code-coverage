@@ -1,0 +1,238 @@
+/*
+ This file is part of the application Privacy Friendly Notes.
+ Privacy Friendly Notes is free software:
+ you can redistribute it and/or modify it under the terms of the
+ GNU General Public License as published by the Free Software Foundation,
+ either version 3 of the License, or any later version.
+ Privacy Friendly Notes is distributed in the hope
+ that it will be useful, but WITHOUT ANY WARRANTY; without even
+ the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ See the GNU General Public License for more details.
+ You should have received a copy of the GNU General Public License
+ along with Privacy Friendly Notes. If not, see <http://www.gnu.org/licenses/>.
+ */
+package org.secuso.privacyfriendlynotes.ui.notes
+
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.os.Bundle
+import android.text.Html
+import android.text.SpannedString
+import android.view.ContextThemeWrapper
+import android.view.KeyEvent
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
+import android.widget.Button
+import android.widget.EditText
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.launch
+import org.secuso.privacyfriendlynotes.R
+import org.secuso.privacyfriendlynotes.room.DbContract
+import org.secuso.privacyfriendlynotes.room.model.Note
+import org.secuso.privacyfriendlynotes.ui.adapter.ChecklistAdapter
+import org.secuso.privacyfriendlynotes.ui.util.ChecklistItem
+import org.secuso.privacyfriendlynotes.ui.util.ChecklistUtil
+import java.io.OutputStream
+import java.io.PrintWriter
+import java.util.Collections
+
+/**
+ * Activity that allows to add, edit and delete checklist notes.
+ */
+class ChecklistNoteActivity : BaseNoteActivity(DbContract.NoteEntry.TYPE_CHECKLIST) {
+    private val etNewItem: EditText by lazy { findViewById(R.id.etNewItem) }
+    private val btnAdd: Button by lazy { findViewById(R.id.btn_add) }
+    private val checklist: RecyclerView by lazy { findViewById(R.id.itemList) }
+    private lateinit var adapter: ChecklistAdapter
+
+    @SuppressLint("NotifyDataSetChanged")
+    override fun onCreate(savedInstanceState: Bundle?) {
+        setContentView(R.layout.activity_checklist_note)
+        findViewById<View>(R.id.btn_add).setOnClickListener(this)
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                isLocked.collect {
+                    btnAdd.isEnabled = !it
+                    etNewItem.isEnabled = !it
+                    adapter.isEnabled = !it
+                    adapter.notifyDataSetChanged()
+                }
+            }
+        }
+
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onLoadActivity() {
+        etNewItem.setOnEditorActionListener { _, _, event ->
+            if ((event == null || event.keyCode == KeyEvent.KEYCODE_ENTER) && etNewItem.text.isNotEmpty()) {
+                addItem()
+            }
+            return@setOnEditorActionListener true
+        }
+
+        val itemTouchCallback = object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN,
+            ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT
+        ) {
+
+            override fun isLongPressDragEnabled() = false
+
+            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
+                val to = target.bindingAdapterPosition
+                val from = viewHolder.bindingAdapterPosition
+                adapter.swap(from, to)
+                adapter.notifyItemMoved(to, from)
+
+                return true
+            }
+
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+                if (!isLocked.value) {
+                    adapter.removeItem(viewHolder.bindingAdapterPosition)
+                } else {
+                    adapter.notifyItemChanged(viewHolder.bindingAdapterPosition)
+                }
+            }
+        }
+        val ith = ItemTouchHelper(itemTouchCallback)
+        adapter = ChecklistAdapter(isEnabled = !isLocked.value, startDrag = { ith.startDrag(it) })
+        checklist.adapter = adapter
+        checklist.layoutManager = LinearLayoutManager(this)
+        btnAdd.setOnClickListener {
+            if (etNewItem.text.isNotEmpty()) {
+                addItem()
+            }
+        }
+        ith.attachToRecyclerView(checklist)
+        adaptFontSize(etNewItem)
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        menuInflater.inflate(R.menu.activity_checklist, menu)
+        return super.onCreateOptionsMenu(menu)
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            R.id.action_sort_alphabetical -> {
+                val next = when (adapter.sortingOption) {
+                    ChecklistAdapter.SortingOption.NONE -> ChecklistAdapter.SortingOption.ASCENDING
+                    ChecklistAdapter.SortingOption.ASCENDING -> ChecklistAdapter.SortingOption.DESCENDING
+                    ChecklistAdapter.SortingOption.DESCENDING -> ChecklistAdapter.SortingOption.NONE
+                }
+                val icon = when (next) {
+                    ChecklistAdapter.SortingOption.NONE -> R.drawable.ic_sort_by_alpha_icon_24dp
+                    ChecklistAdapter.SortingOption.ASCENDING -> R.drawable.ic_sort_by_alpha_asc_icon_24dp
+                    ChecklistAdapter.SortingOption.DESCENDING -> R.drawable.ic_sort_by_alpha_desc_icon_24dp
+                }
+                adapter.sortingOption = next
+                item.setIcon(icon)
+            }
+            R.id.action_convert_to_note -> {
+                MaterialAlertDialogBuilder(ContextThemeWrapper(this@ChecklistNoteActivity, R.style.AppTheme_PopupOverlay_DialogAlert))
+                    .setTitle(R.string.dialog_convert_to_text_title)
+                    .setMessage(R.string.dialog_convert_to_text_desc)
+                    .setPositiveButton(R.string.dialog_convert_action) { _, _ ->
+                        super.convertNote(Html.toHtml(SpannedString(getContentString())), DbContract.NoteEntry.TYPE_TEXT) {
+                            val i = Intent(application, TextNoteActivity::class.java)
+                            i.putExtra(EXTRA_ID, it)
+                            startActivity(i)
+                            finish()
+                        }
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setIcon(android.R.drawable.ic_dialog_alert)
+                    .show()
+            }
+            R.id.action_select_all -> adapter.selectAll()
+            R.id.action_deselect_all -> adapter.deselectAll()
+            R.id.action_new_checked -> {
+                val items = adapter.getItems().filter { it.state }.map { ChecklistItem(false, it.name) }
+                super.newNote(ChecklistUtil.json(items).toString(), DbContract.NoteEntry.TYPE_CHECKLIST) {
+                    val i = Intent(application, ChecklistNoteActivity::class.java)
+                    i.putExtra(EXTRA_ID, it)
+                    startActivity(i)
+                    finish()
+                }
+            }
+            R.id.action_new_unchecked -> {
+                val items = adapter.getItems().filter { !it.state }
+                super.newNote(ChecklistUtil.json(items).toString(), DbContract.NoteEntry.TYPE_CHECKLIST) {
+                    val i = Intent(application, ChecklistNoteActivity::class.java)
+                    i.putExtra(EXTRA_ID, it)
+                    startActivity(i)
+                    finish()
+                }
+            }
+
+            else -> {}
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
+    override fun onNewNote() {
+
+    }
+
+    override fun onNoteLoadedFromDB(note: Note) {
+        adapter.setItems(ChecklistUtil.parse(note.content))
+    }
+
+    override fun hasNoteChanged(title: String, category: Int): Pair<Boolean, Int?> {
+        return Pair(adapter.hasChanged, if (adapter.getItems().isEmpty() && title.isEmpty()) { R.string.toast_emptyNote } else { null })
+    }
+
+    override fun shareNote(name: String): ActionResult<Intent, Int> {
+        val sendIntent = Intent()
+        sendIntent.action = Intent.ACTION_SEND
+        sendIntent.type = "text/plain"
+        sendIntent.putExtra(Intent.EXTRA_TEXT, "$name\n\n${getContentString()}")
+        return ActionResult(true, sendIntent)
+    }
+
+    override fun onClick(v: View) {
+        if (v.id == R.id.btn_add && etNewItem.text.toString().isNotEmpty()) {
+            addItem()
+        }
+    }
+
+    override fun onNoteSave(name: String, category: Int): ActionResult<Note, Int> {
+        val jsonArray = ChecklistUtil.json(adapter.getItems())
+        if (name.isEmpty() && jsonArray.length() == 0) {
+            return ActionResult(false, null)
+        }
+        return ActionResult(true, Note(name, jsonArray.toString(), DbContract.NoteEntry.TYPE_CHECKLIST, category))
+    }
+
+    override fun getMimeType() = "text/plain"
+
+    override fun getFileExtension() = ChecklistNoteActivity.getFileExtension()
+
+    override fun onSaveExternalStorage(outputStream: OutputStream) {
+        val out = PrintWriter(outputStream)
+        out.println(getContentString())
+        out.close()
+    }
+
+    private fun getContentString(): String {
+        return adapter.getItems().joinToString(System.lineSeparator()) { (checked, name) -> "- [${if (checked) "x" else " "}] $name" }
+    }
+
+    private fun addItem() {
+        adapter.addItem(etNewItem.text.toString())
+        etNewItem.setText("")
+    }
+
+    companion object {
+        fun getFileExtension() = ".txt"
+    }
+}

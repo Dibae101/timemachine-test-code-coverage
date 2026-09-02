@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionPagingSource.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.adapter</a> &gt; <span class="el_source">TransactionPagingSource.kt</span></div><h1>TransactionPagingSource.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.adapter
+
+import android.annotation.SuppressLint
+import android.content.ContentResolver
+import android.content.Context
+import android.database.ContentObserver
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import androidx.paging.PagingState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.totschnig.myexpenses.BuildConfig
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_SPLIT_PART
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.asSequence
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.withLimit
+import org.totschnig.myexpenses.viewmodel.data.PageAccount
+import org.totschnig.myexpenses.viewmodel.data.Transaction2
+import org.totschnig.myexpenses.viewmodel.data.mergeTransfers
+import org.totschnig.myexpenses.viewmodel.data.pickForMerge
+import org.totschnig.myexpenses.viewmodel.pageSize
+import timber.log.Timber
+import java.time.Duration
+import java.time.Instant
+
+<span class="nc" id="L35">open class TransactionPagingSource(</span>
+<span class="nc" id="L36">    val context: Context,</span>
+<span class="nc" id="L37">    val account: PageAccount,</span>
+<span class="nc" id="L38">    val whereFilter: StateFlow&lt;Criterion?&gt;,</span>
+<span class="nc" id="L39">    val tags: StateFlow&lt;Map&lt;String, Pair&lt;String, Int?&gt;&gt;&gt;,</span>
+<span class="nc" id="L40">    val currencyContext: CurrencyContext,</span>
+    coroutineScope: CoroutineScope,
+    prefHandler: PrefHandler,
+) : ClearingPagingSource&lt;Int, Transaction2, TransactionPagingSource&gt;() {
+
+    val contentResolver: ContentResolver
+<span class="nc" id="L46">        get() = context.contentResolver</span>
+    private val uri: Uri
+    private val projection: Array&lt;String&gt;
+    private val observer: ContentObserver
+    private var criterion: Criterion? = null
+    private var hasNewCriterion: Boolean = false
+
+    private var filterJob: Job? = null
+    private var tagsJob: Job? = null
+
+<span class="nc" id="L56">    init {</span>
+<span class="nc" id="L57">        account.loadingInfo(prefHandler).also {</span>
+<span class="nc" id="L58">            uri = it.first</span>
+<span class="nc" id="L59">            projection = it.second</span>
+<span class="nc" id="L60">        }</span>
+<span class="nc" id="L61">        observer = object : ContentObserver(Handler(Looper.getMainLooper())) {</span>
+            override fun onChange(selfChange: Boolean) {
+<span class="nc" id="L63">                Timber.i(&quot;Data changed for account %d, now invalidating&quot;, account.id)</span>
+<span class="nc" id="L64">                invalidate()</span>
+<span class="nc" id="L65">            }</span>
+        }
+<span class="nc" id="L67">        contentResolver.registerContentObserver(</span>
+<span class="nc" id="L68">            TransactionProvider.TRANSACTIONS_URI,</span>
+<span class="nc" id="L69">            true,</span>
+<span class="nc" id="L70">            observer</span>
+        )
+<span class="nc" id="L72">        criterion = whereFilter.value</span>
+<span class="nc" id="L73">        filterJob = coroutineScope.launch {</span>
+<span class="nc" id="L74">            whereFilter.drop(1).collect {</span>
+<span class="nc" id="L75">                invalidate()</span>
+<span class="nc" id="L76">            }</span>
+<span class="nc" id="L77">        }</span>
+<span class="nc" id="L78">        tagsJob = coroutineScope.launch {</span>
+<span class="nc" id="L79">            tags.drop(1).collect {</span>
+<span class="nc" id="L80">                invalidate()</span>
+<span class="nc" id="L81">            }</span>
+<span class="nc" id="L82">        }</span>
+
+<span class="nc" id="L84">        registerInvalidatedCallback {</span>
+<span class="nc" id="L85">            clear()</span>
+<span class="nc" id="L86">        }</span>
+<span class="nc" id="L87">    }</span>
+
+    override val jumpingSupported: Boolean
+<span class="nc" id="L90">        get() = true</span>
+
+    override fun clear() {
+<span class="nc" id="L93">        contentResolver.unregisterContentObserver(observer)</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        filterJob?.cancel()</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        tagsJob?.cancel()</span>
+<span class="nc" id="L96">    }</span>
+
+    override fun compareWithLast(lastPagingSource: TransactionPagingSource?) {
+<span class="nc bnc" id="L99" title="All 4 branches missed.">        hasNewCriterion = criterion != lastPagingSource?.criterion</span>
+<span class="nc" id="L100">    }</span>
+
+    override fun getRefreshKey(state: PagingState&lt;Int, Transaction2&gt;) =
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (hasNewCriterion) null</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">        else state.anchorPosition?.let { anchorPosition -&gt;</span>
+<span class="nc" id="L105">            (anchorPosition - state.config.pageSize / 2).coerceAtLeast(0)</span>
+<span class="nc" id="L106">        }.also {</span>
+<span class="nc" id="L107">            Timber.i(&quot;Calculating refreshKey for anchorPosition %d: %d&quot;, state.anchorPosition, it)</span>
+<span class="nc" id="L108">        }</span>
+
+    @SuppressLint(&quot;InlinedApi&quot;)
+<span class="nc" id="L111">    override suspend fun load(params: LoadParams&lt;Int&gt;): LoadResult&lt;Int, Transaction2&gt; = try {</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        val position = params.key ?: 0</span>
+        //if the previous page was loaded from an offset between 0 and loadSize,
+        //we must take care to load only the missing items before the offset
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        val loadSize = if (position &lt; 0) params.loadSize + position else params.loadSize</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        val fetchSize = if (account.isAggregate) loadSize + 1 else loadSize // We'll fetch one more item as a lookahead.</span>
+<span class="nc" id="L117">        Timber.i(&quot;Requesting data for account %d at position %d with loadSize %d&quot;, account.id, position, loadSize)</span>
+<span class="nc" id="L118">        var selection = WHERE_NOT_SPLIT_PART</span>
+<span class="nc" id="L119">        var selectionArgs: Array&lt;String&gt;? = null</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        whereFilter.value?.let { filter -&gt;</span>
+<span class="nc" id="L121">            val selectionForParents = filter.getSelectionForParents()</span>
+<span class="nc bnc" id="L122" title="All 4 branches missed.">            if (selectionForParents.isNotEmpty()) {</span>
+<span class="nc" id="L123">                selection += &quot; AND $selectionForParents&quot;</span>
+<span class="nc bnc" id="L124" title="All 6 branches missed.">                selectionArgs = filter.getSelectionArgs(false).takeIf { it.isNotEmpty() }</span>
+            }
+<span class="nc" id="L126">        }</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        val startTime = if (BuildConfig.DEBUG) Instant.now() else null</span>
+
+<span class="nc" id="L129">        val offset = position.coerceAtLeast(0)</span>
+<span class="nc" id="L130">        val (totalCount, fullList) = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L131">            contentResolver.query(</span>
+<span class="nc" id="L132">                uri,</span>
+<span class="nc" id="L133">                arrayOf(&quot;count(*)&quot;),</span>
+<span class="nc" id="L134">                selection,</span>
+<span class="nc" id="L135">                selectionArgs,</span>
+<span class="nc" id="L136">                null</span>
+<span class="nc" id="L137">            )!!.use {</span>
+<span class="nc" id="L138">                it.moveToFirst()</span>
+<span class="nc" id="L139">                it.getInt(0)</span>
+<span class="nc" id="L140">            } to contentResolver.query(</span>
+<span class="nc" id="L141">                uri.withLimit(fetchSize, offset),</span>
+<span class="nc" id="L142">                projection,</span>
+<span class="nc" id="L143">                selection,</span>
+<span class="nc" id="L144">                selectionArgs,</span>
+<span class="nc" id="L145">                account.sortOrder,</span>
+<span class="nc" id="L146">                null</span>
+<span class="nc" id="L147">            )!!.use { cursor -&gt;</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L149">                    val endTime = Instant.now()</span>
+<span class="nc" id="L150">                    val duration = Duration.between(startTime, endTime)</span>
+<span class="nc" id="L151">                    Timber.i(&quot;Cursor delivered %d rows after %s&quot;, cursor.count, duration)</span>
+                }
+<span class="nc" id="L153">                cursor.asSequence.map {</span>
+<span class="nc" id="L154">                    Transaction2.fromCursor(</span>
+<span class="nc" id="L155">                        currencyContext = currencyContext,</span>
+<span class="nc" id="L156">                        cursor = it,</span>
+<span class="nc" id="L157">                        tags = tags.value,</span>
+<span class="nc" id="L158">                        accountCurrency = currencyContext[account.currency],</span>
+<span class="nc" id="L159">                        accountLabel = account.label,</span>
+<span class="nc" id="L160">                        grouping = account.grouping</span>
+<span class="nc" id="L161">                    )</span>
+<span class="nc" id="L162">                }.toList()</span>
+<span class="nc" id="L163">            }</span>
+        }
+
+<span class="nc" id="L166">        val itemsForThisPage = fullList.take(loadSize) // The items that actually belong to this page.</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        val lookaheadItem = if (account.isAggregate) fullList.getOrNull(loadSize) else null // The (N+1)th item.</span>
+
+<span class="nc" id="L169">        var includeNextHalfTransfer = false</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        val mergedList = if (account.isAggregate) {</span>
+<span class="nc" id="L171">            itemsForThisPage.mergeTransfers(account, currencyContext.homeCurrencyString).let { merged -&gt;</span>
+<span class="nc" id="L172">                val lastItem = merged.lastOrNull()</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                val lookAheadItemId = lookaheadItem?.id</span>
+<span class="nc bnc" id="L174" title="All 8 branches missed.">                if (lastItem?.transferPeer != null &amp;&amp; lookAheadItemId != null &amp;&amp; lastItem.transferPeer == lookAheadItemId ) {</span>
+<span class="nc" id="L175">                    includeNextHalfTransfer = true</span>
+                    // We pull the half transfer in and advance nextKey by one more
+<span class="nc" id="L177">                    merged.toMutableList().also {</span>
+<span class="nc" id="L178">                        it[it.lastIndex] = listOf(lastItem, lookaheadItem).pickForMerge(account, currencyContext.homeCurrencyString)</span>
+<span class="nc" id="L179">                    }</span>
+<span class="nc" id="L180">                } else merged</span>
+            }
+<span class="nc" id="L182">        } else itemsForThisPage</span>
+
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        val prevKey = if (position &gt; 0) (position - pageSize) else null</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        val nextKey = if (fullList.size &lt; fetchSize) null else</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            offset + loadSize + if (includeNextHalfTransfer) 1 else 0</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        val itemsAfter = if (nextKey == null) 0 else (totalCount - nextKey).coerceAtLeast(0)</span>
+<span class="nc" id="L188">        Timber.i(&quot;Setting prevKey %d, nextKey %d, itemsBefore %d, itemsAfter %d&quot;, prevKey, nextKey, offset, itemsAfter)</span>
+<span class="nc" id="L189">        LoadResult.Page(</span>
+<span class="nc" id="L190">            data = mergedList,</span>
+<span class="nc" id="L191">            prevKey = prevKey,</span>
+<span class="nc" id="L192">            nextKey = nextKey,</span>
+<span class="nc" id="L193">            itemsBefore = offset,</span>
+<span class="nc" id="L194">            itemsAfter = itemsAfter</span>
+        )
+<span class="nc" id="L196">    } catch (e: Throwable) {</span>
+<span class="nc" id="L197">        LoadResult.Error(e)</span>
+    } finally {
+<span class="nc" id="L199">        onLoadFinished()</span>
+<span class="nc" id="L200">    }</span>
+
+<span class="nc" id="L202">    open fun onLoadFinished() {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

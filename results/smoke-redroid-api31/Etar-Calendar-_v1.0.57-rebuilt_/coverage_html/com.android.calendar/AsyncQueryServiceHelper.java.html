@@ -1,0 +1,376 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AsyncQueryServiceHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar</a> &gt; <span class="el_source">AsyncQueryServiceHelper.java</span></div><h1>AsyncQueryServiceHelper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2010 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar;
+
+import android.app.IntentService;
+import android.content.ContentProviderOperation;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.Intent;
+import android.content.OperationApplicationException;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Message;
+import android.os.RemoteException;
+import android.os.SystemClock;
+import android.util.Log;
+
+import androidx.annotation.Nullable;
+
+import com.android.calendar.AsyncQueryService.Operation;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.PriorityQueue;
+import java.util.concurrent.Delayed;
+import java.util.concurrent.TimeUnit;
+
+public class AsyncQueryServiceHelper extends IntentService {
+    private static final String TAG = &quot;AsyncQuery&quot;;
+
+<span class="nc" id="L48">    private static final PriorityQueue&lt;OperationInfo&gt; sWorkQueue =</span>
+        new PriorityQueue&lt;OperationInfo&gt;();
+
+<span class="nc" id="L51">    protected Class&lt;AsyncQueryService&gt; mService = AsyncQueryService.class;</span>
+
+    public AsyncQueryServiceHelper(String name) {
+<span class="nc" id="L54">        super(name);</span>
+<span class="nc" id="L55">    }</span>
+
+    public AsyncQueryServiceHelper() {
+<span class="nc" id="L58">        super(&quot;AsyncQueryServiceHelper&quot;);</span>
+<span class="nc" id="L59">    }</span>
+
+    /**
+     * Queues the operation for execution
+     *
+     * @param context
+     * @param args OperationInfo object describing the operation
+     */
+    static public void queueOperation(Context context, OperationInfo args) {
+        // Set the schedule time for execution based on the desired delay.
+<span class="nc" id="L69">        args.calculateScheduledTime();</span>
+
+<span class="nc" id="L71">        synchronized (sWorkQueue) {</span>
+<span class="nc" id="L72">            sWorkQueue.add(args);</span>
+<span class="nc" id="L73">            sWorkQueue.notify();</span>
+<span class="nc" id="L74">        }</span>
+
+<span class="nc" id="L76">        context.startService(new Intent(context, AsyncQueryServiceHelper.class));</span>
+<span class="nc" id="L77">    }</span>
+
+    /**
+     * Gets the last delayed operation. It is typically used for canceling.
+     *
+     * @return Operation object which contains of the last cancelable operation
+     */
+    static public Operation getLastCancelableOperation() {
+<span class="nc" id="L85">        long lastScheduleTime = Long.MIN_VALUE;</span>
+<span class="nc" id="L86">        Operation op = null;</span>
+
+<span class="nc" id="L88">        synchronized (sWorkQueue) {</span>
+            // Unknown order even for a PriorityQueue
+<span class="nc bnc" id="L90" title="All 2 branches missed.">            for (OperationInfo info : sWorkQueue) {</span>
+<span class="nc bnc" id="L91" title="All 4 branches missed.">                if (info.delayMillis &gt; 0 &amp;&amp; lastScheduleTime &lt; info.mScheduledTimeMillis) {</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                    if (op == null) {</span>
+<span class="nc" id="L93">                        op = new Operation();</span>
+                    }
+
+<span class="nc" id="L96">                    op.token = info.token;</span>
+<span class="nc" id="L97">                    op.op = info.op;</span>
+<span class="nc" id="L98">                    op.scheduledExecutionTime = info.mScheduledTimeMillis;</span>
+
+<span class="nc" id="L100">                    lastScheduleTime = info.mScheduledTimeMillis;</span>
+                }
+<span class="nc" id="L102">            }</span>
+<span class="nc" id="L103">        }</span>
+
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;getLastCancelableOperation -&gt; Operation:&quot; + Operation.opToChar(op.op)
+                    + &quot; token:&quot; + op.token);
+        }
+<span class="nc" id="L109">        return op;</span>
+    }
+
+    /**
+     * Attempts to cancel operation that has not already started. Note that
+     * there is no guarantee that the operation will be canceled. They still may
+     * result in a call to on[Query/Insert/Update/Delete/Batch]Complete after
+     * this call has completed.
+     *
+     * @param token The token representing the operation to be canceled. If
+     *            multiple operations have the same token they will all be
+     *            canceled.
+     */
+    static public int cancelOperation(int token) {
+<span class="nc" id="L123">        int canceled = 0;</span>
+<span class="nc" id="L124">        synchronized (sWorkQueue) {</span>
+<span class="nc" id="L125">            Iterator&lt;OperationInfo&gt; it = sWorkQueue.iterator();</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            while (it.hasNext()) {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                if (it.next().token == token) {</span>
+<span class="nc" id="L128">                    it.remove();</span>
+<span class="nc" id="L129">                    ++canceled;</span>
+                }
+            }
+<span class="nc" id="L132">        }</span>
+
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;cancelOperation(&quot; + token + &quot;) -&gt; &quot; + canceled);
+        }
+<span class="nc" id="L137">        return canceled;</span>
+    }
+
+    @Override
+    protected void onHandleIntent(Intent intent) {
+        OperationInfo args;
+
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;onHandleIntent: queue size=&quot; + sWorkQueue.size());
+        }
+<span class="nc" id="L147">        synchronized (sWorkQueue) {</span>
+            while (true) {
+                /*
+                 * This method can be called with no work because of
+                 * cancellations
+                 */
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                if (sWorkQueue.size() == 0) {</span>
+<span class="nc" id="L154">                    return;</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                } else if (sWorkQueue.size() == 1) {</span>
+<span class="nc" id="L156">                    OperationInfo first = sWorkQueue.peek();</span>
+<span class="nc" id="L157">                    long waitTime = first.mScheduledTimeMillis - SystemClock.elapsedRealtime();</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                    if (waitTime &gt; 0) {</span>
+                        try {
+<span class="nc" id="L160">                            sWorkQueue.wait(waitTime);</span>
+<span class="nc" id="L161">                        } catch (InterruptedException e) {</span>
+<span class="nc" id="L162">                        }</span>
+                    }
+                }
+
+<span class="nc" id="L166">                args = sWorkQueue.poll();</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                if (args != null) {</span>
+                    // Got work to do. Break out of waiting loop
+<span class="nc" id="L169">                    break;</span>
+                }
+            }
+<span class="nc" id="L172">        }</span>
+
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;onHandleIntent: &quot; + args);
+        }
+
+<span class="nc" id="L178">        ContentResolver resolver = args.resolver;</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (resolver != null) {</span>
+
+<span class="nc bnc" id="L181" title="All 6 branches missed.">            switch (args.op) {</span>
+                case Operation.EVENT_ARG_QUERY:
+                    Cursor cursor;
+                    try {
+<span class="nc" id="L185">                        cursor = resolver.query(args.uri, args.projection, args.selection,</span>
+                                args.selectionArgs, args.orderBy);
+                        /*
+                         * Calling getCount() causes the cursor window to be
+                         * filled, which will make the first access on the main
+                         * thread a lot faster
+                         */
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                        if (cursor != null) {</span>
+<span class="nc" id="L193">                            cursor.getCount();</span>
+                        }
+<span class="nc" id="L195">                    } catch (Exception e) {</span>
+<span class="nc" id="L196">                        Log.w(TAG, e.toString());</span>
+<span class="nc" id="L197">                        cursor = null;</span>
+<span class="nc" id="L198">                    }</span>
+
+<span class="nc" id="L200">                    args.result = cursor;</span>
+<span class="nc" id="L201">                    break;</span>
+
+                case Operation.EVENT_ARG_INSERT:
+<span class="nc" id="L204">                    args.result = resolver.insert(args.uri, args.values);</span>
+<span class="nc" id="L205">                    break;</span>
+
+                case Operation.EVENT_ARG_UPDATE:
+<span class="nc" id="L208">                    args.result = resolver.update(args.uri, args.values, args.selection,</span>
+                            args.selectionArgs);
+<span class="nc" id="L210">                    break;</span>
+
+                case Operation.EVENT_ARG_DELETE:
+                    try {
+<span class="nc" id="L214">                        args.result = resolver.delete(args.uri, args.selection, args.selectionArgs);</span>
+<span class="nc" id="L215">                    } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L216">                        Log.w(TAG, &quot;Delete failed.&quot;);</span>
+<span class="nc" id="L217">                        Log.w(TAG, e.toString());</span>
+<span class="nc" id="L218">                        args.result = 0;</span>
+<span class="nc" id="L219">                    }</span>
+
+<span class="nc" id="L221">                    break;</span>
+
+                case Operation.EVENT_ARG_BATCH:
+                    try {
+<span class="nc" id="L225">                        args.result = resolver.applyBatch(args.authority, args.cpo);</span>
+<span class="nc" id="L226">                    } catch (RemoteException | OperationApplicationException e) {</span>
+<span class="nc" id="L227">                        Log.e(TAG, e.toString());</span>
+<span class="nc" id="L228">                        args.result = null;</span>
+<span class="nc" id="L229">                    }</span>
+                    break;
+            }
+
+            /*
+             * passing the original token value back to the caller on top of the
+             * event values in arg1.
+             */
+<span class="nc" id="L237">            Message reply = args.handler.obtainMessage(args.token);</span>
+<span class="nc" id="L238">            reply.obj = args;</span>
+<span class="nc" id="L239">            reply.arg1 = args.op;</span>
+
+            if (AsyncQueryService.localLOGV) {
+                Log.d(TAG, &quot;onHandleIntent: op=&quot; + Operation.opToChar(args.op) + &quot;, token=&quot;
+                        + reply.what);
+            }
+
+<span class="nc" id="L246">            reply.sendToTarget();</span>
+        }
+<span class="nc" id="L248">    }</span>
+
+    @Override
+    public void onStart(Intent intent, int startId) {
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;onStart startId=&quot; + startId);
+        }
+<span class="nc" id="L255">        super.onStart(intent, startId);</span>
+<span class="nc" id="L256">    }</span>
+
+    @Override
+    public void onCreate() {
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;onCreate&quot;);
+        }
+<span class="nc" id="L263">        super.onCreate();</span>
+<span class="nc" id="L264">    }</span>
+
+    @Override
+    public void onDestroy() {
+        if (AsyncQueryService.localLOGV) {
+            Log.d(TAG, &quot;onDestroy&quot;);
+        }
+<span class="nc" id="L271">        super.onDestroy();</span>
+<span class="nc" id="L272">    }</span>
+
+<span class="nc" id="L274">    protected static class OperationInfo implements Delayed {</span>
+        public int token; // Used for cancel
+        public int op;
+        public ContentResolver resolver;
+        public Uri uri;
+        public String authority;
+        public Handler handler;
+        public String[] projection;
+        public String selection;
+        public String[] selectionArgs;
+        public String orderBy;
+        public Object result;
+        @Nullable public Object cookie;
+        public ContentValues values;
+        public ArrayList&lt;ContentProviderOperation&gt; cpo;
+
+        /**
+         * delayMillis is relative time e.g. 10,000 milliseconds
+         */
+        public long delayMillis;
+
+        /**
+         * scheduleTimeMillis is the time scheduled for this to be processed.
+         * e.g. SystemClock.elapsedRealtime() + 10,000 milliseconds Based on
+         * {@link android.os.SystemClock#elapsedRealtime }
+         */
+<span class="nc" id="L300">        private long mScheduledTimeMillis = 0;</span>
+
+        // @VisibleForTesting
+        void calculateScheduledTime() {
+<span class="nc" id="L304">            mScheduledTimeMillis = SystemClock.elapsedRealtime() + delayMillis;</span>
+<span class="nc" id="L305">        }</span>
+
+        // @Override // Uncomment with Java6
+        public long getDelay(TimeUnit unit) {
+<span class="nc" id="L309">            return unit.convert(mScheduledTimeMillis - SystemClock.elapsedRealtime(),</span>
+                    TimeUnit.MILLISECONDS);
+        }
+
+        // @Override // Uncomment with Java6
+        public int compareTo(Delayed another) {
+<span class="nc" id="L315">            OperationInfo anotherArgs = (OperationInfo) another;</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            if (this.mScheduledTimeMillis == anotherArgs.mScheduledTimeMillis) {</span>
+<span class="nc" id="L317">                return 0;</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            } else if (this.mScheduledTimeMillis &lt; anotherArgs.mScheduledTimeMillis) {</span>
+<span class="nc" id="L319">                return -1;</span>
+            } else {
+<span class="nc" id="L321">                return 1;</span>
+            }
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L327">            StringBuilder builder = new StringBuilder();</span>
+<span class="nc" id="L328">            builder.append(&quot;OperationInfo [\n\t token= &quot;);</span>
+<span class="nc" id="L329">            builder.append(token);</span>
+<span class="nc" id="L330">            builder.append(&quot;,\n\t op= &quot;);</span>
+<span class="nc" id="L331">            builder.append(Operation.opToChar(op));</span>
+<span class="nc" id="L332">            builder.append(&quot;,\n\t uri= &quot;);</span>
+<span class="nc" id="L333">            builder.append(uri);</span>
+<span class="nc" id="L334">            builder.append(&quot;,\n\t authority= &quot;);</span>
+<span class="nc" id="L335">            builder.append(authority);</span>
+<span class="nc" id="L336">            builder.append(&quot;,\n\t delayMillis= &quot;);</span>
+<span class="nc" id="L337">            builder.append(delayMillis);</span>
+<span class="nc" id="L338">            builder.append(&quot;,\n\t mScheduledTimeMillis= &quot;);</span>
+<span class="nc" id="L339">            builder.append(mScheduledTimeMillis);</span>
+<span class="nc" id="L340">            builder.append(&quot;,\n\t resolver= &quot;);</span>
+<span class="nc" id="L341">            builder.append(resolver);</span>
+<span class="nc" id="L342">            builder.append(&quot;,\n\t handler= &quot;);</span>
+<span class="nc" id="L343">            builder.append(handler);</span>
+<span class="nc" id="L344">            builder.append(&quot;,\n\t projection= &quot;);</span>
+<span class="nc" id="L345">            builder.append(Arrays.toString(projection));</span>
+<span class="nc" id="L346">            builder.append(&quot;,\n\t selection= &quot;);</span>
+<span class="nc" id="L347">            builder.append(selection);</span>
+<span class="nc" id="L348">            builder.append(&quot;,\n\t selectionArgs= &quot;);</span>
+<span class="nc" id="L349">            builder.append(Arrays.toString(selectionArgs));</span>
+<span class="nc" id="L350">            builder.append(&quot;,\n\t orderBy= &quot;);</span>
+<span class="nc" id="L351">            builder.append(orderBy);</span>
+<span class="nc" id="L352">            builder.append(&quot;,\n\t result= &quot;);</span>
+<span class="nc" id="L353">            builder.append(result);</span>
+<span class="nc" id="L354">            builder.append(&quot;,\n\t cookie= &quot;);</span>
+<span class="nc" id="L355">            builder.append(cookie);</span>
+<span class="nc" id="L356">            builder.append(&quot;,\n\t values= &quot;);</span>
+<span class="nc" id="L357">            builder.append(values);</span>
+<span class="nc" id="L358">            builder.append(&quot;,\n\t cpo= &quot;);</span>
+<span class="nc" id="L359">            builder.append(cpo);</span>
+<span class="nc" id="L360">            builder.append(&quot;\n]&quot;);</span>
+<span class="nc" id="L361">            return builder.toString();</span>
+        }
+
+        /**
+         * Compares an user-visible operation to this private OperationInfo
+         * object
+         *
+         * @param o operation to be compared
+         * @return true if logically equivalent
+         */
+        public boolean equivalent(Operation o) {
+<span class="nc bnc" id="L372" title="All 4 branches missed.">            return o.token == this.token &amp;&amp; o.op == this.op;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

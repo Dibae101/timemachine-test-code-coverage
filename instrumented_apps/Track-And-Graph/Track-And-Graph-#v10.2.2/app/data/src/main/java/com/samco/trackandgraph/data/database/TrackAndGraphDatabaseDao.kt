@@ -1,0 +1,561 @@
+/*
+* This file is part of Track & Graph
+*
+* Track & Graph is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* Track & Graph is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+*/
+package com.samco.trackandgraph.data.database
+
+import android.database.Cursor
+import androidx.room.Dao
+import androidx.room.Delete
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Transaction
+import androidx.room.Update
+import com.samco.trackandgraph.data.database.entity.AverageTimeBetweenStat
+import com.samco.trackandgraph.data.database.entity.BarChart
+import com.samco.trackandgraph.data.database.entity.DataPoint
+import com.samco.trackandgraph.data.database.entity.Feature
+import com.samco.trackandgraph.data.database.entity.FeatureTimer
+import com.samco.trackandgraph.data.database.entity.Function
+import com.samco.trackandgraph.data.database.entity.FunctionInputFeature
+import com.samco.trackandgraph.data.database.entity.GlobalNote
+import com.samco.trackandgraph.data.database.entity.GraphOrStat
+import com.samco.trackandgraph.data.database.entity.Group
+import com.samco.trackandgraph.data.database.entity.LastValueStat
+import com.samco.trackandgraph.data.database.entity.LineGraph
+import com.samco.trackandgraph.data.database.entity.LineGraphFeature
+import com.samco.trackandgraph.data.database.entity.LuaGraph
+import com.samco.trackandgraph.data.database.entity.LuaGraphFeature
+import com.samco.trackandgraph.data.database.entity.PieChart
+import com.samco.trackandgraph.data.database.entity.Reminder
+import com.samco.trackandgraph.data.database.entity.TimeHistogram
+import com.samco.trackandgraph.data.database.entity.Tracker
+import com.samco.trackandgraph.data.database.entity.queryresponse.DisplayNote
+import com.samco.trackandgraph.data.database.entity.queryresponse.DisplayTracker
+import com.samco.trackandgraph.data.database.entity.queryresponse.FunctionWithFeature
+import com.samco.trackandgraph.data.database.entity.queryresponse.LineGraphWithFeatures
+import com.samco.trackandgraph.data.database.entity.queryresponse.LuaGraphWithFeatures
+import com.samco.trackandgraph.data.database.entity.queryresponse.TrackerWithFeature
+import com.samco.trackandgraph.data.dependencyanalyser.queryresponse.GraphDependency
+import kotlinx.coroutines.flow.Flow
+
+private const val getTrackersQuery = """
+    SELECT
+        features_table.name as name,
+        features_table.feature_description as feature_description,
+        trackers_table.id as id,
+        trackers_table.feature_id as feature_id,
+        trackers_table.type as type,
+        trackers_table.has_default_value as has_default_value,
+        trackers_table.default_value as default_value,
+        trackers_table.default_label as default_label,
+        trackers_table.suggestion_type as suggestion_type,
+        trackers_table.suggestion_order as suggestion_order
+    FROM trackers_table
+    LEFT JOIN features_table ON trackers_table.feature_id = features_table.id
+            """
+
+private const val getDisplayTrackersQuery = """
+    SELECT
+        features_table.name as name,
+        features_table.feature_description as feature_description,
+        trackers_table.id as id,
+        trackers_table.feature_id as feature_id,
+        trackers_table.type as type,
+        trackers_table.has_default_value as has_default_value,
+        trackers_table.default_value as default_value,
+        trackers_table.default_label as default_label,
+        last_epoch_milli,
+        last_utc_offset_sec,
+        start_instant
+        FROM (
+            trackers_table
+            LEFT JOIN features_table ON trackers_table.feature_id = features_table.id
+            LEFT JOIN (
+                SELECT feature_id, epoch_milli as last_epoch_milli, utc_offset_sec as last_utc_offset_sec
+                FROM data_points_table as dpt
+                INNER JOIN (
+                    SELECT feature_id as fid, MAX(epoch_milli) as max_epoch_milli
+                    FROM data_points_table
+                    GROUP BY feature_id
+                ) as max_data ON max_data.fid = dpt.feature_id AND dpt.epoch_milli = max_data.max_epoch_milli
+            ) as last_data ON last_data.feature_id = trackers_table.feature_id
+            LEFT JOIN (
+                SELECT * FROM feature_timers_table
+            ) as timer_data ON timer_data.feature_id = trackers_table.feature_id
+        )
+    """
+
+@Dao
+internal interface TrackAndGraphDatabaseDao : GraphDao, ReminderDao, GroupDao, TrackerDao, FunctionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertGroup(group: Group): Long
+
+    @Query("DELETE FROM groups_table WHERE id = :id")
+    override fun deleteGroup(id: Long)
+
+    @Update
+    override fun updateGroup(group: Group)
+
+    @Update
+    fun updateGroups(groups: List<Group>)
+
+    @Query("SELECT r.* FROM reminders_table r")
+    fun getAllReminders(): Flow<List<Reminder>>
+
+    @Query("SELECT r.* FROM reminders_table r")
+    override fun getAllRemindersSync(): List<Reminder>
+
+    @Query("SELECT * FROM reminders_table WHERE id = :id")
+    override fun getReminderById(id: Long): Reminder?
+
+    @Query("SELECT g.* FROM groups_table g")
+    override fun getAllGroupsSync(): List<Group>
+
+    @Query("SELECT f.* FROM features_table f")
+    fun getAllFeaturesSync(): List<Feature>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertReminder(reminder: Reminder): Long
+
+    @Update
+    override fun updateReminder(reminder: Reminder)
+
+    @Query("DELETE FROM reminders_table")
+    fun deleteReminders()
+
+    @Query("DELETE FROM reminders_table WHERE id = :id")
+    override fun deleteReminder(id: Long)
+
+    @Query("SELECT * FROM groups_table WHERE id = :id LIMIT 1")
+    override fun getGroupById(id: Long): Group?
+
+    @Update
+    fun updateFeatures(features: List<Feature>)
+
+    @Query("""
+        SELECT DISTINCT f.*
+        FROM features_table f
+        WHERE f.id IN (
+            SELECT feature_id FROM trackers_table t
+            WHERE EXISTS (
+                SELECT 1 FROM group_items_table gi
+                WHERE t.id = gi.child_id AND gi.type = 'TRACKER' AND gi.group_id = :groupId
+            )
+        ) OR f.id IN (
+            SELECT feature_id FROM functions_table fn
+            WHERE EXISTS (
+                SELECT 1 FROM group_items_table gi
+                WHERE fn.id = gi.child_id AND gi.type = 'FUNCTION' AND gi.group_id = :groupId
+            )
+        )
+    """)
+    fun getFeaturesForGroupSync(groupId: Long): List<Feature>
+
+    @Query(
+        """
+            SELECT
+                features_table.name as name,
+                features_table.feature_description as feature_description,
+                trackers_table.id as id,
+                trackers_table.feature_id as feature_id,
+                trackers_table.type as type,
+                trackers_table.has_default_value as has_default_value,
+                trackers_table.default_value as default_value,
+                trackers_table.default_label as default_label,
+                trackers_table.suggestion_order as suggestion_order,
+                trackers_table.suggestion_type as suggestion_type
+            FROM trackers_table
+            LEFT JOIN features_table ON features_table.id = trackers_table.feature_id
+            LEFT JOIN group_items_table gi ON trackers_table.id = gi.child_id AND gi.type = 'TRACKER'
+            WHERE gi.group_id = :groupId
+            ORDER BY gi.display_index ASC
+        """
+    )
+    override fun getTrackersForGroupSync(groupId: Long): List<TrackerWithFeature>
+
+    @Query("SELECT * FROM features_table WHERE id = :featureId LIMIT 1")
+    override fun getFeatureById(featureId: Long): Feature?
+
+    @Query("""
+        SELECT f.*
+        FROM features_table f
+        WHERE f.id IN (:featureIds)
+    """)
+    fun getFeaturesByIdsSync(featureIds: List<Long>): List<Feature>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertFeature(feature: Feature): Long
+
+    @Update
+    override fun updateFeature(feature: Feature)
+
+    @Delete
+    fun deleteDataPoint(dataPoint: DataPoint)
+
+    @Delete
+    override fun deleteDataPoints(dataPoints: List<DataPoint>)
+
+    @Query("DELETE FROM data_points_table WHERE feature_id = :featureId AND value = :index")
+    fun deleteAllDataPointsForDiscreteValue(featureId: Long, index: Double)
+
+    @Query("DELETE FROM graphs_and_stats_table2 WHERE id = :id")
+    override fun deleteGraphOrStat(id: Long)
+
+    @Delete
+    fun deleteGraphOrStat(graphOrStat: GraphOrStat)
+
+    @Query("DELETE FROM features_table WHERE id = :id")
+    override fun deleteFeature(id: Long)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertDataPoint(dataPoint: DataPoint): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertDataPoints(dataPoints: List<DataPoint>)
+
+    @Update
+    override fun updateDataPoints(dataPoint: List<DataPoint>)
+
+    @Query("SELECT * FROM data_points_table WHERE feature_id = :featureId ORDER BY epoch_milli DESC")
+    override fun getDataPointsForFeatureSync(featureId: Long): List<DataPoint>
+
+    @Query("SELECT * FROM data_points_table WHERE feature_id = :featureId AND epoch_milli = :epochMilli")
+    override fun getDataPointByTimestampAndFeatureSync(featureId: Long, epochMilli: Long): DataPoint?
+
+    @Query("SELECT COUNT(*) FROM data_points_table WHERE feature_id = :featureId")
+    override fun getDataPointCount(featureId: Long): Int
+
+    @Query("SELECT * FROM data_points_table WHERE feature_id = :featureId ORDER BY epoch_milli DESC LIMIT :limit OFFSET :offset")
+    override fun getDataPoints(featureId: Long, limit: Int, offset: Int): List<DataPoint>
+
+    @Query("SELECT * FROM data_points_table WHERE feature_id = :featureId ORDER BY epoch_milli DESC")
+    fun getDataPointsCursor(featureId: Long): Cursor
+
+    @Query("SELECT * FROM graphs_and_stats_table2")
+    override fun getAllGraphStatsSync(): List<GraphOrStat>
+
+    @Query("SELECT * FROM graphs_and_stats_table2 WHERE id = :graphStatId LIMIT 1")
+    override fun getGraphStatById(graphStatId: Long): GraphOrStat
+
+    @Query("SELECT * FROM graphs_and_stats_table2 WHERE id = :graphStatId LIMIT 1")
+    override fun tryGetGraphStatById(graphStatId: Long): GraphOrStat?
+
+    @Query("SELECT * FROM line_graphs_table3 WHERE graph_stat_id = :graphStatId LIMIT 1")
+    @Transaction
+    override fun getLineGraphByGraphStatId(graphStatId: Long): LineGraphWithFeatures?
+
+    @Query("SELECT * FROM lua_graphs_table WHERE graph_stat_id = :graphStatId LIMIT 1")
+    @Transaction
+    override fun getLuaGraphByGraphStatId(graphStatId: Long): LuaGraphWithFeatures?
+
+    @Query("SELECT * FROM pie_charts_table2 WHERE graph_stat_id = :graphStatId LIMIT 1")
+    override fun getPieChartByGraphStatId(graphStatId: Long): PieChart?
+
+    @Query("SELECT * FROM average_time_between_stat_table4 WHERE graph_stat_id = :graphStatId LIMIT 1")
+    override fun getAverageTimeBetweenStatByGraphStatId(graphStatId: Long): AverageTimeBetweenStat?
+
+    @Query("""
+        SELECT g.*
+        FROM graphs_and_stats_table2 g
+        INNER JOIN group_items_table gi ON g.id = gi.child_id AND gi.type = 'GRAPH'
+        WHERE gi.group_id = :groupId
+        ORDER BY gi.display_index ASC, g.id DESC
+    """)
+    override fun getGraphsAndStatsByGroupIdSync(groupId: Long): List<GraphOrStat>
+
+    @Query(
+        """
+        SELECT * FROM (
+            SELECT dp.epoch_milli as epoch_milli, dp.utc_offset_sec as utc_offset_sec, t.id as tracker_id, dp.feature_id as feature_id, f.name as feature_name, dp.note as note
+            FROM data_points_table as dp
+            LEFT JOIN features_table as f ON dp.feature_id = f.id
+            LEFT JOIN trackers_table as t ON dp.feature_id = t.feature_id
+            WHERE dp.note IS NOT NULL AND dp.note != ""
+        ) UNION SELECT * FROM (
+            SELECT n.epoch_milli as epoch_milli, n.utc_offset_sec as utc_offset_sec, NULL as tracker_id, NULL as feature_id, NULL as feature_name, n.note as note
+            FROM notes_table as n
+        ) ORDER BY epoch_milli DESC
+        """
+    )
+    fun getAllDisplayNotes(): Flow<List<DisplayNote>>
+
+    @Query("UPDATE data_points_table SET note = '' WHERE epoch_milli = :epochMilli AND feature_id = :featureId")
+    fun removeNote(epochMilli: Long, featureId: Long)
+
+    @Delete
+    fun deleteGlobalNote(note: GlobalNote)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertGlobalNote(note: GlobalNote): Long
+
+    @Query("SELECT * FROM notes_table WHERE epoch_milli = :epochMilli LIMIT 1")
+    fun getGlobalNoteByTimeSync(epochMilli: Long): GlobalNote?
+
+    @Query("SELECT * FROM notes_table")
+    fun getAllGlobalNotesSync(): List<GlobalNote>
+
+    @Query("DELETE FROM line_graph_features_table2 WHERE line_graph_id = :lineGraphId")
+    override fun deleteFeaturesForLineGraph(lineGraphId: Long)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertLineGraphFeatures(lineGraphFeatures: List<LineGraphFeature>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertLineGraph(lineGraph: LineGraph): Long
+
+    @Update
+    override fun updateLineGraph(lineGraph: LineGraph)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertPieChart(pieChart: PieChart): Long
+
+    @Update
+    override fun updatePieChart(pieChart: PieChart)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertAverageTimeBetweenStat(averageTimeBetweenStat: AverageTimeBetweenStat): Long
+
+    @Update
+    override fun updateAverageTimeBetweenStat(averageTimeBetweenStat: AverageTimeBetweenStat)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertGraphOrStat(graphOrStat: GraphOrStat): Long
+
+    @Update
+    override fun updateGraphOrStat(graphOrStat: GraphOrStat)
+
+    @Update
+    fun updateGraphStats(graphStat: List<GraphOrStat>)
+
+    @Update
+    override fun updateTimeHistogram(timeHistogram: TimeHistogram)
+
+    @Update
+    override fun updateLastValueStat(lastValueStat: LastValueStat)
+
+    @Update
+    override fun updateBarChart(barChart: BarChart)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertTimeHistogram(timeHistogram: TimeHistogram): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertLastValueStat(lastValueStat: LastValueStat): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertBarChart(barChart: BarChart): Long
+
+    @Query("SELECT * FROM time_histograms_table WHERE graph_stat_id = :graphStatId LIMIT 1")
+    override fun getTimeHistogramByGraphStatId(graphStatId: Long): TimeHistogram?
+
+    @Query("SELECT * FROM last_value_stats_table WHERE graph_stat_id = :graphStatId LIMIT 1")
+    override fun getLastValueStatByGraphStatId(graphStatId: Long): LastValueStat?
+
+    @Query("SELECT * FROM bar_charts_table WHERE graph_stat_id = :graphStatId LIMIT 1")
+    override fun getBarChartByGraphStatId(graphStatId: Long): BarChart?
+
+    @Query("""
+        SELECT g.*
+        FROM groups_table g
+        INNER JOIN group_items_table gi ON g.id = gi.child_id AND gi.type = 'GROUP'
+        WHERE gi.group_id = :id
+        ORDER BY gi.display_index ASC
+    """)
+    override fun getGroupsForGroupSync(id: Long): List<Group>
+
+    @Query("""
+        SELECT g.*
+        FROM groups_table g
+        WHERE g.id = 0 OR g.id NOT IN (
+            SELECT DISTINCT child_id FROM group_items_table WHERE type = 'GROUP'
+        )
+        LIMIT 1
+    """)
+    fun getRootGroupSync(): Group?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertFeatureTimer(featureTimer: FeatureTimer)
+
+    @Query("DELETE FROM feature_timers_table WHERE feature_id=:featureId")
+    override fun deleteFeatureTimer(featureId: Long)
+
+    @Query("SELECT * FROM feature_timers_table WHERE feature_id=:featureId LIMIT 1")
+    override fun getFeatureTimer(featureId: Long): FeatureTimer?
+
+    @Query("$getDisplayTrackersQuery WHERE start_instant IS NOT NULL ORDER BY start_instant ASC, id DESC")
+    override fun getAllActiveTimerTrackers(): List<DisplayTracker>
+
+    @Query("$getDisplayTrackersQuery WHERE trackers_table.id IN (:ids)")
+    override fun getDisplayTrackerByTrackerIdsSync(ids: Set<Long>): List<DisplayTracker>
+
+    @Query("$getDisplayTrackersQuery WHERE trackers_table.feature_id=:featureId LIMIT 1")
+    override fun getDisplayTrackerByFeatureIdSync(featureId: Long): DisplayTracker?
+
+    @Query(getTrackersQuery)
+    override fun getAllTrackersSync(): List<TrackerWithFeature>
+
+    @Query("$getTrackersQuery WHERE trackers_table.id = :trackerId LIMIT 1")
+    override fun getTrackerById(trackerId: Long): TrackerWithFeature?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertTracker(tracker: Tracker): Long
+
+    @Update
+    override fun updateTracker(tracker: Tracker)
+
+    @Query("$getTrackersQuery WHERE feature_id = :featureId LIMIT 1")
+    override fun getTrackerByFeatureId(featureId: Long): TrackerWithFeature?
+
+    @Query("SELECT COUNT(*) FROM trackers_table")
+    override fun numTrackers(): Int
+
+    @Query(
+        """
+            SELECT DISTINCT data_points_table.label 
+            FROM data_points_table 
+            WHERE data_points_table.feature_id = (
+                SELECT trackers_table.feature_id 
+                FROM trackers_table 
+                WHERE trackers_table.id = :trackerId
+            )
+        """
+    )
+    fun getLabelsForTracker(trackerId: Long): List<String>
+
+    @Query(" SELECT EXISTS ( SELECT 1 FROM data_points_table LIMIT 1 ) ")
+    override fun hasAtLeastOneDataPoint(): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertLuaGraph(luaGraph: LuaGraph): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertLuaGraphFeatures(luaGraphFeatures: List<LuaGraphFeature>)
+
+    @Update
+    override fun updateLuaGraph(luaGraph: LuaGraph)
+
+    @Query("DELETE FROM lua_graph_features_table WHERE lua_graph_id = :luaGraphId")
+    override fun deleteFeaturesForLuaGraph(luaGraphId: Long)
+
+    @Query("SELECT EXISTS (SELECT 1 FROM lua_graphs_table LIMIT 1)")
+    override fun hasAnyLuaGraphs(): Boolean
+
+    @Query("SELECT EXISTS (SELECT 1 FROM graphs_and_stats_table2 LIMIT 1)")
+    override fun hasAnyGraphs(): Boolean
+
+    @Query("SELECT EXISTS (SELECT 1 FROM features_table LIMIT 1)")
+    fun hasAnyFeatures(): Boolean
+
+    @Query("SELECT EXISTS (SELECT 1 FROM group_items_table WHERE type = 'GROUP' LIMIT 1)")
+    override fun hasAnyGroups(): Boolean
+
+    @Query("SELECT EXISTS (SELECT 1 FROM reminders_table LIMIT 1)")
+    override fun hasAnyReminders(): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertFunction(function: Function): Long
+
+    @Update
+    override fun updateFunction(function: Function)
+
+    @Query("""
+        SELECT
+            f.id as id,
+            f.feature_id as feature_id,
+            f.function_graph as function_graph,
+            ft.name as name,
+            ft.feature_description as feature_description
+        FROM functions_table f
+        INNER JOIN features_table ft ON f.feature_id = ft.id
+        WHERE f.id = :functionId
+        LIMIT 1
+    """)
+    override fun getFunctionById(functionId: Long): FunctionWithFeature?
+
+    @Query("""
+        SELECT
+            f.id as id,
+            f.feature_id as feature_id,
+            f.function_graph as function_graph,
+            ft.name as name,
+            ft.feature_description as feature_description
+        FROM functions_table f
+        INNER JOIN features_table ft ON f.feature_id = ft.id
+        WHERE f.feature_id = :featureId
+        LIMIT 1
+    """)
+    override fun getFunctionByFeatureId(featureId: Long): FunctionWithFeature?
+
+    @Query("""
+        SELECT
+            f.id as id,
+            f.feature_id as feature_id,
+            f.function_graph as function_graph,
+            ft.name as name,
+            ft.feature_description as feature_description
+        FROM functions_table f
+        INNER JOIN features_table ft ON f.feature_id = ft.id
+        LEFT JOIN group_items_table gi ON f.id = gi.child_id AND gi.type = 'FUNCTION'
+        WHERE gi.group_id = :groupId
+    """)
+    override fun getFunctionsForGroupSync(groupId: Long): List<FunctionWithFeature>
+
+    @Query("SELECT EXISTS (SELECT 1 FROM functions_table LIMIT 1)")
+    override fun hasAnyFunctions(): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    override fun insertFunctionInputFeature(functionInputFeature: FunctionInputFeature): Long
+
+    @Query("SELECT * FROM function_input_features_table WHERE function_id = :functionId ORDER BY id ASC")
+    override fun getFunctionInputFeaturesSync(functionId: Long): List<FunctionInputFeature>
+
+    @Query("DELETE FROM function_input_features_table WHERE function_id = :functionId")
+    override fun deleteFunctionInputFeatures(functionId: Long)
+
+    // Dependency analysis queries - single-dependency graphs unified
+    @Query("""
+        SELECT graph_stat_id, feature_id FROM bar_charts_table
+        UNION ALL
+        SELECT graph_stat_id, feature_id FROM pie_charts_table2
+        UNION ALL
+        SELECT graph_stat_id, feature_id FROM average_time_between_stat_table4
+        UNION ALL
+        SELECT graph_stat_id, feature_id FROM time_histograms_table
+        UNION ALL
+        SELECT graph_stat_id, feature_id FROM last_value_stats_table
+    """)
+    fun getAllSingleDependencyGraphs(): List<GraphDependency>
+
+    // Multi-dependency queries split into separate calls
+    @Query("SELECT feature_id FROM functions_table")
+    fun getFunctionFeatureIds(): List<Long>
+
+    @Query("SELECT feature_id FROM function_input_features_table WHERE function_id = (SELECT id FROM functions_table WHERE feature_id = :functionFeatureId)")
+    fun getFunctionInputFeatureIds(functionFeatureId: Long): List<Long>
+
+    @Query("SELECT graph_stat_id FROM line_graphs_table3")
+    fun getLineGraphGraphStatIds(): List<Long>
+
+    @Query("SELECT feature_id FROM line_graph_features_table2 WHERE line_graph_id = (SELECT id FROM line_graphs_table3 WHERE graph_stat_id = :graphStatId)")
+    fun getLineGraphFeatureIds(graphStatId: Long): List<Long>
+
+    @Query("SELECT graph_stat_id FROM lua_graphs_table")
+    fun getLuaGraphGraphStatIds(): List<Long>
+
+    @Query("SELECT feature_id FROM lua_graph_features_table WHERE lua_graph_id = (SELECT id FROM lua_graphs_table WHERE graph_stat_id = :graphStatId)")
+    fun getLuaGraphFeatureIds(graphStatId: Long): List<Long>
+}

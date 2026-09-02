@@ -1,0 +1,2670 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseTransactionProvider.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.provider</a> &gt; <span class="el_source">BaseTransactionProvider.kt</span></div><h1>BaseTransactionProvider.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.provider
+
+import android.content.ContentProvider
+import android.content.ContentUris
+import android.content.ContentUris.appendId
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.database.Cursor
+import android.database.MatrixCursor
+import android.database.sqlite.SQLiteConstraintException
+import android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE
+import android.database.sqlite.SQLiteDatabase.CONFLICT_NONE
+import android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+import android.net.Uri
+import android.os.Bundle
+import androidx.core.database.getIntOrNull
+import androidx.core.database.getLongOrNull
+import androidx.core.database.getStringOrNull
+import androidx.core.net.toUri
+import androidx.core.os.BundleCompat
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.preferencesDataStoreFile
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteOpenHelper
+import androidx.sqlite.db.SupportSQLiteQueryBuilder
+import arrow.core.Tuple6
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.compose.transactions.FutureCriterion
+import org.totschnig.myexpenses.db2.FLAG_EXPENSE
+import org.totschnig.myexpenses.db2.FLAG_INCOME
+import org.totschnig.myexpenses.db2.FLAG_NEUTRAL
+import org.totschnig.myexpenses.db2.FLAG_TRANSFER
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.di.AppComponent
+import org.totschnig.myexpenses.di.DataModule
+import org.totschnig.myexpenses.model.AccountGrouping
+import org.totschnig.myexpenses.model.CrStatus
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.model.Grouping
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.model2.Category
+import org.totschnig.myexpenses.model2.CategoryExport
+import org.totschnig.myexpenses.model2.CategoryInfo
+import org.totschnig.myexpenses.model2.ICategoryInfo
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.preference.dynamicExchangeRates
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.AGGREGATE_HOME_CURRENCY_CODE
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.GROUPING_AGGREGATE
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.HOME_AGGREGATE_ID
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.SORT_BY_AGGREGATE
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.SORT_DIRECTION_AGGREGATE
+import org.totschnig.myexpenses.provider.DatabaseConstants.DAY_START_JULIAN
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_DEPENDENT
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_SELF_OR_PEER
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_SELF_OR_RELATED
+import org.totschnig.myexpenses.provider.DatabaseConstants.weekStart
+import org.totschnig.myexpenses.provider.DatabaseConstants.weekStartJulian
+import org.totschnig.myexpenses.provider.DbUtils.aggregateFunction
+import org.totschnig.myexpenses.provider.DbUtils.typeWithFallBack
+import org.totschnig.myexpenses.provider.TransactionProvider.BUDGETS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_CATEGORY
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_CATEGORY_EXPORT
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_CATEGORY_INFO
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_MERGE_SOURCE
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_MERGE_TARGET
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_REPLACE
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_RESULT
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_UPDATED_ACCOUNTS_COUNT
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_CALLER_IS_IN_BULK
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_OLD_CODE
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_OLD_FRACTION_DIGITS
+import org.totschnig.myexpenses.provider.TransactionProvider.TEMPLATES_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.TRANSACTIONS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.URI_SEGMENT_BUDGET_ALLOCATIONS
+import org.totschnig.myexpenses.provider.TransactionProvider.pauseChangeTrigger
+import org.totschnig.myexpenses.provider.TransactionProvider.resumeChangeTrigger
+import org.totschnig.myexpenses.provider.filter.Operation
+import org.totschnig.myexpenses.sync.SyncAdapter
+import org.totschnig.myexpenses.sync.json.TransactionChange
+import org.totschnig.myexpenses.util.AppDirHelper
+import org.totschnig.myexpenses.util.ResultUnit
+import org.totschnig.myexpenses.util.Utils
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler.Companion.report
+import org.totschnig.myexpenses.util.enumValueOrDefault
+import org.totschnig.myexpenses.util.epoch2LocalDate
+import org.totschnig.myexpenses.util.io.FileCopyUtils
+import timber.log.Timber
+import java.io.File
+import java.io.IOException
+import java.time.Duration
+import java.time.Instant
+import java.time.LocalDate
+import java.util.Locale
+import java.util.UUID
+import javax.inject.Inject
+import javax.inject.Named
+import javax.inject.Provider
+import kotlin.math.abs
+import kotlin.math.pow
+
+fun Uri.Builder.appendBooleanQueryParameter(key: String): Uri.Builder =
+<span class="nc" id="L111">    appendQueryParameter(key, &quot;1&quot;)</span>
+
+object SyncContract {
+    const val METHOD_APPLY_CHANGES = &quot;applyChangesFromFile&quot;
+    private const val FILE_NAME = &quot;pending_sync.json&quot;
+<span class="nc" id="L116">    fun getSyncFile(context: Context) = File(context.cacheDir, FILE_NAME)</span>
+    const val KEY_RESULT = &quot;result&quot;
+    const val KEY_EXCEPTION = &quot;exception&quot;
+}
+
+<span class="fc" id="L121">abstract class BaseTransactionProvider : ContentProvider() {</span>
+<span class="nc" id="L122">    var dirty = false</span>
+        set(value) {
+<span class="nc bnc" id="L124" title="All 4 branches missed.">            if (!field &amp;&amp; value) {</span>
+<span class="nc bnc" id="L125" title="All 6 branches missed.">                (context?.applicationContext as? MyApplication)?.markDataDirty()</span>
+            }
+<span class="nc" id="L127">            field = value</span>
+<span class="nc" id="L128">        }</span>
+
+    fun maybeSetDirty(uriMatch: Int) {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (uriMatch != EVENT_CACHE) {</span>
+<span class="nc" id="L132">            dirty = true</span>
+        }
+<span class="nc" id="L134">    }</span>
+
+    @Volatile
+    private var _helper: SupportSQLiteOpenHelper? = null
+
+    val helper: SupportSQLiteOpenHelper
+        get() = _helper
+<span class="fc bfc" id="L141" title="All 2 branches covered.">            ?: synchronized(this) {</span>
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">                if (_helper == null) {</span>
+<span class="fc" id="L143">                    _helper = openHelperProvider.get()</span>
+                }
+<span class="fc" id="L145">                return _helper!!</span>
+<span class="fc" id="L146">            }</span>
+
+    @Inject
+    @Named(AppComponent.DATABASE_NAME)
+    @JvmSuppressWildcards
+<span class="nc" id="L151">    lateinit var provideDatabaseName: (Boolean) -&gt; String</span>
+
+    @Inject
+    @Named(AppComponent.UI_SETTINGS_DATASTORE_NAME)
+<span class="nc" id="L155">    lateinit var uiSettingsDataStoreName: String</span>
+
+    @Inject
+<span class="pc" id="L158">    lateinit var prefHandler: PrefHandler</span>
+
+    @Inject
+<span class="pc" id="L161">    lateinit var currencyContext: CurrencyContext</span>
+
+    @Inject
+<span class="nc" id="L164">    lateinit var dataStore: DataStore&lt;Preferences&gt;</span>
+
+    @Inject
+<span class="pc" id="L167">    lateinit var openHelperProvider: Provider&lt;SupportSQLiteOpenHelper&gt;</span>
+
+    @Inject
+<span class="nc" id="L170">    lateinit var repository: Repository</span>
+
+    val collate: String
+<span class="fc" id="L173">        get() = prefHandler.collate</span>
+
+    val wrappedContext: Context
+<span class="nc" id="L176">        get() = with(context!!) {</span>
+<span class="nc bnc" id="L177" title="All 6 branches missed.">            (applicationContext as? MyApplication)?.wrapContext(this) ?: this</span>
+<span class="nc" id="L178">        }</span>
+
+    private var shouldLog = false
+
+<span class="nc" id="L182">    var bulkInProgress = false</span>
+
+<span class="fc" id="L184">    private val bulkNotificationUris = mutableSetOf&lt;Pair&lt;Uri, Boolean&gt;&gt;()</span>
+
+    fun notifyAccountChange() {
+<span class="nc" id="L187">        notifyChange(TransactionProvider.ACCOUNTS_BASE_URI, false)</span>
+<span class="nc" id="L188">        notifyChange(TransactionProvider.ACCOUNTS_MINIMAL_URI, false)</span>
+<span class="nc" id="L189">    }</span>
+
+    fun notifyChange(uri: Uri, syncToNetwork: Boolean) {
+<span class="nc bnc" id="L192" title="All 4 branches missed.">        if (!bulkInProgress &amp;&amp; callerIsNotInBulkOperation(uri)) {</span>
+<span class="nc" id="L193">            notifyChangeDo(uri, syncToNetwork)</span>
+        } else {
+<span class="nc" id="L195">            synchronized(bulkNotificationUris) {</span>
+<span class="nc" id="L196">                bulkNotificationUris.add(uri to syncToNetwork)</span>
+            }
+        }
+<span class="nc" id="L199">    }</span>
+
+    private fun notifyChangeDo(uri: Uri, syncToNetwork: Boolean) {
+<span class="nc" id="L202">        context!!.contentResolver.notifyChange(</span>
+<span class="nc" id="L203">            uri, null,</span>
+<span class="nc bnc" id="L204" title="All 4 branches missed.">            syncToNetwork &amp;&amp; prefHandler.getBoolean(PrefKey.SYNC_CHANGES_IMMEDIATELY, true)</span>
+        )
+<span class="nc" id="L206">    }</span>
+
+    fun notifyBulk() {
+<span class="nc" id="L209">        synchronized(bulkNotificationUris) {</span>
+<span class="nc" id="L210">            val iterator = bulkNotificationUris.iterator()</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            for ((uri, syncToNetwork) in iterator) {</span>
+<span class="nc" id="L212">                notifyChangeDo(uri, syncToNetwork)</span>
+<span class="nc" id="L213">                iterator.remove()</span>
+            }
+<span class="nc" id="L215">        }</span>
+<span class="nc" id="L216">    }</span>
+
+<span class="nc bnc" id="L218" title="All 2 branches missed.">    fun callerIsNotSyncAdapter(uri: Uri) = !callerIsSyncAdapter(uri)</span>
+
+<span class="nc" id="L220">    fun callerIsSyncAdapter(uri: Uri) = uri.getBooleanQueryParameter(</span>
+<span class="nc" id="L221">        TransactionProvider.QUERY_PARAMETER_CALLER_IS_SYNCADAPTER,</span>
+<span class="nc" id="L222">        false</span>
+<span class="nc" id="L223">    )</span>
+
+    fun deleteTransaction(db: SupportSQLiteDatabase, uri: Uri): Int {
+<span class="nc" id="L226">        val segment = uri.pathSegments[1]</span>
+        //when we are deleting a transfer whose peer is part of a split, we cannot delete the peer,
+        //because the split would be left in an invalid state, hence we transform the peer to a normal split part
+        //first we find out the account label
+        //when we are called from sync adapter, we also transform the peer to a normal transaction
+<span class="nc" id="L231">        db.beginTransaction()</span>
+<span class="nc" id="L232">        return try {</span>
+<span class="nc" id="L233">            val args = ContentValues()</span>
+<span class="nc" id="L234">            args.putNull(KEY_TRANSFER_ACCOUNT)</span>
+<span class="nc" id="L235">            args.putNull(KEY_TRANSFER_PEER)</span>
+<span class="nc" id="L236">            db.update(</span>
+<span class="nc" id="L237">                TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L238">                args,</span>
+<span class="nc" id="L239">                buildList {</span>
+<span class="nc" id="L240">                    add(&quot;$KEY_TRANSFER_PEER = ?&quot;)</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                    if (callerIsNotSyncAdapter(uri)) {</span>
+<span class="nc" id="L242">                        add(&quot;$KEY_PARENTID IS NOT null&quot;)</span>
+                    }
+<span class="nc" id="L244">                }.joinToString(&quot; AND &quot;),</span>
+<span class="nc" id="L245">                arrayOf(segment)</span>
+            )
+            //we delete the transaction, its children and its transfer peer, and transfer peers of its children
+<span class="nc" id="L248">            val count =</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">                if (uri.getQueryParameter(TransactionProvider.QUERY_PARAMETER_MARK_VOID) == null) {</span>
+                    //we delete the parent separately, so that the changes trigger can correctly record the parent uuid
+<span class="nc" id="L251">                    db.delete(</span>
+<span class="nc" id="L252">                        TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L253">                        WHERE_DEPENDENT,</span>
+<span class="nc" id="L254">                        arrayOf&lt;String?&gt;(segment, segment)</span>
+<span class="nc" id="L255">                    ) + db.delete(</span>
+<span class="nc" id="L256">                        TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L257">                        WHERE_SELF_OR_PEER,</span>
+<span class="nc" id="L258">                        arrayOf&lt;String?&gt;(segment, segment)</span>
+                    )
+                } else {
+<span class="nc" id="L261">                    val v = ContentValues()</span>
+<span class="nc" id="L262">                    v.put(KEY_CR_STATUS, CrStatus.VOID.name)</span>
+<span class="nc" id="L263">                    db.update(</span>
+<span class="nc" id="L264">                        TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L265">                        v,</span>
+<span class="nc" id="L266">                        WHERE_SELF_OR_RELATED,</span>
+<span class="nc" id="L267">                        arrayOf(segment, segment, segment, segment)</span>
+                    )
+                }
+<span class="nc" id="L270">            db.setTransactionSuccessful()</span>
+<span class="nc" id="L271">            count</span>
+        } finally {
+<span class="nc" id="L273">            db.endTransaction()</span>
+        }
+    }
+
+    fun callerIsNotInBulkOperation(uri: Uri): Boolean {
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        return !uri.getBooleanQueryParameter(QUERY_PARAMETER_CALLER_IS_IN_BULK, false)</span>
+    }
+
+    /**
+     * @param transactionId When we edit a transaction, we want it to not be included into the debt sum, since it can be changed in the UI, and the variable amount will be calculated by the UI
+     */
+    fun debtProjection(transactionId: String?, withSum: Boolean): Array&lt;String&gt; {
+<span class="nc bnc" id="L285" title="All 4 branches missed.">        val exclusionClause = transactionId?.let {</span>
+<span class="nc" id="L286">            &quot;AND $KEY_ROWID != $it&quot;</span>
+<span class="nc" id="L287">        } ?: &quot;&quot;</span>
+
+<span class="nc" id="L289">        return listOfNotNull(</span>
+<span class="nc" id="L290">            &quot;$TABLE_DEBTS.$KEY_ROWID&quot;,</span>
+<span class="nc" id="L291">            KEY_PAYEEID,</span>
+<span class="nc" id="L292">            KEY_DATE,</span>
+<span class="nc" id="L293">            KEY_LABEL,</span>
+<span class="nc" id="L294">            KEY_AMOUNT,</span>
+<span class="nc" id="L295">            KEY_CURRENCY,</span>
+<span class="nc" id="L296">            KEY_DESCRIPTION,</span>
+<span class="nc" id="L297">            KEY_PAYEE_NAME,</span>
+<span class="nc" id="L298">            KEY_SEALED,</span>
+<span class="nc" id="L299">            KEY_EQUIVALENT_AMOUNT,</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if (withSum) &quot;coalesce((SELECT sum(${debtSumExpression}) FROM $CTE_TRANSACTION_AMOUNTS WHERE $KEY_DEBT_ID = $TABLE_DEBTS.$KEY_ROWID $exclusionClause),0) AS $KEY_SUM&quot; else null,</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">            if (withSum) &quot;coalesce((SELECT sum(${debtEquivalentSumExpression}) FROM $CTE_TRANSACTION_AMOUNTS WHERE $KEY_DEBT_ID = $TABLE_DEBTS.$KEY_ROWID $exclusionClause),0) AS $KEY_EQUIVALENT_SUM&quot; else null</span>
+<span class="nc" id="L302">        ).toTypedArray()</span>
+    }
+
+    private val debtSumExpression
+<span class="nc" id="L306">        get() = &quot;CASE WHEN $TABLE_DEBTS.$KEY_CURRENCY == '$homeCurrency' AND $KEY_CURRENCY != '$homeCurrency' THEN $KEY_EQUIVALENT_AMOUNT ELSE $KEY_AMOUNT END&quot;</span>
+
+    private val debtEquivalentSumExpression
+<span class="nc" id="L309">        get() = &quot;CASE WHEN $KEY_CURRENCY != '$homeCurrency' THEN $KEY_EQUIVALENT_AMOUNT ELSE $KEY_AMOUNT END&quot;</span>
+
+    fun needsExtendedJoin(
+        projection: Array&lt;String&gt;,
+    ) =
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        projection.any { it.contains(KEY_EQUIVALENT_AMOUNT) } || // also cover cases where sum(equivalent_amount) is requested</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                projection.contains(KEY_EXCHANGE_RATE) ||</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                projection.contains(KEY_AMOUNT_HOME_EQUIVALENT) ||</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">                projection.any { it.contains(KEY_DISPLAY_AMOUNT) }</span>
+
+    fun prepareProjectionForTransactions(
+        projectionIn: Array&lt;String&gt;?,
+        table: String,
+        shortenComment: Boolean,
+        expandDisplayAmount: Boolean,
+<span class="nc bnc" id="L324" title="All 2 branches missed.">    ) = projectionIn?.map {</span>
+<span class="nc bnc" id="L325" title="All 14 branches missed.">        when (it) {</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            KEY_COMMENT -&gt; if (shortenComment) &quot;case when instr($KEY_COMMENT, X'0A') &gt; 0 THEN substr($KEY_COMMENT, 1, instr($KEY_COMMENT, X'0A')-1) else $KEY_COMMENT end AS $it&quot; else it</span>
+<span class="nc" id="L327">            KEY_TRANSFER_PEER_PARENT -&gt; &quot;(SELECT $KEY_PARENTID FROM $TABLE_TRANSACTIONS peer WHERE peer.$KEY_ROWID = $table.$KEY_TRANSFER_PEER ) AS $it&quot;</span>
+<span class="nc" id="L328">            KEY_TRANSFER_PEER_IS_ARCHIVED -&gt; &quot;(SELECT $KEY_STATUS FROM $TABLE_TRANSACTIONS peer WHERE peer.$KEY_ROWID = $table.$KEY_TRANSFER_PEER ) = $STATUS_ARCHIVED AS $it&quot;</span>
+<span class="nc" id="L329">            KEY_TRANSFER_PEER_IS_PORTFOLIO -&gt; &quot;(SELECT $KEY_IS_PORTFOLIO FROM $TABLE_ACCOUNTS WHERE $KEY_ROWID = (SELECT $KEY_ACCOUNTID FROM $TABLE_TRANSACTIONS peer WHERE peer.$KEY_ROWID = $table.$KEY_TRANSFER_PEER)) != $PORTFOLIO_NONE AS $it&quot;</span>
+<span class="nc" id="L330">            KEY_TRANSFER_AMOUNT -&gt; &quot;CASE WHEN $KEY_TRANSFER_PEER THEN (SELECT $KEY_AMOUNT FROM $TABLE_TRANSACTIONS WHERE $KEY_ROWID = $table.$KEY_TRANSFER_PEER) ELSE null END AS $it&quot;</span>
+<span class="nc" id="L331">            KEY_SEALED -&gt; checkSealedWithAlias(table)</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            KEY_DISPLAY_AMOUNT -&gt; if (expandDisplayAmount)</span>
+<span class="nc" id="L333">                &quot;${getAmountHomeEquivalent(table, homeCurrency)} AS $it&quot; else it</span>
+
+<span class="nc" id="L335">            KEY_HAS_SEALED_DEBT -&gt; &quot;MAX(${checkForSealedDebt(table)})&quot;</span>
+            KEY_HAS_SEALED_ACCOUNT -&gt; &quot;&quot;&quot;
+<span class="nc" id="L337">                MAX(${checkForSealedAccount(table, TABLE_TRANSACTIONS, false)})</span>
+<span class="nc" id="L338">                &quot;&quot;&quot;.trimIndent()</span>
+
+            KEY_HAS_SEALED_ACCOUNT_WITH_TRANSFER -&gt; &quot;&quot;&quot;
+<span class="nc" id="L341">                MAX(${checkForSealedAccount(table, TABLE_TRANSACTIONS, true)})</span>
+<span class="nc" id="L342">                &quot;&quot;&quot;.trimIndent()</span>
+
+<span class="nc" id="L344">            KEY_AMOUNT_HOME_EQUIVALENT -&gt; getAmountHomeEquivalent(table, homeCurrency) + &quot; AS $it&quot;</span>
+
+<span class="nc" id="L346">            KEY_CURRENCY -&gt; &quot;$table.$KEY_CURRENCY AS $KEY_CURRENCY&quot;</span>
+<span class="nc" id="L347">            KEY_ACCOUNTID -&gt; &quot;$table.$KEY_ACCOUNTID AS $KEY_ACCOUNTID&quot;</span>
+<span class="nc" id="L348">            else -&gt; it</span>
+<span class="nc" id="L349">        }</span>
+<span class="nc" id="L350">    }?.toTypedArray()</span>
+
+<span class="fc" id="L352">    private fun qualifyBudgetColumn(column: String) = &quot;$TABLE_BUDGETS.$column&quot;</span>
+
+<span class="pc" id="L354">    val budgetProjection = arrayOf(</span>
+<span class="fc" id="L355">        qualifyBudgetColumn(KEY_ROWID),</span>
+<span class="fc" id="L356">        qualifyBudgetColumn(KEY_UUID),</span>
+<span class="fc" id="L357">        &quot;coalesce($KEY_ACCOUNTID, -(select $KEY_ROWID from $TABLE_CURRENCIES where $KEY_CODE = $TABLE_BUDGETS.$KEY_CURRENCY), ${HOME_AGGREGATE_ID}) AS $KEY_ACCOUNTID&quot;,</span>
+<span class="fc" id="L358">        KEY_TITLE,</span>
+<span class="fc" id="L359">        qualifyBudgetColumn(KEY_DESCRIPTION),</span>
+<span class="fc" id="L360">        &quot;coalesce($TABLE_BUDGETS.$KEY_CURRENCY, $TABLE_ACCOUNTS.$KEY_CURRENCY) AS $KEY_CURRENCY&quot;,</span>
+<span class="fc" id="L361">        qualifyBudgetColumn(KEY_GROUPING),</span>
+<span class="fc" id="L362">        KEY_COLOR,</span>
+<span class="fc" id="L363">        KEY_START,</span>
+<span class="fc" id="L364">        KEY_END,</span>
+<span class="fc" id="L365">        &quot;$TABLE_ACCOUNTS.$KEY_LABEL AS $KEY_ACCOUNT_LABEL&quot;,</span>
+<span class="fc" id="L366">        &quot;$TABLE_ACCOUNTS.$KEY_UUID AS $KEY_ACCOUNT_UUID&quot;,</span>
+<span class="fc" id="L367">        KEY_SYNC_ACCOUNT_NAME,</span>
+<span class="fc" id="L368">        KEY_IS_DEFAULT</span>
+    )
+
+    companion object {
+
+        fun balanceUri(date: String?, forBalanceSheet: Boolean) =
+<span class="fc" id="L374">            TransactionProvider.ACCOUNTS_URI.buildUpon()</span>
+<span class="fc" id="L375">                .appendQueryParameter(</span>
+<span class="fc" id="L376">                    TransactionProvider.QUERY_PARAMETER_FULL_PROJECTION_WITH_SUMS,</span>
+<span class="fc" id="L377">                    date</span>
+                )
+<span class="fc" id="L379">                .apply {</span>
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">                    if (forBalanceSheet)</span>
+<span class="nc" id="L381">                        appendBooleanQueryParameter(</span>
+<span class="nc" id="L382">                            TransactionProvider.QUERY_PARAMETER_BALANCE_SHEET</span>
+                        )
+<span class="fc" id="L384">                }</span>
+<span class="fc" id="L385">                .build()</span>
+
+        val CATEGORY_TREE_URI: Uri
+<span class="nc" id="L388">            get() = TransactionProvider.CATEGORIES_URI.buildUpon()</span>
+<span class="nc" id="L389">                .appendBooleanQueryParameter(TransactionProvider.QUERY_PARAMETER_HIERARCHICAL)</span>
+<span class="nc" id="L390">                .build()</span>
+
+        /**
+         * Calculate depth of category tree
+         */
+        val CATEGORY_DEPTH_URI: Uri
+<span class="nc" id="L396">            get() = TransactionProvider.CATEGORIES_URI.buildUpon()</span>
+<span class="nc" id="L397">                .appendBooleanQueryParameter(TransactionProvider.QUERY_PARAMETER_DEPTH)</span>
+<span class="nc" id="L398">                .build()</span>
+
+        val ACCOUNTS_MINIMAL_URI_WITH_AGGREGATES: Uri
+<span class="nc" id="L401">            get() = TransactionProvider.ACCOUNTS_MINIMAL_URI</span>
+<span class="nc" id="L402">                .buildUpon()</span>
+<span class="nc" id="L403">                .appendBooleanQueryParameter(TransactionProvider.QUERY_PARAMETER_MERGE_CURRENCY_AGGREGATES)</span>
+<span class="nc" id="L404">                .build()</span>
+
+        const val CURRENCIES_USAGES_TABLE_EXPRESSION =
+            &quot;$TABLE_CURRENCIES LEFT JOIN (SELECT coalesce($KEY_ORIGINAL_CURRENCY, $KEY_CURRENCY) AS currency_coalesced, count(*) AS $KEY_USAGES FROM $VIEW_EXTENDED GROUP BY currency_coalesced) on currency_coalesced = $KEY_CODE&quot;
+
+        fun payeeProjection(tableName: String) = arrayOf(
+<span class="nc" id="L410">            &quot;$tableName.$KEY_ROWID&quot;,</span>
+<span class="nc" id="L411">            &quot;$tableName.$KEY_PAYEE_NAME&quot;,</span>
+<span class="nc" id="L412">            &quot;$tableName.$KEY_SHORT_NAME&quot;,</span>
+<span class="nc" id="L413">            &quot;$tableName.$KEY_BIC&quot;,</span>
+<span class="nc" id="L414">            &quot;$tableName.$KEY_IBAN&quot;,</span>
+<span class="nc" id="L415">            &quot;$tableName.$KEY_PARENTID&quot;,</span>
+<span class="nc" id="L416">            &quot;exists (SELECT 1 FROM $TABLE_TRANSACTIONS WHERE $KEY_PAYEEID=$tableName.$KEY_ROWID) AS $KEY_MAPPED_TRANSACTIONS&quot;,</span>
+<span class="nc" id="L417">            &quot;exists (SELECT 1 FROM $TABLE_TEMPLATES WHERE $KEY_PAYEEID=$tableName.$KEY_ROWID) AS $KEY_MAPPED_TEMPLATES&quot;,</span>
+<span class="nc" id="L418">            &quot;exists (SELECT 1 FROM $TABLE_DEBTS WHERE $KEY_PAYEEID=$tableName.$KEY_ROWID) AS $KEY_MAPPED_DEBTS&quot;</span>
+<span class="nc" id="L419">        )</span>
+
+<span class="pc" id="L421">        val BANK_PROJECTION = arrayOf(</span>
+<span class="fc" id="L422">            KEY_ROWID, KEY_BLZ, KEY_BIC, KEY_BANK_NAME, KEY_USER_ID, KEY_VERSION,</span>
+<span class="fc" id="L423">            &quot;(SELECT count(*) FROM $TABLE_ACCOUNTS WHERE $KEY_BANK_ID = $TABLE_BANKS.$KEY_ROWID) AS $KEY_COUNT&quot;</span>
+        )
+
+        const val DEBT_PAYEE_JOIN =
+            &quot;$TABLE_DEBTS LEFT JOIN $TABLE_PAYEES ON ($KEY_PAYEEID = $TABLE_PAYEES.$KEY_ROWID)&quot;
+
+        const val TRANSACTION_ATTRIBUTES_JOIN =
+            &quot;$TABLE_TRANSACTION_ATTRIBUTES LEFT JOIN $TABLE_ATTRIBUTES ON ($KEY_ATTRIBUTE_ID = $TABLE_ATTRIBUTES.$KEY_ROWID)&quot;
+
+        const val ACCOUNT_ATTRIBUTES_JOIN =
+            &quot;$TABLE_ACCOUNT_ATTRIBUTES LEFT JOIN $TABLE_ATTRIBUTES ON ($KEY_ATTRIBUTE_ID = $TABLE_ATTRIBUTES.$KEY_ROWID)&quot;
+
+        const val KEY_DEBT_LABEL = &quot;debt&quot;
+
+        const val DEBT_LABEL_EXPRESSION =
+            &quot;(SELECT $KEY_LABEL FROM $TABLE_DEBTS WHERE $KEY_ROWID = $KEY_DEBT_ID) AS $KEY_DEBT_LABEL&quot;
+
+        const val TAG = &quot;TransactionProvider&quot;
+
+        protected const val URI_SEGMENT_GROUPS = &quot;groups&quot;
+
+<span class="fc" id="L444">        fun LIVE_ATTACHMENT_SELECTION(withUUIDSelection: Boolean = false) =</span>
+            &quot;EXISTS(SELECT 1 FROM $TABLE_TRANSACTION_ATTACHMENTS WHERE $KEY_ATTACHMENT_ID = $KEY_ROWID&quot; +
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">                    (if (withUUIDSelection) &quot; AND $KEY_TRANSACTIONID = (SELECT $KEY_ROWID FROM $TABLE_TRANSACTIONS WHERE $KEY_UUID = ?)&quot; else &quot;&quot;) +</span>
+<span class="fc" id="L447">                    &quot;)&quot;</span>
+
+<span class="pc" id="L449">        val STALE_ATTACHMENT_SELECTION = &quot;NOT ${LIVE_ATTACHMENT_SELECTION()}&quot;</span>
+
+        fun defaultBudgetAllocationUri(accountSegment: String, grouping: Grouping): Uri =
+<span class="nc" id="L452">            BUDGETS_URI.buildUpon()</span>
+<span class="nc" id="L453">                .appendPath(TransactionProvider.URI_SEGMENT_DEFAULT_BUDGET_ALLOCATIONS)</span>
+<span class="nc" id="L454">                .appendPath(accountSegment)</span>
+<span class="nc" id="L455">                .appendPath(grouping.name)</span>
+<span class="nc" id="L456">                .build()</span>
+
+<span class="nc" id="L458">        fun budgetUri(budgetId: Long) = ContentUris.withAppendedId(BUDGETS_URI, budgetId)</span>
+
+<span class="nc" id="L460">        fun templateUri(templateId: Long) = ContentUris.withAppendedId(TEMPLATES_URI, templateId)</span>
+
+        fun budgetAllocationUri(budgetId: Long, categoryId: Long): Uri =
+<span class="nc" id="L463">            appendId(</span>
+<span class="nc" id="L464">                appendId(BUDGETS_URI.buildUpon(), budgetId),</span>
+<span class="nc" id="L465">                categoryId</span>
+<span class="nc" id="L466">            ).build()</span>
+
+        fun budgetAllocationQueryUri(budgetId: Long, year: String?, second: String?): Uri =
+<span class="nc" id="L469">            appendId(BUDGETS_URI.buildUpon(), budgetId)</span>
+<span class="nc" id="L470">                .appendPath(URI_SEGMENT_BUDGET_ALLOCATIONS)</span>
+<span class="nc" id="L471">                .apply {</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">                    year?.let { appendQueryParameter(KEY_YEAR, year) }</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">                    second?.let { appendQueryParameter(KEY_SECOND_GROUP, second) }</span>
+<span class="nc" id="L474">                }</span>
+<span class="nc" id="L475">                .build()</span>
+
+        fun groupingUriBuilder(grouping: Grouping): Uri.Builder =
+<span class="nc" id="L478">            TRANSACTIONS_URI</span>
+<span class="nc" id="L479">                .buildUpon()</span>
+<span class="nc" id="L480">                .appendPath(URI_SEGMENT_GROUPS)</span>
+<span class="nc" id="L481">                .appendPath(grouping.name)</span>
+
+        protected const val TRANSACTIONS = 1
+        protected const val TRANSACTION_ID = 2
+        protected const val CATEGORIES = 3
+        protected const val ACCOUNTS = 4
+        protected const val ACCOUNTS_BASE = 5
+        protected const val ACCOUNT_ID = 6
+        protected const val PAYEES = 7
+        protected const val METHODS = 8
+        protected const val METHOD_ID = 9
+        protected const val ACCOUNTTYPES_METHODS = 10
+        protected const val TEMPLATES = 11
+        protected const val TEMPLATE_ID = 12
+        protected const val CATEGORY_ID = 13
+        protected const val PAYEE_ID = 15
+        protected const val METHODS_FILTERED = 16
+        protected const val TEMPLATES_INCREASE_USAGE = 17
+        protected const val SQLITE_SEQUENCE_TABLE = 19
+        protected const val AGGREGATE_ID = 20
+        protected const val AGGREGATE_V2 = 21
+        protected const val TRANSACTIONS_GROUPS = 22
+        protected const val TRANSACTIONS_SUMS = 24
+        protected const val TRANSACTION_MOVE = 25
+        protected const val PLANINSTANCE_TRANSACTION_STATUS = 26
+        protected const val CURRENCIES = 27
+        protected const val TRANSACTION_TOGGLE_CRSTATUS = 29
+        protected const val MAPPED_METHODS = 31
+        protected const val DUAL = 32
+        protected const val EVENT_CACHE = 34
+        protected const val DEBUG_SCHEMA = 35
+        protected const val STALE_IMAGES = 36
+        protected const val STALE_IMAGES_ID = 37
+        protected const val TRANSACTION_UNDELETE = 38
+        protected const val MAPPED_TRANSFER_ACCOUNTS = 41
+        protected const val CHANGES = 42
+        protected const val SETTINGS = 43
+        protected const val ACCOUNT_ID_GROUPING = 45
+        protected const val ACCOUNT_ID_SORT = 46
+        protected const val AUTOFILL = 47
+        protected const val ACCOUNT_EXCHANGE_RATE = 48
+        protected const val UNSPLIT = 49
+        protected const val BUDGETS = 50
+        protected const val BUDGET_ID = 51
+        protected const val BUDGET_CATEGORY = 52
+        protected const val CURRENCIES_CODE = 53
+        protected const val ACCOUNTS_MINIMAL = 54
+        protected const val TAGS = 55
+        protected const val TRANSACTIONS_TAGS = 56
+        protected const val TAG_ID = 57
+        protected const val TEMPLATES_TAGS = 58
+        protected const val PLANINSTANCE_STATUS_SINGLE = 60
+        protected const val TRANSACTION_LINK_TRANSFER = 61
+        protected const val ACCOUNTS_TAGS = 62
+        protected const val DEBTS = 63
+        protected const val DEBT_ID = 64
+        protected const val BUDGET_ALLOCATIONS = 65
+        protected const val ACCOUNT_DEFAULT_BUDGET_ALLOCATIONS = 66
+        protected const val BANKS = 67
+        protected const val BANK_ID = 68
+        protected const val ATTRIBUTES = 69
+        protected const val TRANSACTION_ATTRIBUTES = 70
+        protected const val ACCOUNT_ATTRIBUTES = 71
+        protected const val TRANSACTION_ATTACHMENTS = 72
+        protected const val ATTACHMENTS = 73
+        protected const val TRANSACTION_ID_ATTACHMENT_ID = 74
+        protected const val TRANSACTION_UNLINK_TRANSFER = 75
+        protected const val TRANSACTION_TRANSFORM_TO_TRANSFER = 76
+        protected const val UNARCHIVE = 77
+        protected const val ARCHIVE_SUMS = 78
+        protected const val PRICES = 79
+        protected const val DYNAMIC_CURRENCIES = 80
+        protected const val BUDGET_FOR_PERIOD = 81
+        protected const val ACCOUNT_TYPES = 82
+        protected const val ACCOUNT_TYPE_ID = 83
+        protected const val ACCOUNT_FLAGS = 84
+        protected const val ACCOUNT_FLAG_ID = 85
+        protected const val LATEST_PRICES = 86
+
+        const val CTE_TABLE_NAME_FULL_ACCOUNTS = &quot;full_accounts&quot;
+
+        const val COUNT_UNUSED_PAYEE_QUERY = &quot;&quot;&quot;
+        WITH
+            DirectlyUsedPayees AS (
+                SELECT DISTINCT $KEY_PAYEEID AS id
+                FROM $TABLE_TRANSACTIONS
+                WHERE $KEY_PAYEEID IS NOT NULL
+                UNION
+                SELECT DISTINCT $KEY_PAYEEID AS id
+                FROM $TABLE_TEMPLATES
+                WHERE $KEY_PAYEEID IS NOT NULL
+                UNION
+                SELECT DISTINCT $KEY_PAYEEID AS id
+                FROM $TABLE_DEBTS
+                WHERE $KEY_PAYEEID IS NOT NULL
+            ),
+            ParentsOfUsedPayees AS (
+                SELECT DISTINCT p.$KEY_PARENTID AS id
+                FROM $TABLE_PAYEES p
+                JOIN DirectlyUsedPayees dup ON p.$KEY_ROWID = dup.id
+                WHERE p.$KEY_PARENTID IS NOT NULL
+            ),
+            AllActivePayees AS (
+                SELECT id FROM DirectlyUsedPayees
+                UNION
+                SELECT id FROM ParentsOfUsedPayees
+                WHERE id IS NOT NULL
+            )
+        SELECT COUNT(p_all.$KEY_ROWID)
+        FROM $TABLE_PAYEES p_all
+        LEFT JOIN AllActivePayees aap ON p_all.$KEY_ROWID = aap.id
+    WHERE aap.id IS NULL AND $KEY_ROWID != $NULL_ROW_ID;
+    &quot;&quot;&quot;
+
+        fun SupportSQLiteDatabase.storeFractionDigits(code: String, extras: Bundle) {
+<span class="nc" id="L596">            storeFractionDigits(</span>
+<span class="nc" id="L597">                code,</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">                if (extras.containsKey(KEY_FRACTION_DIGITS)) extras.getInt(KEY_FRACTION_DIGITS) else null</span>
+            )
+<span class="nc" id="L600">        }</span>
+
+        fun SupportSQLiteDatabase.storeFractionDigits(code: String, fractionDigits: Int?) {
+<span class="nc" id="L603">            update(TABLE_CURRENCIES, ContentValues(1).apply {</span>
+<span class="nc" id="L604">                put(KEY_FRACTION_DIGITS, fractionDigits)</span>
+<span class="nc" id="L605">            }, &quot;$KEY_CODE = ?&quot;, arrayOf(code))</span>
+<span class="nc" id="L606">        }</span>
+    }
+
+    val homeCurrency: String
+<span class="fc" id="L610">        get() = currencyContext.homeCurrencyString</span>
+
+
+    val accountsWithExchangeRate: String
+<span class="fc" id="L614">        get() = exchangeRateJoin(accountWithTypeAndFlag, KEY_ROWID, homeCurrency, TABLE_ACCOUNTS)</span>
+
+<span class="nc" id="L616">    val budgetTableJoin =</span>
+<span class="fc" id="L617">        &quot;$TABLE_BUDGETS LEFT JOIN $TABLE_ACCOUNTS ON ($KEY_ACCOUNTID = $TABLE_ACCOUNTS.$KEY_ROWID)&quot;</span>
+
+    val aggregateFunction: String
+<span class="fc" id="L620">        get() = aggregateFunction(prefHandler)</span>
+
+    val typeWithFallBack: String
+<span class="nc" id="L623">        get() = typeWithFallBack(prefHandler)</span>
+
+    val dynamicExchangeRatesDefault: String
+<span class="nc" id="L626">        get() = runBlocking {</span>
+<span class="nc" id="L627">            dataStore.dynamicExchangeRates.first()</span>
+<span class="nc" id="L628">        }</span>
+
+    fun buildAccountQuery(
+        minimal: Boolean,
+        mergeAggregate: String?,
+        selection: String?,
+        sortOrder: String?,
+        sumsForDate: String?,
+    ): String {
+<span class="nc bnc" id="L637" title="All 2 branches missed.">        val date = sumsForDate ?: &quot;now&quot;</span>
+<span class="nc" id="L638">        val aggregateFunction = this.aggregateFunction</span>
+
+<span class="nc bnc" id="L640" title="All 2 branches missed.">        val cte = if (minimal) &quot;&quot; else {</span>
+<span class="nc bnc" id="L641" title="All 4 branches missed.">            val endOfDay = if (date == &quot;now&quot;) runBlocking {</span>
+<span class="nc" id="L642">                enumValueOrDefault(</span>
+<span class="nc" id="L643">                    dataStore.data.first()[prefHandler.getStringPreferencesKey(PrefKey.CRITERION_FUTURE)],</span>
+<span class="nc" id="L644">                    FutureCriterion.EndOfDay</span>
+<span class="nc" id="L645">                )</span>
+<span class="nc" id="L646">            } != FutureCriterion.Current else true</span>
+<span class="nc" id="L647">            val aggregateInvisible = runBlocking {</span>
+<span class="nc bnc" id="L648" title="All 2 branches missed.">                dataStore.data.first()[prefHandler.getBooleanPreferencesKey(PrefKey.INVISIBLE_ACCOUNTS_ARE_AGGREGATED)] != false</span>
+            }
+<span class="nc bnc" id="L650" title="All 2 branches missed.">            if (mergeAggregate == null)</span>
+<span class="nc" id="L651">                accountQueryCTE(</span>
+<span class="nc" id="L652">                    homeCurrency = homeCurrency,</span>
+<span class="nc" id="L653">                    endOfDay = endOfDay,</span>
+<span class="nc" id="L654">                    aggregateFunction = aggregateFunction,</span>
+<span class="nc" id="L655">                    typeWithFallBack = typeWithFallBack,</span>
+<span class="nc" id="L656">                    date = date,</span>
+<span class="nc" id="L657">                    dynamicExpression = dynamicExchangeRatesDefault,</span>
+<span class="nc" id="L658">                    aggregateInvisible = aggregateInvisible</span>
+<span class="nc" id="L659">                ) else accountQueryCTEV1(</span>
+<span class="nc" id="L660">                homeCurrency = homeCurrency,</span>
+<span class="nc" id="L661">                endOfDay = endOfDay,</span>
+<span class="nc" id="L662">                aggregateFunction = aggregateFunction,</span>
+<span class="nc" id="L663">                typeWithFallBack = typeWithFallBack,</span>
+<span class="nc" id="L664">                date = date,</span>
+<span class="nc" id="L665">                dynamicExpression = dynamicExchangeRatesDefault,</span>
+<span class="nc" id="L666">                aggregateInvisible = aggregateInvisible</span>
+            )
+        }
+
+<span class="nc bnc" id="L670" title="All 2 branches missed.">        val tableName = if (minimal) accountWithTypeAndFlag else CTE_TABLE_NAME_FULL_ACCOUNTS</span>
+
+<span class="nc bnc" id="L672" title="All 2 branches missed.">        val query = if (mergeAggregate == null) {</span>
+<span class="nc" id="L673">            SupportSQLiteQueryBuilder.builder(tableName)</span>
+<span class="nc bnc" id="L674" title="All 2 branches missed.">                .columns(if (minimal) mapAccountProjection(Account.PROJECTION_MINIMAL) else null)</span>
+<span class="nc" id="L675">                .selection(selection, emptyArray())</span>
+                //for balance sheet, we need to respect the sort order of account types
+<span class="nc" id="L677">                .orderBy(sortOrder)</span>
+<span class="nc" id="L678">                .create().sql</span>
+        } else {
+            //V1
+<span class="nc" id="L681">            val subQueries: MutableList&lt;String&gt; = ArrayList()</span>
+<span class="nc bnc" id="L682" title="All 2 branches missed.">            if (mergeAggregate == &quot;1&quot;) {</span>
+<span class="nc" id="L683">                subQueries.add(</span>
+<span class="nc" id="L684">                    SupportSQLiteQueryBuilder</span>
+<span class="nc" id="L685">                        .builder(tableName)</span>
+<span class="nc" id="L686">                        .columns(</span>
+<span class="nc bnc" id="L687" title="All 2 branches missed.">                            if (minimal) mapAccountProjection(Account.PROJECTION_MINIMAL) else arrayOf(</span>
+<span class="nc" id="L688">                                KEY_ROWID,</span>
+<span class="nc" id="L689">                                KEY_LABEL,</span>
+<span class="nc" id="L690">                                KEY_DESCRIPTION,</span>
+<span class="nc" id="L691">                                KEY_OPENING_BALANCE,</span>
+<span class="nc" id="L692">                                KEY_EQUIVALENT_OPENING_BALANCE,</span>
+<span class="nc" id="L693">                                KEY_CURRENCY,</span>
+<span class="nc" id="L694">                                KEY_COLOR,</span>
+<span class="nc" id="L695">                                KEY_GROUPING,</span>
+<span class="nc" id="L696">                                KEY_ACCOUNT_TYPE_LABEL,</span>
+<span class="nc" id="L697">                                KEY_TYPE,</span>
+<span class="nc" id="L698">                                KEY_TYPE_SORT_KEY,</span>
+<span class="nc" id="L699">                                KEY_IS_ASSET,</span>
+<span class="nc" id="L700">                                KEY_SUPPORTS_RECONCILIATION,</span>
+<span class="nc" id="L701">                                KEY_FLAG,</span>
+<span class="nc" id="L702">                                KEY_FLAG_LABEL,</span>
+<span class="nc" id="L703">                                KEY_VISIBLE,</span>
+<span class="nc" id="L704">                                KEY_FLAG_SORT_KEY,</span>
+<span class="nc" id="L705">                                KEY_FLAG_ICON,</span>
+<span class="nc" id="L706">                                KEY_SORT_KEY,</span>
+<span class="nc" id="L707">                                KEY_EXCLUDE_FROM_TOTALS,</span>
+<span class="nc" id="L708">                                KEY_SYNC_ACCOUNT_NAME,</span>
+<span class="nc" id="L709">                                KEY_UUID,</span>
+<span class="nc" id="L710">                                KEY_SORT_BY,</span>
+<span class="nc" id="L711">                                KEY_SORT_DIRECTION,</span>
+<span class="nc" id="L712">                                KEY_CRITERION,</span>
+<span class="nc" id="L713">                                KEY_SEALED,</span>
+<span class="nc" id="L714">                                KEY_CURRENT_BALANCE,</span>
+<span class="nc" id="L715">                                KEY_EQUIVALENT_CURRENT_BALANCE,</span>
+<span class="nc" id="L716">                                KEY_SUM_INCOME,</span>
+<span class="nc" id="L717">                                KEY_SUM_EXPENSES,</span>
+<span class="nc" id="L718">                                KEY_SUM_TRANSFERS,</span>
+<span class="nc" id="L719">                                KEY_EQUIVALENT_INCOME,</span>
+<span class="nc" id="L720">                                KEY_EQUIVALENT_EXPENSES,</span>
+<span class="nc" id="L721">                                KEY_EQUIVALENT_TRANSFERS,</span>
+<span class="nc" id="L722">                                KEY_TOTAL,</span>
+<span class="nc" id="L723">                                KEY_EQUIVALENT_TOTAL,</span>
+<span class="nc" id="L724">                                KEY_CLEARED_TOTAL,</span>
+<span class="nc" id="L725">                                KEY_RECONCILED_TOTAL,</span>
+<span class="nc" id="L726">                                KEY_USAGES,</span>
+<span class="nc" id="L727">                                &quot;0 AS $KEY_IS_AGGREGATE&quot;,</span>
+<span class="nc" id="L728">                                KEY_HAS_FUTURE,</span>
+<span class="nc" id="L729">                                KEY_HAS_CLEARED,</span>
+<span class="nc" id="L730">                                KEY_LAST_USED,</span>
+<span class="nc" id="L731">                                KEY_BANK_ID,</span>
+<span class="nc" id="L732">                                KEY_EXCHANGE_RATE,</span>
+<span class="nc" id="L733">                                KEY_LATEST_EXCHANGE_RATE,</span>
+<span class="nc" id="L734">                                KEY_LATEST_EXCHANGE_RATE_DATE,</span>
+<span class="nc" id="L735">                                KEY_DYNAMIC</span>
+                            )
+                        )
+<span class="nc" id="L738">                        .selection(selection, emptyArray())</span>
+<span class="nc" id="L739">                        .create().sql</span>
+                )
+            }
+<span class="nc" id="L742">            val openingBalanceSum = &quot;$aggregateFunction($KEY_OPENING_BALANCE)&quot;</span>
+<span class="nc" id="L743">            val openingBalanceSumEquivalent = &quot;$aggregateFunction($KEY_EQUIVALENT_OPENING_BALANCE)&quot;</span>
+            //Currency query
+<span class="nc bnc" id="L745" title="All 2 branches missed.">            if (mergeAggregate != HOME_AGGREGATE_ID.toString()) {</span>
+<span class="nc" id="L746">                val qb = SupportSQLiteQueryBuilder.builder(</span>
+<span class="nc" id="L747">                    &quot;$tableName LEFT JOIN $TABLE_CURRENCIES on $KEY_CODE = $KEY_CURRENCY&quot;</span>
+                )
+<span class="nc" id="L749">                val rowIdColumn = &quot;0 - $TABLE_CURRENCIES.$KEY_ROWID AS $KEY_ROWID&quot;</span>
+<span class="nc" id="L750">                val labelColumn = &quot;$KEY_CURRENCY AS $KEY_LABEL&quot;</span>
+<span class="nc" id="L751">                val aggregateColumn = &quot;1 AS $KEY_IS_AGGREGATE&quot;</span>
+<span class="nc bnc" id="L752" title="All 2 branches missed.">                val currencyProjection = if (minimal) arrayOf(</span>
+<span class="nc" id="L753">                    rowIdColumn,</span>
+<span class="nc" id="L754">                    labelColumn,</span>
+<span class="nc" id="L755">                    KEY_CURRENCY,</span>
+<span class="nc" id="L756">                    &quot;'AGGREGATE' AS $KEY_ACCOUNT_TYPE_LABEL&quot;,</span>
+<span class="nc" id="L757">                    &quot;0 AS $KEY_IS_ASSET&quot;,</span>
+<span class="nc" id="L758">                    &quot;0 AS $KEY_SUPPORTS_RECONCILIATION&quot;,</span>
+<span class="nc" id="L759">                    &quot;0 AS $KEY_TYPE&quot;,</span>
+<span class="nc" id="L760">                    &quot;0 AS $KEY_TYPE_SORT_KEY&quot;,</span>
+<span class="nc" id="L761">                    &quot;0 AS $KEY_FLAG&quot;,</span>
+<span class="nc" id="L762">                    &quot;null AS $KEY_FLAG_LABEL&quot;,</span>
+<span class="nc" id="L763">                    &quot;1 AS $KEY_VISIBLE&quot;,</span>
+<span class="nc" id="L764">                    &quot;0 AS $KEY_FLAG_SORT_KEY&quot;,</span>
+<span class="nc" id="L765">                    &quot;null AS KEY_FLAG_ICON&quot;,</span>
+<span class="nc" id="L766">                    aggregateColumn</span>
+                ) else {
+                    arrayOf(
+<span class="nc" id="L769">                        rowIdColumn,  //we use negative ids for aggregate accounts</span>
+<span class="nc" id="L770">                        labelColumn,</span>
+<span class="nc" id="L771">                        &quot;'' AS $KEY_DESCRIPTION&quot;,</span>
+<span class="nc" id="L772">                        &quot;$openingBalanceSum AS $KEY_OPENING_BALANCE&quot;,</span>
+<span class="nc" id="L773">                        &quot;$openingBalanceSumEquivalent AS $KEY_EQUIVALENT_OPENING_BALANCE&quot;,</span>
+<span class="nc" id="L774">                        KEY_CURRENCY,</span>
+<span class="nc" id="L775">                        &quot;-1 AS $KEY_COLOR&quot;,</span>
+<span class="nc" id="L776">                        &quot;$TABLE_CURRENCIES.$KEY_GROUPING&quot;,</span>
+<span class="nc" id="L777">                        &quot;'AGGREGATE' AS $KEY_ACCOUNT_TYPE_LABEL&quot;,</span>
+<span class="nc" id="L778">                        &quot;0 AS $KEY_TYPE&quot;,</span>
+<span class="nc" id="L779">                        &quot;0 AS $KEY_TYPE_SORT_KEY&quot;,</span>
+<span class="nc" id="L780">                        &quot;0 AS $KEY_IS_ASSET&quot;,</span>
+<span class="nc" id="L781">                        &quot;0 AS $KEY_SUPPORTS_RECONCILIATION&quot;,</span>
+<span class="nc" id="L782">                        &quot;0 AS $KEY_FLAG&quot;,</span>
+<span class="nc" id="L783">                        &quot;null AS $KEY_FLAG_LABEL&quot;,</span>
+<span class="nc" id="L784">                        &quot;1 AS $KEY_VISIBLE&quot;,</span>
+<span class="nc" id="L785">                        &quot;0 AS $KEY_FLAG_SORT_KEY&quot;,</span>
+<span class="nc" id="L786">                        &quot;null AS $KEY_FLAG_ICON&quot;,</span>
+<span class="nc" id="L787">                        &quot;0 AS $KEY_SORT_KEY&quot;,</span>
+<span class="nc" id="L788">                        &quot;0 AS $KEY_EXCLUDE_FROM_TOTALS&quot;,</span>
+<span class="nc" id="L789">                        &quot;null AS $KEY_SYNC_ACCOUNT_NAME&quot;,</span>
+<span class="nc" id="L790">                        &quot;null AS $KEY_UUID&quot;,</span>
+<span class="nc" id="L791">                        &quot;$TABLE_CURRENCIES.$KEY_SORT_BY&quot;,</span>
+<span class="nc" id="L792">                        &quot;$TABLE_CURRENCIES.$KEY_SORT_DIRECTION&quot;,</span>
+<span class="nc" id="L793">                        &quot;0 AS $KEY_CRITERION&quot;,</span>
+<span class="nc" id="L794">                        &quot;0 AS $KEY_SEALED&quot;,</span>
+<span class="nc" id="L795">                        &quot;$aggregateFunction($KEY_CURRENT_BALANCE) AS $KEY_CURRENT_BALANCE&quot;,</span>
+<span class="nc" id="L796">                        &quot;$aggregateFunction($KEY_EQUIVALENT_CURRENT_BALANCE) AS $KEY_EQUIVALENT_CURRENT_BALANCE&quot;,</span>
+<span class="nc" id="L797">                        &quot;$aggregateFunction($KEY_SUM_INCOME) AS $KEY_SUM_INCOME&quot;,</span>
+<span class="nc" id="L798">                        &quot;$aggregateFunction($KEY_SUM_EXPENSES) AS $KEY_SUM_EXPENSES&quot;,</span>
+<span class="nc" id="L799">                        &quot;$aggregateFunction($KEY_SUM_TRANSFERS) AS $KEY_SUM_TRANSFERS&quot;,</span>
+<span class="nc" id="L800">                        &quot;$aggregateFunction($KEY_EQUIVALENT_INCOME) AS $KEY_EQUIVALENT_INCOME&quot;,</span>
+<span class="nc" id="L801">                        &quot;$aggregateFunction($KEY_EQUIVALENT_EXPENSES) AS $KEY_EQUIVALENT_EXPENSES&quot;,</span>
+<span class="nc" id="L802">                        &quot;$aggregateFunction($KEY_EQUIVALENT_TRANSFERS) AS $KEY_EQUIVALENT_TRANSFERS&quot;,</span>
+<span class="nc" id="L803">                        &quot;$aggregateFunction($KEY_TOTAL) AS $KEY_TOTAL&quot;,</span>
+<span class="nc" id="L804">                        &quot;$aggregateFunction($KEY_EQUIVALENT_TOTAL) AS $KEY_EQUIVALENT_TOTAL&quot;,</span>
+<span class="nc" id="L805">                        &quot;0 AS $KEY_CLEARED_TOTAL&quot;,  //we do not calculate cleared and reconciled totals for aggregate accounts</span>
+<span class="nc" id="L806">                        &quot;0 AS $KEY_RECONCILED_TOTAL&quot;,</span>
+<span class="nc" id="L807">                        &quot;0 AS $KEY_USAGES&quot;,</span>
+<span class="nc" id="L808">                        aggregateColumn,</span>
+<span class="nc" id="L809">                        &quot;max($KEY_HAS_FUTURE) AS $KEY_HAS_FUTURE&quot;,</span>
+<span class="nc" id="L810">                        &quot;0 AS $KEY_HAS_CLEARED&quot;,</span>
+<span class="nc" id="L811">                        &quot;0 AS $KEY_LAST_USED&quot;,</span>
+<span class="nc" id="L812">                        &quot;null AS $KEY_BANK_ID&quot;,</span>
+<span class="nc" id="L813">                        &quot;null AS $KEY_EXCHANGE_RATE&quot;,</span>
+<span class="nc" id="L814">                        &quot;null AS $KEY_LATEST_EXCHANGE_RATE&quot;,</span>
+<span class="nc" id="L815">                        &quot;null AS $KEY_LATEST_EXCHANGE_RATE_DATE&quot;,</span>
+<span class="nc" id="L816">                        &quot;0 AS $KEY_DYNAMIC&quot;</span>
+                    )
+                }
+<span class="nc" id="L819">                subQueries.add(</span>
+<span class="nc" id="L820">                    qb.columns(currencyProjection)</span>
+<span class="nc" id="L821">                        .selection(&quot;$KEY_EXCLUDE_FROM_TOTALS = 0&quot;, emptyArray())</span>
+<span class="nc" id="L822">                        .groupBy(KEY_CURRENCY)</span>
+<span class="nc" id="L823">                        .having(</span>
+<span class="nc bnc" id="L824" title="All 2 branches missed.">                            if (mergeAggregate == &quot;1&quot;) &quot;count(*) &gt; 1 OR (count(*) = 1 AND sum($KEY_VISIBLE) = 0)&quot; else &quot;$TABLE_CURRENCIES.$KEY_ROWID = &quot; +</span>
+<span class="nc" id="L825">                                    mergeAggregate.substring(1)</span>
+<span class="nc" id="L826">                        ).create().sql</span>
+                )
+            }
+            //home query
+<span class="nc bnc" id="L830" title="All 4 branches missed.">            if (mergeAggregate == HOME_AGGREGATE_ID.toString() || mergeAggregate == &quot;1&quot;) {</span>
+<span class="nc" id="L831">                val qb = SupportSQLiteQueryBuilder.builder(tableName)</span>
+
+<span class="nc" id="L833">                val grouping = prefHandler.getString(GROUPING_AGGREGATE, &quot;NONE&quot;)</span>
+<span class="nc" id="L834">                val sortBy = prefHandler.getString(SORT_BY_AGGREGATE, KEY_DATE)</span>
+<span class="nc" id="L835">                val sortDirection = prefHandler.getString(SORT_DIRECTION_AGGREGATE, &quot;DESC&quot;)</span>
+<span class="nc" id="L836">                val rowIdColumn = &quot;$HOME_AGGREGATE_ID AS $KEY_ROWID&quot;</span>
+<span class="nc" id="L837">                val labelColumn =</span>
+<span class="nc" id="L838">                    &quot;'${wrappedContext.getString(R.string.grand_total)}' AS $KEY_LABEL&quot;</span>
+<span class="nc" id="L839">                val currencyColumn = &quot;'$AGGREGATE_HOME_CURRENCY_CODE' AS $KEY_CURRENCY&quot;</span>
+<span class="nc" id="L840">                val aggregateColumn = &quot;2 AS $KEY_IS_AGGREGATE&quot;</span>
+<span class="nc bnc" id="L841" title="All 2 branches missed.">                val homeProjection = if (minimal) {</span>
+                    arrayOf(
+<span class="nc" id="L843">                        rowIdColumn,</span>
+<span class="nc" id="L844">                        labelColumn,</span>
+<span class="nc" id="L845">                        currencyColumn,</span>
+<span class="nc" id="L846">                        &quot;'AGGREGATE' AS $KEY_ACCOUNT_TYPE_LABEL&quot;,</span>
+<span class="nc" id="L847">                        &quot;0 AS $KEY_IS_ASSET&quot;,</span>
+<span class="nc" id="L848">                        &quot;0 AS $KEY_SUPPORTS_RECONCILIATION&quot;,</span>
+<span class="nc" id="L849">                        &quot;0 AS $KEY_TYPE&quot;,</span>
+<span class="nc" id="L850">                        &quot;0 AS $KEY_TYPE_SORT_KEY&quot;,</span>
+<span class="nc" id="L851">                        &quot;0 AS $KEY_FLAG&quot;,</span>
+<span class="nc" id="L852">                        &quot;null AS $KEY_FLAG_LABEL&quot;,</span>
+<span class="nc" id="L853">                        &quot;1 AS $KEY_VISIBLE&quot;,</span>
+<span class="nc" id="L854">                        &quot;0 AS $KEY_FLAG_SORT_KEY&quot;,</span>
+<span class="nc" id="L855">                        &quot;null AS KEY_FLAG_ICON&quot;,</span>
+<span class="nc" id="L856">                        aggregateColumn</span>
+                    )
+                } else {
+                    arrayOf(
+<span class="nc" id="L860">                        rowIdColumn,</span>
+<span class="nc" id="L861">                        labelColumn,</span>
+<span class="nc" id="L862">                        &quot;'' AS $KEY_DESCRIPTION&quot;,</span>
+<span class="nc" id="L863">                        &quot;0 AS $KEY_OPENING_BALANCE&quot;,</span>
+<span class="nc" id="L864">                        &quot;$openingBalanceSumEquivalent AS $KEY_EQUIVALENT_OPENING_BALANCE&quot;,</span>
+<span class="nc" id="L865">                        currencyColumn,</span>
+<span class="nc" id="L866">                        &quot;-1 AS $KEY_COLOR&quot;,</span>
+<span class="nc" id="L867">                        &quot;'$grouping' AS $KEY_GROUPING&quot;,</span>
+<span class="nc" id="L868">                        &quot;'AGGREGATE' AS $KEY_ACCOUNT_TYPE_LABEL&quot;,</span>
+<span class="nc" id="L869">                        &quot;0 AS $KEY_TYPE&quot;,</span>
+<span class="nc" id="L870">                        &quot;0 AS $KEY_TYPE_SORT_KEY&quot;,</span>
+<span class="nc" id="L871">                        &quot;0 AS $KEY_IS_ASSET&quot;,</span>
+<span class="nc" id="L872">                        &quot;0 AS $KEY_SUPPORTS_RECONCILIATION&quot;,</span>
+<span class="nc" id="L873">                        &quot;0 AS $KEY_FLAG&quot;,</span>
+<span class="nc" id="L874">                        &quot;null AS $KEY_FLAG_LABEL&quot;,</span>
+<span class="nc" id="L875">                        &quot;1 AS $KEY_VISIBLE&quot;,</span>
+<span class="nc" id="L876">                        &quot;0 AS $KEY_FLAG_SORT_KEY&quot;,</span>
+<span class="nc" id="L877">                        &quot;null AS $KEY_FLAG_ICON&quot;,</span>
+<span class="nc" id="L878">                        &quot;0 AS $KEY_SORT_KEY&quot;,</span>
+<span class="nc" id="L879">                        &quot;0 AS $KEY_EXCLUDE_FROM_TOTALS&quot;,</span>
+<span class="nc" id="L880">                        &quot;null AS $KEY_SYNC_ACCOUNT_NAME&quot;,</span>
+<span class="nc" id="L881">                        &quot;null AS $KEY_UUID&quot;,</span>
+<span class="nc" id="L882">                        &quot;'$sortBy' AS $KEY_SORT_BY&quot;,</span>
+<span class="nc" id="L883">                        &quot;'$sortDirection' AS $KEY_SORT_DIRECTION&quot;,</span>
+<span class="nc" id="L884">                        &quot;0 AS $KEY_CRITERION&quot;,</span>
+<span class="nc" id="L885">                        &quot;0 AS $KEY_SEALED&quot;,</span>
+<span class="nc" id="L886">                        &quot;0 AS $KEY_CURRENT_BALANCE&quot;,</span>
+<span class="nc" id="L887">                        &quot;$aggregateFunction($KEY_EQUIVALENT_CURRENT_BALANCE) AS $KEY_EQUIVALENT_CURRENT_BALANCE&quot;,</span>
+<span class="nc" id="L888">                        &quot;0 AS $KEY_SUM_INCOME&quot;,</span>
+<span class="nc" id="L889">                        &quot;0 AS $KEY_SUM_EXPENSES&quot;,</span>
+<span class="nc" id="L890">                        &quot;0 AS $KEY_SUM_TRANSFERS&quot;,</span>
+<span class="nc" id="L891">                        &quot;$aggregateFunction($KEY_EQUIVALENT_INCOME) AS $KEY_EQUIVALENT_INCOME&quot;,</span>
+<span class="nc" id="L892">                        &quot;$aggregateFunction($KEY_EQUIVALENT_EXPENSES) AS $KEY_EQUIVALENT_EXPENSES&quot;,</span>
+<span class="nc" id="L893">                        &quot;$aggregateFunction($KEY_EQUIVALENT_TRANSFERS) AS $KEY_EQUIVALENT_TRANSFERS&quot;,</span>
+<span class="nc" id="L894">                        &quot;0 AS $KEY_TOTAL&quot;,</span>
+<span class="nc" id="L895">                        &quot;$aggregateFunction($KEY_EQUIVALENT_TOTAL) AS $KEY_EQUIVALENT_TOTAL&quot;,</span>
+<span class="nc" id="L896">                        &quot;0 AS $KEY_CLEARED_TOTAL&quot;,  //we do not calculate cleared and reconciled totals for aggregate accounts</span>
+<span class="nc" id="L897">                        &quot;0 AS $KEY_RECONCILED_TOTAL&quot;,</span>
+<span class="nc" id="L898">                        &quot;0 AS $KEY_USAGES&quot;,</span>
+<span class="nc" id="L899">                        aggregateColumn,</span>
+<span class="nc" id="L900">                        &quot;max($KEY_HAS_FUTURE) AS $KEY_HAS_FUTURE&quot;,</span>
+<span class="nc" id="L901">                        &quot;0 AS $KEY_HAS_CLEARED&quot;,</span>
+<span class="nc" id="L902">                        &quot;0 AS $KEY_LAST_USED&quot;,</span>
+<span class="nc" id="L903">                        &quot;null AS $KEY_BANK_ID&quot;,</span>
+<span class="nc" id="L904">                        &quot;null AS $KEY_EXCHANGE_RATE&quot;,</span>
+<span class="nc" id="L905">                        &quot;null AS $KEY_LATEST_EXCHANGE_RATE&quot;,</span>
+<span class="nc" id="L906">                        &quot;null AS $KEY_LATEST_EXCHANGE_RATE_DATE&quot;,</span>
+<span class="nc" id="L907">                        &quot;0 AS $KEY_DYNAMIC&quot;</span>
+                    )
+                }
+<span class="nc" id="L910">                subQueries.add(</span>
+<span class="nc" id="L911">                    qb.columns(homeProjection)</span>
+<span class="nc" id="L912">                        .selection(&quot;$KEY_EXCLUDE_FROM_TOTALS = 0&quot;, emptyArray())</span>
+<span class="nc" id="L913">                        .groupBy(&quot;1&quot;)</span>
+<span class="nc" id="L914">                        .having(&quot;(select count(distinct $KEY_CURRENCY) from $TABLE_ACCOUNTS WHERE $KEY_EXCLUDE_FROM_TOTALS = 0 AND $KEY_CURRENCY != '$homeCurrency') &gt; 0&quot;)</span>
+<span class="nc" id="L915">                        .create().sql</span>
+                )
+            }
+<span class="nc" id="L918">            val accountGrouping = runBlocking {</span>
+<span class="nc bnc" id="L919" title="All 4 branches missed.">                dataStore.data.first()[prefHandler.getStringPreferencesKey(PrefKey.ACCOUNT_GROUPING)]?.let {</span>
+<span class="nc bnc" id="L920" title="All 4 branches missed.">                    AccountGrouping.valueOf(it).takeIf { it != AccountGrouping.FLAG }</span>
+<span class="nc" id="L921">                } ?: AccountGrouping.DEFAULT</span>
+            }
+
+<span class="nc" id="L924">            val sortOrderForGrouping =</span>
+<span class="nc bnc" id="L925" title="All 2 branches missed.">                if (accountGrouping == AccountGrouping.TYPE) &quot;$KEY_IS_ASSET DESC,$KEY_TYPE_SORT_KEY DESC,&quot; else &quot;&quot;</span>
+
+<span class="nc" id="L927">            buildUnionQuery(</span>
+<span class="nc" id="L928">                subQueries.toTypedArray(),</span>
+<span class="nc" id="L929">                &quot;$KEY_IS_AGGREGATE,$sortOrderForGrouping$sortByFlag$sortOrder&quot;</span>
+            )
+        }
+<span class="nc" id="L932">        return &quot;$cte\n$query&quot;</span>
+    }
+
+    val sortByFlag: String
+<span class="nc bnc" id="L936" title="All 2 branches missed.">        get() = if (runBlocking {</span>
+<span class="nc bnc" id="L937" title="All 2 branches missed.">                dataStore.data.first()[prefHandler.getBooleanPreferencesKey(PrefKey.SORT_ACCOUNT_LIST_BY_FLAG_FIRST)] != false</span>
+<span class="nc" id="L938">            }) &quot;$KEY_FLAG_SORT_KEY DESC,&quot; else &quot;&quot;</span>
+
+    @Synchronized
+    fun backup(context: Context, backupDir: File, lenientMode: Boolean): Result&lt;Unit&gt; {
+<span class="nc" id="L942">        val currentDb = context.getDatabasePath(helper.databaseName)</span>
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        return (if (prefHandler.encryptDatabase) {</span>
+<span class="nc bnc" id="L944" title="All 2 branches missed.">            _helper?.close()</span>
+<span class="nc" id="L945">            _helper = null</span>
+<span class="nc" id="L946">            decrypt(currentDb, backupDir)</span>
+        } else {
+<span class="nc bnc" id="L948" title="All 2 branches missed.">            if (lenientMode) {</span>
+<span class="nc" id="L949">                backupDb(currentDb, backupDir)</span>
+            } else {
+<span class="nc" id="L951">                helper.readableDatabase.beginTransaction()</span>
+<span class="nc" id="L952">                try {</span>
+<span class="nc" id="L953">                    backupDb(currentDb, backupDir)</span>
+                } finally {
+<span class="nc" id="L955">                    helper.readableDatabase.endTransaction()</span>
+                }
+            }
+        })
+<span class="nc bnc" id="L959" title="All 2 branches missed.">            .mapCatching {</span>
+<span class="nc" id="L960">                val backupPrefFile = getBackupPrefFile(backupDir)</span>
+<span class="nc" id="L961">                val backupDataStoreFile = getBackupDataStoreFile(backupDir)</span>
+                // Samsung has special path on some devices
+                // http://stackoverflow.com/questions/5531289/copy-the-shared-preferences-xml-file-from-data-on-samsung-device-failed
+<span class="nc" id="L964">                val sharedPrefPath = &quot;/shared_prefs/&quot; + context.packageName + &quot;_preferences.xml&quot;</span>
+<span class="nc" id="L965">                var sharedPrefFile =</span>
+<span class="nc" id="L966">                    File(&quot;/dbdata/databases/&quot; + context.packageName + sharedPrefPath)</span>
+<span class="nc bnc" id="L967" title="All 2 branches missed.">                if (!sharedPrefFile.exists()) {</span>
+<span class="nc" id="L968">                    sharedPrefFile = File(getInternalAppDir().path + sharedPrefPath)</span>
+<span class="nc" id="L969">                    log(sharedPrefFile.path)</span>
+<span class="nc bnc" id="L970" title="All 2 branches missed.">                    if (!sharedPrefFile.exists()) {</span>
+<span class="nc" id="L971">                        val message = &quot;Unable to find shared preference file at &quot; +</span>
+<span class="nc" id="L972">                                sharedPrefFile.path</span>
+<span class="nc" id="L973">                        report(message)</span>
+<span class="nc" id="L974">                        throw Throwable(message)</span>
+                    }
+                }
+<span class="nc" id="L977">                val copyPrefSuccess = FileCopyUtils.copy(sharedPrefFile, backupPrefFile)</span>
+<span class="nc" id="L978">                val preferencesDataStoreFile =</span>
+<span class="nc" id="L979">                    context.preferencesDataStoreFile(uiSettingsDataStoreName)</span>
+<span class="nc" id="L980">                dirty =</span>
+<span class="nc bnc" id="L981" title="All 6 branches missed.">                    if (copyPrefSuccess &amp;&amp; (!preferencesDataStoreFile.exists() || FileCopyUtils.copy(</span>
+<span class="nc" id="L982">                            preferencesDataStoreFile,</span>
+<span class="nc" id="L983">                            backupDataStoreFile</span>
+                        ))
+                    ) {
+<span class="nc" id="L986">                        prefHandler.putBoolean(PrefKey.AUTO_BACKUP_DIRTY, false)</span>
+<span class="nc" id="L987">                        false</span>
+                    } else {
+<span class="nc" id="L989">                        throw Throwable(</span>
+                            &quot;Unable to copy file from &quot; +
+<span class="nc bnc" id="L991" title="All 2 branches missed.">                                    (if (copyPrefSuccess) preferencesDataStoreFile else sharedPrefFile).path +</span>
+                                    &quot; to &quot; +
+<span class="nc bnc" id="L993" title="All 2 branches missed.">                                    (if (copyPrefSuccess) backupDataStoreFile else backupPrefFile).path</span>
+                        )
+                    }
+<span class="nc" id="L996">            }</span>
+    }
+
+    @Synchronized
+    open fun restore(backupFile: File, encrypt: Boolean): Boolean {
+<span class="nc" id="L1001">        val dataDir = File(getInternalAppDir(), &quot;databases&quot;)</span>
+<span class="nc" id="L1002">        dataDir.mkdir()</span>
+<span class="nc" id="L1003">        val currentDb = File(dataDir, provideDatabaseName(encrypt))</span>
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">        _helper?.close()</span>
+<span class="nc" id="L1005">        _helper = null</span>
+<span class="nc" id="L1006">        val result: Boolean = try {</span>
+<span class="nc bnc" id="L1007" title="All 2 branches missed.">            if (encrypt) {</span>
+<span class="nc" id="L1008">                DataModule.cryptProvider.encrypt(context!!, backupFile, currentDb)</span>
+<span class="nc" id="L1009">                true</span>
+            } else {
+<span class="nc" id="L1011">                FileCopyUtils.copy(backupFile, currentDb)</span>
+            }
+        } finally {
+<span class="nc" id="L1014">            prefHandler.putBoolean(PrefKey.ENCRYPT_DATABASE, encrypt)</span>
+        }
+<span class="nc" id="L1016">        return result</span>
+    }
+
+    fun budgetCategoryUpsert(db: SupportSQLiteDatabase, uri: Uri, values: ContentValues): Int {
+<span class="nc" id="L1020">        db.beginTransaction()</span>
+<span class="nc" id="L1021">        return try {</span>
+<span class="nc" id="L1022">            val (budgetId, catId) = parseBudgetCategoryUri(uri)</span>
+<span class="nc" id="L1023">            val year: String? = values.getAsString(KEY_YEAR)</span>
+<span class="nc" id="L1024">            val second: String? = values.getAsString(KEY_SECOND_GROUP)</span>
+<span class="nc bnc" id="L1025" title="All 8 branches missed.">            check((year != null) == (second != null))</span>
+<span class="nc bnc" id="L1026" title="All 4 branches missed.">            if (year == null &amp;&amp; second == null) {</span>
+<span class="nc" id="L1027">                db.delete(</span>
+<span class="nc" id="L1028">                    TABLE_BUDGET_ALLOCATIONS,</span>
+<span class="nc" id="L1029">                    listOf(</span>
+<span class="nc" id="L1030">                        &quot;$KEY_BUDGETID = ?&quot;,</span>
+<span class="nc" id="L1031">                        &quot;$KEY_CATID = ?&quot;,</span>
+<span class="nc" id="L1032">                        &quot;$KEY_YEAR IS NULL&quot;,</span>
+<span class="nc" id="L1033">                        &quot;$KEY_SECOND_GROUP IS NULL&quot;</span>
+<span class="nc" id="L1034">                    ).joinToString(&quot; AND &quot;),</span>
+<span class="nc" id="L1035">                    arrayOf(budgetId, catId)</span>
+                )
+            }
+<span class="nc" id="L1038">            val budget: String? = values.getAsString(KEY_BUDGET)</span>
+<span class="nc bnc" id="L1039" title="All 4 branches missed.">            val oneTime: String? = values.getAsBoolean(KEY_ONE_TIME)?.let { if (it) &quot;1&quot; else &quot;0&quot; }</span>
+<span class="nc" id="L1040">            val rollOverPrevious: String? = values.getAsString(KEY_BUDGET_ROLLOVER_PREVIOUS)</span>
+<span class="nc" id="L1041">            val rollOverNext: String? = values.getAsString(KEY_BUDGET_ROLLOVER_NEXT)</span>
+<span class="nc" id="L1042">            check(</span>
+<span class="nc bnc" id="L1043" title="All 6 branches missed.">                (budget != null &amp;&amp; rollOverNext == null &amp;&amp; rollOverPrevious == null) ||</span>
+<span class="nc bnc" id="L1044" title="All 6 branches missed.">                        (budget == null &amp;&amp; oneTime == null &amp;&amp; year != null &amp;&amp;</span>
+<span class="nc bnc" id="L1045" title="All 8 branches missed.">                                (rollOverNext != null).xor(rollOverPrevious != null)</span>
+                                )
+            )
+<span class="nc" id="L1048">            val statementBuilder = StringBuilder()</span>
+<span class="nc" id="L1049">            statementBuilder.append(&quot;INSERT OR REPLACE INTO $TABLE_BUDGET_ALLOCATIONS ($KEY_BUDGETID, $KEY_CATID, $KEY_YEAR, $KEY_SECOND_GROUP, $KEY_BUDGET_ROLLOVER_PREVIOUS, $KEY_BUDGET_ROLLOVER_NEXT, $KEY_BUDGET, $KEY_ONE_TIME) &quot;)</span>
+<span class="nc" id="L1050">            statementBuilder.append(&quot;VALUES (?,?,?,?,&quot;)</span>
+<span class="nc" id="L1051">            val baseArgs = listOf(budgetId, catId, year, second)</span>
+<span class="nc" id="L1052">            val argsList = mutableListOf&lt;String?&gt;()</span>
+<span class="nc" id="L1053">            argsList.addAll(baseArgs)</span>
+<span class="nc bnc" id="L1054" title="All 2 branches missed.">            if (rollOverPrevious == null) {</span>
+<span class="nc" id="L1055">                statementBuilder.append(&quot;(select $KEY_BUDGET_ROLLOVER_PREVIOUS from $TABLE_BUDGET_ALLOCATIONS where $KEY_BUDGETID = ? AND $KEY_CATID = ? AND $KEY_YEAR = ? AND $KEY_SECOND_GROUP = ?),&quot;)</span>
+<span class="nc" id="L1056">                argsList.addAll(baseArgs)</span>
+            } else {
+<span class="nc" id="L1058">                statementBuilder.append(&quot;?,&quot;)</span>
+<span class="nc" id="L1059">                argsList.add(rollOverPrevious)</span>
+            }
+<span class="nc bnc" id="L1061" title="All 2 branches missed.">            if (rollOverNext == null) {</span>
+<span class="nc" id="L1062">                statementBuilder.append(&quot;(select $KEY_BUDGET_ROLLOVER_NEXT from $TABLE_BUDGET_ALLOCATIONS where $KEY_BUDGETID = ? AND $KEY_CATID = ? AND $KEY_YEAR = ? AND $KEY_SECOND_GROUP = ?),&quot;)</span>
+<span class="nc" id="L1063">                argsList.addAll(baseArgs)</span>
+            } else {
+<span class="nc" id="L1065">                statementBuilder.append(&quot;?,&quot;)</span>
+<span class="nc" id="L1066">                argsList.add(rollOverNext)</span>
+            }
+<span class="nc bnc" id="L1068" title="All 2 branches missed.">            if (budget != null) {</span>
+<span class="nc" id="L1069">                statementBuilder.append(&quot;?,?)&quot;)</span>
+<span class="nc" id="L1070">                argsList.add(budget)</span>
+<span class="nc bnc" id="L1071" title="All 2 branches missed.">                argsList.add(oneTime ?: &quot;1&quot;)</span>
+            } else {
+<span class="nc" id="L1073">                statementBuilder.append(&quot;(select $KEY_BUDGET from $TABLE_BUDGET_ALLOCATIONS where $KEY_BUDGETID = ? AND $KEY_CATID = ? AND $KEY_YEAR = ? AND $KEY_SECOND_GROUP = ?),&quot;)</span>
+<span class="nc" id="L1074">                statementBuilder.append(&quot;(select $KEY_ONE_TIME from $TABLE_BUDGET_ALLOCATIONS where $KEY_BUDGETID = ? AND $KEY_CATID = ? AND $KEY_YEAR = ? AND $KEY_SECOND_GROUP = ?))&quot;)</span>
+<span class="nc" id="L1075">                argsList.addAll(baseArgs)</span>
+<span class="nc" id="L1076">                argsList.addAll(baseArgs)</span>
+            }
+<span class="nc" id="L1078">            val statement = statementBuilder.toString()</span>
+<span class="nc" id="L1079">            val result = db.compileStatement(statement).use {</span>
+<span class="nc" id="L1080">                argsList.forEachIndexed { index, arg -&gt;</span>
+<span class="nc" id="L1081">                    val bindIndex = index + 1</span>
+<span class="nc bnc" id="L1082" title="All 2 branches missed.">                    if (arg != null) {</span>
+<span class="nc" id="L1083">                        it.bindString(bindIndex, arg)</span>
+                    } else {
+<span class="nc" id="L1085">                        it.bindNull(bindIndex)</span>
+                    }
+<span class="nc" id="L1087">                }</span>
+<span class="nc" id="L1088">                log(&quot;$statement - ${argsList.joinToString()}&quot;)</span>
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">                if (it.executeInsert() == -1L) 0 else 1</span>
+            }
+<span class="nc" id="L1091">            db.setTransactionSuccessful()</span>
+<span class="nc" id="L1092">            result</span>
+        } finally {
+<span class="nc" id="L1094">            db.endTransaction()</span>
+        }
+    }
+
+    fun budgetDefaultSelect(
+        db: SupportSQLiteDatabase,
+        uri: Uri,
+    ): Long? {
+<span class="nc" id="L1102">        val segment2 = uri.pathSegments[2]</span>
+<span class="nc" id="L1103">        val accountId = segment2.toLongOrNull()</span>
+<span class="nc" id="L1104">        val (accountSelection, accountSelectionArg) = when {</span>
+<span class="nc bnc" id="L1105" title="All 2 branches missed.">            accountId == null -&gt; &quot;$KEY_CURRENCY = ?&quot; to segment2</span>
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">            accountId &gt; 0 -&gt; &quot;$KEY_ACCOUNTID = ?&quot; to accountId</span>
+<span class="nc bnc" id="L1107" title="All 2 branches missed.">            accountId == HOME_AGGREGATE_ID -&gt; &quot;$KEY_CURRENCY = ?&quot; to AGGREGATE_HOME_CURRENCY_CODE</span>
+<span class="nc" id="L1108">            else -&gt; &quot;$KEY_CURRENCY = (select $KEY_CURRENCY from $TABLE_CURRENCIES where $KEY_ROWID = ?)&quot; to -accountId</span>
+        }
+<span class="nc" id="L1110">        val group = uri.pathSegments[3]</span>
+
+<span class="nc" id="L1112">        return db.query(</span>
+<span class="nc" id="L1113">            TABLE_BUDGETS,</span>
+<span class="nc" id="L1114">            arrayOf(KEY_ROWID),</span>
+<span class="nc" id="L1115">            &quot;$KEY_IS_DEFAULT = 1 AND $KEY_GROUPING = ? AND $accountSelection&quot;,</span>
+<span class="nc" id="L1116">            arrayOf(group, accountSelectionArg)</span>
+        )
+<span class="nc bnc" id="L1118" title="All 4 branches missed.">            .use { it.takeIf { it.moveToFirst() }?.getLong(0) }</span>
+    }
+
+    fun oldestTransactionForCurrency(
+        db: SupportSQLiteDatabase,
+        currency: String,
+    ) =
+<span class="nc" id="L1125">        Bundle(1).apply {</span>
+<span class="nc" id="L1126">            db.query(</span>
+<span class="nc" id="L1127">                TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L1128">                arrayOf(&quot;min($KEY_DATE)&quot;),</span>
+<span class="nc" id="L1129">                &quot;$KEY_ACCOUNTID IN (SELECT $KEY_ROWID FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY = ? AND $dynamicExchangeRatesDefault)&quot;,</span>
+<span class="nc" id="L1130">                arrayOf(currency)</span>
+<span class="nc" id="L1131">            ).use {</span>
+<span class="nc bnc" id="L1132" title="All 4 branches missed.">                if (it.moveToFirst() &amp;&amp; !it.isNull(0)) epoch2LocalDate(it.getLong(0)) else null</span>
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">            }?.let { putSerializable(KEY_MAX_VALUE, it) }</span>
+<span class="nc" id="L1134">        }</span>
+
+<span class="nc" id="L1136">    fun hasCategories(db: SupportSQLiteDatabase) = Bundle(1).apply {</span>
+<span class="nc" id="L1137">        val defaultCatIds =</span>
+<span class="nc" id="L1138">            listOfNotNull(SPLIT_CATID, prefHandler.defaultTransferCategory).joinToString()</span>
+<span class="nc" id="L1139">        putBoolean(</span>
+<span class="nc" id="L1140">            KEY_COUNT,</span>
+<span class="nc" id="L1141">            db.query(&quot;SELECT EXISTS (SELECT 1 FROM $TABLE_CATEGORIES WHERE $KEY_ROWID NOT IN ($defaultCatIds))&quot;)</span>
+<span class="nc" id="L1142">                .use {</span>
+<span class="nc bnc" id="L1143" title="All 4 branches missed.">                    if (it.moveToFirst()) it.getInt(0) == 1 else false</span>
+                }
+        )
+<span class="nc" id="L1146">    }</span>
+
+    /**
+     * @return number of corrupted entries
+     */
+<span class="nc" id="L1151">    fun checkCorruptedData987() = Bundle(1).apply {</span>
+<span class="nc" id="L1152">        putLongArray(</span>
+<span class="nc" id="L1153">            KEY_RESULT, helper.readableDatabase.query(</span>
+<span class="nc" id="L1154">                &quot;select distinct transactions.parent_id from transactions left join transactions parent on transactions.parent_id = parent._id where transactions.parent_id is not null and parent.account_id != transactions.account_id&quot;,</span>
+<span class="nc" id="L1155">            ).useAndMapToList { it.getLong(0) }.toLongArray()</span>
+        )
+<span class="nc" id="L1157">    }</span>
+
+    private fun decrypt(currentDb: File, backupDir: File): Result&lt;Unit&gt; {
+<span class="nc" id="L1160">        val backupDb = getBackupDbFile(backupDir)</span>
+<span class="nc" id="L1161">        DataModule.cryptProvider.decrypt(context!!, currentDb, backupDb)</span>
+<span class="nc" id="L1162">        return ResultUnit</span>
+    }
+
+    private fun backupDb(currentDb: File, backupDir: File): Result&lt;Unit&gt; {
+<span class="nc" id="L1166">        val backupDb = getBackupDbFile(backupDir)</span>
+<span class="nc bnc" id="L1167" title="All 2 branches missed.">        if (currentDb.exists()) {</span>
+<span class="nc bnc" id="L1168" title="All 2 branches missed.">            if (FileCopyUtils.copy(currentDb, backupDb)) {</span>
+<span class="nc" id="L1169">                return ResultUnit</span>
+            }
+<span class="nc" id="L1171">            return Result.failure(Throwable(&quot;Error while copying ${currentDb.path} to ${backupDb.path}&quot;))</span>
+        }
+<span class="nc" id="L1173">        return Result.failure(Throwable(&quot;Could not find database at ${currentDb.path}&quot;))</span>
+    }
+
+    private fun getInternalAppDir(): File {
+<span class="nc" id="L1177">        return context!!.filesDir.parentFile!!</span>
+    }
+
+    fun log(message: String, vararg args: Any?) {
+<span class="fc" id="L1181">        Timber.tag(TAG).i(message, *args)</span>
+<span class="fc" id="L1182">    }</span>
+
+    fun aggregateHomeProjection(columns: Array&lt;String&gt;?) =
+<span class="nc bnc" id="L1185" title="All 2 branches missed.">        (columns ?: arrayOf(</span>
+<span class="nc" id="L1186">            KEY_LABEL,</span>
+<span class="nc" id="L1187">            KEY_OPENING_BALANCE,</span>
+<span class="nc" id="L1188">            KEY_CURRENCY</span>
+<span class="nc" id="L1189">        )).map {</span>
+<span class="nc bnc" id="L1190" title="All 4 branches missed.">            when (it) {</span>
+<span class="nc" id="L1191">                KEY_LABEL -&gt; &quot;'${wrappedContext.getString(R.string.grand_total)}'&quot;</span>
+<span class="nc" id="L1192">                KEY_OPENING_BALANCE -&gt; &quot;$aggregateFunction($KEY_OPENING_BALANCE * &quot; +</span>
+<span class="nc" id="L1193">                        getExchangeRate(TABLE_ACCOUNTS, KEY_ROWID, homeCurrency) +</span>
+                        &quot;)&quot;
+<span class="nc" id="L1195">                KEY_CURRENCY -&gt; &quot;'$AGGREGATE_HOME_CURRENCY_CODE'&quot;</span>
+<span class="nc" id="L1196">                else -&gt; throw IllegalArgumentException(&quot;unknown column $it&quot;)</span>
+<span class="nc" id="L1197">            } + &quot; AS $it&quot;</span>
+<span class="nc" id="L1198">        }.toTypedArray()</span>
+
+    fun aggregateCurrencyProjection(columns: Array&lt;String&gt;?): Array&lt;String&gt; {
+<span class="nc" id="L1201">        val accountSelect =</span>
+<span class="nc" id="L1202">            &quot;FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY = $KEY_CODE AND $KEY_EXCLUDE_FROM_TOTALS = 0 AND $KEY_PARENTID IS NULL&quot;</span>
+<span class="nc bnc" id="L1203" title="All 2 branches missed.">        return (columns ?: arrayOf(</span>
+<span class="nc" id="L1204">            KEY_LABEL,</span>
+<span class="nc" id="L1205">            KEY_OPENING_BALANCE,</span>
+<span class="nc" id="L1206">            KEY_CURRENCY</span>
+<span class="nc" id="L1207">        )).map {</span>
+<span class="nc bnc" id="L1208" title="All 4 branches missed.">            when (it) {</span>
+<span class="nc" id="L1209">                KEY_LABEL -&gt; KEY_CODE</span>
+<span class="nc" id="L1210">                KEY_OPENING_BALANCE -&gt; &quot;(SELECT $aggregateFunction($KEY_OPENING_BALANCE) $accountSelect)&quot;</span>
+<span class="nc" id="L1211">                KEY_CURRENCY -&gt; KEY_CODE</span>
+<span class="nc" id="L1212">                else -&gt; throw IllegalArgumentException(&quot;unknown column $it&quot;)</span>
+<span class="nc" id="L1213">            } + &quot; AS $it&quot;</span>
+<span class="nc" id="L1214">        }.toTypedArray()</span>
+    }
+
+    fun aggregateTypeProjection(columns: Array&lt;String&gt;?): Array&lt;String&gt; {
+<span class="nc" id="L1218">        val accountSelect =</span>
+<span class="nc" id="L1219">            &quot;FROM $TABLE_ACCOUNTS WHERE $KEY_TYPE = $TABLE_ACCOUNT_TYPES.$KEY_ROWID AND $KEY_EXCLUDE_FROM_TOTALS = 0 AND $KEY_PARENTID IS NULL&quot;</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">        return (columns ?: arrayOf(</span>
+<span class="nc" id="L1221">            KEY_LABEL,</span>
+<span class="nc" id="L1222">            KEY_OPENING_BALANCE,</span>
+<span class="nc" id="L1223">            KEY_CURRENCY</span>
+<span class="nc" id="L1224">        )).map {</span>
+<span class="nc bnc" id="L1225" title="All 4 branches missed.">            when (it) {</span>
+<span class="nc" id="L1226">                KEY_LABEL -&gt; KEY_LABEL</span>
+<span class="nc" id="L1227">                KEY_OPENING_BALANCE -&gt; &quot;(SELECT $aggregateFunction($KEY_OPENING_BALANCE) $accountSelect)&quot;</span>
+<span class="nc" id="L1228">                KEY_CURRENCY -&gt; &quot;'$AGGREGATE_HOME_CURRENCY_CODE'&quot;</span>
+<span class="nc" id="L1229">                else -&gt; throw IllegalArgumentException(&quot;unknown column $it&quot;)</span>
+<span class="nc" id="L1230">            } + &quot; AS $it&quot;</span>
+<span class="nc" id="L1231">        }.toTypedArray()</span>
+    }
+
+    fun aggregateFlagProjection(columns: Array&lt;String&gt;?): Array&lt;String&gt; {
+<span class="nc" id="L1235">        val accountSelect =</span>
+<span class="nc" id="L1236">            &quot;FROM $TABLE_ACCOUNTS WHERE $KEY_FLAG = $TABLE_ACCOUNT_FLAGS.$KEY_ROWID AND $KEY_EXCLUDE_FROM_TOTALS = 0 AND $KEY_PARENTID IS NULL&quot;</span>
+<span class="nc bnc" id="L1237" title="All 2 branches missed.">        return (columns ?: arrayOf(</span>
+<span class="nc" id="L1238">            KEY_LABEL,</span>
+<span class="nc" id="L1239">            KEY_OPENING_BALANCE,</span>
+<span class="nc" id="L1240">            KEY_CURRENCY</span>
+<span class="nc" id="L1241">        )).map {</span>
+<span class="nc bnc" id="L1242" title="All 4 branches missed.">            when (it) {</span>
+<span class="nc" id="L1243">                KEY_LABEL -&gt; KEY_FLAG_LABEL</span>
+<span class="nc" id="L1244">                KEY_OPENING_BALANCE -&gt; &quot;(SELECT $aggregateFunction($KEY_OPENING_BALANCE) $accountSelect)&quot;</span>
+<span class="nc" id="L1245">                KEY_CURRENCY -&gt; &quot;'$AGGREGATE_HOME_CURRENCY_CODE'&quot;</span>
+<span class="nc" id="L1246">                else -&gt; throw IllegalArgumentException(&quot;unknown column $it&quot;)</span>
+<span class="nc" id="L1247">            } + &quot; AS $it&quot;</span>
+<span class="nc" id="L1248">        }.toTypedArray()</span>
+    }
+
+    fun SupportSQLiteQueryBuilder.measureAndLogQuery(
+        uri: Uri,
+        db: SupportSQLiteDatabase,
+        projection: Array&lt;String&gt;?,
+        selection: String?,
+        selectionArgs: Array&lt;Any&gt;?,
+        groupBy: String?,
+        having: String?,
+        sortOrder: String?,
+        limit: String?,
+        cte: String?,
+    ): Cursor {
+<span class="fc" id="L1263">        val query =</span>
+<span class="fc" id="L1264">            columns(projection).selection(selection, selectionArgs).groupBy(groupBy).having(having)</span>
+<span class="fc" id="L1265">                .orderBy(sortOrder).apply {</span>
+<span class="pc bpc" id="L1266" title="1 of 2 branches missed.">                    if (limit != null) {</span>
+<span class="nc" id="L1267">                        limit(limit)</span>
+                    }
+<span class="fc" id="L1269">                }.create()</span>
+<span class="pc bpc" id="L1270" title="1 of 2 branches missed.">        return if (cte == null) measure(block = {</span>
+<span class="fc" id="L1271">            db.query(query)</span>
+        }) {
+<span class="fc bfc" id="L1273" title="All 2 branches covered.">            &quot;$uri - ${query.sql} - (${selectionArgs?.joinToString()})&quot;</span>
+<span class="nc" id="L1274">        } else db.measureAndLogQuery(uri, &quot;WITH $cte ${query.sql}&quot;, selection, selectionArgs)</span>
+    }
+
+    fun updateFractionDigits(
+        db: SupportSQLiteDatabase,
+        currency: String,
+        newValue: Int,
+        oldValue: Int,
+    ): Int {
+<span class="nc" id="L1283">        val bindArgs = arrayOf(currency)</span>
+<span class="nc" id="L1284">        val count = db.query(</span>
+<span class="nc" id="L1285">            SupportSQLiteQueryBuilder.builder(TABLE_ACCOUNTS)</span>
+<span class="nc" id="L1286">                .columns(arrayOf(&quot;count(*)&quot;))</span>
+<span class="nc" id="L1287">                .selection(&quot;$KEY_CURRENCY=?&quot;, bindArgs)</span>
+<span class="nc" id="L1288">                .create()</span>
+<span class="nc" id="L1289">        ).use {</span>
+<span class="nc bnc" id="L1290" title="All 2 branches missed.">            if (it.moveToFirst()) it.getInt(0) else 0</span>
+        }
+<span class="nc bnc" id="L1292" title="All 2 branches missed.">        val increase: Boolean = oldValue &lt; newValue</span>
+<span class="nc bnc" id="L1293" title="All 2 branches missed.">        val operation = if (increase) &quot;*&quot; else &quot;/&quot;</span>
+<span class="nc bnc" id="L1294" title="All 2 branches missed.">        val inverseOperation = if (increase) &quot;/&quot; else &quot;*&quot;</span>
+<span class="nc" id="L1295">        val factor = 10.0.pow(abs(oldValue - newValue).toDouble()).toInt()</span>
+<span class="nc" id="L1296">        db.safeUpdateWithSealed {</span>
+<span class="nc" id="L1297">            db.execSQL(</span>
+<span class="nc" id="L1298">                &quot;UPDATE $TABLE_ACCOUNTS SET $KEY_OPENING_BALANCE=$KEY_OPENING_BALANCE$operation$factor WHERE $KEY_CURRENCY=?&quot;,</span>
+<span class="nc" id="L1299">                bindArgs</span>
+            )
+<span class="nc" id="L1301">            db.execSQL(</span>
+<span class="nc" id="L1302">                &quot;UPDATE $TABLE_TRANSACTIONS SET $KEY_AMOUNT=$KEY_AMOUNT$operation$factor WHERE $KEY_ACCOUNTID IN (SELECT $KEY_ROWID FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY=?)&quot;,</span>
+<span class="nc" id="L1303">                bindArgs</span>
+            )
+<span class="nc" id="L1305">            db.execSQL(</span>
+<span class="nc" id="L1306">                &quot;UPDATE $TABLE_TEMPLATES SET $KEY_AMOUNT=$KEY_AMOUNT$operation$factor WHERE $KEY_ACCOUNTID IN (SELECT $KEY_ROWID FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY=?)&quot;,</span>
+<span class="nc" id="L1307">                bindArgs</span>
+            )
+<span class="nc" id="L1309">            db.execSQL(</span>
+<span class="nc" id="L1310">                &quot;UPDATE $TABLE_ACCOUNT_EXCHANGE_RATES SET $KEY_EXCHANGE_RATE=$KEY_EXCHANGE_RATE$operation$factor WHERE $KEY_CURRENCY_OTHER=?&quot;,</span>
+<span class="nc" id="L1311">                bindArgs</span>
+            )
+<span class="nc" id="L1313">            db.execSQL(</span>
+<span class="nc" id="L1314">                &quot;UPDATE $TABLE_ACCOUNT_EXCHANGE_RATES SET $KEY_EXCHANGE_RATE=$KEY_EXCHANGE_RATE$inverseOperation$factor WHERE $KEY_CURRENCY_SELF=?&quot;,</span>
+<span class="nc" id="L1315">                bindArgs</span>
+            )
+<span class="nc" id="L1317">            val totalBudgetClause =</span>
+<span class="nc bnc" id="L1318" title="All 2 branches missed.">                if (homeCurrency == currency) &quot; OR $KEY_CURRENCY = '$AGGREGATE_HOME_CURRENCY_CODE'&quot; else &quot;&quot;</span>
+<span class="nc" id="L1319">            db.execSQL(</span>
+                &quot;&quot;&quot;UPDATE $TABLE_BUDGET_ALLOCATIONS SET
+<span class="nc" id="L1321">                        $KEY_BUDGET=$KEY_BUDGET$operation$factor,</span>
+<span class="nc" id="L1322">                        $KEY_BUDGET_ROLLOVER_PREVIOUS=$KEY_BUDGET_ROLLOVER_PREVIOUS$operation$factor,</span>
+<span class="nc" id="L1323">                        $KEY_BUDGET_ROLLOVER_NEXT=$KEY_BUDGET_ROLLOVER_NEXT$operation$factor</span>
+                        WHERE $KEY_BUDGETID IN (
+                            SELECT $KEY_ROWID FROM $TABLE_BUDGETS WHERE
+                                $KEY_CURRENCY=? OR
+                                $KEY_ACCOUNTID IN (
+                                    SELECT $KEY_ROWID FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY=?
+                                )
+<span class="nc" id="L1330">                                $totalBudgetClause</span>
+                        )
+<span class="nc" id="L1332">                    &quot;&quot;&quot;.trimIndent(),</span>
+<span class="nc" id="L1333">                arrayOf(currency, currency)</span>
+            )
+<span class="nc" id="L1335">            db.execSQL(</span>
+<span class="nc" id="L1336">                &quot;UPDATE $TABLE_DEBTS SET $KEY_AMOUNT=$KEY_AMOUNT$operation$factor WHERE $KEY_CURRENCY=?&quot;,</span>
+<span class="nc" id="L1337">                bindArgs</span>
+            )
+<span class="nc" id="L1339">            db.execSQL(</span>
+<span class="nc" id="L1340">                &quot;UPDATE $TABLE_PRICES SET $KEY_VALUE=$KEY_VALUE$inverseOperation$factor WHERE $KEY_COMMODITY=?&quot;,</span>
+<span class="nc" id="L1341">                bindArgs</span>
+            )
+<span class="nc" id="L1343">            db.execSQL(</span>
+<span class="nc" id="L1344">                &quot;UPDATE $TABLE_PRICES SET $KEY_VALUE=$KEY_VALUE$operation$factor WHERE $KEY_CURRENCY=?&quot;,</span>
+<span class="nc" id="L1345">                bindArgs</span>
+            )
+<span class="nc" id="L1347">            db.execSQL(</span>
+<span class="nc" id="L1348">                &quot;UPDATE $TABLE_EQUIVALENT_AMOUNTS SET $KEY_EQUIVALENT_AMOUNT=$KEY_EQUIVALENT_AMOUNT$operation$factor WHERE $KEY_CURRENCY=?&quot;,</span>
+<span class="nc" id="L1349">                bindArgs</span>
+            )
+<span class="nc" id="L1351">        }</span>
+<span class="nc" id="L1352">        return count</span>
+    }
+
+    fun SupportSQLiteDatabase.measureAndLogQuery(
+        uri: Uri,
+        sql: String,
+        selection: String?,
+        selectionArgs: Array&lt;Any&gt;?,
+<span class="nc bnc" id="L1360" title="All 2 branches missed.">    ): Cursor = measure(block = { query(sql, selectionArgs ?: emptyArray()) }) {</span>
+<span class="nc bnc" id="L1361" title="All 2 branches missed.">        &quot;$uri - $selection - $sql - (${selectionArgs?.joinToString()})&quot;</span>
+<span class="nc" id="L1362">    }</span>
+
+<span class="pc bpc" id="L1364" title="1 of 2 branches missed.">    private fun measure(block: () -&gt; Cursor, lazyMessage: () -&gt; String): Cursor = if (shouldLog) {</span>
+<span class="fc" id="L1365">        log(lazyMessage())</span>
+<span class="fc" id="L1366">        val startTime = Instant.now()</span>
+<span class="fc" id="L1367">        val result = try {</span>
+<span class="fc" id="L1368">            block()</span>
+<span class="nc" id="L1369">        } catch (e: Exception) {</span>
+<span class="nc" id="L1370">            Timber.tag(TAG).e(e, &quot;Query failed: ${lazyMessage()}&quot;)</span>
+<span class="nc" id="L1371">            throw e</span>
+        }
+<span class="fc" id="L1373">        val endTime = Instant.now()</span>
+<span class="fc" id="L1374">        val duration = Duration.between(startTime, endTime)</span>
+<span class="fc" id="L1375">        log(&quot;$duration - ${result.count}&quot;)</span>
+<span class="fc" id="L1376">        result</span>
+<span class="nc" id="L1377">    } else try {</span>
+<span class="nc" id="L1378">        block()</span>
+<span class="nc" id="L1379">    } catch (e: Exception) {</span>
+<span class="nc" id="L1380">        Timber.tag(TAG).e(e, &quot;Query failed: ${lazyMessage()}&quot;)</span>
+<span class="nc" id="L1381">        throw e</span>
+<span class="fc" id="L1382">    }</span>
+
+    fun report(e: String) {
+<span class="nc" id="L1385">        report(Exception(e), TAG)</span>
+<span class="nc" id="L1386">    }</span>
+
+    override fun onCreate(): Boolean {
+<span class="fc" id="L1389">        MyApplication.instance.appComponent.inject(this)</span>
+<span class="fc" id="L1390">        shouldLog = prefHandler.shouldDebug</span>
+<span class="fc" id="L1391">        return true</span>
+    }
+
+<span class="pc bpc" id="L1394" title="1 of 2 branches missed.">    fun wrapWithResultCompat(cursor: Cursor, extras: Bundle) = if (extras.isEmpty) cursor</span>
+<span class="nc" id="L1395">    else cursor.apply {</span>
+<span class="nc" id="L1396">        setExtras(extras)</span>
+<span class="pc" id="L1397">    }</span>
+
+    fun handleAccountProperty(
+        db: SupportSQLiteDatabase,
+        uri: Uri,
+        vararg keys: String,
+    ): Int {
+<span class="nc" id="L1404">        val subject = uri.pathSegments[1]</span>
+<span class="nc" id="L1405">        val id: Long? = subject.toLongOrNull()</span>
+<span class="nc bnc" id="L1406" title="All 4 branches missed.">        val isAggregate = id == null || id &lt; 0</span>
+<span class="nc" id="L1407">        val contentValues = ContentValues(keys.size).apply {</span>
+<span class="nc" id="L1408">            keys.forEachIndexed { index, key -&gt;</span>
+<span class="nc" id="L1409">                put(key, uri.pathSegments[2 + index])</span>
+<span class="nc" id="L1410">            }</span>
+<span class="nc" id="L1411">        }</span>
+<span class="nc" id="L1412">        return db.update(</span>
+<span class="nc bnc" id="L1413" title="All 2 branches missed.">            if (isAggregate) TABLE_CURRENCIES else TABLE_ACCOUNTS,</span>
+<span class="nc" id="L1414">            contentValues,</span>
+<span class="nc bnc" id="L1415" title="All 2 branches missed.">            (if (id == null) KEY_CODE else KEY_ROWID) + &quot; = ?&quot;,</span>
+            arrayOf(
+<span class="nc bnc" id="L1417" title="All 2 branches missed.">                if (id == null) subject else abs(id).toString()</span>
+            )
+        )
+    }
+
+    fun budgetAllocationGroupsQuery(
+        db: SupportSQLiteDatabase,
+        uri: Uri,
+    ): Cursor {
+<span class="nc" id="L1426">        val projection = arrayOf(</span>
+<span class="nc" id="L1427">            KEY_YEAR,</span>
+<span class="nc" id="L1428">            KEY_SECOND_GROUP,</span>
+<span class="nc" id="L1429">            KEY_BUDGET,</span>
+<span class="nc" id="L1430">            KEY_BUDGET_ROLLOVER_PREVIOUS,</span>
+<span class="nc" id="L1431">            KEY_ONE_TIME</span>
+        )
+<span class="nc bnc" id="L1433" title="All 2 branches missed.">        val budgetId = budgetDefaultSelect(db, uri) ?: return MatrixCursor(projection).apply {</span>
+<span class="nc" id="L1434">            setNotificationUri(context!!.contentResolver, uri)</span>
+<span class="nc" id="L1435">            log(&quot;$uri: no default budget found&quot;)</span>
+<span class="nc" id="L1436">        }</span>
+
+<span class="nc" id="L1438">        val sql = &quot;&quot;&quot;</span>
+        WITH AggregatedBudget AS (
+            SELECT
+                $KEY_YEAR,
+                $KEY_SECOND_GROUP,
+                SUM(CASE WHEN $KEY_CATID = 0 THEN $KEY_BUDGET ELSE NULL END) AS $KEY_BUDGET,
+                SUM($KEY_BUDGET_ROLLOVER_PREVIOUS) AS $KEY_BUDGET_ROLLOVER_PREVIOUS,
+                SUM(CASE WHEN $KEY_CATID = 0 THEN $KEY_ONE_TIME ELSE NULL END) AS $KEY_ONE_TIME
+            FROM $TABLE_BUDGET_ALLOCATIONS
+            WHERE $KEY_BUDGETID = ?
+            GROUP BY $KEY_YEAR, $KEY_SECOND_GROUP
+        ) SELECT * FROM AggregatedBudget
+        WHERE $KEY_BUDGET IS NOT NULL OR $KEY_BUDGET_ROLLOVER_PREVIOUS IS NOT NULL
+        ORDER BY $KEY_YEAR, $KEY_SECOND_GROUP
+<span class="nc" id="L1452">    &quot;&quot;&quot;.trimIndent()</span>
+<span class="nc" id="L1453">        val c = db.measureAndLogQuery(uri, sql, null, arrayOf(budgetId))</span>
+<span class="nc" id="L1454">        c.setNotificationUri(context!!.contentResolver, uri)</span>
+<span class="nc" id="L1455">        return wrapWithResultCompat(c, Bundle().apply { putLong(KEY_BUDGETID, budgetId) })</span>
+    }
+
+
+    fun archiveSumQuery(
+        db: SupportSQLiteDatabase,
+        uri: Uri,
+        typeWithFallBack: String,
+    ): Cursor {
+
+<span class="nc" id="L1465">        val projection = buildList {</span>
+<span class="nc" id="L1466">            val isExpense =</span>
+<span class="nc" id="L1467">                &quot;$KEY_TYPE = $FLAG_EXPENSE OR ($KEY_TYPE = $FLAG_NEUTRAL AND $KEY_DISPLAY_AMOUNT &lt; 0)&quot;</span>
+
+<span class="nc" id="L1469">            add(&quot;$aggregateFunction(CASE WHEN $isExpense THEN $KEY_DISPLAY_AMOUNT ELSE 0 END) AS $KEY_SUM_EXPENSES&quot;)</span>
+
+<span class="nc" id="L1471">            val isIncome =</span>
+<span class="nc" id="L1472">                &quot;$KEY_TYPE = $FLAG_INCOME OR ($KEY_TYPE = $FLAG_NEUTRAL AND $KEY_DISPLAY_AMOUNT &gt; 0)&quot;</span>
+
+<span class="nc" id="L1474">            add(&quot;$aggregateFunction(CASE WHEN $isIncome THEN $KEY_DISPLAY_AMOUNT ELSE 0 END) AS $KEY_SUM_INCOME&quot;)</span>
+
+<span class="nc" id="L1476">            add(&quot;$aggregateFunction(CASE WHEN $KEY_TYPE = $FLAG_TRANSFER THEN $KEY_DISPLAY_AMOUNT ELSE 0 END) AS $KEY_SUM_TRANSFERS&quot;)</span>
+<span class="nc" id="L1477">        }.toTypedArray()</span>
+
+<span class="nc" id="L1479">        val sql = archiveSumCTE(uri.pathSegments[1].toLong(), typeWithFallBack) + &quot; &quot; +</span>
+<span class="nc" id="L1480">                SupportSQLiteQueryBuilder.builder(CTE_TRANSACTION_AMOUNTS)</span>
+<span class="nc" id="L1481">                    .columns(projection)</span>
+<span class="nc" id="L1482">                    .create()</span>
+<span class="nc" id="L1483">                    .sql</span>
+<span class="nc" id="L1484">        return db.measureAndLogQuery(uri, sql, null, null)</span>
+    }
+
+    fun transactionGroupsQuery(
+        db: SupportSQLiteDatabase,
+        uri: Uri,
+        selection: String?,
+        selectionArgs: Array&lt;Any&gt;?,
+    ): Cursor {
+<span class="nc" id="L1493">        val accountQuery = uri.accountSelector</span>
+
+        //Grand total account or aggregate account for type or flag
+<span class="nc" id="L1496">        val forHome: String? =</span>
+<span class="nc bnc" id="L1497" title="All 4 branches missed.">            if (uri.getQueryParameter(KEY_ACCOUNTID) == null &amp;&amp; uri.getQueryParameter(KEY_CURRENCY) == null) homeCurrency else null</span>
+
+<span class="nc" id="L1499">        val group = enumValueOrDefault(uri.pathSegments[2], Grouping.NONE)</span>
+
+<span class="nc bnc" id="L1501" title="All 4 branches missed.">        val breakdownByAccount = forHome != null &amp;&amp; uri.getBooleanQueryParameter(</span>
+<span class="nc" id="L1502">            TransactionProvider.QUERY_PARAMETER_BREAKDOWN_BY_ACCOUNT,</span>
+<span class="nc" id="L1503">            false</span>
+        )
+
+        // the start value is only needed for WEEK and DAY
+<span class="nc bnc" id="L1507" title="All 2 branches missed.">        val withJulianStart = uri.getBooleanQueryParameter(</span>
+<span class="nc" id="L1508">            TransactionProvider.QUERY_PARAMETER_WITH_JULIAN_START,</span>
+<span class="nc" id="L1509">            false</span>
+<span class="nc bnc" id="L1510" title="All 4 branches missed.">        ) &amp;&amp; (group == Grouping.WEEK || group == Grouping.DAY)</span>
+<span class="nc" id="L1511">        val includeTransfers = uri.getBooleanQueryParameter(</span>
+<span class="nc" id="L1512">            TransactionProvider.QUERY_PARAMETER_INCLUDE_TRANSFERS,</span>
+<span class="nc" id="L1513">            false</span>
+        )
+
+<span class="nc" id="L1516">        val projection = buildList {</span>
+<span class="nc" id="L1517">            add(KEY_YEAR)</span>
+<span class="nc" id="L1518">            add(KEY_SECOND_GROUP)</span>
+<span class="nc" id="L1519">            add(KEY_SUM_EXPENSES)</span>
+<span class="nc" id="L1520">            add(KEY_SUM_INCOME)</span>
+<span class="nc bnc" id="L1521" title="All 2 branches missed.">            if (!includeTransfers) {</span>
+<span class="nc" id="L1522">                add(KEY_SUM_TRANSFERS)</span>
+            }
+
+            //previously we started distribution from group header and needed to know if there were mapped categories
+            //maybe we add this functionality back later
+            //MAPPED_CATEGORIES;
+<span class="nc bnc" id="L1528" title="All 2 branches missed.">            if (withJulianStart) {</span>
+<span class="nc" id="L1529">                add(</span>
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">                    (if (group === Grouping.WEEK) weekStartJulian else DAY_START_JULIAN)</span>
+                            + &quot; AS &quot; + KEY_GROUP_START
+                )
+            }
+<span class="nc bnc" id="L1534" title="All 2 branches missed.">            if (group === Grouping.WEEK) {</span>
+<span class="nc" id="L1535">                add(&quot;$weekStart AS $KEY_WEEK_START&quot;)</span>
+            }
+
+<span class="nc bnc" id="L1538" title="All 2 branches missed.">            if (breakdownByAccount) {</span>
+<span class="nc" id="L1539">                add(KEY_ACCOUNTID)</span>
+<span class="nc" id="L1540">                add(KEY_CURRENCY)</span>
+<span class="nc" id="L1541">                add(KEY_DYNAMIC)</span>
+<span class="nc" id="L1542">                add(KEY_SUM)</span>
+<span class="nc" id="L1543">                add(KEY_PERIOD_END)</span>
+<span class="nc" id="L1544">                add(&quot;CASE WHEN $KEY_DYNAMIC THEN coalesce(market_rate, $KEY_EXCHANGE_RATE) ELSE $KEY_EXCHANGE_RATE END AS $KEY_EXCHANGE_RATE&quot;)</span>
+            }
+<span class="nc" id="L1546">        }.toTypedArray()</span>
+
+<span class="nc" id="L1548">        val sql = buildTransactionGroupCte(</span>
+<span class="nc" id="L1549">            accountQuery,</span>
+<span class="nc" id="L1550">            selection,</span>
+<span class="nc" id="L1551">            forHome,</span>
+<span class="nc" id="L1552">            typeWithFallBack,</span>
+<span class="nc" id="L1553">            breakdownByAccount,</span>
+<span class="nc" id="L1554">            group,</span>
+<span class="nc" id="L1555">            includeTransfers,</span>
+<span class="nc" id="L1556">            aggregateFunction</span>
+        ) + &quot; &quot; +
+<span class="nc bnc" id="L1558" title="All 2 branches missed.">                SupportSQLiteQueryBuilder.builder(if (breakdownByAccount) &quot;with_market_rate&quot; else CTE_TRANSACTION_GROUPS)</span>
+<span class="nc" id="L1559">                    .columns(projection)</span>
+<span class="nc" id="L1560">                    .selection(null, selectionArgs)</span>
+<span class="nc" id="L1561">                    .create()</span>
+<span class="nc" id="L1562">                    .sql</span>
+<span class="nc" id="L1563">        return db.measureAndLogQuery(uri, sql, selection, selectionArgs)</span>
+    }
+
+    fun insertAttribute(db: SupportSQLiteDatabase, values: ContentValues) {
+<span class="nc" id="L1567">        val name = values.getAsString(KEY_ATTRIBUTE_NAME)</span>
+<span class="nc" id="L1568">        val context = values.getAsString(KEY_CONTEXT)</span>
+<span class="nc" id="L1569">        db.execSQL(</span>
+<span class="nc" id="L1570">            &quot;INSERT INTO $TABLE_ATTRIBUTES ($KEY_ATTRIBUTE_NAME, $KEY_CONTEXT)  SELECT ?,? WHERE NOT EXISTS (SELECT 1 FROM $TABLE_ATTRIBUTES WHERE $KEY_ATTRIBUTE_NAME=? AND $KEY_CONTEXT = ? )&quot;,</span>
+<span class="nc" id="L1571">            arrayOf(name, context, name, context)</span>
+        )
+<span class="nc" id="L1573">    }</span>
+
+    fun insertTransactionAttribute(db: SupportSQLiteDatabase, values: ContentValues) {
+<span class="nc" id="L1576">        insertObjectAttribute(db, values, TABLE_TRANSACTION_ATTRIBUTES, KEY_TRANSACTIONID)</span>
+<span class="nc" id="L1577">    }</span>
+
+    fun insertAccountAttribute(db: SupportSQLiteDatabase, values: ContentValues) {
+<span class="nc" id="L1580">        insertObjectAttribute(db, values, TABLE_ACCOUNT_ATTRIBUTES, KEY_ACCOUNTID)</span>
+<span class="nc" id="L1581">    }</span>
+
+    private fun insertObjectAttribute(
+        db: SupportSQLiteDatabase,
+        values: ContentValues,
+        table: String,
+        linkColumn: String,
+    ) {
+<span class="nc" id="L1589">        db.execSQL(</span>
+<span class="nc" id="L1590">            &quot;INSERT or REPLACE INTO $table SELECT DISTINCT ?, _id, ? FROM $TABLE_ATTRIBUTES WHERE $KEY_ATTRIBUTE_NAME = ? AND $KEY_CONTEXT = ?;&quot;,</span>
+            arrayOf(
+<span class="nc" id="L1592">                values.getAsLong(linkColumn),</span>
+<span class="nc" id="L1593">                values.getAsString(KEY_VALUE),</span>
+<span class="nc" id="L1594">                values.getAsString(KEY_ATTRIBUTE_NAME),</span>
+<span class="nc" id="L1595">                values.getAsString(KEY_CONTEXT)</span>
+            )
+        )
+<span class="nc" id="L1598">    }</span>
+
+    fun requireAttachment(db: SupportSQLiteDatabase, uri: String, uuid: String?) =
+<span class="nc bnc" id="L1601" title="All 6 branches missed.">        uuid?.let { findAttachmentByUuid(db, it) }</span>
+<span class="nc" id="L1602">            ?: findAttachment(db, uri)</span>
+<span class="nc" id="L1603">            ?: insertAttachment(db, uri, uuid)</span>
+
+<span class="nc" id="L1605">    fun findAttachmentByUuid(db: SupportSQLiteDatabase, uuid: String) = db.query(</span>
+<span class="nc" id="L1606">        TABLE_ATTACHMENTS,</span>
+<span class="nc" id="L1607">        arrayOf(KEY_ROWID),</span>
+<span class="nc" id="L1608">        &quot;$KEY_UUID = ?&quot;,</span>
+<span class="nc" id="L1609">        arrayOf(uuid)</span>
+<span class="nc bnc" id="L1610" title="All 2 branches missed.">    ).use { if (it.moveToFirst()) it.getLong(0) else null }</span>
+
+<span class="nc" id="L1612">    private fun findAttachment(db: SupportSQLiteDatabase, uri: String) = db.query(</span>
+<span class="nc" id="L1613">        TABLE_ATTACHMENTS,</span>
+<span class="nc" id="L1614">        arrayOf(KEY_ROWID),</span>
+<span class="nc" id="L1615">        &quot;$KEY_URI = ?&quot;,</span>
+<span class="nc" id="L1616">        arrayOf(uri)</span>
+<span class="nc bnc" id="L1617" title="All 2 branches missed.">    ).use { if (it.moveToFirst()) it.getLong(0) else null }</span>
+
+<span class="nc" id="L1619">    private fun findAttachment(db: SupportSQLiteDatabase, id: Long) = db.query(</span>
+<span class="nc" id="L1620">        TABLE_ATTACHMENTS,</span>
+<span class="nc" id="L1621">        arrayOf(KEY_URI),</span>
+<span class="nc" id="L1622">        &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L1623">        arrayOf(id)</span>
+<span class="nc bnc" id="L1624" title="All 2 branches missed.">    ).use { if (it.moveToFirst()) it.getString(0) else null }</span>
+
+    fun deleteAttachments(
+        db: SupportSQLiteDatabase,
+        transactionId: Long,
+        uriList: MutableList&lt;String&gt;,
+    ): Boolean {
+<span class="nc bnc" id="L1631" title="All 2 branches missed.">        val attachmentIds = uriList.associateWith { findAttachment(db, it) ?: return false }</span>
+<span class="nc" id="L1632">        attachmentIds.forEach {</span>
+<span class="nc" id="L1633">            db.delete(</span>
+<span class="nc" id="L1634">                TABLE_TRANSACTION_ATTACHMENTS,</span>
+<span class="nc" id="L1635">                &quot;$KEY_TRANSACTIONID = ? AND $KEY_ATTACHMENT_ID = ?&quot;,</span>
+<span class="nc" id="L1636">                arrayOf(transactionId.toString(), it.value.toString())</span>
+            )
+<span class="nc" id="L1638">            deleteAttachment(db, it.value, it.key)</span>
+<span class="nc" id="L1639">        }</span>
+<span class="nc" id="L1640">        return true</span>
+    }
+
+    fun deleteAttachment(db: SupportSQLiteDatabase, attachmentId: Long, uriString: String?) {
+
+<span class="nc bnc" id="L1645" title="All 2 branches missed.">        val uri = (uriString ?: findAttachment(db, attachmentId)!!).toUri()</span>
+<span class="nc bnc" id="L1646" title="All 2 branches missed.">        if (uri.authority != AppDirHelper.getFileProviderAuthority(context!!)) {</span>
+<span class="nc" id="L1647">            Timber.d(&quot;External, releasePersistableUriPermission&quot;)</span>
+<span class="nc bnc" id="L1648" title="All 2 branches missed.">            if (try {</span>
+<span class="nc" id="L1649">                    db.delete(</span>
+<span class="nc" id="L1650">                        TABLE_ATTACHMENTS,</span>
+<span class="nc" id="L1651">                        &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L1652">                        arrayOf(attachmentId)</span>
+                    )
+<span class="nc" id="L1654">                } catch (_: SQLiteConstraintException) {</span>
+                    //still in use
+<span class="nc" id="L1656">                    0</span>
+<span class="nc" id="L1657">                } == 1</span>
+            ) {
+<span class="nc" id="L1659">                releasePersistableUriPermission(uri)</span>
+            }
+        } else {
+<span class="nc" id="L1662">            Timber.d(&quot;Internal, now considered stale, if no longer referenced&quot;)</span>
+        }
+<span class="nc" id="L1664">    }</span>
+
+    open fun takePersistableUriPermission(uri: Uri) {
+<span class="nc" id="L1667">        context!!.contentResolver.takePersistableUriPermission(</span>
+<span class="nc" id="L1668">            uri,</span>
+<span class="nc" id="L1669">            Intent.FLAG_GRANT_READ_URI_PERMISSION</span>
+        )
+<span class="nc" id="L1671">    }</span>
+
+    open fun releasePersistableUriPermission(uri: Uri) {
+<span class="nc" id="L1674">        try {</span>
+<span class="nc" id="L1675">            context!!.contentResolver.releasePersistableUriPermission(</span>
+<span class="nc" id="L1676">                uri,</span>
+<span class="nc" id="L1677">                Intent.FLAG_GRANT_READ_URI_PERMISSION</span>
+            )
+<span class="nc" id="L1679">        } catch (e: SecurityException) {</span>
+            //we had a URI without a permission. This should not happen
+<span class="nc" id="L1681">            report(e)</span>
+        }
+<span class="nc" id="L1683">    }</span>
+
+    private fun insertAttachment(
+        db: SupportSQLiteDatabase,
+        uriString: String,
+        uuid: String?,
+    ): Long {
+<span class="nc" id="L1690">        val id = db.insert(</span>
+<span class="nc" id="L1691">            TABLE_ATTACHMENTS,</span>
+<span class="nc" id="L1692">            ContentValues(2).apply {</span>
+<span class="nc" id="L1693">                put(KEY_URI, uriString)</span>
+<span class="nc bnc" id="L1694" title="All 2 branches missed.">                put(KEY_UUID, uuid ?: generateUuid())</span>
+<span class="nc" id="L1695">            }</span>
+        )
+<span class="nc" id="L1697">        val uri = uriString.toUri()</span>
+<span class="nc bnc" id="L1698" title="All 4 branches missed.">        if (uri.scheme == &quot;content&quot; &amp;&amp; uri.authority != AppDirHelper.getFileProviderAuthority(</span>
+<span class="nc" id="L1699">                context!!</span>
+            )
+        ) {
+<span class="nc" id="L1702">            Timber.d(&quot;External, takePersistableUriPermission&quot;)</span>
+<span class="nc" id="L1703">            takePersistableUriPermission(uri)</span>
+        }
+<span class="nc" id="L1705">        return id</span>
+    }
+
+    fun ensureCategoryTree(db: SupportSQLiteDatabase, extras: Bundle): Bundle {
+<span class="nc" id="L1709">        db.beginTransaction()</span>
+<span class="nc" id="L1710">        try {</span>
+<span class="nc" id="L1711">            extras.classLoader = javaClass.classLoader</span>
+<span class="nc" id="L1712">            val result = Bundle(1).apply {</span>
+<span class="nc" id="L1713">                putInt(</span>
+<span class="nc" id="L1714">                    KEY_COUNT, ensureCategoryTreeInternal(</span>
+<span class="nc" id="L1715">                        db,</span>
+<span class="nc" id="L1716">                        BundleCompat.getParcelable(</span>
+<span class="nc" id="L1717">                            extras,</span>
+<span class="nc" id="L1718">                            KEY_CATEGORY_EXPORT,</span>
+<span class="nc" id="L1719">                            CategoryExport::class.java</span>
+                        )!!,
+<span class="nc" id="L1721">                        null</span>
+                    )
+                )
+<span class="nc" id="L1724">            }</span>
+<span class="nc" id="L1725">            db.setTransactionSuccessful()</span>
+<span class="nc" id="L1726">            return result</span>
+        } finally {
+<span class="nc" id="L1728">            db.endTransaction()</span>
+        }
+    }
+
+    private fun ensureCategoryTreeInternal(
+        db: SupportSQLiteDatabase,
+        categoryExport: CategoryExport,
+        parentId: Long?,
+    ): Int {
+<span class="nc bnc" id="L1737" title="All 4 branches missed.">        check(categoryExport.uuid.isNotEmpty())</span>
+<span class="nc" id="L1738">        val (nextParent, created) = ensureCategoryInternal(db, categoryExport, parentId)</span>
+<span class="nc bnc" id="L1739" title="All 2 branches missed.">        var count = if (created) 1 else 0</span>
+<span class="nc" id="L1740">        categoryExport.children.forEach {</span>
+<span class="nc" id="L1741">            count += ensureCategoryTreeInternal(db, it, nextParent)</span>
+<span class="nc" id="L1742">        }</span>
+<span class="nc" id="L1743">        return count</span>
+    }
+
+    fun ensureCategory(db: SupportSQLiteDatabase, extras: Bundle): Bundle {
+<span class="nc" id="L1747">        db.beginTransaction()</span>
+<span class="nc" id="L1748">        try {</span>
+<span class="nc" id="L1749">            extras.classLoader = javaClass.classLoader</span>
+<span class="nc" id="L1750">            val result = Bundle(1).apply {</span>
+<span class="nc" id="L1751">                putSerializable(</span>
+<span class="nc" id="L1752">                    KEY_RESULT,</span>
+<span class="nc" id="L1753">                    ensureCategoryInternal(</span>
+<span class="nc" id="L1754">                        helper.writableDatabase,</span>
+<span class="nc" id="L1755">                        BundleCompat.getParcelable(</span>
+<span class="nc" id="L1756">                            extras,</span>
+<span class="nc" id="L1757">                            KEY_CATEGORY_INFO,</span>
+<span class="nc" id="L1758">                            CategoryInfo::class.java</span>
+                        )!!,
+<span class="nc bnc" id="L1760" title="All 2 branches missed.">                        if (extras.containsKey(KEY_PARENTID)) extras.getLong(KEY_PARENTID) else null</span>
+                    )
+                )
+<span class="nc" id="L1763">            }</span>
+<span class="nc" id="L1764">            db.setTransactionSuccessful()</span>
+<span class="nc" id="L1765">            return result</span>
+        } finally {
+<span class="nc" id="L1767">            db.endTransaction()</span>
+        }
+    }
+
+    /**
+     * 1 if the category with provided uuid exists,
+     *  1.1 if target (a category with the provided label and parent) does not exist: update label, parent, icon, color and return category
+     *  1.2 if target exists: move all usages of the source category into target category; delete source category and continue with 2.1
+     * 2. otherwise
+     * 2.1 if target exists, (update icon), append uuid and return it
+     * 2.2 otherwise create category with label and uuid and return it
+     *
+     * @return pair of category id and boolean that is true if a new category has been created
+     */
+    private fun ensureCategoryInternal(
+        db: SupportSQLiteDatabase,
+        categoryInfo: ICategoryInfo,
+        parentId: Long?,
+    ): Pair&lt;Long, Boolean&gt; {
+
+<span class="nc" id="L1787">        val stripped = categoryInfo.label.trim()</span>
+<span class="nc" id="L1788">        val uuids = categoryInfo.uuid.split(Repository.UUID_SEPARATOR)</span>
+
+<span class="nc" id="L1790">        val sourceBasedOnUuid = db.query(</span>
+<span class="nc" id="L1791">            TABLE_CATEGORIES,</span>
+            arrayOf(
+<span class="nc" id="L1793">                KEY_ROWID,</span>
+<span class="nc" id="L1794">                KEY_LABEL,</span>
+<span class="nc" id="L1795">                KEY_PARENTID,</span>
+<span class="nc" id="L1796">                KEY_ICON,</span>
+<span class="nc" id="L1797">                KEY_COLOR,</span>
+<span class="nc" id="L1798">                KEY_TYPE</span>
+            ),
+<span class="nc bnc" id="L1800" title="All 2 branches missed.">            Array(uuids.size) { &quot;instr($KEY_UUID, ?) &gt; 0&quot; }.joinToString(&quot; OR &quot;),</span>
+<span class="nc" id="L1801">            uuids.toTypedArray(),</span>
+<span class="nc" id="L1802">            null</span>
+<span class="nc" id="L1803">        ).use {</span>
+<span class="nc bnc" id="L1804" title="All 2 branches missed.">            if (it.moveToFirst()) {</span>
+<span class="nc" id="L1805">                Tuple6(</span>
+<span class="nc" id="L1806">                    it.getLong(0),</span>
+<span class="nc" id="L1807">                    it.getString(1),</span>
+<span class="nc" id="L1808">                    it.getLongOrNull(2),</span>
+<span class="nc" id="L1809">                    it.getStringOrNull(3),</span>
+<span class="nc" id="L1810">                    it.getIntOrNull(4),</span>
+<span class="nc" id="L1811">                    it.getInt(5)</span>
+                )
+<span class="nc" id="L1813">            } else null</span>
+        }
+
+<span class="nc bnc" id="L1816" title="All 2 branches missed.">        val (parentSelection, parentSelectionArgs) = if (parentId == null) {</span>
+<span class="nc" id="L1817">            &quot;$KEY_PARENTID is null&quot; to emptyArray()</span>
+        } else {
+<span class="nc" id="L1819">            &quot;$KEY_PARENTID = ?&quot; to arrayOf(parentId.toString())</span>
+        }
+
+<span class="nc" id="L1822">        val target = db.query(</span>
+<span class="nc" id="L1823">            TABLE_CATEGORIES,</span>
+<span class="nc" id="L1824">            arrayOf(KEY_ROWID, KEY_UUID),</span>
+<span class="nc" id="L1825">            &quot;$KEY_LABEL = ? AND $parentSelection&quot;,</span>
+<span class="nc" id="L1826">            arrayOf(stripped, *parentSelectionArgs),</span>
+<span class="nc" id="L1827">            null</span>
+<span class="nc" id="L1828">        ).use {</span>
+<span class="nc bnc" id="L1829" title="All 2 branches missed.">            if (it.moveToFirst()) {</span>
+<span class="nc" id="L1830">                it.getLong(0) to it.getStringOrNull(1)</span>
+<span class="nc" id="L1831">            } else null</span>
+        }
+
+<span class="nc bnc" id="L1834" title="All 2 branches missed.">        if (sourceBasedOnUuid != null) {</span>
+<span class="nc bnc" id="L1835" title="All 4 branches missed.">            if (target == null || target.first == sourceBasedOnUuid.first) {</span>
+<span class="nc" id="L1836">                val categoryId = sourceBasedOnUuid.first</span>
+<span class="nc" id="L1837">                val contentValues = ContentValues().apply {</span>
+<span class="nc bnc" id="L1838" title="All 2 branches missed.">                    if (sourceBasedOnUuid.second != categoryInfo.label) {</span>
+<span class="nc" id="L1839">                        put(KEY_LABEL, categoryInfo.label)</span>
+                    }
+<span class="nc bnc" id="L1841" title="All 2 branches missed.">                    if (sourceBasedOnUuid.third != parentId) {</span>
+<span class="nc" id="L1842">                        put(KEY_PARENTID, parentId)</span>
+                    }
+<span class="nc bnc" id="L1844" title="All 2 branches missed.">                    if (sourceBasedOnUuid.fourth != categoryInfo.icon) {</span>
+<span class="nc" id="L1845">                        put(KEY_ICON, categoryInfo.icon)</span>
+                    }
+<span class="nc bnc" id="L1847" title="All 2 branches missed.">                    if (sourceBasedOnUuid.fifth != categoryInfo.color) {</span>
+<span class="nc" id="L1848">                        put(KEY_COLOR, categoryInfo.color)</span>
+                    }
+<span class="nc bnc" id="L1850" title="All 8 branches missed.">                    if (parentId == null &amp;&amp; categoryInfo.type != null &amp;&amp; sourceBasedOnUuid.sixth != categoryInfo.type) {</span>
+<span class="nc" id="L1851">                        put(KEY_TYPE, categoryInfo.type)</span>
+                    }
+<span class="nc" id="L1853">                }</span>
+<span class="nc bnc" id="L1854" title="All 2 branches missed.">                if (contentValues.size() &gt; 0) {</span>
+<span class="nc" id="L1855">                    db.update(</span>
+<span class="nc" id="L1856">                        TABLE_CATEGORIES,</span>
+<span class="nc" id="L1857">                        contentValues,</span>
+<span class="nc" id="L1858">                        &quot;$KEY_ROWID = ?&quot;, arrayOf(categoryId)</span>
+                    )
+                }
+<span class="nc" id="L1861">                return categoryId to false</span>
+            } else {
+<span class="nc" id="L1863">                val contentValues = ContentValues(1).apply {</span>
+<span class="nc" id="L1864">                    put(KEY_CATID, target.first)</span>
+<span class="nc" id="L1865">                }</span>
+<span class="nc" id="L1866">                val selection = &quot;$KEY_CATID = ?&quot;</span>
+<span class="nc" id="L1867">                val selectionArgs = arrayOf&lt;Any&gt;(sourceBasedOnUuid.first)</span>
+<span class="nc" id="L1868">                db.update(TABLE_TRANSACTIONS, contentValues, selection, selectionArgs)</span>
+<span class="nc" id="L1869">                db.update(TABLE_TEMPLATES, contentValues, selection, selectionArgs)</span>
+<span class="nc" id="L1870">                db.update(TABLE_CHANGES, contentValues, selection, selectionArgs)</span>
+<span class="nc" id="L1871">                db.update(TABLE_BUDGET_ALLOCATIONS, contentValues, selection, selectionArgs)</span>
+<span class="nc" id="L1872">                db.delete(TABLE_CATEGORIES, &quot;$KEY_ROWID = ?&quot;, arrayOf(sourceBasedOnUuid.first))</span>
+                //Ideally, we would also need to update filters
+            }
+        }
+
+<span class="nc bnc" id="L1877" title="All 2 branches missed.">        if (target != null) {</span>
+<span class="nc" id="L1878">            val newUuids =</span>
+<span class="nc bnc" id="L1879" title="All 4 branches missed.">                (uuids + (target.second?.split(Repository.UUID_SEPARATOR) ?: emptyList()))</span>
+<span class="nc" id="L1880">                    .distinct()</span>
+<span class="nc" id="L1881">                    .joinToString(Repository.UUID_SEPARATOR)</span>
+<span class="nc" id="L1882">            db.update(TABLE_CATEGORIES, ContentValues().apply {</span>
+<span class="nc" id="L1883">                put(KEY_UUID, newUuids)</span>
+<span class="nc" id="L1884">                put(KEY_ICON, categoryInfo.icon)</span>
+<span class="nc" id="L1885">                put(KEY_COLOR, categoryInfo.color)</span>
+<span class="nc bnc" id="L1886" title="All 4 branches missed.">                if (parentId == null &amp;&amp; categoryInfo.type != null) {</span>
+<span class="nc" id="L1887">                    put(KEY_TYPE, categoryInfo.type)</span>
+                }
+<span class="nc" id="L1889">            }, &quot;$KEY_ROWID = ?&quot;, arrayOf(target.first))</span>
+
+<span class="nc" id="L1891">            return target.first to false</span>
+        }
+
+<span class="nc bnc" id="L1894" title="All 2 branches missed.">        return saveCategory(</span>
+<span class="nc" id="L1895">            db,</span>
+<span class="nc" id="L1896">            Category(</span>
+<span class="nc" id="L1897">                label = categoryInfo.label,</span>
+<span class="nc" id="L1898">                parentId = parentId,</span>
+<span class="nc" id="L1899">                icon = categoryInfo.icon,</span>
+<span class="nc" id="L1900">                uuid = categoryInfo.uuid,</span>
+<span class="nc" id="L1901">                color = categoryInfo.color,</span>
+<span class="nc bnc" id="L1902" title="All 4 branches missed.">                type = if (parentId == null) categoryInfo.type?.toByte() ?: FLAG_NEUTRAL else null</span>
+            )
+<span class="nc bnc" id="L1904" title="All 2 branches missed.">        )?.let { it to true }</span>
+<span class="nc" id="L1905">            ?: throw IOException(&quot;Saving category failed&quot;)</span>
+    }
+
+<span class="nc" id="L1908">    fun saveCategory(db: SupportSQLiteDatabase, extras: Bundle) = Bundle(1).apply {</span>
+<span class="nc" id="L1909">        extras.classLoader = this@BaseTransactionProvider.javaClass.classLoader</span>
+<span class="nc" id="L1910">        saveCategory(</span>
+<span class="nc" id="L1911">            db,</span>
+<span class="nc" id="L1912">            BundleCompat.getParcelable(extras, KEY_CATEGORY, Category::class.java)!!</span>
+<span class="nc bnc" id="L1913" title="All 2 branches missed.">        )?.let {</span>
+<span class="nc" id="L1914">            putLong(KEY_ROWID, it)</span>
+<span class="nc" id="L1915">        }</span>
+<span class="nc" id="L1916">    }</span>
+
+    fun saveCategory(db: SupportSQLiteDatabase, category: Category): Long? {
+<span class="nc" id="L1919">        val initialValues = ContentValues().apply {</span>
+<span class="nc" id="L1920">            put(KEY_LABEL, category.label.trim())</span>
+<span class="nc" id="L1921">            put(KEY_LABEL_NORMALIZED, Utils.normalize(category.label))</span>
+<span class="nc bnc" id="L1922" title="All 2 branches missed.">            if (category.parentId != null) {</span>
+<span class="nc" id="L1923">                putNull(KEY_COLOR)</span>
+            } else {
+<span class="nc bnc" id="L1925" title="All 8 branches missed.">                put(KEY_COLOR, category.color.takeIf { it != 0 } ?: suggestNewCategoryColor(db))</span>
+            }
+<span class="nc" id="L1927">            put(KEY_ICON, category.icon)</span>
+<span class="nc bnc" id="L1928" title="All 2 branches missed.">            if (category.id == null) {</span>
+<span class="nc" id="L1929">                put(KEY_PARENTID, category.parentId)</span>
+            }
+<span class="nc bnc" id="L1931" title="All 2 branches missed.">            if (category.parentId == null) {</span>
+<span class="nc bnc" id="L1932" title="All 2 branches missed.">                put(KEY_TYPE, (category.type ?: FLAG_NEUTRAL))</span>
+            }
+<span class="nc" id="L1934">        }</span>
+<span class="nc" id="L1935">        return try {</span>
+<span class="nc bnc" id="L1936" title="All 2 branches missed.">            if (category.id == null) {</span>
+<span class="nc bnc" id="L1937" title="All 2 branches missed.">                initialValues.put(KEY_UUID, category.uuid ?: UUID.randomUUID().toString())</span>
+<span class="nc" id="L1938">                db.insert(TABLE_CATEGORIES, initialValues)</span>
+            } else {
+<span class="nc bnc" id="L1940" title="All 2 branches missed.">                if (db.update(</span>
+<span class="nc" id="L1941">                        TABLE_CATEGORIES,</span>
+<span class="nc" id="L1942">                        initialValues,</span>
+<span class="nc" id="L1943">                        &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L1944">                        arrayOf(category.id)</span>
+                    ) == 0
+                )
+<span class="nc" id="L1947">                    null else category.id</span>
+            }
+<span class="nc" id="L1949">        } catch (_: SQLiteConstraintException) {</span>
+<span class="nc" id="L1950">            null</span>
+        }
+    }
+
+<span class="nc" id="L1954">    fun SupportSQLiteDatabase.saveTransactionTags(</span>
+        transactionId: Long,
+        tagIds: Set&lt;Long&gt;,
+        replace: Boolean,
+<span class="nc" id="L1958">        forTemplate: Boolean = false,</span>
+    ) {
+<span class="nc bnc" id="L1960" title="All 2 branches missed.">        val table = if (forTemplate) TABLE_TEMPLATES_TAGS else TABLE_TRANSACTIONS_TAGS</span>
+<span class="nc bnc" id="L1961" title="All 2 branches missed.">        val column = if (forTemplate) KEY_TEMPLATEID else KEY_TRANSACTIONID</span>
+<span class="nc" id="L1962">        val selection = &quot;$column = ?&quot;</span>
+<span class="nc" id="L1963">        val selectionArgs: Array&lt;Any&gt; = arrayOf(transactionId)</span>
+<span class="nc" id="L1964">        val currentTags = query(</span>
+<span class="nc" id="L1965">            table,</span>
+<span class="nc" id="L1966">            arrayOf(KEY_TAGID),</span>
+<span class="nc" id="L1967">            selection,</span>
+<span class="nc" id="L1968">            selectionArgs</span>
+<span class="nc" id="L1969">        ).useAndMapToSet { it.getLong(0) }</span>
+<span class="nc" id="L1970">        val new = tagIds - currentTags</span>
+<span class="nc bnc" id="L1971" title="All 2 branches missed.">        val deleted = if (replace) currentTags - tagIds else emptySet()</span>
+<span class="nc bnc" id="L1972" title="All 8 branches missed.">        if (new.isNotEmpty() || deleted.isNotEmpty()) {</span>
+<span class="nc" id="L1973">            beginTransaction()</span>
+<span class="nc" id="L1974">            try {</span>
+<span class="nc bnc" id="L1975" title="All 4 branches missed.">                if (deleted.isNotEmpty()) {</span>
+<span class="nc" id="L1976">                    delete(</span>
+<span class="nc" id="L1977">                        table,</span>
+<span class="nc" id="L1978">                        &quot;$selection AND $KEY_TAGID IN (${deleted.joinToString()})&quot;,</span>
+<span class="nc" id="L1979">                        selectionArgs</span>
+                    )
+                }
+<span class="nc bnc" id="L1982" title="All 4 branches missed.">                if (new.isNotEmpty()) {</span>
+<span class="nc" id="L1983">                    val values = ContentValues(2)</span>
+<span class="nc" id="L1984">                    values.put(column, transactionId)</span>
+<span class="nc" id="L1985">                    new.forEach {</span>
+<span class="nc" id="L1986">                        values.put(KEY_TAGID, it)</span>
+<span class="nc" id="L1987">                        insert(table, CONFLICT_IGNORE, values)</span>
+<span class="nc" id="L1988">                    }</span>
+                }
+<span class="nc" id="L1990">                setTransactionSuccessful()</span>
+            } finally {
+<span class="nc" id="L1992">                endTransaction()</span>
+            }
+        }
+<span class="nc" id="L1995">    }</span>
+
+    fun SupportSQLiteDatabase.saveTransactionTags(extras: Bundle) {
+<span class="nc" id="L1998">        saveTransactionTags(</span>
+<span class="nc" id="L1999">            extras.getLong(KEY_TRANSACTIONID),</span>
+<span class="nc" id="L2000">            extras.getLongArray(KEY_TAGLIST)!!.toSet(),</span>
+<span class="nc" id="L2001">            extras.getBoolean(KEY_REPLACE, true)</span>
+        )
+<span class="nc" id="L2003">    }</span>
+
+    @JvmOverloads
+<span class="nc" id="L2006">    fun SupportSQLiteDatabase.saveTransactionTags(</span>
+        transactionId: Long,
+        tagList: String?,
+        replace: Boolean,
+<span class="nc" id="L2010">        forTemplate: Boolean = false,</span>
+    ) {
+<span class="nc bnc" id="L2012" title="All 2 branches missed.">        if (tagList == null) return</span>
+<span class="nc" id="L2013">        saveTransactionTags(</span>
+<span class="nc" id="L2014">            transactionId,</span>
+<span class="nc bnc" id="L2015" title="All 4 branches missed.">            if (tagList.isEmpty()) {</span>
+<span class="nc" id="L2016">                emptySet()</span>
+            } else {
+<span class="nc" id="L2018">                tagList.split(Repository.RECORD_SEPARATOR)</span>
+<span class="nc bnc" id="L2019" title="All 2 branches missed.">                    .filter { it.isNotEmpty() } // This prevents the crash</span>
+<span class="nc" id="L2020">                    .map { it.toLong() }</span>
+<span class="nc" id="L2021">                    .toSet()</span>
+            },
+<span class="nc" id="L2023">            replace,</span>
+<span class="nc" id="L2024">            forTemplate</span>
+        )
+<span class="nc" id="L2026">    }</span>
+
+    fun mergeCategories(db: SupportSQLiteDatabase, extras: Bundle) {
+<span class="nc" id="L2029">        val source = extras.getLongArray(KEY_MERGE_SOURCE)!!</span>
+<span class="nc" id="L2030">        val target = extras.getLong(KEY_MERGE_TARGET)</span>
+<span class="nc bnc" id="L2031" title="All 2 branches missed.">        require(</span>
+<span class="nc bnc" id="L2032" title="All 2 branches missed.">            db.query(</span>
+<span class="nc" id="L2033">                TABLE_CATEGORIES,</span>
+<span class="nc" id="L2034">                arrayOf(KEY_TYPE),</span>
+<span class="nc" id="L2035">                &quot;$KEY_ROWID ${Operation.IN.getOp(source.size + 1)}&quot;,</span>
+<span class="nc" id="L2036">                arrayOf(*source.toTypedArray(), target)</span>
+<span class="nc" id="L2037">            ).useAndMapToSet { it.getInt(0) }.size == 1</span>
+        )
+<span class="nc" id="L2039">        db.safeUpdateWithSealed {</span>
+<span class="nc" id="L2040">            source.forEach {</span>
+<span class="nc" id="L2041">                db.mergeCategory(it, target)</span>
+<span class="nc" id="L2042">            }</span>
+<span class="nc" id="L2043">        }</span>
+<span class="nc" id="L2044">    }</span>
+
+    private fun SupportSQLiteDatabase.mergeCategory(source: Long, target: Long) {
+<span class="nc" id="L2047">        val whereArgs: Array&lt;Any&gt; = arrayOf(source)</span>
+<span class="nc" id="L2048">        query(</span>
+<span class="nc" id="L2049">            &quot;SELECT $KEY_ROWID, (SELECT $KEY_ROWID FROM $TABLE_CATEGORIES target WHERE target.$KEY_PARENTID = ? AND target.$KEY_LABEL = $TABLE_CATEGORIES.$KEY_LABEL) AS peer FROM $TABLE_CATEGORIES WHERE $KEY_PARENTID = ? AND peer IS NOT NULL&quot;,</span>
+<span class="nc" id="L2050">            arrayOf(target, source)</span>
+<span class="nc" id="L2051">        ).use {</span>
+<span class="nc bnc" id="L2052" title="All 2 branches missed.">            while (it.moveToNext()) {</span>
+<span class="nc" id="L2053">                mergeCategory(it.getLong(0), it.getLong(1))</span>
+            }
+<span class="nc" id="L2055">        }</span>
+<span class="nc" id="L2056">        fun update(</span>
+            table: String,
+<span class="nc" id="L2058">            column: String = KEY_CATID,</span>
+<span class="nc" id="L2059">            conflictAlgorithm: Int = CONFLICT_NONE,</span>
+        ) {
+<span class="nc" id="L2061">            update(</span>
+<span class="nc" id="L2062">                table,</span>
+<span class="nc" id="L2063">                ContentValues(1).apply {</span>
+<span class="nc" id="L2064">                    put(column, target)</span>
+<span class="nc" id="L2065">                },</span>
+<span class="nc" id="L2066">                &quot;$column = ?&quot;,</span>
+<span class="nc" id="L2067">                whereArgs,</span>
+<span class="nc" id="L2068">                conflictAlgorithm</span>
+            )
+<span class="nc" id="L2070">        }</span>
+<span class="nc" id="L2071">        update(TABLE_TRANSACTIONS)</span>
+<span class="nc" id="L2072">        update(TABLE_TEMPLATES)</span>
+<span class="nc" id="L2073">        update(TABLE_CHANGES)</span>
+<span class="nc" id="L2074">        update(TABLE_BUDGET_ALLOCATIONS, conflictAlgorithm = CONFLICT_REPLACE)</span>
+<span class="nc" id="L2075">        update(TABLE_CATEGORIES, KEY_PARENTID)</span>
+<span class="nc" id="L2076">        delete(</span>
+<span class="nc" id="L2077">            TABLE_CATEGORIES,</span>
+<span class="nc" id="L2078">            &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L2079">            whereArgs</span>
+        )
+<span class="nc" id="L2081">    }</span>
+
+
+    fun initChangeLog(db: SupportSQLiteDatabase, accountId: String) {
+<span class="nc" id="L2085">        val accountIdBindArgs: Array&lt;Any&gt; = arrayOf(accountId)</span>
+<span class="nc" id="L2086">        db.beginTransaction()</span>
+<span class="nc" id="L2087">        try {</span>
+<span class="nc" id="L2088">            db.delete(TABLE_CHANGES, &quot;$KEY_ACCOUNTID = ?&quot;, accountIdBindArgs)</span>
+<span class="nc" id="L2089">            db.query(</span>
+<span class="nc" id="L2090">                SupportSQLiteQueryBuilder.builder(TABLE_TRANSACTIONS)</span>
+<span class="nc" id="L2091">                    .columns(arrayOf(KEY_ROWID))</span>
+<span class="nc" id="L2092">                    .selection(</span>
+<span class="nc" id="L2093">                        &quot;(&quot; + KEY_UUID + &quot; IS NULL OR (&quot; + KEY_TRANSFER_PEER + &quot; IS NOT NULL AND (SELECT &quot; + KEY_UUID + &quot; from &quot; + TABLE_TRANSACTIONS + &quot; peer where &quot; + KEY_TRANSFER_PEER + &quot; = &quot; + TABLE_TRANSACTIONS + &quot;.&quot; + KEY_ROWID + &quot;) is null )) AND (&quot;</span>
+                                + KEY_TRANSFER_PEER + &quot; IS NULL OR &quot; + KEY_ROWID + &quot; &lt; &quot; + KEY_TRANSFER_PEER + &quot;)&quot;,
+<span class="nc" id="L2095">                        null</span>
+                    )
+<span class="nc" id="L2097">                    .create()</span>
+<span class="nc" id="L2098">            ).use {</span>
+<span class="nc bnc" id="L2099" title="All 2 branches missed.">                if (it.moveToFirst()) {</span>
+<span class="nc" id="L2100">                    db.safeUpdateWithSealed {</span>
+<span class="nc bnc" id="L2101" title="All 2 branches missed.">                        while (!it.isAfterLast) {</span>
+<span class="nc" id="L2102">                            val idString: String = it.getString(0)</span>
+<span class="nc" id="L2103">                            db.execSQL(</span>
+<span class="nc" id="L2104">                                &quot;UPDATE $TABLE_TRANSACTIONS SET $KEY_UUID = ? WHERE $KEY_ROWID = ? OR $KEY_TRANSFER_PEER = ?&quot;,</span>
+<span class="nc" id="L2105">                                arrayOf(generateUuid(), idString, idString)</span>
+                            )
+<span class="nc" id="L2107">                            it.moveToNext()</span>
+                        }
+<span class="nc" id="L2109">                    }</span>
+                }
+<span class="nc" id="L2111">            }</span>
+<span class="nc" id="L2112">            val parentUUidTemplate = parentUuidExpression(TABLE_TRANSACTIONS, TABLE_TRANSACTIONS)</span>
+<span class="nc" id="L2113">            try {</span>
+<span class="nc" id="L2114">                db.execSQL(</span>
+                    &quot;&quot;&quot;INSERT INTO $TABLE_CHANGES($KEY_TYPE, $KEY_SYNC_SEQUENCE_LOCAL, $KEY_UUID, $KEY_PARENT_UUID, $KEY_COMMENT, $KEY_DATE, $KEY_AMOUNT, $KEY_ORIGINAL_AMOUNT, $KEY_ORIGINAL_CURRENCY, $KEY_EQUIVALENT_AMOUNT, $KEY_CATID, $KEY_ACCOUNTID, $KEY_PAYEEID, $KEY_TRANSFER_ACCOUNT, $KEY_METHODID, $KEY_CR_STATUS, $KEY_STATUS, $KEY_REFERENCE_NUMBER)
+<span class="nc" id="L2116">                        SELECT '${TransactionChange.Type.created.name}', 1, $KEY_UUID, $parentUUidTemplate, $KEY_COMMENT, $KEY_DATE, $KEY_AMOUNT, $KEY_ORIGINAL_AMOUNT, $KEY_ORIGINAL_CURRENCY, $KEY_EQUIVALENT_AMOUNT, $KEY_CATID, $KEY_ACCOUNTID, $KEY_PAYEEID, $KEY_TRANSFER_ACCOUNT, $KEY_METHODID, $KEY_CR_STATUS, $KEY_STATUS, $KEY_REFERENCE_NUMBER </span>
+<span class="nc" id="L2117">                        FROM $TABLE_TRANSACTIONS ${equivalentAmountJoin(homeCurrency)}</span>
+                        WHERE $KEY_ACCOUNTID = ?&quot;&quot;&quot;,
+<span class="nc" id="L2119">                    accountIdBindArgs</span>
+                )
+<span class="nc" id="L2121">            } catch (e: SQLiteConstraintException) {</span>
+<span class="nc" id="L2122">                report(</span>
+<span class="nc" id="L2123">                    Throwable(&quot;Checking Foreign Keys&quot;), mapOf(</span>
+<span class="nc" id="L2124">                        &quot;fk_list&quot; to db.getForeignKeyInfoAsString(TABLE_TRANSACTIONS),</span>
+<span class="nc" id="L2125">                        &quot;fk_check&quot; to db.getForeignKeyCheckInfoAsString(TABLE_TRANSACTIONS)</span>
+                    )
+                )
+<span class="nc" id="L2128">                throw e</span>
+            }
+<span class="nc" id="L2130">            db.execSQL(</span>
+                &quot;&quot;&quot;INSERT INTO $TABLE_CHANGES($KEY_TYPE, $KEY_SYNC_SEQUENCE_LOCAL, $KEY_UUID, $KEY_PARENT_UUID, $KEY_ACCOUNTID)
+<span class="nc" id="L2132">               SELECT '${TransactionChange.Type.tags.name}', 1, $KEY_UUID, $parentUUidTemplate, $KEY_ACCOUNTID FROM $TABLE_TRANSACTIONS WHERE $KEY_ACCOUNTID = ? AND EXISTS (SELECT 1 FROM $TABLE_TRANSACTIONS_TAGS WHERE $KEY_TRANSACTIONID = $KEY_ROWID)&quot;&quot;&quot;,</span>
+<span class="nc" id="L2133">                accountIdBindArgs</span>
+            )
+<span class="nc" id="L2135">            db.execSQL(</span>
+                &quot;&quot;&quot;INSERT INTO $TABLE_CHANGES($KEY_TYPE, $KEY_SYNC_SEQUENCE_LOCAL, $KEY_UUID, $KEY_PARENT_UUID, $KEY_ACCOUNTID)
+<span class="nc" id="L2137">               SELECT '${TransactionChange.Type.attachments.name}', 1, $KEY_UUID, $parentUUidTemplate, $KEY_ACCOUNTID FROM $TABLE_TRANSACTIONS WHERE $KEY_ACCOUNTID = ? AND EXISTS (SELECT 1 FROM $TABLE_TRANSACTION_ATTACHMENTS WHERE $KEY_TRANSACTIONID = $KEY_ROWID)&quot;&quot;&quot;,</span>
+<span class="nc" id="L2138">                accountIdBindArgs</span>
+            )
+<span class="nc" id="L2140">            val currentSyncIncrease = ContentValues(1)</span>
+<span class="nc" id="L2141">            currentSyncIncrease.put(KEY_SYNC_SEQUENCE_LOCAL, 1)</span>
+<span class="nc" id="L2142">            db.update(TABLE_ACCOUNTS, currentSyncIncrease, &quot;$KEY_ROWID = ?&quot;, accountIdBindArgs)</span>
+<span class="nc" id="L2143">            db.setTransactionSuccessful()</span>
+<span class="nc" id="L2144">        } catch (e: java.lang.Exception) {</span>
+<span class="nc" id="L2145">            report(e, TAG)</span>
+<span class="nc" id="L2146">            throw e</span>
+        } finally {
+<span class="nc" id="L2148">            db.endTransaction()</span>
+        }
+<span class="nc" id="L2150">    }</span>
+
+    private fun subSelectTemplate(colum: String) =
+<span class="nc" id="L2153">        &quot;(SELECT %1\$s FROM $TABLE_TRANSACTIONS WHERE $KEY_UUID = ?)&quot;.format(Locale.ROOT, colum)</span>
+
+    /**
+     * @return number of split parts + 1 (for parent)
+     */
+    fun SupportSQLiteDatabase.unsplit(values: ContentValues, callerIsNotSyncAdapter: Boolean): Int {
+<span class="nc" id="L2159">        val passedInUuid = values.getAsString(KEY_UUID)</span>
+<span class="nc" id="L2160">        val passedInRowId = values.getAsLong(KEY_ROWID)</span>
+<span class="nc bnc" id="L2161" title="All 6 branches missed.">        require(passedInUuid != null || passedInRowId != null)</span>
+<span class="nc bnc" id="L2162" title="All 4 branches missed.">        val uuid = passedInUuid</span>
+<span class="nc" id="L2163">            ?: uuidForTransaction(passedInRowId)</span>
+<span class="nc" id="L2164">            ?: throw Exception(&quot;Missing uuid&quot;)</span>
+<span class="nc bnc" id="L2165" title="All 4 branches missed.">        val transactionId = passedInRowId</span>
+<span class="nc" id="L2166">            ?: findTransactionByUuid(passedInUuid)</span>
+<span class="nc" id="L2167">            ?: throw Exception(&quot;Missing transaction id&quot;)</span>
+
+<span class="nc" id="L2169">        val crStatusSubSelect = subSelectTemplate(KEY_CR_STATUS)</span>
+<span class="nc" id="L2170">        val payeeIdSubSelect = subSelectTemplate(KEY_PAYEEID)</span>
+<span class="nc" id="L2171">        val accountIdSubSelect = subSelectTemplate(KEY_ACCOUNTID)</span>
+
+
+<span class="nc" id="L2174">        return try {</span>
+<span class="nc" id="L2175">            beginTransaction()</span>
+<span class="nc" id="L2176">            pauseChangeTrigger(this)</span>
+            //set equivalent amounts based on parents rate
+<span class="nc" id="L2178">            execSQL(</span>
+                &quot;&quot;&quot;WITH parent AS (SELECT 1.0 * $KEY_EQUIVALENT_AMOUNT / $KEY_AMOUNT AS rate FROM $TABLE_TRANSACTIONS ${
+<span class="nc" id="L2180">                    equivalentAmountJoin(</span>
+<span class="nc" id="L2181">                        homeCurrency</span>
+                    )
+<span class="nc" id="L2183">                } WHERE $KEY_ROWID = $transactionId)</span>
+                    | INSERT OR REPLACE INTO $TABLE_EQUIVALENT_AMOUNTS
+                    | ($KEY_EQUIVALENT_AMOUNT, $KEY_TRANSACTIONID, $KEY_CURRENCY)
+<span class="nc" id="L2186">                    | SELECT (select rate from parent)*$KEY_AMOUNT, $KEY_ROWID, '$homeCurrency' FROM $TABLE_TRANSACTIONS WHERE $KEY_PARENTID = $transactionId AND (select rate from parent) IS NOT NULL</span>
+                    |
+<span class="nc" id="L2188">                &quot;&quot;&quot;.trimMargin()</span>
+            )
+            //parts are promoted to independence
+<span class="nc" id="L2191">            val partUpdateCount =</span>
+<span class="nc" id="L2192">                compileStatement(&quot;UPDATE $TABLE_TRANSACTIONS SET $KEY_PARENTID = null, $KEY_CR_STATUS = $crStatusSubSelect, $KEY_PAYEEID = $payeeIdSubSelect WHERE $KEY_PARENTID = ?&quot;).use {</span>
+<span class="nc" id="L2193">                    it.bindString(1, uuid)</span>
+<span class="nc" id="L2194">                    it.bindString(2, uuid)</span>
+<span class="nc" id="L2195">                    it.bindLong(3, transactionId)</span>
+<span class="nc" id="L2196">                    it.executeUpdateDelete()</span>
+                }
+            //Change is recorded
+<span class="nc bnc" id="L2199" title="All 2 branches missed.">            if (callerIsNotSyncAdapter) {</span>
+<span class="nc" id="L2200">                execSQL(</span>
+                    &quot;&quot;&quot;INSERT INTO $TABLE_CHANGES
+                            | ($KEY_TYPE, $KEY_ACCOUNTID, $KEY_SYNC_SEQUENCE_LOCAL, $KEY_UUID)
+                            | SELECT '${TransactionChange.Type.unsplit.name}', $KEY_ROWID, $KEY_SYNC_SEQUENCE_LOCAL, ?
+                            | FROM $TABLE_ACCOUNTS
+<span class="nc" id="L2205">                            | WHERE $KEY_ROWID = $accountIdSubSelect AND $KEY_SYNC_ACCOUNT_NAME IS NOT NULL&quot;&quot;&quot;.trimMargin(),</span>
+<span class="nc" id="L2206">                    arrayOf(uuid, uuid)</span>
+                )
+            }
+            //parent is deleted
+<span class="nc" id="L2210">            val parentDeleteCount = delete(TABLE_TRANSACTIONS, &quot;$KEY_UUID = ?&quot;, arrayOf(uuid))</span>
+<span class="nc" id="L2211">            resumeChangeTrigger(this)</span>
+<span class="nc" id="L2212">            setTransactionSuccessful()</span>
+<span class="nc" id="L2213">            partUpdateCount + parentDeleteCount</span>
+        } finally {
+<span class="nc" id="L2215">            endTransaction()</span>
+        }
+    }
+
+    fun SupportSQLiteDatabase.insertEquivalentAmount(
+        transactionId: Long,
+        equivalentAmount: Long,
+    ) {
+<span class="nc" id="L2223">        insert(TABLE_EQUIVALENT_AMOUNTS, ContentValues(3).apply {</span>
+<span class="nc" id="L2224">            put(KEY_EQUIVALENT_AMOUNT, equivalentAmount)</span>
+<span class="nc" id="L2225">            put(KEY_TRANSACTIONID, transactionId)</span>
+<span class="nc" id="L2226">            put(KEY_CURRENCY, homeCurrency)</span>
+<span class="nc" id="L2227">        })</span>
+<span class="nc" id="L2228">    }</span>
+
+    /**
+     * @param baseTable if not null, extended projection is calculated
+     */
+    fun templateProjection(
+        baseTable: String?,
+<span class="nc" id="L2235">    ): Array&lt;String&gt; = buildList {</span>
+<span class="nc" id="L2236">        add(KEY_ROWID)</span>
+<span class="nc" id="L2237">        add(KEY_AMOUNT)</span>
+<span class="nc" id="L2238">        add(KEY_COMMENT)</span>
+<span class="nc" id="L2239">        add(KEY_CATID)</span>
+<span class="nc" id="L2240">        add(KEY_PATH)</span>
+<span class="nc" id="L2241">        add(KEY_ICON)</span>
+<span class="nc" id="L2242">        add(KEY_PAYEEID)</span>
+<span class="nc" id="L2243">        add(KEY_PAYEE_NAME)</span>
+<span class="nc" id="L2244">        add(KEY_SHORT_NAME)</span>
+<span class="nc" id="L2245">        add(&quot;${effectiveTypeExpression(typeWithFallBack(prefHandler))} AS $KEY_TYPE&quot;)</span>
+<span class="nc" id="L2246">        add(KEY_TRANSFER_ACCOUNT)</span>
+<span class="nc" id="L2247">        add(TRANSFER_ACCOUNT_LABEL)</span>
+<span class="nc" id="L2248">        add(TRANSFER_ACCOUNT_CURRENCY)</span>
+<span class="nc" id="L2249">        add(KEY_ACCOUNTID)</span>
+<span class="nc" id="L2250">        add(KEY_ACCOUNT_LABEL)</span>
+<span class="nc" id="L2251">        add(KEY_METHODID)</span>
+<span class="nc" id="L2252">        add(KEY_TITLE)</span>
+<span class="nc" id="L2253">        add(KEY_PLANID)</span>
+<span class="nc" id="L2254">        add(KEY_PLAN_EXECUTION)</span>
+<span class="nc" id="L2255">        add(KEY_UUID)</span>
+<span class="nc" id="L2256">        add(KEY_PARENTID)</span>
+<span class="nc" id="L2257">        add(KEY_PLAN_EXECUTION_ADVANCE)</span>
+<span class="nc" id="L2258">        add(KEY_DEFAULT_ACTION)</span>
+<span class="nc" id="L2259">        add(KEY_DEBT_ID)</span>
+<span class="nc" id="L2260">        add(KEY_ORIGINAL_CURRENCY)</span>
+<span class="nc" id="L2261">        add(KEY_ORIGINAL_AMOUNT)</span>
+<span class="nc bnc" id="L2262" title="All 2 branches missed.">        if (baseTable != null) {</span>
+<span class="nc" id="L2263">            add(KEY_COLOR)</span>
+<span class="nc" id="L2264">            add(KEY_CURRENCY)</span>
+<span class="nc" id="L2265">            add(KEY_METHOD_LABEL)</span>
+<span class="nc" id="L2266">            add(&quot;$dynamicExchangeRatesDefault AS $KEY_DYNAMIC&quot;)</span>
+<span class="nc" id="L2267">            add(&quot;${checkForSealedAccount(baseTable, TABLE_TEMPLATES, true)} AS $KEY_SEALED&quot;)</span>
+        }
+<span class="nc" id="L2269">    }.toTypedArray()</span>
+
+    fun SupportSQLiteDatabase.insertOrReplaceEquivalentAmount(
+        transactionId: Long,
+        equivalentAmount: Long?,
+    ): Int {
+<span class="nc" id="L2275">        val whereClause = &quot;$KEY_TRANSACTIONID = ? AND $KEY_CURRENCY = ?&quot;</span>
+<span class="nc" id="L2276">        val whereArgs = arrayOf&lt;Any&gt;(transactionId, homeCurrency)</span>
+<span class="nc bnc" id="L2277" title="All 2 branches missed.">        return if (equivalentAmount == null) {</span>
+<span class="nc" id="L2278">            delete(</span>
+<span class="nc" id="L2279">                TABLE_EQUIVALENT_AMOUNTS,</span>
+<span class="nc" id="L2280">                whereClause,</span>
+<span class="nc" id="L2281">                whereArgs</span>
+            )
+        } else {
+            // we do not use &quot;Insert or replace&quot; because we would receive insert trigger instead of
+            // update trigger, and we would not be able to check if value has changed
+<span class="nc bnc" id="L2286" title="All 2 branches missed.">            update(</span>
+<span class="nc" id="L2287">                TABLE_EQUIVALENT_AMOUNTS,</span>
+<span class="nc" id="L2288">                ContentValues(1).apply {</span>
+<span class="nc" id="L2289">                    put(KEY_EQUIVALENT_AMOUNT, equivalentAmount)</span>
+<span class="nc" id="L2290">                },</span>
+<span class="nc" id="L2291">                whereClause,</span>
+<span class="nc" id="L2292">                whereArgs</span>
+<span class="nc bnc" id="L2293" title="All 4 branches missed.">            ).takeIf { it != 0 } ?: run {</span>
+<span class="nc" id="L2294">                insertEquivalentAmount(transactionId, equivalentAmount)</span>
+<span class="nc" id="L2295">                1</span>
+            }
+        }
+    }
+
+    fun SupportSQLiteDatabase.insertOrReplaceEquivalentAmount(
+        equivalentAmount: Long?,
+        where: String?,
+        whereArgs: Array&lt;Any&gt;?,
+<span class="nc" id="L2304">    ) = query(</span>
+<span class="nc" id="L2305">        table = TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L2306">        columns = arrayOf(KEY_ROWID),</span>
+<span class="nc" id="L2307">        selection = where,</span>
+<span class="nc" id="L2308">        selectionArgs = whereArgs</span>
+<span class="nc" id="L2309">    ).use {</span>
+<span class="nc bnc" id="L2310" title="All 2 branches missed.">        if (it.moveToFirst()) {</span>
+<span class="nc" id="L2311">            var count = 0</span>
+            do {
+<span class="nc" id="L2313">                count += insertOrReplaceEquivalentAmount(it.getLong(0), equivalentAmount)</span>
+<span class="nc bnc" id="L2314" title="All 2 branches missed.">            } while (it.moveToNext())</span>
+<span class="nc" id="L2315">            count</span>
+        } else {
+<span class="nc bnc" id="L2317" title="All 2 branches missed.">            report(IllegalArgumentException(&quot;selection = $where, args  = ${whereArgs?.joinToString()} &quot;))</span>
+<span class="nc" id="L2318">            0</span>
+<span class="nc" id="L2319">        }</span>
+<span class="nc" id="L2320">    }</span>
+
+
+    /**
+     * also populates account exchange rates where missing and possible
+     */
+    fun SupportSQLiteDatabase.recalculateEquivalentAmounts(extras: Bundle): Pair&lt;Int, Int&gt; {
+<span class="nc" id="L2327">        val currency = extras.getString(KEY_CURRENCY)!!</span>
+
+<span class="nc bnc" id="L2329" title="All 4 branches missed.">        val accountId = extras.getLong(KEY_ACCOUNTID).takeIf { it != 0L }</span>
+<span class="nc bnc" id="L2330" title="All 2 branches missed.">        var accountIdClause = if (accountId != null) &quot;AND $KEY_ACCOUNTID = ?&quot; else &quot;&quot;</span>
+
+<span class="nc" id="L2332">        val sql1 =</span>
+            &quot;&quot;&quot;INSERT OR REPLACE INTO $TABLE_EQUIVALENT_AMOUNTS ($KEY_TRANSACTIONID, $KEY_CURRENCY, $KEY_EQUIVALENT_AMOUNT)
+<span class="nc" id="L2334">          SELECT $KEY_ROWID, ?, round($KEY_AMOUNT * (SELECT $KEY_VALUE FROM $TABLE_PRICES WHERE $TABLE_PRICES.$KEY_CURRENCY = ? AND $TABLE_PRICES.$KEY_COMMODITY = $VIEW_WITH_ACCOUNT.$KEY_CURRENCY and $TABLE_PRICES.$KEY_DATE &lt;=  strftime('%Y-%m-%d', $VIEW_WITH_ACCOUNT.$KEY_DATE, 'unixepoch', 'localtime') ORDER BY $KEY_DATE DESC, ${priceSort()} LIMIT 1)) AS new_equivalent_amount FROM $VIEW_WITH_ACCOUNT WHERE $dynamicExchangeRatesDefault AND $KEY_CURRENCY != ? AND $KEY_PARENTID IS NULL $accountIdClause AND new_equivalent_amount IS NOT NULL</span>
+        &quot;&quot;&quot;
+<span class="nc" id="L2336">        val count1 = compileStatement(sql1).use {</span>
+<span class="nc" id="L2337">            it.bindAllArgsAsStrings(listOf(currency, currency, currency))</span>
+<span class="nc bnc" id="L2338" title="All 2 branches missed.">            if (accountId != null) {</span>
+<span class="nc" id="L2339">                it.bindLong(4, accountId)</span>
+            }
+<span class="nc" id="L2341">            it.executeUpdateDelete()</span>
+        }
+
+<span class="nc" id="L2344">        val count2 = try {</span>
+<span class="nc bnc" id="L2345" title="All 2 branches missed.">            accountIdClause = if (accountId != null) &quot;AND $KEY_ROWID = ?&quot; else &quot;&quot;</span>
+<span class="nc" id="L2346">            val sql2 =</span>
+                &quot;&quot;&quot;INSERT OR REPLACE INTO $TABLE_ACCOUNT_EXCHANGE_RATES ($KEY_ACCOUNTID, $KEY_CURRENCY_SELF, $KEY_CURRENCY_OTHER, $KEY_EXCHANGE_RATE)
+            SELECT $KEY_ROWID, $KEY_CURRENCY, ?,
+            (
+                SELECT $KEY_VALUE FROM $TABLE_PRICES
+                WHERE
+                    $TABLE_PRICES.$KEY_CURRENCY = ? AND
+                    $TABLE_PRICES.$KEY_COMMODITY = $TABLE_ACCOUNTS.$KEY_CURRENCY AND
+                    $TABLE_PRICES.$KEY_DATE &lt;= coalesce(
+                        strftime('%Y-%m-%d', (SELECT min($KEY_DATE) FROM $TABLE_TRANSACTIONS WHERE $KEY_ACCOUNTID = $TABLE_ACCOUNTS.$KEY_ROWID), 'unixepoch', 'localtime'), 
+                        ?
+                    )
+            )
+<span class="nc" id="L2359">            FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY != ? $accountIdClause</span>
+            &quot;&quot;&quot;
+
+<span class="nc" id="L2362">            compileStatement(sql2).use {</span>
+<span class="nc" id="L2363">                it.bindAllArgsAsStrings(</span>
+<span class="nc" id="L2364">                    listOf(</span>
+<span class="nc" id="L2365">                        currency,</span>
+<span class="nc" id="L2366">                        currency,</span>
+<span class="nc" id="L2367">                        LocalDate.now().toString(),</span>
+<span class="nc" id="L2368">                        currency</span>
+                    )
+                )
+<span class="nc bnc" id="L2371" title="All 2 branches missed.">                if (accountId != null) {</span>
+<span class="nc" id="L2372">                    it.bindLong(5, accountId)</span>
+                }
+<span class="nc" id="L2374">                it.executeUpdateDelete()</span>
+            }
+<span class="nc" id="L2376">        } catch (_: SQLiteConstraintException) {</span>
+<span class="nc" id="L2377">            0</span>
+        }
+
+<span class="nc" id="L2380">        return count1 to count2</span>
+    }
+
+    fun SupportSQLiteDatabase.recalculateEquivalentAmountsForDate(extras: Bundle): Int {
+<span class="nc" id="L2384">        val currency = extras.getString(KEY_CURRENCY)!!</span>
+<span class="nc" id="L2385">        val date = BundleCompat.getSerializable&lt;LocalDate&gt;(extras, KEY_DATE, LocalDate::class.java)</span>
+<span class="nc" id="L2386">        val dateString = date.toString()</span>
+<span class="nc" id="L2387">        val sql =</span>
+            &quot;&quot;&quot;INSERT OR REPLACE INTO $TABLE_EQUIVALENT_AMOUNTS ($KEY_TRANSACTIONID, $KEY_CURRENCY, $KEY_EQUIVALENT_AMOUNT)
+<span class="nc" id="L2389">          SELECT $KEY_ROWID, ?, round($KEY_AMOUNT * (SELECT $KEY_VALUE FROM $TABLE_PRICES WHERE $TABLE_PRICES.$KEY_CURRENCY = ? AND $TABLE_PRICES.$KEY_COMMODITY = ? and $TABLE_PRICES.$KEY_DATE = ? ORDER BY ${priceSort()} LIMIT 1)) AS new_equivalent_amount FROM $VIEW_WITH_ACCOUNT WHERE $dynamicExchangeRatesDefault AND $KEY_CURRENCY = ? AND $KEY_PARENTID IS NULL AND strftime('%Y-%m-%d', $KEY_DATE, 'unixepoch', 'localtime') = ? AND new_equivalent_amount IS NOT NULL</span>
+        &quot;&quot;&quot;
+<span class="nc" id="L2391">        return compileStatement(sql).use {</span>
+<span class="nc" id="L2392">            it.bindAllArgsAsStrings(</span>
+<span class="nc" id="L2393">                listOf(</span>
+<span class="nc" id="L2394">                    homeCurrency,</span>
+<span class="nc" id="L2395">                    homeCurrency,</span>
+<span class="nc" id="L2396">                    currency,</span>
+<span class="nc" id="L2397">                    dateString,</span>
+<span class="nc" id="L2398">                    currency,</span>
+<span class="nc" id="L2399">                    dateString</span>
+                )
+            )
+<span class="nc" id="L2402">            it.executeUpdateDelete()</span>
+        }
+    }
+
+    fun SupportSQLiteDatabase.setFlagSort(extras: Bundle): Bundle {
+<span class="nc" id="L2407">        val sortedIds = extras.getLongArray(KEY_SORTED_IDS)!!</span>
+<span class="nc" id="L2408">        val resultBundle = Bundle()</span>
+<span class="nc" id="L2409">        var result = true</span>
+
+<span class="nc" id="L2411">        beginTransaction()</span>
+<span class="nc" id="L2412">        try {</span>
+<span class="nc" id="L2413">            val sql = &quot;&quot;&quot;</span>
+                UPDATE $TABLE_ACCOUNT_FLAGS
+                SET $KEY_FLAG_SORT_KEY = ?
+                WHERE $KEY_ROWID = ?
+<span class="nc" id="L2417">            &quot;&quot;&quot;.trimIndent()</span>
+<span class="nc" id="L2418">            val statement = compileStatement(sql)</span>
+            //the default flag should have sort key 0, flags that are more important have positive key,
+            //flags that are less important have negative key
+<span class="nc" id="L2421">            var startIndex = sortedIds.indexOf(0).toLong()</span>
+<span class="nc" id="L2422">            sortedIds.forEach { flagId -&gt;</span>
+<span class="nc" id="L2423">                statement.bindLong(1, startIndex--)</span>
+<span class="nc" id="L2424">                statement.bindLong(2, flagId)</span>
+<span class="nc" id="L2425">                val affectedRows = statement.executeUpdateDelete()</span>
+<span class="nc bnc" id="L2426" title="All 2 branches missed.">                if (affectedRows != 1) {</span>
+<span class="nc" id="L2427">                    CrashHandler.throwOrReport(&quot;Update failed, expected 1 affected row, got $affectedRows&quot;)</span>
+<span class="nc" id="L2428">                    result = false</span>
+                }
+<span class="nc" id="L2430">            }</span>
+
+<span class="nc" id="L2432">            statement.close()</span>
+
+<span class="nc" id="L2434">            setTransactionSuccessful()</span>
+
+<span class="nc" id="L2436">        } catch (e: Exception) {</span>
+<span class="nc" id="L2437">            CrashHandler.throwOrReport(e)</span>
+<span class="nc" id="L2438">            result = false</span>
+        } finally {
+<span class="nc" id="L2440">            endTransaction()</span>
+<span class="nc" id="L2441">            resultBundle.putBoolean(KEY_RESULT, result)</span>
+        }
+<span class="nc" id="L2443">        return resultBundle</span>
+    }
+
+    fun SupportSQLiteDatabase.setTypeSort(extras: Bundle): Bundle {
+<span class="nc" id="L2447">        val sortedIds = extras.getLongArray(KEY_SORTED_IDS)!!</span>
+<span class="nc" id="L2448">        val resultBundle = Bundle()</span>
+<span class="nc" id="L2449">        var result = true</span>
+
+<span class="nc" id="L2451">        beginTransaction()</span>
+<span class="nc" id="L2452">        try {</span>
+<span class="nc" id="L2453">            val sql = &quot;&quot;&quot;</span>
+                UPDATE $TABLE_ACCOUNT_TYPES
+                SET $KEY_TYPE_SORT_KEY = ?
+                WHERE $KEY_ROWID = ?
+<span class="nc" id="L2457">            &quot;&quot;&quot;.trimIndent()</span>
+<span class="nc" id="L2458">            val statement = compileStatement(sql)</span>
+            //we use a range that ends with -1, so that new types (with default to 0) will be sorted
+            //before the last type, assuming that in many cases the last type will be the Other assetes/liabilities type
+<span class="nc" id="L2461">            val startIndex = sortedIds.size.toLong() - 2</span>
+<span class="nc" id="L2462">            sortedIds.forEachIndexed { index, flagId -&gt;</span>
+<span class="nc" id="L2463">                statement.bindLong(1, startIndex - index)</span>
+<span class="nc" id="L2464">                statement.bindLong(2, flagId)</span>
+<span class="nc" id="L2465">                val affectedRows = statement.executeUpdateDelete()</span>
+<span class="nc bnc" id="L2466" title="All 2 branches missed.">                if (affectedRows != 1) {</span>
+<span class="nc" id="L2467">                    CrashHandler.throwOrReport(&quot;Update failed, expected 1 affected row, got $affectedRows&quot;)</span>
+<span class="nc" id="L2468">                    result = false</span>
+                }
+<span class="nc" id="L2470">            }</span>
+
+<span class="nc" id="L2472">            statement.close()</span>
+
+<span class="nc" id="L2474">            setTransactionSuccessful()</span>
+
+<span class="nc" id="L2476">        } catch (e: Exception) {</span>
+<span class="nc" id="L2477">            CrashHandler.throwOrReport(e)</span>
+<span class="nc" id="L2478">            result = false</span>
+        } finally {
+<span class="nc" id="L2480">            endTransaction()</span>
+<span class="nc" id="L2481">            resultBundle.putBoolean(KEY_RESULT, result)</span>
+        }
+<span class="nc" id="L2483">        return resultBundle</span>
+    }
+
+    fun SupportSQLiteDatabase.cleanupUnusedPayees() {
+<span class="nc" id="L2487">        beginTransaction()</span>
+<span class="nc" id="L2488">        try {</span>
+<span class="nc" id="L2489">            val deleteUnusedChildrenSql = &quot;&quot;&quot;</span>
+            DELETE FROM $TABLE_PAYEES
+            WHERE $KEY_PARENTID IS NOT NULL
+              AND $KEY_ROWID NOT IN (SELECT DISTINCT $KEY_PAYEEID FROM $TABLE_TRANSACTIONS WHERE $KEY_PAYEEID IS NOT NULL)
+              AND $KEY_ROWID NOT IN (SELECT DISTINCT $KEY_PAYEEID FROM $TABLE_TEMPLATES WHERE $KEY_PAYEEID IS NOT NULL)
+              AND $KEY_ROWID NOT IN (SELECT DISTINCT $KEY_PAYEEID FROM $TABLE_DEBTS WHERE $KEY_PAYEEID IS NOT NULL)
+              AND $KEY_ROWID != $NULL_ROW_ID
+        &quot;&quot;&quot;
+<span class="nc" id="L2497">            execSQL(deleteUnusedChildrenSql)</span>
+
+<span class="nc" id="L2499">            val deleteUnusedRootsSql = &quot;&quot;&quot;</span>
+            DELETE FROM $TABLE_PAYEES
+            WHERE $KEY_PARENTID IS NULL -- This identifies it as a root
+              AND $KEY_ROWID NOT IN (SELECT DISTINCT $KEY_PAYEEID FROM $TABLE_TRANSACTIONS WHERE $KEY_PAYEEID IS NOT NULL)
+              AND $KEY_ROWID NOT IN (SELECT DISTINCT $KEY_PAYEEID FROM $TABLE_TEMPLATES WHERE $KEY_PAYEEID IS NOT NULL)
+              AND $KEY_ROWID NOT IN (SELECT DISTINCT $KEY_PAYEEID FROM $TABLE_DEBTS WHERE $KEY_PAYEEID IS NOT NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM $TABLE_PAYEES p_child
+                  WHERE p_child.$KEY_PARENTID = $TABLE_PAYEES.$KEY_ROWID
+              )
+               AND $KEY_ROWID != $NULL_ROW_ID
+        &quot;&quot;&quot;
+<span class="nc" id="L2511">            execSQL(deleteUnusedRootsSql)</span>
+
+<span class="nc" id="L2513">            setTransactionSuccessful()</span>
+        } finally {
+<span class="nc" id="L2515">            endTransaction()</span>
+        }
+<span class="nc" id="L2517">    }</span>
+
+    fun applyChangesFromSync(extras: Bundle): Bundle {
+<span class="nc" id="L2520">        val db = helper.writableDatabase</span>
+<span class="nc" id="L2521">        val accountId = extras.getLong(KEY_ACCOUNTID)</span>
+<span class="nc" id="L2522">        val currency = currencyContext[extras.getString(KEY_CURRENCY)!!]</span>
+<span class="nc" id="L2523">        val accountTypeId = extras.getLong(KEY_TYPE)</span>
+<span class="nc" id="L2524">        val changes = SyncContract.getSyncFile(context!!).reader().use {</span>
+<span class="nc" id="L2525">            Json.decodeFromString&lt;List&lt;TransactionChange&gt;&gt;(it.readText().also {</span>
+<span class="nc" id="L2526">                log(&quot;Sync file: $it&quot;)</span>
+<span class="nc" id="L2527">            })</span>
+        }
+
+<span class="nc" id="L2530">        val handler = SyncHandler(</span>
+<span class="nc" id="L2531">            accountId,</span>
+<span class="nc" id="L2532">            currency,</span>
+<span class="nc" id="L2533">            accountTypeId,</span>
+<span class="nc" id="L2534">            repository,</span>
+<span class="nc" id="L2535">            currencyContext = currencyContext,</span>
+        )
+
+<span class="nc" id="L2538">        db.beginTransaction()</span>
+<span class="nc" id="L2539">        return try {</span>
+<span class="nc" id="L2540">            pauseChangeTrigger(db)</span>
+<span class="nc" id="L2541">            changes.forEach {</span>
+<span class="nc" id="L2542">                applyBatch(handler.collectOperations(it))</span>
+<span class="nc" id="L2543">            }</span>
+<span class="nc" id="L2544">            resumeChangeTrigger(db)</span>
+<span class="nc" id="L2545">            db.setTransactionSuccessful()</span>
+<span class="nc" id="L2546">            Bundle().apply {</span>
+<span class="nc" id="L2547">                putBoolean(SyncContract.KEY_RESULT, true)</span>
+<span class="nc" id="L2548">            }</span>
+<span class="nc" id="L2549">        } catch (e: Throwable) {</span>
+<span class="nc" id="L2550">            SyncAdapter.log().e(e)</span>
+<span class="nc" id="L2551">            Bundle().apply {</span>
+<span class="nc" id="L2552">                putBoolean(SyncContract.KEY_RESULT, false)</span>
+<span class="nc" id="L2553">                putString(SyncContract.KEY_EXCEPTION, e.message)</span>
+<span class="nc" id="L2554">            }</span>
+        } finally {
+<span class="nc" id="L2556">            db.endTransaction()</span>
+        }
+    }
+
+<span class="nc bnc" id="L2560" title="All 6 branches missed.">    protected fun prefixAnd(where: String?) = if (where.isNullOrEmpty()) &quot;&quot; else &quot; AND ($where)&quot;</span>
+
+    fun SupportSQLiteDatabase.deleteDebt(debId: String, where: String?, whereArgs: Array&lt;String&gt;?) =
+<span class="nc" id="L2563">        safeUpdateWithSealed(protectDebts = false) {</span>
+<span class="nc" id="L2564">            delete(</span>
+<span class="nc" id="L2565">                TABLE_DEBTS,</span>
+<span class="nc" id="L2566">                &quot;$KEY_ROWID = $debId${prefixAnd(where)}&quot;, whereArgs</span>
+<span class="nc" id="L2567">            )</span>
+<span class="nc" id="L2568">        }</span>
+
+    fun SupportSQLiteDatabase.updateCurrency(extras: Bundle): Bundle {
+<span class="nc" id="L2571">        val result = Bundle()</span>
+<span class="nc" id="L2572">        beginTransaction()</span>
+<span class="nc" id="L2573">        try {</span>
+<span class="nc" id="L2574">            val id = extras.getLong(KEY_ROWID)</span>
+<span class="nc" id="L2575">            val values = BundleCompat.getParcelable(extras, KEY_VALUES, ContentValues::class.java)!!</span>
+<span class="nc" id="L2576">            val oldCode = extras.getString(QUERY_PARAMETER_OLD_CODE)</span>
+<span class="nc bnc" id="L2577" title="All 2 branches missed.">            val oldFractionDigits = if (extras.containsKey(QUERY_PARAMETER_OLD_FRACTION_DIGITS)) {</span>
+<span class="nc" id="L2578">                extras.getInt(QUERY_PARAMETER_OLD_FRACTION_DIGITS)</span>
+            } else {
+<span class="nc" id="L2580">                null</span>
+            }
+
+<span class="nc bnc" id="L2583" title="All 2 branches missed.">            if (oldCode != null) {</span>
+<span class="nc" id="L2584">                execSQL(&quot;PRAGMA defer_foreign_keys = ON;&quot;)</span>
+            }
+
+<span class="nc" id="L2587">            val currenciesUpdated = update(</span>
+<span class="nc" id="L2588">                TABLE_CURRENCIES,</span>
+<span class="nc" id="L2589">                values,</span>
+<span class="nc" id="L2590">                &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L2591">                arrayOf(id.toString())</span>
+            )
+<span class="nc" id="L2593">            var accountsUpdated = 0</span>
+
+<span class="nc bnc" id="L2595" title="All 2 branches missed.">            if (currenciesUpdated &gt; 0) {</span>
+<span class="nc" id="L2596">                val code = values.getAsString(KEY_CODE)</span>
+<span class="nc bnc" id="L2597" title="All 6 branches missed.">                if (oldCode != null &amp;&amp; code != null &amp;&amp; code != oldCode) {</span>
+<span class="nc" id="L2598">                    val accountValues = ContentValues(1).apply {</span>
+<span class="nc" id="L2599">                        put(KEY_CURRENCY, code)</span>
+<span class="nc" id="L2600">                    }</span>
+<span class="nc" id="L2601">                    update(</span>
+<span class="nc" id="L2602">                        TABLE_ACCOUNTS,</span>
+<span class="nc" id="L2603">                        accountValues,</span>
+<span class="nc" id="L2604">                        &quot;$KEY_CURRENCY = ?&quot;,</span>
+<span class="nc" id="L2605">                        arrayOf(oldCode)</span>
+                    )
+<span class="nc" id="L2607">                    val priceValues = ContentValues(1).apply {</span>
+<span class="nc" id="L2608">                        put(KEY_COMMODITY, code)</span>
+<span class="nc" id="L2609">                    }</span>
+<span class="nc" id="L2610">                    update(</span>
+<span class="nc" id="L2611">                        TABLE_PRICES,</span>
+<span class="nc" id="L2612">                        priceValues,</span>
+<span class="nc" id="L2613">                        &quot;$KEY_COMMODITY = ?&quot;,</span>
+<span class="nc" id="L2614">                        arrayOf(oldCode)</span>
+                    )
+                }
+<span class="nc bnc" id="L2617" title="All 2 branches missed.">                if (values.containsKey(KEY_LABEL)) {</span>
+<span class="nc" id="L2618">                    val label = values.getAsString(KEY_LABEL)</span>
+<span class="nc bnc" id="L2619" title="All 2 branches missed.">                    val effectiveCode = code ?: query(</span>
+<span class="nc" id="L2620">                        TABLE_CURRENCIES, arrayOf(KEY_CODE), &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L2621">                        arrayOf(id.toString()), null, null, null</span>
+<span class="nc bnc" id="L2622" title="All 2 branches missed.">                    ).use { if (it.moveToFirst()) it.getString(0) else null }</span>
+<span class="nc bnc" id="L2623" title="All 4 branches missed.">                    if (effectiveCode != null &amp;&amp; label != null) {</span>
+<span class="nc" id="L2624">                        update(</span>
+<span class="nc" id="L2625">                            TABLE_ACCOUNTS,</span>
+<span class="nc" id="L2626">                            ContentValues(1).apply { put(KEY_LABEL, label) },</span>
+<span class="nc" id="L2627">                            &quot;$KEY_CURRENCY = ? AND $KEY_IS_PORTFOLIO = ?&quot;,</span>
+<span class="nc" id="L2628">                            arrayOf(effectiveCode, PORTFOLIO_ASSET.toString())</span>
+                        )
+                    }
+                }
+<span class="nc bnc" id="L2632" title="All 4 branches missed.">                if (oldFractionDigits != null &amp;&amp; values.containsKey(KEY_FRACTION_DIGITS)) {</span>
+<span class="nc" id="L2633">                    accountsUpdated = updateFractionDigits(</span>
+<span class="nc" id="L2634">                        this,</span>
+<span class="nc" id="L2635">                        code,</span>
+<span class="nc" id="L2636">                        values.getAsInteger(KEY_FRACTION_DIGITS),</span>
+<span class="nc" id="L2637">                        oldFractionDigits</span>
+                    )
+                }
+            }
+<span class="nc" id="L2641">            setTransactionSuccessful()</span>
+<span class="nc" id="L2642">            result.putInt(KEY_RESULT, currenciesUpdated)</span>
+<span class="nc" id="L2643">            result.putInt(KEY_UPDATED_ACCOUNTS_COUNT, accountsUpdated)</span>
+        } finally {
+<span class="nc" id="L2645">            endTransaction()</span>
+        }
+<span class="nc" id="L2647">        return result</span>
+    }
+
+    fun SupportSQLiteDatabase.checkCurrencyInUse(code: String): Bundle {
+<span class="nc" id="L2651">        val result = Bundle()</span>
+<span class="nc" id="L2652">        val sql = &quot;&quot;&quot;</span>
+            SELECT (
+                EXISTS (SELECT 1 FROM $TABLE_ACCOUNTS WHERE $KEY_CURRENCY = ?) OR
+                EXISTS (SELECT 1 FROM $TABLE_DEBTS WHERE $KEY_CURRENCY = ?) OR
+                EXISTS (SELECT 1 FROM $TABLE_PRICES WHERE $KEY_COMMODITY = ? OR $KEY_CURRENCY = ?) OR
+                EXISTS (SELECT 1 FROM $TABLE_EQUIVALENT_AMOUNTS WHERE $KEY_CURRENCY = ?) OR
+                EXISTS (SELECT 1 FROM $TABLE_BUDGETS WHERE $KEY_CURRENCY = ?) OR
+                EXISTS (SELECT 1 FROM $TABLE_ACCOUNT_EXCHANGE_RATES WHERE $KEY_CURRENCY_OTHER = ? OR $KEY_CURRENCY_SELF = ?)
+            ) AS is_used
+<span class="nc" id="L2661">        &quot;&quot;&quot;.trimIndent()</span>
+
+<span class="nc" id="L2663">        query(sql, arrayOf(code, code, code, code, code, code, code, code)).use { cursor -&gt;</span>
+<span class="nc bnc" id="L2664" title="All 4 branches missed.">            val isUsed = if (cursor.moveToFirst()) cursor.getInt(0) == 1 else false</span>
+<span class="nc" id="L2665">            result.putBoolean(KEY_RESULT, isUsed)</span>
+<span class="nc" id="L2666">        }</span>
+<span class="nc" id="L2667">        return result</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

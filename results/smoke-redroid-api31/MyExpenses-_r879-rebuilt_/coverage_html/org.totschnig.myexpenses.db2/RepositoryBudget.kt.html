@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepositoryBudget.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.db2</a> &gt; <span class="el_source">RepositoryBudget.kt</span></div><h1>RepositoryBudget.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.db2
+
+import android.content.ContentProviderOperation
+import android.content.ContentUris
+import android.content.ContentValues
+import android.net.Uri
+import androidx.annotation.VisibleForTesting
+import kotlinx.coroutines.flow.first
+import org.totschnig.myexpenses.model.CrStatus
+import org.totschnig.myexpenses.model.Grouping
+import org.totschnig.myexpenses.model.PreDefinedPaymentMethod.Companion.translateIfPredefined
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model2.BudgetExport
+import org.totschnig.myexpenses.provider.BaseTransactionProvider
+import org.totschnig.myexpenses.provider.BaseTransactionProvider.Companion.budgetUri
+import org.totschnig.myexpenses.provider.DatabaseConstants.DAY
+import org.totschnig.myexpenses.provider.DatabaseConstants.THIS_YEAR
+import org.totschnig.myexpenses.provider.DatabaseConstants.YEAR
+import org.totschnig.myexpenses.provider.KEY_BUDGET
+import org.totschnig.myexpenses.provider.KEY_BUDGETID
+import org.totschnig.myexpenses.provider.KEY_BUDGET_ROLLOVER_NEXT
+import org.totschnig.myexpenses.provider.KEY_BUDGET_ROLLOVER_PREVIOUS
+import org.totschnig.myexpenses.provider.KEY_CATID
+import org.totschnig.myexpenses.provider.KEY_GROUPING
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_ONE_TIME
+import org.totschnig.myexpenses.provider.KEY_SECOND_GROUP
+import org.totschnig.myexpenses.provider.KEY_SUM_EXPENSES
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.KEY_YEAR
+import org.totschnig.myexpenses.provider.DatabaseConstants.month
+import org.totschnig.myexpenses.provider.DatabaseConstants.thisYearOfMonthStart
+import org.totschnig.myexpenses.provider.DatabaseConstants.thisYearOfWeekStart
+import org.totschnig.myexpenses.provider.DatabaseConstants.week
+import org.totschnig.myexpenses.provider.DatabaseConstants.yearOfMonthStart
+import org.totschnig.myexpenses.provider.DatabaseConstants.yearOfWeekStart
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.TransactionProvider.BUDGETS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.BUDGET_ALLOCATIONS_URI
+import org.totschnig.myexpenses.provider.filter.AccountCriterion
+import org.totschnig.myexpenses.provider.filter.CategoryCriterion
+import org.totschnig.myexpenses.provider.filter.CrStatusCriterion
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.filter.FilterPersistence
+import org.totschnig.myexpenses.provider.filter.MethodCriterion
+import org.totschnig.myexpenses.provider.filter.PayeeCriterion
+import org.totschnig.myexpenses.provider.filter.TagCriterion
+import org.totschnig.myexpenses.provider.getEnum
+import org.totschnig.myexpenses.util.GroupingInfo
+import org.totschnig.myexpenses.util.GroupingNavigator
+import org.totschnig.myexpenses.viewmodel.BudgetViewModel.Companion.prefNameForCriteria
+import org.totschnig.myexpenses.viewmodel.BudgetViewModel2.Companion.aggregateNeutralPrefKey
+import org.totschnig.myexpenses.viewmodel.data.Budget
+import org.totschnig.myexpenses.viewmodel.data.BudgetProgress
+import org.totschnig.myexpenses.viewmodel.data.DateInfo
+import org.totschnig.myexpenses.viewmodel.data.DateInfoExtra
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
+
+
+<span class="nc" id="L61">data class BudgetDuration(val start: LocalDate, val end: LocalDate)</span>
+<span class="nc" id="L62">data class BudgetPeriod(</span>
+<span class="nc" id="L63">    val year: Int?,</span>
+<span class="nc" id="L64">    val second: Int?,</span>
+<span class="nc" id="L65">    val duration: BudgetDuration,</span>
+<span class="nc" id="L66">    val description: String,</span>
+)
+
+fun budgetAllocationQueryUri(
+    budgetId: Long,
+    groupingInfo: GroupingInfo,
+<span class="nc" id="L72">): Uri = budgetAllocationQueryUri(</span>
+<span class="nc" id="L73">    budgetId,</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">    if (groupingInfo.grouping == Grouping.NONE) null else groupingInfo.year.toString(),</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">    if (groupingInfo.grouping == Grouping.NONE) null else groupingInfo.second.toString()</span>
+<span class="nc" id="L76">)</span>
+
+fun budgetAllocationQueryUri(
+    budgetId: Long,
+    year: String?,
+    second: String?,
+<span class="nc" id="L82">): Uri = BaseTransactionProvider.budgetAllocationQueryUri(budgetId, year, second)</span>
+
+suspend fun Repository.sumLoaderForBudget(
+    budget: Budget,
+    aggregateNeutral: Boolean,
+    period: Pair&lt;Int, Int&gt;?,
+): Triple&lt;Uri, String, Array&lt;String&gt;?&gt; {
+<span class="nc" id="L89">    val sumBuilder = TransactionProvider.TRANSACTIONS_SUM_URI.buildUpon()</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">    budget.queryParameter?.let {</span>
+<span class="nc" id="L91">        sumBuilder.appendQueryParameter(it.first, it.second)</span>
+    }
+<span class="nc" id="L93">    sumBuilder.appendQueryParameter(</span>
+<span class="nc" id="L94">        TransactionProvider.QUERY_PARAMETER_AGGREGATE_NEUTRAL,</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        aggregateNeutral.toString()</span>
+    )
+<span class="nc" id="L97">    val filterPersistence =</span>
+<span class="nc" id="L98">        FilterPersistence(dataStore, prefNameForCriteria(budget.id))</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">    var filterClause = if (period == null) buildDateFilterClauseCurrentPeriod(budget) else</span>
+<span class="nc" id="L100">        dateFilterClause(budget.grouping, period.first, period.second)</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">    val selectionArgs: Array&lt;String&gt;? = filterPersistence.getValue()?.let {</span>
+<span class="nc" id="L102">        filterClause += &quot; AND &quot; + it.getSelectionForParts()</span>
+<span class="nc" id="L103">        it.getSelectionArgs(true)</span>
+    }
+<span class="nc" id="L105">    return Triple(sumBuilder.build(), filterClause, selectionArgs)</span>
+}
+
+private fun buildDateFilterClauseCurrentPeriod(budget: Budget): String {
+<span class="nc" id="L109">    val year = &quot;$YEAR = $THIS_YEAR&quot;</span>
+<span class="nc bnc" id="L110" title="All 5 branches missed.">    return when (budget.grouping) {</span>
+<span class="nc" id="L111">        Grouping.YEAR -&gt; year</span>
+<span class="nc" id="L112">        Grouping.DAY -&gt; &quot;$year AND $DAY = ${budget.grouping.queryArgumentForThisSecond}&quot;</span>
+<span class="nc" id="L113">        Grouping.WEEK -&gt; &quot;$yearOfWeekStart = $thisYearOfWeekStart AND $week = ${budget.grouping.queryArgumentForThisSecond}&quot;</span>
+<span class="nc" id="L114">        Grouping.MONTH -&gt; &quot;$yearOfMonthStart = $thisYearOfMonthStart AND $month = ${budget.grouping.queryArgumentForThisSecond}&quot;</span>
+<span class="nc" id="L115">        Grouping.NONE -&gt; budget.durationAsSqlFilter()</span>
+    }
+}
+
+fun dateFilterClause(grouping: Grouping, year: Int, second: Int): String {
+<span class="nc" id="L120">    val yearExpression = &quot;$YEAR = $year&quot;</span>
+<span class="nc bnc" id="L121" title="All 5 branches missed.">    return when (grouping) {</span>
+<span class="nc" id="L122">        Grouping.YEAR -&gt; yearExpression</span>
+<span class="nc" id="L123">        Grouping.DAY -&gt; &quot;$yearExpression AND $DAY = $second&quot;</span>
+<span class="nc" id="L124">        Grouping.WEEK -&gt; &quot;$yearOfWeekStart = $year AND $week = $second&quot;</span>
+<span class="nc" id="L125">        Grouping.MONTH -&gt; &quot;$yearOfMonthStart = $year AND $month = $second&quot;</span>
+<span class="nc" id="L126">        else -&gt; throw IllegalArgumentException()</span>
+    }
+}
+
+<span class="nc" id="L130">fun Repository.getGrouping(budgetId: Long): Grouping? = contentResolver.query(</span>
+<span class="nc" id="L131">    budgetUri(budgetId),</span>
+<span class="nc" id="L132">    null, null, null, null</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">)?.use {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">    if (it.moveToFirst()) it.getEnum(KEY_GROUPING, Grouping.NONE) else null</span>
+<span class="nc" id="L135">}</span>
+
+<span class="nc" id="L137">fun Repository.loadBudget(budgetId: Long): Budget? = contentResolver.query(</span>
+<span class="nc" id="L138">    budgetUri(budgetId),</span>
+<span class="nc" id="L139">    null, null, null, null</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">)?.use { cursor -&gt;</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">    if (cursor.moveToFirst()) budgetCreatorFunction(cursor) else null</span>
+<span class="nc" id="L142">}</span>
+
+<span class="nc" id="L144">suspend fun Repository.loadBudgetProgress(budgetId: Long, period: Pair&lt;Int, Int&gt;?) =</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">    loadBudget(budgetId)?.let { budget -&gt;</span>
+<span class="nc" id="L146">        val grouping = budget.grouping</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        val groupingInfo = if (grouping == Grouping.NONE) BudgetPeriod(</span>
+<span class="nc" id="L148">            year = null,</span>
+<span class="nc" id="L149">            second = null,</span>
+<span class="nc" id="L150">            duration = BudgetDuration(</span>
+<span class="nc" id="L151">                start = budget.start!!,</span>
+<span class="nc" id="L152">                end = budget.end!!</span>
+            ),
+<span class="nc" id="L154">            description = budget.durationPrettyPrint()</span>
+        ) else {
+<span class="nc" id="L156">            val dateInfo = DateInfo.load(contentResolver)</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            val info = period?.let { GroupingInfo(grouping, it.first, it.second) }</span>
+<span class="nc" id="L158">                ?: GroupingNavigator.current(grouping, dateInfo)</span>
+<span class="nc" id="L159">            var weekStart: LocalDate? = null</span>
+
+<span class="nc" id="L161">            BudgetPeriod(</span>
+<span class="nc" id="L162">                year = info.year,</span>
+<span class="nc" id="L163">                second = info.second,</span>
+<span class="nc bnc" id="L164" title="All 5 branches missed.">                duration = when (grouping) {</span>
+                    Grouping.DAY -&gt; {
+<span class="nc" id="L166">                        with(LocalDate.ofYearDay(info.year, info.second)) {</span>
+<span class="nc" id="L167">                            BudgetDuration(this, this)</span>
+                        }
+                    }
+
+                    Grouping.WEEK -&gt; {
+<span class="nc" id="L172">                        weekStart = DateInfoExtra.load(context.contentResolver, info).weekStart!!</span>
+<span class="nc" id="L173">                        BudgetDuration(</span>
+<span class="nc" id="L174">                            weekStart,</span>
+<span class="nc" id="L175">                            Grouping.getWeekEndFromStart(weekStart)</span>
+                        )
+                    }
+
+<span class="nc" id="L179">                    Grouping.MONTH -&gt; with(</span>
+<span class="nc" id="L180">                        Grouping.getMonthRange(</span>
+<span class="nc" id="L181">                            info.year,</span>
+<span class="nc" id="L182">                            info.second,</span>
+<span class="nc" id="L183">                            prefHandler.monthStart</span>
+                        )
+                    ) {
+<span class="nc" id="L186">                        BudgetDuration(this.first, this.second)</span>
+                    }
+
+<span class="nc" id="L189">                    Grouping.YEAR -&gt; BudgetDuration(</span>
+<span class="nc" id="L190">                        LocalDate.ofYearDay(info.year, 1),</span>
+<span class="nc" id="L191">                        LocalDate.of(info.year, 12, 31)</span>
+                    )
+
+<span class="nc" id="L194">                    else -&gt; throw IllegalStateException()</span>
+                },
+<span class="nc" id="L196">                description = grouping.getDisplayTitle(</span>
+<span class="nc" id="L197">                    context,</span>
+<span class="nc" id="L198">                    info.year,</span>
+<span class="nc" id="L199">                    info.second,</span>
+<span class="nc" id="L200">                    dateInfo,</span>
+<span class="nc" id="L201">                    weekStart,</span>
+<span class="nc" id="L202">                    true</span>
+                )
+            )
+        }
+<span class="nc" id="L206">        val totalDays =</span>
+<span class="nc" id="L207">            ChronoUnit.DAYS.between(groupingInfo.duration.start, groupingInfo.duration.end) + 1</span>
+<span class="nc" id="L208">        val currentDay = ChronoUnit.DAYS.between(groupingInfo.duration.start, LocalDate.now()) + 1</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        val allocated = budgetAllocation(</span>
+<span class="nc" id="L210">            budgetId,</span>
+<span class="nc" id="L211">            groupingInfo.year,</span>
+<span class="nc" id="L212">            groupingInfo.second</span>
+<span class="nc" id="L213">        ) ?: 0</span>
+<span class="nc" id="L214">        val aggregateNeutral = dataStore.data.first()[aggregateNeutralPrefKey(budgetId)] == true</span>
+<span class="nc" id="L215">        val (sumUri, sumSelection, sumSelectionArguments) =</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            sumLoaderForBudget(budget, aggregateNeutral, period)</span>
+<span class="nc" id="L217">        val spent = contentResolver.query(</span>
+<span class="nc" id="L218">            sumUri,</span>
+<span class="nc" id="L219">            arrayOf(KEY_SUM_EXPENSES),</span>
+<span class="nc" id="L220">            sumSelection,</span>
+<span class="nc" id="L221">            sumSelectionArguments,</span>
+<span class="nc" id="L222">            null</span>
+<span class="nc" id="L223">        ).use {</span>
+<span class="nc bnc" id="L224" title="All 6 branches missed.">            if (it?.moveToFirst() != true) 0 else it.getLong(0)</span>
+        }
+
+<span class="nc" id="L227">        BudgetProgress(</span>
+<span class="nc" id="L228">            budget.title,</span>
+<span class="nc" id="L229">            budget.currency,</span>
+<span class="nc" id="L230">            groupingInfo,</span>
+<span class="nc" id="L231">            allocated,</span>
+<span class="nc" id="L232">            -spent,</span>
+<span class="nc" id="L233">            totalDays,</span>
+<span class="nc" id="L234">            currentDay</span>
+<span class="nc" id="L235">        )</span>
+<span class="nc" id="L236">    }</span>
+
+/**
+ * resolves the effective values according to business rules
+ */
+fun Repository.budgetAllocation(
+    budgetId: Long,
+    year: Int?,
+    second: Int?,
+<span class="nc" id="L245">) = contentResolver.query(</span>
+<span class="nc" id="L246">    budgetAllocationQueryUri(</span>
+<span class="nc bnc" id="L247" title="All 4 branches missed.">        budgetId, year?.toString(), second?.toString()</span>
+<span class="nc" id="L248">    ), arrayOf(KEY_BUDGET), null, null, null</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">)?.use {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">    if (it.moveToFirst()) it.getLong(0) else null</span>
+<span class="nc" id="L251">}</span>
+
+/**
+ * retrieves raw data from database for verification in tests
+ */
+@VisibleForTesting
+fun Repository.budgetAllocation(
+    budgetId: Long,
+    categoryId: Long,
+    period: Pair&lt;Int, Int&gt;?
+<span class="nc" id="L261">) = contentResolver.query(</span>
+<span class="nc" id="L262">    BUDGET_ALLOCATIONS_URI,</span>
+<span class="nc" id="L263">    arrayOf(KEY_BUDGET),</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">    &quot;$KEY_BUDGETID = ? AND $KEY_CATID = ?&quot; + if (period == null) &quot;&quot; else  &quot;AND $KEY_YEAR = ? AND $KEY_SECOND_GROUP = ?&quot;,</span>
+<span class="nc bnc" id="L265" title="All 4 branches missed.">    listOfNotNull(budgetId.toString(), categoryId.toString(), period?.first?.toString(), period?.second?.toString()).toTypedArray(),</span>
+<span class="nc" id="L266">    null</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">)?.use {</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">    if (it.moveToFirst()) it.getLong(0) else null</span>
+<span class="nc" id="L269">}</span>
+
+fun Repository.deleteBudget(id: Long) =
+<span class="nc" id="L272">    contentResolver.delete(</span>
+<span class="nc" id="L273">        budgetUri(id),</span>
+<span class="nc" id="L274">        null,</span>
+<span class="nc" id="L275">        null</span>
+<span class="nc" id="L276">    )</span>
+
+<span class="nc" id="L278">fun Repository.saveBudget(budget: Budget, initialAmount: Long?, uuid: String? = null): Long {</span>
+<span class="nc" id="L279">    val contentValues = budget.toContentValues(initialAmount)</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">    return if (budget.id == 0L) {</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        contentValues.put(KEY_UUID, uuid ?: generateUuid())</span>
+<span class="nc" id="L282">        contentResolver.insert(BUDGETS_URI, contentValues)</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">            ?.let { ContentUris.parseId(it) } ?: -1</span>
+    } else {
+<span class="nc" id="L285">        contentResolver.update(</span>
+<span class="nc" id="L286">            budgetUri(budget.id),</span>
+<span class="nc" id="L287">            contentValues, null, null</span>
+<span class="nc" id="L288">        ).let {</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            if (it == 1) budget.id else -1</span>
+        }
+    }
+}
+
+<span class="nc" id="L294">fun saveBudgetOp(</span>
+    budget: Budget,
+    initialAmount: Long?,
+<span class="nc" id="L297">    uuid: String? = null,</span>
+): ContentProviderOperation {
+<span class="nc" id="L299">    val contentValues = budget.toContentValues(initialAmount)</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">    return if (budget.id == 0L) {</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        contentValues.put(KEY_UUID, uuid ?: generateUuid())</span>
+<span class="nc" id="L302">        ContentProviderOperation.newInsert(BUDGETS_URI)</span>
+<span class="nc" id="L303">            .withValues(contentValues)</span>
+<span class="nc" id="L304">            .build()</span>
+<span class="nc" id="L305">    } else {</span>
+<span class="nc" id="L306">        ContentProviderOperation.newUpdate(budgetUri(budget.id))</span>
+<span class="nc" id="L307">            .withValues(contentValues)</span>
+<span class="nc" id="L308">            .build()</span>
+    }
+}
+
+suspend fun Repository.importBudget(
+    budgetExport: BudgetExport,
+    budgetId: Long,
+    accountId: Long,
+    uuid: String?,
+): Long {
+<span class="nc" id="L318">    val ops = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc bnc" id="L319" title="All 2 branches missed.">    if (budgetId != 0L) {</span>
+<span class="nc" id="L320">        ops.add(</span>
+<span class="nc" id="L321">            ContentProviderOperation.newDelete(BUDGET_ALLOCATIONS_URI)</span>
+<span class="nc" id="L322">                .withSelection(&quot;$KEY_BUDGETID = ?&quot;, arrayOf(budgetId.toString()))</span>
+<span class="nc" id="L323">                .build()</span>
+        )
+    }
+<span class="nc" id="L326">    return with(budgetExport) {</span>
+<span class="nc" id="L327">        ops.add(</span>
+<span class="nc" id="L328">            saveBudgetOp(</span>
+<span class="nc" id="L329">                Budget(</span>
+<span class="nc" id="L330">                    budgetId,</span>
+<span class="nc" id="L331">                    accountId,</span>
+<span class="nc" id="L332">                    title,</span>
+<span class="nc" id="L333">                    description,</span>
+<span class="nc" id="L334">                    currency,</span>
+<span class="nc" id="L335">                    grouping,</span>
+<span class="nc" id="L336">                    0,</span>
+<span class="nc" id="L337">                    start,</span>
+<span class="nc" id="L338">                    end,</span>
+<span class="nc" id="L339">                    &quot;&quot;,</span>
+<span class="nc" id="L340">                    isDefault,</span>
+<span class="nc" id="L341">                    null</span>
+<span class="nc" id="L342">                ), null, uuid</span>
+            )
+        )
+<span class="nc" id="L345">        allocations.forEach {</span>
+<span class="nc" id="L346">            ops.add(</span>
+<span class="nc" id="L347">                ContentProviderOperation.newInsert(BUDGET_ALLOCATIONS_URI)</span>
+<span class="nc" id="L348">                    .withValues(ContentValues().apply {</span>
+<span class="nc bnc" id="L349" title="All 4 branches missed.">                        put(KEY_CATID, it.category?.let { ensureCategoryPath(it) } ?: 0L)</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                        if (budgetId != 0L) {</span>
+<span class="nc" id="L351">                            put(KEY_BUDGETID, budgetId)</span>
+                        }
+<span class="nc" id="L353">                        put(KEY_YEAR, it.year)</span>
+<span class="nc" id="L354">                        put(KEY_SECOND_GROUP, it.second)</span>
+<span class="nc" id="L355">                        put(KEY_BUDGET, it.budget)</span>
+<span class="nc" id="L356">                        put(KEY_BUDGET_ROLLOVER_PREVIOUS, it.rolloverPrevious)</span>
+<span class="nc" id="L357">                        put(KEY_BUDGET_ROLLOVER_NEXT, it.rolloverNext)</span>
+<span class="nc" id="L358">                        put(KEY_ONE_TIME, it.oneTime)</span>
+<span class="nc" id="L359">                    }).apply {</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                        if (budgetId == 0L) {</span>
+<span class="nc" id="L361">                            withValueBackReference(KEY_BUDGETID, 0)</span>
+                        }
+<span class="nc" id="L363">                    }</span>
+<span class="nc" id="L364">                    .build())</span>
+<span class="nc" id="L365">        }</span>
+<span class="nc" id="L366">        val result = contentResolver.applyBatch(TransactionProvider.AUTHORITY, ops)</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        val budgetId = if (budgetId != 0L) budgetId else ContentUris.parseId(result[0].uri!!)</span>
+<span class="nc" id="L368">        val filterPersistence = FilterPersistence(dataStore, prefNameForCriteria(budgetId))</span>
+<span class="nc" id="L369">        val criteria: List&lt;Criterion&gt; = buildList {</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            categoryFilter?.mapNotNull { path -&gt;</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">                ensureCategoryPath(path)?.let { path.last().label to it }</span>
+<span class="nc" id="L372">            }?.let {</span>
+<span class="nc" id="L373">                val label = it.joinToString { it.first }</span>
+<span class="nc" id="L374">                val ids = it.map { it.second }.toLongArray()</span>
+<span class="nc" id="L375">                add(CategoryCriterion(label, *ids))</span>
+            }
+<span class="nc bnc" id="L377" title="All 4 branches missed.">            partyFilter?.mapNotNull { party -&gt;  requireParty(party)?.let { party to it } }?.let {</span>
+<span class="nc" id="L378">                val label = it.joinToString { it.first }</span>
+<span class="nc" id="L379">                val ids = it.map { it.second }.toLongArray()</span>
+<span class="nc" id="L380">                add(PayeeCriterion(label, *ids))</span>
+            }
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            methodFilter?.mapNotNull { method -&gt;</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                findPaymentMethod(method)?.let { method.translateIfPredefined(context) to it }</span>
+<span class="nc" id="L384">            }?.let {</span>
+<span class="nc" id="L385">                val label = it.joinToString { it.first }</span>
+<span class="nc" id="L386">                val ids = it.map { it.second }.toLongArray()</span>
+<span class="nc" id="L387">                add(MethodCriterion(label, *ids))</span>
+            }
+<span class="nc bnc" id="L389" title="All 2 branches missed.">            statusFilter?.mapNotNull {</span>
+<span class="nc" id="L390">                try {</span>
+<span class="nc" id="L391">                    CrStatus.valueOf(it)</span>
+<span class="nc" id="L392">                } catch (_: Exception) {</span>
+<span class="nc" id="L393">                    null</span>
+<span class="nc" id="L394">                }</span>
+<span class="nc bnc" id="L395" title="All 6 branches missed.">            }?.takeIf { it.isNotEmpty() }?.let {</span>
+<span class="nc" id="L396">                add(CrStatusCriterion(it))</span>
+            }
+<span class="nc bnc" id="L398" title="All 8 branches missed.">            tagFilter?.takeIf { it.isNotEmpty() }?.map {</span>
+<span class="nc" id="L399">                it to extractTagId(it)</span>
+<span class="nc" id="L400">            }?.let {</span>
+<span class="nc" id="L401">                val label = it.joinToString { it.first }</span>
+<span class="nc" id="L402">                val ids = it.map { it.second }.toLongArray()</span>
+<span class="nc" id="L403">                add(TagCriterion(label, *ids))</span>
+            }
+<span class="nc bnc" id="L405" title="All 2 branches missed.">            accountFilter?.mapNotNull { accountUuid -&gt;</span>
+<span class="nc" id="L406">                findAccountByUuidWithExtraColumn(accountUuid, KEY_LABEL)</span>
+<span class="nc bnc" id="L407" title="All 6 branches missed.">            }?.takeIf { it.isNotEmpty() }?.let {</span>
+<span class="nc" id="L408">                val label = it.joinToString { it.second!! }</span>
+<span class="nc" id="L409">                val ids = it.map { it.first }.toLongArray()</span>
+<span class="nc" id="L410">                add(AccountCriterion(label, *ids))</span>
+<span class="nc" id="L411">            }</span>
+<span class="nc" id="L412">        }</span>
+<span class="nc" id="L413">        filterPersistence.persist(criteria)</span>
+<span class="nc" id="L414">        budgetId</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

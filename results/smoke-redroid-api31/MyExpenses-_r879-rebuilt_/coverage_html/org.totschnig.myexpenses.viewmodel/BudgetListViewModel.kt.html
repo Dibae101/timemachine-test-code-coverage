@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BudgetListViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">BudgetListViewModel.kt</span></div><h1>BudgetListViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.lifecycle.viewModelScope
+import app.cash.copper.flow.mapToOne
+import app.cash.copper.flow.observeQuery
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.db2.budgetAllocationQueryUri
+import org.totschnig.myexpenses.db2.findAccountByUuid
+import org.totschnig.myexpenses.db2.importBudget
+import org.totschnig.myexpenses.db2.sumLoaderForBudget
+import org.totschnig.myexpenses.model2.BudgetExport
+import org.totschnig.myexpenses.provider.KEY_BUDGET
+import org.totschnig.myexpenses.provider.KEY_SUM_EXPENSES
+import org.totschnig.myexpenses.provider.DatabaseConstants.THIS_YEAR
+import org.totschnig.myexpenses.provider.filter.FilterPersistence
+import org.totschnig.myexpenses.provider.filter.SimpleCriterion
+import org.totschnig.myexpenses.provider.filter.asSimpleList
+import org.totschnig.myexpenses.provider.getLong
+import org.totschnig.myexpenses.sync.GenericAccountService
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.enumValueOrDefault
+import org.totschnig.myexpenses.viewmodel.BudgetViewModel2.Companion.aggregateNeutralPrefKey
+import org.totschnig.myexpenses.viewmodel.data.Budget
+import org.totschnig.myexpenses.viewmodel.data.getLabelForBudgetType
+import timber.log.Timber
+
+<span class="nc" id="L42">class BudgetListViewModel(application: Application) : BudgetViewModel(application) {</span>
+<span class="nc" id="L43">    private val groupingSortKey = stringPreferencesKey(&quot;budgetListGrouping&quot;)</span>
+
+<span class="nc" id="L45">    enum class Grouping(val commandId: Int) {</span>
+<span class="nc" id="L46">        Account(R.id.GROUPING_BUDGETS_ACCOUNT_COMMAND), Grouping(R.id.GROUPING_BUDGETS_GROUPING_COMMAND)</span>
+    }
+
+    sealed interface ImportInfo {
+        val uuid: String
+    }
+
+<span class="nc" id="L53">    data class Importable(</span>
+<span class="nc" id="L54">        override val uuid: String,</span>
+<span class="nc" id="L55">        val budget: BudgetExport,</span>
+<span class="nc" id="L56">        val accountId: Long,</span>
+    ) : ImportInfo
+
+<span class="nc" id="L59">    data class NotImportable(override val uuid: String, val title: String) : ImportInfo</span>
+
+<span class="nc" id="L61">    private val _importInfo = MutableStateFlow&lt;Pair&lt;String, List&lt;ImportInfo&gt;&gt;?&gt;(null)</span>
+<span class="nc" id="L62">    val importInfo: StateFlow&lt;Pair&lt;String, List&lt;ImportInfo&gt;&gt;?&gt; = _importInfo.asStateFlow()</span>
+
+<span class="nc" id="L64">    fun grouping() = dataStore.data.map { preferences -&gt;</span>
+<span class="nc" id="L65">        enumValueOrDefault(preferences[groupingSortKey], Grouping.Account)</span>
+<span class="nc" id="L66">    }</span>
+
+    suspend fun setGrouping(grouping: Grouping) {
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        dataStore.edit {</span>
+<span class="nc" id="L70">            it[groupingSortKey] = grouping.name</span>
+<span class="nc" id="L71">        }</span>
+<span class="nc" id="L72">    }</span>
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+<span class="nc" id="L75">    val dataGrouped: StateFlow&lt;Pair&lt;Grouping, List&lt;Pair&lt;String, List&lt;Budget&gt;&gt;&gt;&gt;&gt; by lazy {</span>
+<span class="nc" id="L76">        dataStore.data.map { preferences -&gt;</span>
+<span class="nc" id="L77">            enumValueOrDefault(preferences[groupingSortKey], Grouping.Account)</span>
+<span class="nc" id="L78">        }.flatMapLatest { grouping -&gt;</span>
+<span class="nc" id="L79">            data.map {</span>
+<span class="nc" id="L80">                grouping to if (grouping == Grouping.Account)</span>
+<span class="nc" id="L81">                    it.groupBy { it.accountId }</span>
+<span class="nc" id="L82">                        .values</span>
+<span class="nc" id="L83">                        .sortedWith(</span>
+<span class="nc" id="L84">                            compareBy(</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                            { it.first().accountId &lt; 0 },</span>
+<span class="nc" id="L86">                            { it.first().accountName }</span>
+                        ))
+<span class="nc" id="L88">                        .map {</span>
+<span class="nc" id="L89">                            it.first().label(localizedContext) to it</span>
+                        }
+                else
+<span class="nc" id="L92">                    it.groupBy { it.grouping }</span>
+<span class="nc" id="L93">                        .toSortedMap()</span>
+<span class="nc" id="L94">                        .values</span>
+<span class="nc" id="L95">                        .map {</span>
+<span class="nc" id="L96">                            localizedContext.getString(it.first().grouping.getLabelForBudgetType()) to it</span>
+<span class="nc" id="L97">                        }</span>
+<span class="nc" id="L98">            }</span>
+<span class="nc" id="L99">        }.stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, Grouping.Account to emptyList())</span>
+    }
+
+
+<span class="nc" id="L103">    fun budgetCriteria(budget: Budget): Flow&lt;List&lt;SimpleCriterion&lt;*&gt;&gt;&gt; = FilterPersistence(</span>
+<span class="nc" id="L104">        dataStore,</span>
+<span class="nc" id="L105">        prefNameForCriteria(budget.id),</span>
+<span class="nc" id="L106">        viewModelScope</span>
+<span class="nc" id="L107">    ).whereFilter.map { it.asSimpleList }</span>
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun budgetAmounts(budget: Budget): Flow&lt;Pair&lt;Long, Long&gt;&gt; =
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        combine(budgetCriteria(budget), dataStore.data) { _, data -&gt; data }</span>
+<span class="nc" id="L112">            .map {</span>
+<span class="nc" id="L113">                it[aggregateNeutralPrefKey(budget.id)] == true</span>
+<span class="nc" id="L114">            }.flatMapLatest { aggregateNeutral -&gt;</span>
+<span class="nc" id="L115">                Timber.d(&quot;(Re)Loading, %d&quot;, budget.id)</span>
+<span class="nc" id="L116">                val (sumUri, sumSelection, sumSelectionArguments) = repository.sumLoaderForBudget(</span>
+<span class="nc" id="L117">                    budget, aggregateNeutral, null</span>
+                )
+
+<span class="nc" id="L120">                val allocationUri = budgetAllocationQueryUri(</span>
+<span class="nc" id="L121">                    budget.id,</span>
+<span class="nc" id="L122">                    if (budget.grouping == org.totschnig.myexpenses.model.Grouping.NONE) null else THIS_YEAR,</span>
+<span class="nc" id="L123">                    budget.grouping.queryArgumentForThisSecond</span>
+                )
+
+<span class="nc" id="L126">                combine(</span>
+<span class="nc" id="L127">                    contentResolver.observeQuery(</span>
+<span class="nc" id="L128">                        sumUri,</span>
+<span class="nc" id="L129">                        arrayOf(KEY_SUM_EXPENSES), sumSelection, sumSelectionArguments, null, true</span>
+                    )
+<span class="nc" id="L131">                        .mapToOne { it.getLong(KEY_SUM_EXPENSES) },</span>
+<span class="nc" id="L132">                    contentResolver.observeQuery(allocationUri, projection = arrayOf(KEY_BUDGET))</span>
+<span class="nc" id="L133">                        .mapToOne(0) {</span>
+<span class="nc" id="L134">                            it.getLong(0)</span>
+                        }
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                ) { spent, allocated -&gt;</span>
+<span class="nc" id="L137">                    Timber.d(&quot;Emitting, %d&quot;, budget.id)</span>
+<span class="nc" id="L138">                    spent to allocated</span>
+<span class="nc" id="L139">                }</span>
+<span class="nc" id="L140">            }</span>
+
+    val allBudgets
+<span class="nc" id="L143">        get() = dataGrouped.value.second.flatMap { it.second }</span>
+
+    fun importBudgets(accountName: String) {
+<span class="nc" id="L146">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            GenericAccountService.getSyncBackendProvider(localizedContext, accountName)</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                .mapCatching { backend -&gt;</span>
+<span class="nc" id="L149">                    val allBudgets = allBudgets</span>
+<span class="nc" id="L150">                    val budgets = backend.budgets</span>
+<span class="nc" id="L151">                    accountName to</span>
+<span class="nc" id="L152">                            budgets.filter { remote -&gt;</span>
+<span class="nc" id="L153">                                allBudgets.none { local -&gt; local.uuid == remote.first }</span>
+<span class="nc" id="L154">                            }.map { (uuid, budget) -&gt;</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                                budget.accountUuid?.let {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                                    repository.findAccountByUuid(it)?.let {</span>
+<span class="nc" id="L157">                                        Importable(uuid, budget, it)</span>
+<span class="nc" id="L158">                                    } ?: NotImportable(uuid, budget.title)</span>
+<span class="nc" id="L159">                                } ?: Importable(uuid, budget, 0L)</span>
+<span class="nc" id="L160">                            }</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                }.onSuccess { result -&gt;</span>
+<span class="nc" id="L162">                    _importInfo.update { result }</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                }.onFailure {</span>
+<span class="nc" id="L164">                    CrashHandler.report(it)</span>
+<span class="nc" id="L165">                }</span>
+<span class="nc" id="L166">        }</span>
+<span class="nc" id="L167">    }</span>
+
+    fun importDialogDismissed() {
+<span class="nc" id="L170">        _importInfo.update {</span>
+<span class="nc" id="L171">            null</span>
+        }
+<span class="nc" id="L173">    }</span>
+
+    fun importBudgetsDo(uuids: List&lt;String&gt;) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        importInfo.value?.let { (accountName, list) -&gt;</span>
+<span class="nc" id="L177">            val budgetsToImport = list</span>
+<span class="nc" id="L178">                .filterIsInstance&lt;Importable&gt;()</span>
+<span class="nc" id="L179">                .filter { uuids.contains(it.uuid) }</span>
+<span class="nc" id="L180">            viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L181">                budgetsToImport.forEach {</span>
+<span class="nc" id="L182">                    val budgetId = repository.importBudget(it.budget, 0, it.accountId, it.uuid)</span>
+<span class="nc" id="L183">                    setBudgetSynced(budgetId, it.accountId, prefHandler, accountName)</span>
+<span class="nc" id="L184">                }</span>
+<span class="nc" id="L185">            }</span>
+        }
+<span class="nc" id="L187">        importDialogDismissed()</span>
+<span class="nc" id="L188">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

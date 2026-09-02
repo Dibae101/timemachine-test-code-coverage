@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BarcodeImageWriterTask.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Catima</a> &gt; <a href="index.source.html" class="el_package">protect.card_locker</a> &gt; <span class="el_source">BarcodeImageWriterTask.java</span></div><h1>BarcodeImageWriterTask.java</h1><pre class="source lang-java linenums">package protect.card_locker;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.PorterDuff;
+import android.util.ArrayMap;
+import android.util.Log;
+import android.util.TypedValue;
+import android.view.View;
+import android.widget.ImageView;
+import android.widget.TextView;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.google.zxing.EncodeHintType;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.WriterException;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.common.StringUtils;
+
+import java.lang.ref.WeakReference;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.Objects;
+
+import protect.card_locker.async.CompatCallable;
+
+/**
+ * This task will generate a barcode and load it into an ImageView.
+ * Only a weak reference of the ImageView is kept, so this class will not
+ * prevent the ImageView from being garbage collected.
+ */
+public class BarcodeImageWriterTask implements CompatCallable&lt;Bitmap&gt; {
+    private static final String TAG = &quot;Catima&quot;;
+
+    private static final int IS_VALID = 999;
+    private final Context mContext;
+    private boolean isSuccesful;
+
+    // When drawn in a smaller window 1D barcodes for some reason end up
+    // squished, whereas 2D barcodes look fine.
+    private static final int MAX_WIDTH_1D = 1500;
+    private static final int MAX_WIDTH_2D = 500;
+
+    private final WeakReference&lt;ImageView&gt; imageViewReference;
+    private final WeakReference&lt;TextView&gt; textViewReference;
+    private String cardId;
+    private final CatimaBarcode format;
+    private final Charset encoding;
+    private final int imageHeight;
+    private final int imageWidth;
+    private final int imagePadding;
+    private final boolean widthPadding;
+    private final boolean showFallback;
+    private final BarcodeImageWriterResultCallback callback;
+
+    public BarcodeImageWriterTask(
+            Context context, ImageView imageView, String cardIdString,
+            CatimaBarcode barcodeFormat, @NonNull Charset barcodeEncoding, TextView textView,
+            boolean showFallback, BarcodeImageWriterResultCallback callback, boolean roundCornerPadding, boolean isFullscreen
+<span class="nc" id="L64">    ) {</span>
+<span class="nc" id="L65">        mContext = context;</span>
+
+<span class="nc" id="L67">        isSuccesful = true;</span>
+<span class="nc" id="L68">        this.callback = callback;</span>
+
+        // Use a WeakReference to ensure the ImageView can be garbage collected
+<span class="nc" id="L71">        imageViewReference = new WeakReference&lt;&gt;(imageView);</span>
+<span class="nc" id="L72">        textViewReference = new WeakReference&lt;&gt;(textView);</span>
+
+<span class="nc" id="L74">        cardId = cardIdString;</span>
+<span class="nc" id="L75">        format = barcodeFormat;</span>
+<span class="nc" id="L76">        encoding = barcodeEncoding;</span>
+
+<span class="nc" id="L78">        int imageViewHeight = imageView.getHeight();</span>
+<span class="nc" id="L79">        int imageViewWidth = imageView.getWidth();</span>
+
+        // Some barcodes already have internal whitespace and shouldn't get extra padding
+        // TODO: Get rid of this hack by somehow detecting this extra whitespace
+<span class="nc bnc" id="L83" title="All 4 branches missed.">        if (roundCornerPadding &amp;&amp; !barcodeFormat.hasInternalPadding()) {</span>
+<span class="nc" id="L84">            imagePadding = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 10, context.getResources().getDisplayMetrics()));</span>
+        } else {
+<span class="nc" id="L86">            imagePadding = 0;</span>
+        }
+
+<span class="nc bnc" id="L89" title="All 4 branches missed.">        if (format.isSquare() &amp;&amp; imageViewWidth &gt; imageViewHeight) {</span>
+<span class="nc" id="L90">            imageViewWidth -= imagePadding;</span>
+<span class="nc" id="L91">            widthPadding = true;</span>
+        } else {
+<span class="nc" id="L93">            imageViewHeight -= imagePadding;</span>
+<span class="nc" id="L94">            widthPadding = false;</span>
+        }
+
+<span class="nc" id="L97">        final int MAX_WIDTH = getMaxWidth(format);</span>
+
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (format.isSquare()) {</span>
+<span class="nc" id="L100">            imageHeight = imageWidth = Math.min(imageViewHeight, Math.min(MAX_WIDTH, imageViewWidth));</span>
+<span class="nc bnc" id="L101" title="All 4 branches missed.">        } else if (imageView.getWidth() &lt; MAX_WIDTH &amp;&amp; !isFullscreen) {</span>
+<span class="nc" id="L102">            imageHeight = imageViewHeight;</span>
+<span class="nc" id="L103">            imageWidth = imageViewWidth;</span>
+        } else {
+            // Scale down the image to reduce the memory needed to produce it
+<span class="nc" id="L106">            imageWidth = Math.min(MAX_WIDTH, this.mContext.getResources().getDisplayMetrics().widthPixels);</span>
+<span class="nc" id="L107">            double ratio = (double) imageWidth / (double) imageViewWidth;</span>
+<span class="nc" id="L108">            imageHeight = (int) (imageViewHeight * ratio);</span>
+        }
+
+<span class="nc" id="L111">        this.showFallback = showFallback;</span>
+<span class="nc" id="L112">    }</span>
+
+    private int getMaxWidth(CatimaBarcode format) {
+<span class="nc bnc" id="L115" title="All 3 branches missed.">        switch (format.format()) {</span>
+            // 2D barcodes
+            case AZTEC:
+            case MAXICODE:
+            case PDF_417:
+            case QR_CODE:
+<span class="nc" id="L121">                return MAX_WIDTH_2D;</span>
+
+            // 2D but rectangular versions get blurry otherwise
+            case DATA_MATRIX:
+<span class="nc" id="L125">                return MAX_WIDTH_1D;</span>
+
+            // 1D barcodes:
+            case CODABAR:
+            case CODE_39:
+            case CODE_93:
+            case CODE_128:
+            case EAN_8:
+            case EAN_13:
+            case ITF:
+            case UPC_A:
+            case UPC_E:
+            case RSS_14:
+            case RSS_EXPANDED:
+            case UPC_EAN_EXTENSION:
+            default:
+<span class="nc" id="L141">                return MAX_WIDTH_1D;</span>
+        }
+    }
+
+    private String getFallbackString(CatimaBarcode format) {
+<span class="nc bnc" id="L146" title="All 14 branches missed.">        switch (format.format()) {</span>
+            // 2D barcodes
+            case AZTEC:
+<span class="nc" id="L149">                return &quot;AZTEC&quot;;</span>
+            case DATA_MATRIX:
+<span class="nc" id="L151">                return &quot;DATA_MATRIX&quot;;</span>
+            case PDF_417:
+<span class="nc" id="L153">                return &quot;PDF_417&quot;;</span>
+            case QR_CODE:
+<span class="nc" id="L155">                return &quot;QR_CODE&quot;;</span>
+
+            // 1D barcodes:
+            case CODABAR:
+<span class="nc" id="L159">                return &quot;C0C&quot;;</span>
+            case CODE_39:
+<span class="nc" id="L161">                return &quot;CODE_39&quot;;</span>
+            case CODE_93:
+<span class="nc" id="L163">                return &quot;CODE_93&quot;;</span>
+            case CODE_128:
+<span class="nc" id="L165">                return &quot;CODE_128&quot;;</span>
+            case EAN_8:
+<span class="nc" id="L167">                return &quot;32123456&quot;;</span>
+            case EAN_13:
+<span class="nc" id="L169">                return &quot;5901234123457&quot;;</span>
+            case ITF:
+<span class="nc" id="L171">                return &quot;1003&quot;;</span>
+            case UPC_A:
+<span class="nc" id="L173">                return &quot;123456789012&quot;;</span>
+            case UPC_E:
+<span class="nc" id="L175">                return &quot;0123456&quot;;</span>
+            default:
+<span class="nc" id="L177">                throw new IllegalArgumentException(&quot;No fallback known for this barcode type&quot;);</span>
+        }
+    }
+
+    private Bitmap generate() {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (cardId.isEmpty()) {</span>
+<span class="nc" id="L183">            return null;</span>
+        }
+
+<span class="nc" id="L186">        MultiFormatWriter writer = new MultiFormatWriter();</span>
+
+<span class="nc" id="L188">        Map&lt;EncodeHintType, Object&gt; encodeHints = new ArrayMap&lt;&gt;();</span>
+        // We don't want to pass the ISO-8859-1 as an encoding hint as zxing may add this as ECI
+        // inside the barcode.
+        //
+        // Due to many barcode scanners in the wild being badly coded they may trip over ECI
+        // info existing and fail to scan.
+        // See:
+        // - https://github.com/CatimaLoyalty/Android/issues/2921
+        // - https://github.com/CatimaLoyalty/Android/issues/2932
+        //
+        // Just not always passing the encoding hint is slightly hacky, but in 5+ years of Catima
+        // cards without encode hints have never caused any issues (unless they were UTF-8), yet
+        // just days after passing ISO-8859-1 as CHARACTER_SET in the encode hints already 2
+        // scan failures were reported (one for QR, one for Aztec).
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (!Objects.equals(encoding.name(), StandardCharsets.ISO_8859_1.name())) {</span>
+<span class="nc" id="L203">            Log.d(TAG, &quot;Chosen encoding is not ISO_8859_1, so passing as encoding hint&quot;);</span>
+<span class="nc" id="L204">            encodeHints.put(EncodeHintType.CHARACTER_SET, encoding);</span>
+        } else {
+<span class="nc" id="L206">            Log.d(TAG, &quot;Not passing encoding as encoding hint&quot;);</span>
+        }
+
+        BitMatrix bitMatrix;
+        try {
+            try {
+<span class="nc" id="L212">                bitMatrix = writer.encode(cardId, format.format(), imageWidth, imageHeight, encodeHints);</span>
+<span class="nc" id="L213">            } catch (Exception e) {</span>
+                // Cast a wider net here and catch any exception, as there are some
+                // cases where an encoder may fail if the data is invalid for the
+                // barcode type. If this happens, we want to fail gracefully.
+<span class="nc" id="L217">                throw new WriterException(e);</span>
+<span class="nc" id="L218">            }</span>
+
+<span class="nc" id="L220">            final int WHITE = 0xFFFFFFFF;</span>
+<span class="nc" id="L221">            final int BLACK = 0xFF000000;</span>
+
+<span class="nc" id="L223">            int bitMatrixWidth = bitMatrix.getWidth();</span>
+<span class="nc" id="L224">            int bitMatrixHeight = bitMatrix.getHeight();</span>
+
+<span class="nc" id="L226">            int[] pixels = new int[bitMatrixWidth * bitMatrixHeight];</span>
+
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            for (int y = 0; y &lt; bitMatrixHeight; y++) {</span>
+<span class="nc" id="L229">                int offset = y * bitMatrixWidth;</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                for (int x = 0; x &lt; bitMatrixWidth; x++) {</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                    int color = bitMatrix.get(x, y) ? BLACK : WHITE;</span>
+<span class="nc" id="L232">                    pixels[offset + x] = color;</span>
+                }
+            }
+<span class="nc" id="L235">            Bitmap bitmap = Bitmap.createBitmap(bitMatrixWidth, bitMatrixHeight,</span>
+                    Bitmap.Config.ARGB_8888);
+<span class="nc" id="L237">            bitmap.setPixels(pixels, 0, bitMatrixWidth, 0, 0, bitMatrixWidth, bitMatrixHeight);</span>
+
+            // Determine if the image needs to be scaled.
+            // This is necessary because the datamatrix barcode generator
+            // ignores the requested size and returns the smallest image necessary
+            // to represent the barcode. If we let the ImageView scale the image
+            // it will use bi-linear filtering, which results in a blurry barcode.
+            // To avoid this, if scaling is needed do so without filtering.
+
+<span class="nc" id="L246">            int heightScale = imageHeight / bitMatrixHeight;</span>
+<span class="nc" id="L247">            int widthScale = imageWidth / bitMatrixHeight;</span>
+<span class="nc" id="L248">            int scalingFactor = Math.min(heightScale, widthScale);</span>
+
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (scalingFactor &gt; 1) {</span>
+<span class="nc" id="L251">                bitmap = Bitmap.createScaledBitmap(bitmap, bitMatrixWidth * scalingFactor, bitMatrixHeight * scalingFactor, false);</span>
+            }
+
+<span class="nc" id="L254">            return bitmap;</span>
+<span class="nc" id="L255">        } catch (WriterException e) {</span>
+<span class="nc" id="L256">            Log.e(TAG, &quot;Failed to generate barcode of type &quot; + format + &quot;: &quot; + cardId, e);</span>
+<span class="nc" id="L257">        } catch (OutOfMemoryError e) {</span>
+<span class="nc" id="L258">            Log.w(TAG, &quot;Insufficient memory to render barcode, &quot;</span>
+<span class="nc" id="L259">                    + imageWidth + &quot;x&quot; + imageHeight + &quot;, &quot; + format.name()</span>
+<span class="nc" id="L260">                    + &quot;, length=&quot; + cardId.length(), e);</span>
+<span class="nc" id="L261">        }</span>
+
+<span class="nc" id="L263">        return null;</span>
+    }
+
+    public Bitmap doInBackground(Void... params) {
+        // Only do the hard tasks if we've not already been cancelled
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if (!Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L269">            Bitmap bitmap = generate();</span>
+
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            if (bitmap == null) {</span>
+<span class="nc" id="L272">                isSuccesful = false;</span>
+
+<span class="nc bnc" id="L274" title="All 4 branches missed.">                if (showFallback &amp;&amp; !Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L275">                    Log.i(TAG, &quot;Barcode generation failed, generating fallback...&quot;);</span>
+<span class="nc" id="L276">                    cardId = getFallbackString(format);</span>
+<span class="nc" id="L277">                    bitmap = generate();</span>
+<span class="nc" id="L278">                    return bitmap;</span>
+                }
+            } else {
+<span class="nc" id="L281">                return bitmap;</span>
+            }
+        }
+
+        // We've been interrupted - create a empty fallback
+<span class="nc" id="L286">        Bitmap.Config config = Bitmap.Config.ARGB_8888;</span>
+<span class="nc" id="L287">        return Bitmap.createBitmap(imageWidth, imageHeight, config);</span>
+    }
+
+    public void onPostExecute(Object castResult) {
+<span class="nc" id="L291">        Bitmap result = (Bitmap) castResult;</span>
+
+<span class="nc" id="L293">        Log.i(TAG, &quot;Finished generating barcode image of type &quot; + format + &quot;: &quot; + cardId);</span>
+<span class="nc" id="L294">        ImageView imageView = imageViewReference.get();</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        if (imageView == null) {</span>
+            // The ImageView no longer exists, nothing to do
+<span class="nc" id="L297">            return;</span>
+        }
+
+<span class="nc" id="L300">        String formatPrettyName = format.prettyName();</span>
+
+<span class="nc" id="L302">        imageView.setTag(isSuccesful);</span>
+
+<span class="nc" id="L304">        imageView.setImageBitmap(result);</span>
+<span class="nc" id="L305">        imageView.setContentDescription(mContext.getString(R.string.barcodeImageDescriptionWithType, formatPrettyName));</span>
+<span class="nc" id="L306">        TextView textView = textViewReference.get();</span>
+
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (result != null) {</span>
+<span class="nc" id="L309">            Log.i(TAG, &quot;Displaying barcode&quot;);</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            if (widthPadding) {</span>
+<span class="nc" id="L311">                imageView.setPadding(imagePadding / 2, 0, imagePadding / 2, 0);</span>
+            } else {
+<span class="nc" id="L313">                imageView.setPadding(0, imagePadding / 2, 0, imagePadding / 2);</span>
+            }
+<span class="nc" id="L315">            imageView.setVisibility(View.VISIBLE);</span>
+
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            if (isSuccesful) {</span>
+<span class="nc" id="L318">                imageView.setColorFilter(null);</span>
+            } else {
+<span class="nc" id="L320">                imageView.setColorFilter(Color.LTGRAY, PorterDuff.Mode.LIGHTEN);</span>
+            }
+
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            if (textView != null) {</span>
+<span class="nc" id="L324">                textView.setVisibility(View.VISIBLE);</span>
+<span class="nc" id="L325">                textView.setText(formatPrettyName);</span>
+            }
+        } else {
+<span class="nc" id="L328">            Log.i(TAG, &quot;Barcode generation failed, removing image from display&quot;);</span>
+<span class="nc" id="L329">            imageView.setVisibility(View.GONE);</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">            if (textView != null) {</span>
+<span class="nc" id="L331">                textView.setVisibility(View.GONE);</span>
+            }
+        }
+
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (callback != null) {</span>
+<span class="nc" id="L336">            callback.onBarcodeImageWriterResult(isSuccesful);</span>
+        }
+<span class="nc" id="L338">    }</span>
+
+    @Override
+    public void onPreExecute() {
+        // No Action
+<span class="nc" id="L343">    }</span>
+
+    /**
+     * Provided to comply with Callable while keeping the original Syntax of AsyncTask
+     *
+     * @return generated Bitmap
+     */
+    @Override
+    public Bitmap call() {
+<span class="nc" id="L352">        return doInBackground();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

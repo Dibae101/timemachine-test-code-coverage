@@ -1,0 +1,297 @@
+package com.example.util.simpletimetracker.feature_change_activity_filter.viewModel
+
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.util.simpletimetracker.domain.extension.addOrRemove
+import com.example.util.simpletimetracker.core.extension.set
+import com.example.util.simpletimetracker.core.extension.trimIfNotBlank
+import com.example.util.simpletimetracker.core.interactor.SnackBarMessageNavigationInteractor
+import com.example.util.simpletimetracker.core.mapper.ActivityFilterViewDataMapper
+import com.example.util.simpletimetracker.core.view.ViewChooserStateDelegate
+import com.example.util.simpletimetracker.feature_base_adapter.buttonsRow.view.ButtonsRowViewData
+import com.example.util.simpletimetracker.domain.extension.orZero
+import com.example.util.simpletimetracker.domain.activityFilter.interactor.ActivityFilterInteractor
+import com.example.util.simpletimetracker.domain.prefs.interactor.PrefsInteractor
+import com.example.util.simpletimetracker.domain.activityFilter.model.ActivityFilter
+import com.example.util.simpletimetracker.feature_base_adapter.ViewHolderType
+import com.example.util.simpletimetracker.feature_base_adapter.activityFilter.ActivityFilterViewData
+import com.example.util.simpletimetracker.feature_base_adapter.category.CategoryViewData
+import com.example.util.simpletimetracker.feature_base_adapter.recordType.RecordTypeViewData
+import com.example.util.simpletimetracker.feature_change_activity_filter.R
+import com.example.util.simpletimetracker.feature_change_activity_filter.interactor.ChangeActivityFilterViewDataInteractor
+import com.example.util.simpletimetracker.feature_change_activity_filter.mapper.ChangeActivityFilterMapper
+import com.example.util.simpletimetracker.feature_change_activity_filter.viewData.ChangeActivityFilterChooserState
+import com.example.util.simpletimetracker.feature_change_activity_filter.viewData.ChangeActivityFilterTypeSwitchViewData
+import com.example.util.simpletimetracker.feature_change_activity_filter.viewData.ChangeActivityFilterTypesViewData
+import com.example.util.simpletimetracker.feature_color_selection.api.ColorSelectionViewModelDelegate
+import com.example.util.simpletimetracker.navigation.Router
+import com.example.util.simpletimetracker.navigation.params.screen.ChangeActivityFilterParams
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+@HiltViewModel
+class ChangeActivityFilterViewModel @Inject constructor(
+    private val router: Router,
+    private val changeActivityFilterViewDataInteractor: ChangeActivityFilterViewDataInteractor,
+    private val activityFilterInteractor: ActivityFilterInteractor,
+    private val prefsInteractor: PrefsInteractor,
+    private val activityFilterViewDataMapper: ActivityFilterViewDataMapper,
+    private val changeActivityFilterMapper: ChangeActivityFilterMapper,
+    private val snackBarMessageNavigationInteractor: SnackBarMessageNavigationInteractor,
+    private val colorSelectionViewModelDelegate: ColorSelectionViewModelDelegate,
+) : ViewModel(),
+    ColorSelectionViewModelDelegate by colorSelectionViewModelDelegate {
+
+    lateinit var extra: ChangeActivityFilterParams
+
+    val filterPreview: LiveData<ActivityFilterViewData> by lazy {
+        return@lazy MutableLiveData<ActivityFilterViewData>().let { initial ->
+            viewModelScope.launch {
+                initializePreview()
+                initial.value = loadActivityFilterPreviewViewData()
+            }
+            initial
+        }
+    }
+    val filterTypeViewData: LiveData<List<ViewHolderType>> by lazy {
+        return@lazy MutableLiveData<List<ViewHolderType>>().let { initial ->
+            viewModelScope.launch {
+                initializeSelectedTypes()
+                initial.value = loadTagTypeViewData()
+            }
+            initial
+        }
+    }
+    val viewData: LiveData<ChangeActivityFilterTypesViewData> by lazy {
+        return@lazy MutableLiveData<ChangeActivityFilterTypesViewData>().let { initial ->
+            viewModelScope.launch {
+                initializeSelectedTypes()
+                initial.value = loadViewData()
+            }
+            initial
+        }
+    }
+    val chooserState: LiveData<ViewChooserStateDelegate.States> = MutableLiveData(
+        ViewChooserStateDelegate.States(
+            current = ChangeActivityFilterChooserState.Closed,
+            previous = ChangeActivityFilterChooserState.Closed,
+        ),
+    )
+    val deleteButtonEnabled: LiveData<Boolean> = MutableLiveData(true)
+    val saveButtonEnabled: LiveData<Boolean> = MutableLiveData(true)
+    val deleteIconVisibility: LiveData<Boolean> by lazy { MutableLiveData(filterId != 0L) }
+    val keyboardVisibility: LiveData<Boolean> by lazy { MutableLiveData(filterId == 0L) }
+
+    private val filterId: Long get() = (extra as? ChangeActivityFilterParams.Change)?.id.orZero()
+    private val newSelectedIds: Set<Long>
+        get() = when (newType) {
+            is ActivityFilter.Type.Activity -> newTypeIds
+            is ActivityFilter.Type.Category -> newCategoryIds
+        }
+    private var newTypeIds: MutableSet<Long> = mutableSetOf()
+    private var newCategoryIds: MutableSet<Long> = mutableSetOf()
+    private var newType: ActivityFilter.Type = ActivityFilter.Type.Activity
+    private var newName: String = ""
+    private var wasSelected: Boolean = true
+
+    init {
+        colorSelectionViewModelDelegate.attach(getColorSelectionDelegateParent())
+    }
+
+    override fun onCleared() {
+        colorSelectionViewModelDelegate.clearColorDelegate()
+        super.onCleared()
+    }
+
+    fun onNameChange(name: String) {
+        viewModelScope.launch {
+            if (name != newName) {
+                newName = name
+                updateActivityFilterPreview()
+            }
+        }
+    }
+
+    fun onColorChooserClick() {
+        onNewChooserState(ChangeActivityFilterChooserState.Color)
+    }
+
+    fun onTypeChooserClick() {
+        onNewChooserState(ChangeActivityFilterChooserState.Type)
+    }
+
+    fun onFilterTypeClick(viewData: ButtonsRowViewData) {
+        if (viewData !is ChangeActivityFilterTypeSwitchViewData) return
+        viewModelScope.launch {
+            newType = viewData.type
+            updateTagTypeViewData()
+            updateViewData()
+        }
+    }
+
+    fun onTypeClick(item: RecordTypeViewData) {
+        viewModelScope.launch {
+            newType = ActivityFilter.Type.Activity
+            newTypeIds.addOrRemove(item.id)
+            updateViewData()
+        }
+    }
+
+    fun onCategoryClick(item: CategoryViewData) {
+        viewModelScope.launch {
+            newType = ActivityFilter.Type.Category
+            newCategoryIds.addOrRemove(item.id)
+            updateViewData()
+        }
+    }
+
+    fun onDeleteClick() {
+        (deleteButtonEnabled as MutableLiveData).value = false
+        viewModelScope.launch {
+            if (filterId != 0L) {
+                activityFilterInteractor.remove(filterId)
+                showMessage(R.string.change_activity_filter_removed)
+                (keyboardVisibility as MutableLiveData).value = false
+                router.back()
+            }
+        }
+    }
+
+    fun onSaveClick() {
+        if (newName.isEmpty()) {
+            showMessage(R.string.change_category_message_choose_name)
+            return
+        }
+        (saveButtonEnabled as MutableLiveData).value = false
+        viewModelScope.launch {
+            ActivityFilter(
+                id = filterId,
+                selectedIds = newSelectedIds,
+                type = newType,
+                name = newName.trimIfNotBlank(),
+                color = colorSelectionViewModelDelegate.newColor,
+                selected = wasSelected,
+            ).let {
+                activityFilterInteractor.add(it)
+                (keyboardVisibility as MutableLiveData).value = false
+                router.back()
+            }
+        }
+    }
+
+    fun onBackPressed() {
+        if (chooserState.value?.current !is ChangeActivityFilterChooserState.Closed) {
+            onNewChooserState(ChangeActivityFilterChooserState.Closed)
+        } else {
+            router.back()
+        }
+    }
+
+    private fun onNewChooserState(
+        newState: ChangeActivityFilterChooserState,
+    ) {
+        val current = chooserState.value?.current
+            ?: ChangeActivityFilterChooserState.Closed
+
+        keyboardVisibility.set(false)
+        if (current == newState) {
+            chooserState.set(
+                ViewChooserStateDelegate.States(
+                    current = ChangeActivityFilterChooserState.Closed,
+                    previous = current,
+                ),
+            )
+        } else {
+            chooserState.set(
+                ViewChooserStateDelegate.States(
+                    current = newState,
+                    previous = current,
+                ),
+            )
+        }
+    }
+
+    private suspend fun initializePreview() {
+        if (extra is ChangeActivityFilterParams.Change) {
+            activityFilterInteractor.get(filterId)?.let {
+                newName = it.name
+                colorSelectionViewModelDelegate.newColor = it.color
+                wasSelected = it.selected
+                colorSelectionViewModelDelegate.updateColorViewData()
+            }
+        }
+    }
+
+    private suspend fun initializeSelectedTypes() {
+        if (extra is ChangeActivityFilterParams.Change) {
+            activityFilterInteractor.get(filterId)?.let {
+                when (it.type) {
+                    is ActivityFilter.Type.Activity -> {
+                        newTypeIds = it.selectedIds.toMutableSet()
+                    }
+                    is ActivityFilter.Type.Category -> {
+                        newCategoryIds = it.selectedIds.toMutableSet()
+                    }
+                }
+                newType = it.type
+            }
+        }
+    }
+
+    private fun getColorSelectionDelegateParent(): ColorSelectionViewModelDelegate.Parent {
+        return object : ColorSelectionViewModelDelegate.Parent {
+            override suspend fun update() {
+                updateActivityFilterPreview()
+            }
+        }
+    }
+
+    private fun updateActivityFilterPreview() = viewModelScope.launch {
+        (filterPreview as MutableLiveData).value = loadActivityFilterPreviewViewData()
+    }
+
+    private suspend fun loadActivityFilterPreviewViewData(): ActivityFilterViewData {
+        val isDarkTheme = prefsInteractor.getDarkMode()
+
+        return ActivityFilter(
+            selectedIds = newSelectedIds,
+            type = newType,
+            name = newName,
+            color = colorSelectionViewModelDelegate.newColor,
+            selected = true,
+        ).let {
+            activityFilterViewDataMapper.mapFiltered(
+                filter = it,
+                isDarkTheme = isDarkTheme,
+                selected = it.selected,
+            )
+        }
+    }
+
+    private fun updateTagTypeViewData() {
+        filterTypeViewData.set(loadTagTypeViewData())
+    }
+
+    private fun loadTagTypeViewData(): List<ViewHolderType> {
+        return changeActivityFilterMapper.mapToTypeSwitchViewData(newType)
+    }
+
+    private fun updateViewData() = viewModelScope.launch {
+        val data = loadViewData()
+        (viewData as MutableLiveData).value = data
+    }
+
+    private suspend fun loadViewData(): ChangeActivityFilterTypesViewData {
+        return changeActivityFilterViewDataInteractor.getTypesViewData(
+            type = newType,
+            selectedIds = newSelectedIds,
+        )
+    }
+
+    private fun showMessage(stringResId: Int) {
+        snackBarMessageNavigationInteractor.showMessage(stringResId)
+    }
+}

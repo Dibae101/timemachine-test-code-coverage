@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EntrySyncable.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.sync.v2</a> &gt; <span class="el_source">EntrySyncable.kt</span></div><h1>EntrySyncable.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.sync.v2
+
+import android.content.Context
+import android.util.Log
+import com.looker.droidify.data.model.Repo
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.percentBy
+import com.looker.droidify.network.validation.invalid
+import com.looker.droidify.sync.JsonParser
+import com.looker.droidify.sync.SyncState
+import com.looker.droidify.sync.Syncable
+import com.looker.droidify.sync.common.ENTRY_V2_NAME
+import com.looker.droidify.sync.common.INDEX_V2_NAME
+import com.looker.droidify.sync.common.downloadIndex
+import com.looker.droidify.sync.toJarScope
+import com.looker.droidify.sync.v2.model.Entry
+import com.looker.droidify.sync.v2.model.IndexV2
+import com.looker.droidify.sync.v2.model.IndexV2Merger
+import com.looker.droidify.utility.common.cache.Cache
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
+
+<span class="nc" id="L24">class EntrySyncable(</span>
+<span class="nc" id="L25">    private val context: Context,</span>
+<span class="nc" id="L26">    private val downloader: Downloader,</span>
+<span class="nc" id="L27">    private val dispatcher: CoroutineDispatcher,</span>
+) : Syncable&lt;Entry&gt; {
+    @OptIn(ExperimentalSerializationApi::class)
+    override suspend fun sync(
+        repo: Repo,
+        block: (SyncState) -&gt; Unit,
+<span class="nc" id="L33">    ) = withContext(dispatcher) {</span>
+<span class="nc" id="L34">        try {</span>
+<span class="nc" id="L35">            val jar = downloader.downloadIndex(</span>
+<span class="nc" id="L36">                context = context,</span>
+<span class="nc" id="L37">                repo = repo,</span>
+<span class="nc" id="L38">                url = repo.address.removeSuffix(&quot;/&quot;) + &quot;/$ENTRY_V2_NAME&quot;,</span>
+<span class="nc" id="L39">                fileName = ENTRY_V2_NAME,</span>
+<span class="nc bnc" id="L40" title="All 2 branches missed.">                onProgress = { bytes, total -&gt;</span>
+<span class="nc" id="L41">                    val percent = (bytes percentBy total)</span>
+<span class="nc" id="L42">                    block(SyncState.IndexDownload.Progress(repo.id, percent))</span>
+<span class="nc" id="L43">                },</span>
+            )
+<span class="nc bnc" id="L45" title="All 2 branches missed.">            if (jar.length() == 0L) {</span>
+<span class="nc" id="L46">                block(</span>
+<span class="nc" id="L47">                    SyncState.IndexDownload.Failure(</span>
+<span class="nc" id="L48">                        repo.id,</span>
+<span class="nc" id="L49">                        IllegalStateException(&quot;Empty entry v2 jar&quot;),</span>
+                    ),
+                )
+<span class="nc" id="L52">                return@withContext</span>
+            } else {
+<span class="nc" id="L54">                block(SyncState.IndexDownload.Success(repo.id))</span>
+            }
+<span class="nc" id="L56">            val (fingerprint, entry) = try {</span>
+<span class="nc" id="L57">                with(jar.toJarScope&lt;Entry&gt;()) {</span>
+<span class="nc" id="L58">                    val output = json()</span>
+<span class="nc bnc" id="L59" title="All 2 branches missed.">                    val jarFingerprint = fingerprint</span>
+<span class="nc" id="L60">                        ?: invalid(&quot;Jar entry does not contain a fingerprint&quot;)</span>
+
+<span class="nc bnc" id="L62" title="All 4 branches missed.">                    if (repo.fingerprint != null &amp;&amp; !repo.fingerprint.assert(jarFingerprint)) {</span>
+<span class="nc" id="L63">                        invalid(&quot;Expected fingerprint: ${repo.fingerprint}, Actual fingerprint: $jarFingerprint&quot;)</span>
+                    }
+
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                    (repo.fingerprint ?: jarFingerprint) to output</span>
+                }
+<span class="nc" id="L68">            } catch (t: Throwable) {</span>
+<span class="nc" id="L69">                block(SyncState.JarParsing.Failure(repo.id, t))</span>
+<span class="nc" id="L70">                return@withContext</span>
+            } finally {
+<span class="nc" id="L72">                jar.delete()</span>
+            }
+<span class="nc" id="L74">            block(SyncState.JarParsing.Success(repo.id, fingerprint))</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            val diffRef = entry.getDiff(repo.versionInfo?.timestamp)</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (diffRef == null) {</span>
+<span class="nc" id="L77">                block(SyncState.JsonParsing.Success(repo.id, fingerprint, null))</span>
+<span class="nc" id="L78">                return@withContext</span>
+            }
+<span class="nc" id="L80">            val indexPath = repo.address.removeSuffix(&quot;/&quot;) + diffRef.name</span>
+<span class="nc" id="L81">            val indexFile = Cache.getIndexFile(context, &quot;repo_${repo.id}_$INDEX_V2_NAME&quot;)</span>
+<span class="nc bnc" id="L82" title="All 4 branches missed.">            val indexV2 = if (diffRef != entry.index &amp;&amp; indexFile.exists()) {</span>
+<span class="nc" id="L83">                val diffFile = downloader.downloadIndex(</span>
+<span class="nc" id="L84">                    context = context,</span>
+<span class="nc" id="L85">                    repo = repo,</span>
+<span class="nc" id="L86">                    url = indexPath,</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">                    fileName = &quot;diff_${repo.versionInfo?.timestamp}.json&quot;,</span>
+<span class="nc" id="L88">                    diff = true,</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                    onProgress = { bytes, total -&gt;</span>
+<span class="nc" id="L90">                        val percent = (bytes percentBy total)</span>
+<span class="nc" id="L91">                        block(SyncState.IndexDownload.Progress(repo.id, percent))</span>
+<span class="nc" id="L92">                    },</span>
+                )
+<span class="nc" id="L94">                try {</span>
+<span class="nc" id="L95">                    indexFile</span>
+<span class="nc bnc" id="L96" title="All 6 branches missed.">                        .takeIf { it.exists() &amp;&amp; it.length() &gt; 0 }</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                        ?.let { indexFile -&gt;</span>
+<span class="nc" id="L98">                            IndexV2Merger(indexFile).use { merger -&gt;</span>
+<span class="nc" id="L99">                                merger.processDiff(</span>
+<span class="nc" id="L100">                                    diffFile.inputStream(),</span>
+<span class="nc" id="L101">                                ).let {</span>
+<span class="nc" id="L102">                                    Log.d(</span>
+<span class="nc" id="L103">                                        &quot;EntrySyncable&quot;,</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                                        &quot;merged diff file $diffFile, success = $it, indexFile = $indexFile.&quot;,</span>
+<span class="nc" id="L105">                                    )</span>
+<span class="nc" id="L106">                                }</span>
+                            }
+<span class="nc" id="L108">                            JsonParser.decodeFromString&lt;IndexV2&gt;(</span>
+<span class="nc" id="L109">                                indexFile.readBytes().decodeToString(),</span>
+<span class="nc" id="L110">                            )</span>
+                        }
+<span class="nc" id="L112">                } catch (t: Throwable) {</span>
+<span class="nc" id="L113">                    block(SyncState.JsonParsing.Failure(repo.id, t))</span>
+<span class="nc" id="L114">                    return@withContext</span>
+                }
+            } else {
+<span class="nc" id="L117">                val newIndexFile = downloader.downloadIndex(</span>
+<span class="nc" id="L118">                    context = context,</span>
+<span class="nc" id="L119">                    repo = repo,</span>
+<span class="nc" id="L120">                    url = indexPath,</span>
+<span class="nc" id="L121">                    fileName = INDEX_V2_NAME,</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                    onProgress = { bytes, total -&gt;</span>
+<span class="nc" id="L123">                        val percent = (bytes percentBy total)</span>
+<span class="nc" id="L124">                        block(SyncState.IndexDownload.Progress(repo.id, percent))</span>
+<span class="nc" id="L125">                    },</span>
+                )
+<span class="nc" id="L127">                try {</span>
+<span class="nc" id="L128">                    JsonParser.decodeFromString&lt;IndexV2&gt;(newIndexFile.readBytes().decodeToString())</span>
+<span class="nc" id="L129">                } catch (t: Throwable) {</span>
+<span class="nc" id="L130">                    block(SyncState.JsonParsing.Failure(repo.id, t))</span>
+<span class="nc" id="L131">                    return@withContext</span>
+                }
+            }
+<span class="nc" id="L134">            block(SyncState.JsonParsing.Success(repo.id, fingerprint, indexV2))</span>
+<span class="nc" id="L135">        } catch (t: Throwable) {</span>
+<span class="nc" id="L136">            block(SyncState.IndexDownload.Failure(repo.id, t))</span>
+        }
+<span class="nc" id="L138">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

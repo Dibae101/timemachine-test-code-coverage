@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FeederApplication.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder</a> &gt; <span class="el_source">FeederApplication.kt</span></div><h1>FeederApplication.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder
+
+import android.app.Application
+import android.app.job.JobScheduler
+import android.content.ContentResolver
+import android.content.SharedPreferences
+import android.widget.Toast
+import androidx.core.app.NotificationManagerCompat
+import androidx.preference.PreferenceManager
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.annotation.ExperimentalCoilApi
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
+import coil3.memoryCacheMaxSizePercentWhileInBackground
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.crossfade
+import coil3.request.maxBitmapSize
+import coil3.size.Size
+import com.danielrampelt.coil.ico.IcoDecoder
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.db.room.AppDatabase
+import com.nononsenseapps.feeder.db.room.BlocklistDao
+import com.nononsenseapps.feeder.db.room.FeedDao
+import com.nononsenseapps.feeder.db.room.FeedItemDao
+import com.nononsenseapps.feeder.db.room.ReadStatusSyncedDao
+import com.nononsenseapps.feeder.db.room.RemoteFeedDao
+import com.nononsenseapps.feeder.db.room.RemoteReadMarkDao
+import com.nononsenseapps.feeder.db.room.SyncDeviceDao
+import com.nononsenseapps.feeder.db.room.SyncRemoteDao
+import com.nononsenseapps.feeder.di.androidModule
+import com.nononsenseapps.feeder.di.archModelModule
+import com.nononsenseapps.feeder.di.networkModule
+import com.nononsenseapps.feeder.model.AlwaysUseCacheIfPossibleRequestsInterceptor
+import com.nononsenseapps.feeder.model.ForceCacheOnSomeFailuresInterceptor
+import com.nononsenseapps.feeder.model.OneImageRequestPerHostInterceptor
+import com.nononsenseapps.feeder.model.PodcastPlayerStateHolder
+import com.nononsenseapps.feeder.model.RateLimitedInterceptor
+import com.nononsenseapps.feeder.model.TTSStateHolder
+import com.nononsenseapps.feeder.model.TooManyRequestsInterceptor
+import com.nononsenseapps.feeder.model.UserAgentInterceptor
+import com.nononsenseapps.feeder.notifications.NotificationsWorker
+import com.nononsenseapps.feeder.util.FilePathProvider
+import com.nononsenseapps.feeder.util.ToastMaker
+import com.nononsenseapps.feeder.util.currentlyUnmetered
+import com.nononsenseapps.feeder.util.filePathProvider
+import com.nononsenseapps.feeder.util.logDebug
+import com.nononsenseapps.jsonfeed.cachingHttpClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.withContext
+import okhttp3.Cache
+import okhttp3.CacheControl
+import okhttp3.OkHttpClient
+import okio.Path.Companion.toOkioPath
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.bind
+import org.kodein.di.direct
+import org.kodein.di.instance
+import org.kodein.di.singleton
+import java.io.File
+import java.util.concurrent.TimeUnit
+
+<span class="fc" id="L66">@OptIn(ExperimentalCoilApi::class)</span>
+class FeederApplication :
+    Application(),
+    DIAware,
+    SingletonImageLoader.Factory {
+<span class="fc" id="L71">    private val applicationCoroutineScope = ApplicationCoroutineScope()</span>
+<span class="fc" id="L72">    private val ttsStateHolder = TTSStateHolder(this, applicationCoroutineScope)</span>
+<span class="fc" id="L73">    private val podcastPlayerStateHolder = PodcastPlayerStateHolder(this, applicationCoroutineScope)</span>
+
+<span class="fc" id="L75">    override val di by DI.lazy {</span>
+<span class="fc" id="L76">        bind&lt;FilePathProvider&gt;() with</span>
+<span class="fc" id="L77">            singleton {</span>
+<span class="fc" id="L78">                filePathProvider(cacheDir = cacheDir, filesDir = filesDir)</span>
+            }
+<span class="fc" id="L80">        bind&lt;Application&gt;() with singleton { this@FeederApplication }</span>
+<span class="fc" id="L81">        bind&lt;AppDatabase&gt;() with singleton { AppDatabase.getInstance(this@FeederApplication) }</span>
+<span class="fc" id="L82">        bind&lt;FeedDao&gt;() with singleton { instance&lt;AppDatabase&gt;().feedDao() }</span>
+<span class="fc" id="L83">        bind&lt;FeedItemDao&gt;() with singleton { instance&lt;AppDatabase&gt;().feedItemDao() }</span>
+<span class="fc" id="L84">        bind&lt;SyncRemoteDao&gt;() with singleton { instance&lt;AppDatabase&gt;().syncRemoteDao() }</span>
+<span class="pc" id="L85">        bind&lt;ReadStatusSyncedDao&gt;() with singleton { instance&lt;AppDatabase&gt;().readStatusSyncedDao() }</span>
+<span class="fc" id="L86">        bind&lt;RemoteReadMarkDao&gt;() with singleton { instance&lt;AppDatabase&gt;().remoteReadMarkDao() }</span>
+<span class="pc" id="L87">        bind&lt;RemoteFeedDao&gt;() with singleton { instance&lt;AppDatabase&gt;().remoteFeedDao() }</span>
+<span class="pc" id="L88">        bind&lt;SyncDeviceDao&gt;() with singleton { instance&lt;AppDatabase&gt;().syncDeviceDao() }</span>
+<span class="fc" id="L89">        bind&lt;BlocklistDao&gt;() with singleton { instance&lt;AppDatabase&gt;().blocklistDao() }</span>
+
+<span class="fc" id="L91">        import(androidModule)</span>
+
+<span class="fc" id="L93">        import(archModelModule)</span>
+
+<span class="pc" id="L95">        bind&lt;ContentResolver&gt;() with singleton { contentResolver }</span>
+<span class="fc" id="L96">        bind&lt;JobScheduler&gt;() with singleton { getSystemService(JobScheduler::class.java) }</span>
+<span class="fc" id="L97">        bind&lt;ToastMaker&gt;() with</span>
+<span class="fc" id="L98">            singleton {</span>
+<span class="nc" id="L99">                object : ToastMaker {</span>
+                    override suspend fun makeToast(text: String) =
+<span class="nc" id="L101">                        withContext(Dispatchers.Main) {</span>
+<span class="nc" id="L102">                            Toast.makeText(this@FeederApplication, text, Toast.LENGTH_SHORT).show()</span>
+<span class="nc" id="L103">                        }</span>
+
+                    override suspend fun makeToast(resId: Int) =
+<span class="nc" id="L106">                        withContext(Dispatchers.Main) {</span>
+<span class="nc" id="L107">                            Toast.makeText(this@FeederApplication, resId, Toast.LENGTH_SHORT).show()</span>
+<span class="nc" id="L108">                        }</span>
+<span class="nc" id="L109">                }</span>
+            }
+<span class="pc" id="L111">        bind&lt;NotificationManagerCompat&gt;() with singleton { NotificationManagerCompat.from(this@FeederApplication) }</span>
+<span class="fc" id="L112">        bind&lt;SharedPreferences&gt;() with</span>
+<span class="fc" id="L113">            singleton {</span>
+<span class="fc" id="L114">                PreferenceManager.getDefaultSharedPreferences(</span>
+<span class="fc" id="L115">                    this@FeederApplication,</span>
+<span class="fc" id="L116">                )</span>
+            }
+
+<span class="fc" id="L119">        bind&lt;OkHttpClient&gt;() with</span>
+<span class="fc" id="L120">            singleton {</span>
+<span class="fc" id="L121">                val filePathProvider = instance&lt;FilePathProvider&gt;()</span>
+<span class="fc" id="L122">                cachingHttpClient(</span>
+<span class="fc" id="L123">                    cacheDirectory = filePathProvider.httpCacheDir,</span>
+<span class="fc" id="L124">                    cacheSize = 200L * 1024 * 1024,</span>
+                ) {
+<span class="fc" id="L126">                    addNetworkInterceptor(UserAgentInterceptor)</span>
+<span class="fc" id="L127">                    addNetworkInterceptor(RateLimitedInterceptor)</span>
+<span class="fc" id="L128">                    addNetworkInterceptor(ForceCacheOnSomeFailuresInterceptor)</span>
+<span class="fc" id="L129">                    addNetworkInterceptor(TooManyRequestsInterceptor)</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">                    if (BuildConfig.DEBUG) {</span>
+<span class="fc" id="L131">                        addInterceptor { chain -&gt;</span>
+<span class="fc" id="L132">                            val request = chain.request()</span>
+<span class="fc" id="L133">                            logDebug(</span>
+<span class="fc" id="L134">                                &quot;FEEDER&quot;,</span>
+<span class="fc" id="L135">                                &quot;Request ${request.url} headers [${request.headers}]&quot;,</span>
+                            )
+
+<span class="fc" id="L138">                            chain.proceed(request).also {</span>
+<span class="fc" id="L139">                                logDebug(</span>
+<span class="fc" id="L140">                                    &quot;FEEDER&quot;,</span>
+<span class="fc" id="L141">                                    &quot;Response ${it.request.url} code ${it.networkResponse?.code} cached ${it.cacheResponse != null}&quot;,</span>
+                                )
+<span class="fc" id="L143">                            }</span>
+                        }
+                    }
+<span class="fc" id="L146">                }</span>
+            }
+<span class="fc" id="L148">        bind&lt;ImageLoader&gt;() with</span>
+<span class="fc" id="L149">            singleton {</span>
+<span class="fc" id="L150">                val filePathProvider = instance&lt;FilePathProvider&gt;()</span>
+<span class="fc" id="L151">                val repository = instance&lt;Repository&gt;()</span>
+<span class="fc" id="L152">                val okHttpClient =</span>
+<span class="fc" id="L153">                    instance&lt;OkHttpClient&gt;()</span>
+<span class="fc" id="L154">                        .newBuilder()</span>
+                        // Use a separate cache for images so we don't evict feed responses
+                        // Note that coil has its own cache, so this is only for the network
+<span class="fc" id="L157">                        .cache(Cache(filePathProvider.httpImageCacheDir, 300L * 1024 * 1024))</span>
+<span class="fc" id="L158">                        .addInterceptor(AlwaysUseCacheIfPossibleRequestsInterceptor)</span>
+<span class="fc" id="L159">                        .addInterceptor { chain -&gt;</span>
+<span class="fc" id="L160">                            chain.proceed(</span>
+<span class="fc" id="L161">                                when (!repository.loadImageOnlyOnWifi.value || currentlyUnmetered(this@FeederApplication)) {</span>
+<span class="fc" id="L162">                                    true -&gt; chain.request()</span>
+<span class="nc" id="L163">                                    false -&gt; {</span>
+                                        // Forces only cached responses to be used - if no cache then 504 is thrown
+<span class="nc" id="L165">                                        chain</span>
+<span class="nc" id="L166">                                            .request()</span>
+<span class="nc" id="L167">                                            .newBuilder()</span>
+<span class="nc" id="L168">                                            .cacheControl(</span>
+                                                CacheControl
+<span class="nc" id="L170">                                                    .Builder()</span>
+<span class="nc" id="L171">                                                    .onlyIfCached()</span>
+<span class="nc" id="L172">                                                    .maxStale(Int.MAX_VALUE, TimeUnit.SECONDS)</span>
+<span class="nc" id="L173">                                                    .maxAge(Int.MAX_VALUE, TimeUnit.SECONDS)</span>
+<span class="nc" id="L174">                                                    .build(),</span>
+<span class="nc" id="L175">                                            ).build()</span>
+                                    }
+                                },
+<span class="fc" id="L178">                            )</span>
+<span class="fc" id="L179">                        }.build()</span>
+
+                ImageLoader
+<span class="fc" id="L182">                    .Builder(instance())</span>
+<span class="fc" id="L183">                    .crossfade(true)</span>
+<span class="fc" id="L184">                    .coroutineContext(applicationCoroutineScope.coroutineContext)</span>
+<span class="fc" id="L185">                    .maxBitmapSize(Size(2500, 2500))</span>
+<span class="fc" id="L186">                    .memoryCacheMaxSizePercentWhileInBackground(0.05)</span>
+<span class="fc" id="L187">                    .diskCache(</span>
+                        DiskCache
+<span class="fc" id="L189">                            .Builder()</span>
+<span class="fc" id="L190">                            .directory(filePathProvider.imageCacheDir.toOkioPath())</span>
+<span class="fc" id="L191">                            .maxSizeBytes(200L * 1024 * 1024)</span>
+<span class="fc" id="L192">                            .build(),</span>
+<span class="fc" id="L193">                    ).memoryCache {</span>
+                        MemoryCache
+<span class="fc" id="L195">                            .Builder()</span>
+<span class="fc" id="L196">                            .maxSizeBytes(100 * 1024 * 1024)</span>
+<span class="fc" id="L197">                            .build()</span>
+<span class="fc" id="L198">                    }.components {</span>
+<span class="fc" id="L199">                        add(OneImageRequestPerHostInterceptor)</span>
+<span class="fc" id="L200">                        add(IcoDecoder.Factory(this@FeederApplication))</span>
+<span class="fc" id="L201">                        add(</span>
+<span class="fc" id="L202">                            OkHttpNetworkFetcherFactory(</span>
+                                callFactory = {
+<span class="fc" id="L204">                                    okHttpClient</span>
+                                },
+                            ),
+                        )
+<span class="fc" id="L208">                    }.build()</span>
+            }
+<span class="fc" id="L210">        bind&lt;ApplicationCoroutineScope&gt;() with instance(applicationCoroutineScope)</span>
+<span class="fc" id="L211">        import(networkModule)</span>
+<span class="fc" id="L212">        bind&lt;TTSStateHolder&gt;() with instance(ttsStateHolder)</span>
+<span class="fc" id="L213">        bind&lt;PodcastPlayerStateHolder&gt;() with instance(podcastPlayerStateHolder)</span>
+<span class="fc" id="L214">        bind&lt;NotificationsWorker&gt;() with singleton { NotificationsWorker(di) }</span>
+<span class="fc" id="L215">    }</span>
+
+    override fun onCreate() {
+<span class="fc" id="L218">        super.onCreate()</span>
+        @Suppress(&quot;DEPRECATION&quot;)
+<span class="fc" id="L220">        staticFilesDir = filesDir</span>
+<span class="fc" id="L221">    }</span>
+
+    override fun onTerminate() {
+<span class="nc" id="L224">        applicationCoroutineScope.cancel(&quot;Application is being terminated&quot;)</span>
+<span class="nc" id="L225">        ttsStateHolder.shutdown()</span>
+<span class="nc" id="L226">        podcastPlayerStateHolder.shutdown()</span>
+<span class="nc" id="L227">        super.onTerminate()</span>
+<span class="nc" id="L228">    }</span>
+
+<span class="fc" id="L230">    override fun newImageLoader(context: PlatformContext): ImageLoader = di.direct.instance()</span>
+
+    companion object {
+        @Deprecated(&quot;Only used by an old database migration&quot;)
+<span class="pc" id="L234">        lateinit var staticFilesDir: File</span>
+
+        private const val LOG_TAG = &quot;FEEDER_APP&quot;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,515 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Discography.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vinyl-Music-Player</a> &gt; <a href="index.source.html" class="el_package">com.poupa.vinylmusicplayer.discog</a> &gt; <span class="el_source">Discography.java</span></div><h1>Discography.java</h1><pre class="source lang-java linenums">package com.poupa.vinylmusicplayer.discog;
+
+import android.content.Context;
+import android.os.Build;
+import android.os.Handler;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.poupa.vinylmusicplayer.App;
+import com.poupa.vinylmusicplayer.discog.tagging.TagExtractor;
+import com.poupa.vinylmusicplayer.interfaces.MusicServiceEventListener;
+import com.poupa.vinylmusicplayer.model.Album;
+import com.poupa.vinylmusicplayer.model.Artist;
+import com.poupa.vinylmusicplayer.model.Genre;
+import com.poupa.vinylmusicplayer.model.Song;
+import com.poupa.vinylmusicplayer.provider.BlacklistStore;
+import com.poupa.vinylmusicplayer.sort.SongSortOrder;
+import com.poupa.vinylmusicplayer.ui.activities.base.AbsMusicServiceActivity;
+import com.poupa.vinylmusicplayer.util.FileUtil;
+import com.poupa.vinylmusicplayer.util.PreferenceUtil;
+import com.poupa.vinylmusicplayer.util.StringUtil;
+
+import org.jaudiotagger.tag.reference.GenreTypes;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.BiPredicate;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+
+/**
+ * @author SC (soncaokim)
+ */
+
+<span class="fc" id="L46">public class Discography implements MusicServiceEventListener {</span>
+    // TODO wrap this inside the MemCache class
+<span class="fc" id="L48">    private final DB database = new DB();</span>
+<span class="fc" id="L49">    private final MemCache cache = new MemCache();</span>
+
+<span class="fc" id="L51">    private final Map&lt;AbsMusicServiceActivity, Handler&gt; attachedActivitiesAndQueue = new HashMap&lt;&gt;();</span>
+    private static final String TASK_QUEUE_COALESCENCE_TOKEN = &quot;Discography.triggerSyncWithMediaStore&quot;;
+<span class="fc" id="L53">    private final Collection&lt;Runnable&gt; changedListeners = new LinkedList&lt;&gt;();</span>
+
+    // TODO This is not a singleton and should not be declared as such
+    @NonNull
+    public static Discography getInstance() {
+<span class="fc" id="L58">        return App.getDiscography();</span>
+    }
+
+    public void addActivity(@NonNull final AbsMusicServiceActivity activity) {
+<span class="pc bpc" id="L62" title="1 of 2 branches missed.">        if (!attachedActivitiesAndQueue.containsKey(activity)) {</span>
+<span class="fc" id="L63">            attachedActivitiesAndQueue.put(activity, new Handler(activity.getMainLooper()));</span>
+
+<span class="fc" id="L65">            activity.addMusicServiceEventListener(this);</span>
+
+<span class="pc bpc" id="L67" title="1 of 2 branches missed.">            if (cache.consistencyState == MemCache.ConsistencyState.UNINITIALIZED) {</span>
+                // These operations are IO intensive and may take time, depending on the library size
+                // delay it till UI is availble
+<span class="fc" id="L70">                fetchAllSongs();</span>
+<span class="fc" id="L71">                triggerSyncWithMediaStore(false);</span>
+            }
+        }
+<span class="fc" id="L74">    }</span>
+
+    public void removeActivity(@NonNull final AbsMusicServiceActivity activity) {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        if (attachedActivitiesAndQueue.containsKey(activity)) {</span>
+<span class="nc" id="L78">            activity.removeMusicServiceEventListener(this);</span>
+
+            // Flush the delayed task queue - dont do anything is we are stopping
+<span class="nc" id="L81">            final Handler handler = attachedActivitiesAndQueue.get(activity);</span>
+<span class="nc" id="L82">            Objects.requireNonNull(handler);</span>
+<span class="nc" id="L83">            handler.removeCallbacksAndMessages(TASK_QUEUE_COALESCENCE_TOKEN);</span>
+
+<span class="nc" id="L85">            attachedActivitiesAndQueue.remove(activity);</span>
+        }
+<span class="nc" id="L87">    }</span>
+
+    void setCacheState(final MemCache.ConsistencyState value) {
+<span class="fc" id="L90">        synchronized (cache) {</span>
+<span class="fc" id="L91">            cache.consistencyState = value;</span>
+<span class="fc" id="L92">        }</span>
+<span class="fc" id="L93">    }</span>
+
+    private MemCache.ConsistencyState getCacheState() {
+<span class="fc" id="L96">        synchronized (cache) {</span>
+<span class="fc" id="L97">            return cache.consistencyState;</span>
+        }
+    }
+
+    @NonNull
+    private Song getOrAddSong(@NonNull final Song song, @NonNull final SyncWithMediaStoreAsyncTask.Progress progress) {
+<span class="nc" id="L103">        synchronized (cache) {</span>
+<span class="nc" id="L104">            final Song discogSong = getSong(song.id);</span>
+<span class="nc" id="L105">            boolean existsAndObsolete = false;</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (!discogSong.equals(Song.EMPTY_SONG)) {</span>
+<span class="nc" id="L107">                final BiPredicate&lt;Song, Song&gt; isMetadataObsolete = (final @NonNull Song incomingSong, final @NonNull Song cachedSong) -&gt; {</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                    if (incomingSong.dateAdded != cachedSong.dateAdded) return true;</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">                    if (incomingSong.dateModified != cachedSong.dateModified) return true;</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                    return (!incomingSong.data.equals(cachedSong.data));</span>
+                };
+
+<span class="nc" id="L113">                existsAndObsolete = isMetadataObsolete.test(song, discogSong);</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                if (existsAndObsolete) {</span>
+<span class="nc" id="L115">                    removeSongById(song.id);</span>
+                } else {
+<span class="nc" id="L117">                    return discogSong;</span>
+                }
+            }
+
+<span class="nc" id="L121">            addSong(song, false);</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            if (existsAndObsolete) {++ progress.updated;}</span>
+<span class="nc" id="L123">            else {++ progress.added;}</span>
+
+<span class="nc" id="L125">            return song;</span>
+        }
+    }
+
+    @NonNull
+    public Song getSong(long songId) {
+<span class="nc" id="L131">        synchronized (cache) {</span>
+<span class="nc" id="L132">            Song song = cache.songsById.get(songId);</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            return song == null ? Song.EMPTY_SONG : song;</span>
+        }
+    }
+
+    @NonNull
+    public ArrayList&lt;Song&gt; getSongsFromIdsAndCleanupOrphans(@NonNull ArrayList&lt;Long&gt; songIds, @Nullable Consumer&lt;ArrayList&lt;Long&gt;&gt; orphanIdsCleaner) {
+<span class="fc" id="L139">        ArrayList&lt;Long&gt; orphanSongIds = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L140">        ArrayList&lt;Song&gt; songs = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L142">        synchronized (cache) {</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">            for (Long id : songIds) {</span>
+<span class="nc" id="L144">                Song song = cache.songsById.get(id);</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                if (song != null) {</span>
+<span class="nc" id="L146">                    songs.add(song);</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                } else if (orphanIdsCleaner != null) {</span>
+<span class="nc" id="L148">                    orphanSongIds.add(id);</span>
+                }
+<span class="nc" id="L150">            }</span>
+<span class="fc" id="L151">        }</span>
+
+<span class="fc" id="L153">        MemCache.ConsistencyState cacheState = getCacheState();</span>
+        // In the case where the Discog is being reset situation, the operation takes time,
+        // and while the cache is being filled up,
+        // correct and existing songs may be considered as orphan
+        // --&gt; incorrectly cleaned from the auxiliary DBs (history, queue, etc)
+<span class="pc bpc" id="L158" title="1 of 4 branches missed.">        if ((orphanIdsCleaner != null) &amp;&amp; (cacheState != MemCache.ConsistencyState.RESETTING)) {</span>
+<span class="fc" id="L159">            orphanIdsCleaner.accept(orphanSongIds);</span>
+        }
+<span class="fc" id="L161">        return songs;</span>
+    }
+
+    @NonNull
+    public Song getSongByPath(@NonNull final String path) {
+<span class="nc" id="L166">        synchronized (cache) {</span>
+<span class="nc" id="L167">            Song matchingSong = Song.EMPTY_SONG;</span>
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            for (Song song : cache.songsById.values()) {</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                if (song.data.equals(path)) {</span>
+<span class="nc" id="L171">                    matchingSong = song;</span>
+<span class="nc" id="L172">                    break;</span>
+                }
+<span class="nc" id="L174">            }</span>
+<span class="nc" id="L175">            return matchingSong;</span>
+        }
+    }
+
+    @NonNull
+    public ArrayList&lt;Song&gt; getAllSongs(@Nullable Comparator&lt;Song&gt; sortOrder) {
+<span class="fc" id="L181">        synchronized (cache) {</span>
+            // Make a copy here, to avoid error while the caller is iterating on the result
+<span class="fc" id="L183">            ArrayList&lt;Song&gt; copy = new ArrayList&lt;&gt;(cache.songsById.values());</span>
+
+            // Perform sort inside the critical section, to avoid data race
+            // (artist or album being modified while sorting)
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">            if (sortOrder != null) {Collections.sort(copy, sortOrder);}</span>
+
+<span class="fc" id="L189">            return copy;</span>
+        }
+    }
+
+    @NonNull
+    public Map&lt;Long, Song&gt; getAllSongsById() {
+<span class="nc" id="L195">        synchronized (cache) {</span>
+            // Make a copy here, to avoid error while the caller is iterating on the result
+<span class="nc" id="L197">            return new HashMap&lt;&gt;(cache.songsById);</span>
+        }
+    }
+
+    @Nullable
+    public Artist getArtist(long artistId) {
+<span class="nc" id="L203">        synchronized (cache) {</span>
+<span class="nc" id="L204">            return cache.artistsById.get(artistId);</span>
+        }
+    }
+
+    @Nullable
+    public Artist getArtistByName(String artistName) {
+<span class="nc" id="L210">        synchronized (cache) {</span>
+<span class="nc" id="L211">            return cache.artistsByName.get(artistName);</span>
+        }
+    }
+
+    @NonNull
+    public ArrayList&lt;Artist&gt; getAllArtists(@NonNull Comparator&lt;Artist&gt; sortOrder) {
+<span class="fc" id="L217">        synchronized (cache) {</span>
+            // Make a copy here, to avoid error while the caller is iterating on the result
+<span class="fc" id="L219">            ArrayList&lt;Artist&gt; copy = new ArrayList&lt;&gt;(cache.artistsById.values());</span>
+
+            // Perform sort inside the critical section, to avoid data race
+            // (artist or album being modified while sorting)
+<span class="fc" id="L223">            Collections.sort(copy, sortOrder);</span>
+<span class="fc" id="L224">            return copy;</span>
+        }
+    }
+
+    @Nullable
+    public Album getAlbum(long albumId) {
+<span class="nc" id="L230">        synchronized (cache) {</span>
+<span class="nc" id="L231">            Map&lt;Long, MemCache.AlbumSlice&gt; albumsByArtist = cache.albumsByAlbumIdAndArtistId.get(albumId);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (albumsByArtist == null) return null;</span>
+<span class="nc" id="L233">            return mergeFullAlbum(albumsByArtist.values());</span>
+        }
+    }
+
+    @NonNull
+    public ArrayList&lt;Album&gt; getAllAlbums(@NonNull Comparator&lt;? super Album&gt; sortOrder) {
+<span class="fc" id="L239">        synchronized (cache) {</span>
+<span class="fc" id="L240">            ArrayList&lt;Album&gt; fullAlbums = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">            for (Map&lt;Long, MemCache.AlbumSlice&gt; albumsByArtist : cache.albumsByAlbumIdAndArtistId.values()) {</span>
+<span class="nc" id="L242">                fullAlbums.add(mergeFullAlbum(albumsByArtist.values()));</span>
+<span class="nc" id="L243">            }</span>
+
+            // Perform sort inside the critical section, to avoid data race
+            // (artist or album being modified while sorting)
+<span class="fc" id="L247">            Collections.sort(fullAlbums, sortOrder);</span>
+
+<span class="fc" id="L249">            return fullAlbums;</span>
+        }
+    }
+
+    @NonNull
+    private static Album mergeFullAlbum(@NonNull Iterable&lt;? extends MemCache.AlbumSlice&gt; albumParts) {
+<span class="nc" id="L255">        Album fullAlbum = new Album();</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        for (Album fragment : albumParts) {</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            for (Song song : fragment.songs) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                if (fullAlbum.songs.contains(song)) continue;</span>
+<span class="nc" id="L259">                fullAlbum.songs.add(song);</span>
+<span class="nc" id="L260">            }</span>
+<span class="nc" id="L261">        }</span>
+        // Maintain sorted album after merge
+<span class="nc" id="L263">        Collections.sort(fullAlbum.songs, SongSortOrder.BY_DISC_TRACK);</span>
+<span class="nc" id="L264">        return fullAlbum;</span>
+    }
+
+    @NonNull
+    public ArrayList&lt;Genre&gt; getAllGenres(@NonNull Comparator&lt;? super Genre&gt; sortOrder) {
+<span class="fc" id="L269">        synchronized (cache) {</span>
+            // Make a copy here, to avoid error while the caller is iterating on the result
+<span class="fc" id="L271">            ArrayList&lt;Genre&gt; copy = new ArrayList&lt;&gt;(cache.genresByName.values());</span>
+
+            // Perform sort inside the critical section, to avoid data race
+            // (artist or album being modified while sorting)
+<span class="fc" id="L275">            Collections.sort(copy, sortOrder);</span>
+
+<span class="fc" id="L277">            return copy;</span>
+        }
+    }
+
+    @Nullable
+    public ArrayList&lt;Song&gt; getSongsForGenre(long genreId, @NonNull Comparator&lt;? super Song&gt; sortOrder) {
+<span class="nc" id="L283">        synchronized (cache) {</span>
+<span class="nc" id="L284">            ArrayList&lt;Song&gt; songs = cache.songsByGenreId.get(genreId);</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            if (songs == null) {return null;}</span>
+
+<span class="nc" id="L287">            ArrayList&lt;Song&gt; copy = new ArrayList&lt;&gt;(songs);</span>
+
+            // Perform sort inside the critical section, to avoid data race
+            // (artist or album being modified while sorting)
+<span class="nc" id="L291">            Collections.sort(copy, sortOrder);</span>
+
+<span class="nc" id="L293">            return copy;</span>
+        }
+    }
+
+    public float getMaxReplayGain() {
+<span class="nc" id="L298">        return cache.getMaxReplayGain();</span>
+    }
+
+    private void addSong(@NonNull Song song, boolean cacheOnly) {
+<span class="nc" id="L302">        synchronized (cache) {</span>
+            // Race condition check: If the song has been added -&gt; skip
+<span class="nc bnc" id="L304" title="All 2 branches missed.">            if (cache.songsById.containsKey(song.id)) {</span>
+<span class="nc" id="L305">                return;</span>
+            }
+
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (!cacheOnly) {</span>
+<span class="nc" id="L309">                TagExtractor.extractTags(song);</span>
+            }
+
+<span class="nc" id="L312">            Consumer&lt;List&lt;String&gt;&gt; normNames = (@NonNull List&lt;String&gt; names) -&gt; {</span>
+<span class="nc" id="L313">                List&lt;String&gt; normalized = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">                for (String name : names) {</span>
+<span class="nc" id="L315">                    normalized.add(StringUtil.unicodeNormalize(name));</span>
+<span class="nc" id="L316">                }</span>
+<span class="nc" id="L317">                names.clear(); names.addAll(normalized);</span>
+<span class="nc" id="L318">            };</span>
+<span class="nc" id="L319">            normNames.accept(song.albumArtistNames);</span>
+<span class="nc" id="L320">            normNames.accept(song.artistNames);</span>
+<span class="nc" id="L321">            song.albumName = StringUtil.unicodeNormalize(song.albumName);</span>
+<span class="nc" id="L322">            song.title = StringUtil.unicodeNormalize(song.title);</span>
+<span class="nc" id="L323">            normNames.accept(song.genres);</span>
+
+            // Replace genre numerical ID3v1 values by textual ones
+<span class="nc" id="L326">            List&lt;String&gt; normalizedGenres = new ArrayList&lt;&gt;(song.genres.size());</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            for (String genre : song.genres) {</span>
+                try {
+<span class="nc" id="L329">                    int genreId = Integer.parseInt(genre);</span>
+<span class="nc" id="L330">                    String genreName = GenreTypes.getInstanceOf().getValueForId(genreId);</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">                    if (genreName != null) {</span>
+<span class="nc" id="L332">                        normalizedGenres.add(genreName);</span>
+                    }
+<span class="nc" id="L334">                } catch (NumberFormatException ignored) {</span>
+<span class="nc" id="L335">                    normalizedGenres.add(genre);</span>
+<span class="nc" id="L336">                }</span>
+<span class="nc" id="L337">            }</span>
+<span class="nc" id="L338">            song.genres = normalizedGenres;</span>
+
+<span class="nc" id="L340">            cache.addSong(song);</span>
+
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            if (!cacheOnly) {</span>
+<span class="nc" id="L343">                database.addSong(song);</span>
+            }
+
+<span class="nc" id="L346">            notifyDiscographyChanged();</span>
+<span class="nc" id="L347">        }</span>
+<span class="nc" id="L348">    }</span>
+
+    public void triggerSyncWithMediaStore(boolean reset) {
+        // Pick an attached activity
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">        if (attachedActivitiesAndQueue.isEmpty()) {throw new IllegalStateException(&quot;No attached activity&quot;);}</span>
+<span class="fc" id="L353">        final AbsMusicServiceActivity activity = (AbsMusicServiceActivity)attachedActivitiesAndQueue.keySet().toArray()[0];</span>
+<span class="fc" id="L354">        Objects.requireNonNull(activity);</span>
+
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">        if (getCacheState() != MemCache.ConsistencyState.OK) {</span>
+            // Prevent reentrance - delay to later
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.P) {</span>
+<span class="nc" id="L359">                final long DELAY = 500L;</span>
+
+<span class="nc" id="L361">                final Handler handler = attachedActivitiesAndQueue.get(activity);</span>
+<span class="nc" id="L362">                Objects.requireNonNull(handler);</span>
+<span class="nc" id="L363">                handler.removeCallbacksAndMessages(TASK_QUEUE_COALESCENCE_TOKEN);</span>
+<span class="nc" id="L364">                handler.postDelayed(() -&gt; triggerSyncWithMediaStore(reset), TASK_QUEUE_COALESCENCE_TOKEN, DELAY);</span>
+<span class="nc" id="L365">            } // else: too bad, just drop the operation. It is unlikely we get there anyway</span>
+        } else {
+<span class="fc" id="L367">            (new SyncWithMediaStoreAsyncTask(activity, this, reset)).execute();</span>
+        }
+<span class="fc" id="L369">    }</span>
+
+    SyncWithMediaStoreAsyncTask.Progress syncWithMediaStore(@NonNull final Consumer&lt;SyncWithMediaStoreAsyncTask.Progress&gt; progressUpdater) {
+<span class="fc" id="L372">        final Context context = App.getInstance().getApplicationContext();</span>
+
+        // Zombies are tracks that are removed but still indexed by MediaStore
+<span class="pc bnc" id="L375" title="All 2 branches missed.">        final Predicate&lt;Song&gt; isZombie = (s) -&gt; !(new File(s.data)).exists();</span>
+
+        // Whitelist
+<span class="fc" id="L378">        final File startDirectory = PreferenceUtil.getInstance().getStartDirectory();</span>
+<span class="fc" id="L379">        final String startPath = FileUtil.safeGetCanonicalPath(startDirectory);</span>
+<span class="fc" id="L380">        final Predicate&lt;Song&gt; isNotWhiteListed = (s) -&gt; {</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">            if (PreferenceUtil.getInstance().getWhitelistEnabled()) {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                return !s.data.startsWith(startPath);</span>
+            }
+<span class="nc" id="L384">            return false;</span>
+        };
+
+        // Blacklist
+<span class="fc" id="L388">        final ArrayList&lt;String&gt; blackListedPaths = BlacklistStore.getInstance(context).getPaths();</span>
+<span class="fc" id="L389">        final Predicate&lt;Song&gt; isBlackListed = (s) -&gt; {</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">            for (final String path : blackListedPaths) {</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">                if (s.data.startsWith(path)) return true;</span>
+<span class="nc" id="L392">            }</span>
+<span class="nc" id="L393">            return false;</span>
+        };
+
+<span class="fc" id="L396">        final SyncWithMediaStoreAsyncTask.Progress counters = new SyncWithMediaStoreAsyncTask.Progress();</span>
+<span class="fc" id="L397">        final ArrayList&lt;Song&gt; alienSongs = MediaStoreBridge.getAllSongs(context);</span>
+<span class="fc" id="L398">        final Set&lt;Long&gt; importedSongIds = new HashSet&lt;&gt;();</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">        for (final Song song : alienSongs) {</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">            if (isNotWhiteListed.test(song)) continue;</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">            if (isBlackListed.test(song)) continue;</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            if (isZombie.test(song)) continue;</span>
+
+<span class="nc" id="L404">            final Song matchedSong = getOrAddSong(song, counters);</span>
+<span class="nc" id="L405">            importedSongIds.add(matchedSong.id);</span>
+
+<span class="nc" id="L407">            progressUpdater.accept(counters);</span>
+<span class="nc" id="L408">        }</span>
+
+<span class="fc" id="L410">        synchronized (cache) {</span>
+            // Clean orphan songs (removed from MediaStore)
+<span class="fc" id="L412">            final Set&lt;Long&gt; cacheSongsId = new HashSet&lt;&gt;(cache.songsById.keySet()); // make a copy</span>
+<span class="fc" id="L413">            cacheSongsId.removeAll(importedSongIds);</span>
+<span class="fc" id="L414">            removeSongsById(cacheSongsId);</span>
+
+<span class="fc" id="L416">            counters.removed = cacheSongsId.size();</span>
+<span class="fc" id="L417">        }</span>
+
+<span class="fc" id="L419">        return counters;</span>
+    }
+
+    @Override
+<span class="fc" id="L423">    public void onServiceConnected() {}</span>
+
+    @Override
+<span class="nc" id="L426">    public void onServiceDisconnected() {}</span>
+
+    @Override
+<span class="nc" id="L429">    public void onQueueChanged() {}</span>
+
+    @Override
+<span class="nc" id="L432">    public void onPlayingMetaChanged() {}</span>
+
+    @Override
+<span class="nc" id="L435">    public void onPlayStateChanged() {}</span>
+
+    @Override
+<span class="nc" id="L438">    public void onRepeatModeChanged() {}</span>
+
+    @Override
+<span class="nc" id="L441">    public void onShuffleModeChanged() {}</span>
+
+    @Override
+    public void onMediaStoreChanged() {
+<span class="fc" id="L445">        triggerSyncWithMediaStore(false);</span>
+<span class="fc" id="L446">    }</span>
+
+    public void addChangedListener(Runnable listener) {
+<span class="fc" id="L449">        changedListeners.add(listener);</span>
+<span class="fc" id="L450">    }</span>
+
+    public void removeChangedListener(Runnable listener) {
+<span class="nc" id="L453">        attachedActivitiesAndQueue.forEach((activity, handler) -&gt; handler.removeCallbacks(listener));</span>
+<span class="nc" id="L454">        changedListeners.remove(listener);</span>
+<span class="nc" id="L455">    }</span>
+
+    private void notifyDiscographyChanged() {
+        // Notify the attached activiies to reload the UI content
+        // Since this can be called from a background thread, make it safe by wrapping as an event to main thread
+<span class="nc" id="L460">        attachedActivitiesAndQueue.forEach((activity, handler) -&gt; {</span>
+            // Post as much 1 event per a coalescence period
+<span class="nc" id="L462">            final long COALESCENCE_DELAY = 200L;</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">            for (final Runnable listener : changedListeners) {</span>
+<span class="nc" id="L464">                handler.removeCallbacks(listener);</span>
+<span class="nc" id="L465">                handler.postDelayed(listener, COALESCENCE_DELAY);</span>
+<span class="nc" id="L466">            }</span>
+<span class="nc" id="L467">        });</span>
+<span class="nc" id="L468">    }</span>
+
+    public void removeSongByPath(@NonNull String... paths) {
+<span class="nc" id="L471">        synchronized (cache) {</span>
+<span class="nc" id="L472">            ArrayList&lt;Long&gt; matchingSongIds = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">            for (String path : paths) {</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">                for (Song song : cache.songsById.values()) {</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                    if (song.data.equals(path)) {</span>
+<span class="nc" id="L476">                        matchingSongIds.add(song.id);</span>
+<span class="nc" id="L477">                        break;</span>
+                    }
+<span class="nc" id="L479">                }</span>
+            }
+<span class="nc" id="L481">            removeSongsById(matchingSongIds);</span>
+<span class="nc" id="L482">        }</span>
+<span class="nc" id="L483">    }</span>
+
+    private void removeSongById(final long songId) {
+<span class="nc" id="L486">        removeSongsById(List.of(songId));</span>
+<span class="nc" id="L487">    }</span>
+
+    private void removeSongsById(@NonNull final Collection&lt;Long&gt; songIds) {
+<span class="pc bpc" id="L490" title="1 of 2 branches missed.">        if (songIds.isEmpty()) return;</span>
+
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        for (final long songId : songIds) {</span>
+<span class="nc" id="L493">            cache.removeSongById(songId);</span>
+<span class="nc" id="L494">            database.removeSongById(songId);</span>
+<span class="nc" id="L495">        }</span>
+<span class="nc" id="L496">        notifyDiscographyChanged();</span>
+<span class="nc" id="L497">    }</span>
+
+    void clear() {
+<span class="nc" id="L500">        database.clear();</span>
+<span class="nc" id="L501">        cache.clear();</span>
+<span class="nc" id="L502">    }</span>
+
+    private void fetchAllSongs() {
+<span class="fc" id="L505">        setCacheState(MemCache.ConsistencyState.REFRESHING);</span>
+
+<span class="fc" id="L507">        Collection&lt;Song&gt; songs = database.fetchAllSongs();</span>
+<span class="pc bpc" id="L508" title="1 of 2 branches missed.">        for (Song song : songs) {</span>
+<span class="nc" id="L509">            addSong(song, true);</span>
+<span class="nc" id="L510">        }</span>
+
+<span class="fc" id="L512">        setCacheState(MemCache.ConsistencyState.OK);</span>
+<span class="fc" id="L513">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

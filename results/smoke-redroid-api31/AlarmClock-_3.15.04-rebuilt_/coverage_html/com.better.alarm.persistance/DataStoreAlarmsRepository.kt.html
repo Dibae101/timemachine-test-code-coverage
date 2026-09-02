@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataStoreAlarmsRepository.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AlarmClock</a> &gt; <a href="index.source.html" class="el_package">com.better.alarm.persistance</a> &gt; <span class="el_source">DataStoreAlarmsRepository.kt</span></div><h1>DataStoreAlarmsRepository.kt</h1><pre class="source lang-java linenums">package com.better.alarm.persistance
+
+import android.os.Looper
+import androidx.datastore.core.DataStore
+import androidx.datastore.core.DataStoreFactory
+import androidx.datastore.core.Serializer
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import com.better.alarm.logger.Logger
+import com.better.alarm.model.AlarmStore
+import com.better.alarm.model.AlarmValue
+import com.better.alarm.model.AlarmValues
+import com.better.alarm.model.AlarmsRepository
+import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.decodeFromByteArray
+import kotlinx.serialization.protobuf.ProtoBuf
+import org.koin.core.time.measureDuration
+import org.koin.core.time.measureTimedValue
+
+/**
+ * [AlarmsRepository] which stores [AlarmValue]s in a [DataStore].
+ *
+ * [AlarmsRepository] uses active records ([AlarmStore]s) to read and write values.
+ *
+ * ## Extra care required
+ * Both reading and writing are asynchronous which requires extra care in certain situations.
+ *
+ * ### Reading
+ * When reading values to dispatch an event to an alarm from a broadcast receiver, a blocking read
+ * is required because the application can destroyed before the asynchronous read can complete.
+ *
+ * ### Writing
+ * Writing is done in the background and we can assume then the last value will eventually be
+ * written. However, we must ensure that the application is not destroyed before the write
+ * completes. This is done by calling [awaitStored] before the application can be destroyed. Since
+ * there are no callbacks for application destruction, we must call [awaitStored] and blocking await
+ * in certain key places. These places are:
+ * - [android.app.Activity.onPause] before returning from the method
+ * - [android.content.BroadcastReceiver.onReceive] before returning from the method
+ */
+<span class="fc" id="L52">class DataStoreAlarmsRepository(</span>
+<span class="fc" id="L53">    private val logger: Logger,</span>
+<span class="fc" id="L54">    private val ioScope: CoroutineScope,</span>
+    initial: AlarmValues,
+<span class="fc" id="L56">    private val dataStore: DataStore&lt;AlarmValues&gt;,</span>
+<span class="fc" id="L57">    override val initialized: Boolean</span>
+) : AlarmsRepository {
+  companion object {
+    fun createBlocking(
+        datastoreDir: File,
+        logger: Logger,
+        ioScope: CoroutineScope
+    ): AlarmsRepository {
+<span class="fc" id="L65">      val initialized = datastoreDir.resolve(&quot;alarms&quot;).exists()</span>
+<span class="fc" id="L66">      val dataStore: DataStore&lt;AlarmValues&gt; =</span>
+<span class="fc" id="L67">          DataStoreFactory.create(</span>
+<span class="fc" id="L68">              serializer = ProtobufSerializer,</span>
+<span class="fc" id="L69">              produceFile = { datastoreDir.resolve(&quot;alarms&quot;) },</span>
+<span class="fc" id="L70">              scope = ioScope,</span>
+<span class="pc" id="L71">              corruptionHandler = ReplaceFileCorruptionHandler { AlarmValues() },</span>
+          )
+
+<span class="fc" id="L74">      val (restoredValues, duration) =</span>
+<span class="fc" id="L75">          measureTimedValue {</span>
+<span class="fc" id="L76">            runBlocking { withTimeout(5000) { ioScope.async { dataStore.data.first() }.await() } }</span>
+          }
+
+<span class="fc" id="L79">      logger.debug { &quot;create() took ${duration.toInt()}ms&quot; }</span>
+
+<span class="fc" id="L81">      return DataStoreAlarmsRepository(</span>
+<span class="fc" id="L82">              logger = logger,</span>
+<span class="fc" id="L83">              ioScope = ioScope,</span>
+<span class="fc" id="L84">              initial = restoredValues,</span>
+<span class="fc" id="L85">              dataStore = dataStore,</span>
+<span class="fc" id="L86">              initialized = initialized,</span>
+          )
+<span class="fc" id="L88">          .also { it.launch() }</span>
+    }
+  }
+
+  private val alarmsByIdState: MutableStateFlow&lt;Map&lt;Int, AlarmValue&gt;&gt; =
+<span class="fc" id="L93">      MutableStateFlow(initial.alarms)</span>
+
+  override fun create(): AlarmStore {
+<span class="fc" id="L96">    val usedIds = alarmsByIdState.value.keys</span>
+<span class="fc bfc" id="L97" title="All 2 branches covered.">    val id = (0..Int.MAX_VALUE).first { it !in usedIds }</span>
+<span class="fc" id="L98">    alarmsByIdState.update { alarmsById -&gt;</span>
+<span class="fc" id="L99">      val created = id to AlarmValue(id = id)</span>
+<span class="fc" id="L100">      alarmsById.plus(created)</span>
+    }
+<span class="fc" id="L102">    return createStoreView(id)</span>
+  }
+
+  override fun query(): List&lt;AlarmStore&gt; {
+<span class="pc" id="L106">    return alarmsByIdState.value.map { (id, _) -&gt; createStoreView(id) }</span>
+  }
+
+  private fun launch() {
+<span class="fc" id="L110">    alarmsByIdState</span>
+<span class="fc" id="L111">        .onEach { newData -&gt;</span>
+<span class="fc" id="L112">          val storeDuration = measureDuration {</span>
+<span class="fc" id="L113">            dataStore.updateData { prev -&gt;</span>
+<span class="fc" id="L114">              val duration = measureDuration {</span>
+                // changed
+<span class="fc" id="L116">                prev.alarms</span>
+<span class="pc bpc" id="L117" title="1 of 4 branches missed.">                    .filter { (id, value) -&gt; id in newData &amp;&amp; value != newData[id] }</span>
+<span class="fc" id="L118">                    .forEach { (id, prevValue) -&gt;</span>
+<span class="fc" id="L119">                      logger.debug { &quot;changed $prevValue =&gt; ${newData[id]}&quot; }</span>
+<span class="fc" id="L120">                    }</span>
+                // added
+<span class="fc" id="L122">                newData</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">                    .filter { (id, value) -&gt; id !in prev.alarms }</span>
+<span class="fc" id="L124">                    .forEach { logger.debug { &quot;added ${it.value}&quot; } }</span>
+                // removed
+<span class="fc" id="L126">                prev.alarms</span>
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">                    .filter { (id, value) -&gt; id !in newData }</span>
+<span class="pc" id="L128">                    .forEach { logger.debug { &quot;removed ${it.value}&quot; } }</span>
+<span class="fc" id="L129">              }</span>
+<span class="fc" id="L130">              logger.debug { &quot;Logging took ${duration.toInt()}ms&quot; }</span>
+<span class="fc" id="L131">              AlarmValues(alarms = newData)</span>
+            }
+<span class="fc" id="L133">          }</span>
+<span class="fc" id="L134">          logger.debug { &quot;Store took ${storeDuration.toInt()}ms&quot; }</span>
+<span class="fc" id="L135">        }</span>
+<span class="fc" id="L136">        .launchIn(ioScope)</span>
+<span class="fc" id="L137">  }</span>
+
+  override fun awaitStored() {
+<span class="fc" id="L140">    val duration = measureDuration {</span>
+<span class="fc" id="L141">      runBlocking {</span>
+<span class="fc" id="L142">        withTimeout(5000) {</span>
+<span class="fc" id="L143">          dataStore.data.first { stored -&gt; stored.alarms == alarmsByIdState.value }</span>
+<span class="fc" id="L144">        }</span>
+<span class="fc" id="L145">      }</span>
+<span class="fc" id="L146">    }</span>
+<span class="fc" id="L147">    logger.debug { &quot;awaitStored() took ${duration.toInt()}ms&quot; }</span>
+<span class="fc" id="L148">  }</span>
+
+  /**
+   * Creates a view of the [alarmsByIdState] for the given id. [AlarmStore] is backed by the
+   * [alarmsByIdState] value associated with this id, therefore changes to [AlarmStore] are
+   * reflected in the state and are stored.
+   */
+  private fun createStoreView(id: Int): AlarmStore {
+<span class="fc" id="L156">    return object : AlarmStore {</span>
+<span class="pc" id="L157">      override val id: Int = id</span>
+      override var value: AlarmValue
+        get() {
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">          check(Looper.getMainLooper() == Looper.myLooper()) { &quot;Must be called on main thread&quot; }</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">          return requireNotNull(alarmsByIdState.value).getValue(id)</span>
+        }
+        set(value) {
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">          check(Looper.getMainLooper() == Looper.myLooper()) { &quot;Must be called on main thread&quot; }</span>
+<span class="fc" id="L165">          alarmsByIdState.update { it.plus(id to value) }</span>
+<span class="fc" id="L166">        }</span>
+
+      override fun delete() {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        check(Looper.getMainLooper() == Looper.myLooper()) { &quot;Must be called on main thread&quot; }</span>
+<span class="nc" id="L170">        alarmsByIdState.update { it.minus(id) }</span>
+<span class="nc" id="L171">      }</span>
+    }
+  }
+}
+
+/** [ProtoBuf] [AlarmValues] serializer for [DataStore]. */
+@OptIn(ExperimentalSerializationApi::class)
+object ProtobufSerializer : Serializer&lt;AlarmValues&gt; {
+<span class="fc" id="L179">  override val defaultValue: AlarmValues = AlarmValues()</span>
+
+  override suspend fun readFrom(input: InputStream): AlarmValues {
+<span class="nc" id="L182">    val bytes = input.readBytes()</span>
+<span class="nc" id="L183">    try {</span>
+<span class="nc" id="L184">      return ProtoBuf.decodeFromByteArray(bytes)</span>
+<span class="nc" id="L185">    } catch (e: Exception) {</span>
+<span class="nc" id="L186">      error(&quot;Failed to read from ${bytes.decodeToString()}&quot;)</span>
+    }
+  }
+
+  @Suppress(&quot;BlockingMethodInNonBlockingContext&quot;)
+  override suspend fun writeTo(t: AlarmValues, output: OutputStream) {
+<span class="fc" id="L192">    output.write(ProtoBuf.encodeToByteArray(AlarmValues.serializer(), t))</span>
+<span class="fc" id="L193">  }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

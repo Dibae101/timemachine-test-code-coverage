@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>VaultBackupManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Aegis</a> &gt; <a href="index.source.html" class="el_package">com.beemdevelopment.aegis.vault</a> &gt; <span class="el_source">VaultBackupManager.java</span></div><h1>VaultBackupManager.java</h1><pre class="source lang-java linenums">package com.beemdevelopment.aegis.vault;
+
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.UriPermission;
+import android.net.Uri;
+import android.text.TextUtils;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+import androidx.documentfile.provider.DocumentFile;
+
+import com.beemdevelopment.aegis.BackupsVersioningStrategy;
+import com.beemdevelopment.aegis.Preferences;
+import com.beemdevelopment.aegis.database.AuditLogRepository;
+import com.beemdevelopment.aegis.util.IOUtils;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.text.ParseException;
+import java.text.ParsePosition;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class VaultBackupManager {
+<span class="fc" id="L37">    private static final String TAG = VaultBackupManager.class.getSimpleName();</span>
+
+<span class="fc" id="L39">    private static final StrictDateFormat _dateFormat =</span>
+            new StrictDateFormat(&quot;yyyyMMdd-HHmmss&quot;, Locale.ENGLISH);
+
+    public static final String FILENAME_PREFIX = &quot;aegis-backup&quot;;
+<span class="fc" id="L43">    public static final String FILENAME_SINGLE = String.format(&quot;%s.json&quot;, FILENAME_PREFIX);</span>
+
+    private final Context _context;
+    private final Preferences _prefs;
+    private final ExecutorService _executor;
+    private final AuditLogRepository _auditLogRepository;
+
+<span class="fc" id="L50">    public VaultBackupManager(Context context, AuditLogRepository auditLogRepository) {</span>
+<span class="fc" id="L51">        _context = context;</span>
+<span class="fc" id="L52">        _prefs = new Preferences(context);</span>
+<span class="fc" id="L53">        _executor = Executors.newSingleThreadExecutor();</span>
+<span class="fc" id="L54">        _auditLogRepository = auditLogRepository;</span>
+<span class="fc" id="L55">    }</span>
+
+    public void scheduleBackup(File tempFile, BackupsVersioningStrategy strategy, Uri uri, int versionsToKeep) {
+<span class="nc" id="L58">        _executor.execute(() -&gt; {</span>
+            try {
+<span class="nc" id="L60">                createBackup(tempFile, strategy, uri, versionsToKeep);</span>
+<span class="nc" id="L61">                _auditLogRepository.addBackupCreatedEvent();</span>
+<span class="nc" id="L62">                _prefs.setBuiltInBackupResult(new Preferences.BackupResult(null));</span>
+<span class="nc" id="L63">            } catch (VaultRepositoryException | VaultBackupPermissionException e) {</span>
+<span class="nc" id="L64">                e.printStackTrace();</span>
+<span class="nc" id="L65">                _prefs.setBuiltInBackupResult(new Preferences.BackupResult(e));</span>
+<span class="nc" id="L66">            }</span>
+<span class="nc" id="L67">        });</span>
+<span class="nc" id="L68">    }</span>
+
+    private void createBackup(File tempFile, BackupsVersioningStrategy strategy, Uri uri, int versionsToKeep)
+            throws VaultRepositoryException, VaultBackupPermissionException {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">        if (uri == null) {</span>
+<span class="nc" id="L73">            throw new VaultRepositoryException(&quot;getBackupsLocation returned null&quot;);</span>
+        }
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (strategy == BackupsVersioningStrategy.SINGLE_BACKUP) {</span>
+<span class="nc" id="L76">            createBackup(tempFile, uri);</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        } else if (strategy == BackupsVersioningStrategy.MULTIPLE_BACKUPS) {</span>
+<span class="nc" id="L78">            createBackup(tempFile, uri, versionsToKeep);</span>
+        } else {
+<span class="nc" id="L80">            throw new VaultRepositoryException(&quot;Invalid backups versioning strategy&quot;);</span>
+        }
+<span class="nc" id="L82">    }</span>
+
+    private void createBackup(File tempFile, Uri fileUri)
+            throws VaultRepositoryException, VaultBackupPermissionException {
+<span class="nc" id="L86">        Log.i(TAG, String.format(&quot;Creating backup at %s&quot;, fileUri));</span>
+        try {
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            if (!hasPermissionsAt(fileUri)) {</span>
+<span class="nc" id="L89">                throw new VaultBackupPermissionException(&quot;No persisted URI permissions&quot;);</span>
+            }
+<span class="nc" id="L91">            ContentResolver resolver = _context.getContentResolver();</span>
+<span class="nc" id="L92">            try (FileInputStream inStream = new FileInputStream(tempFile);</span>
+<span class="nc" id="L93">                 OutputStream outStream = resolver.openOutputStream(fileUri, &quot;wt&quot;)</span>
+            ) {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                if (outStream == null) {</span>
+<span class="nc" id="L96">                    throw new IOException(&quot;openOutputStream returned null&quot;);</span>
+                }
+<span class="nc" id="L98">                IOUtils.copy(inStream, outStream);</span>
+<span class="nc" id="L99">            } catch (IOException exception) {</span>
+<span class="nc" id="L100">                throw new VaultRepositoryException(exception);</span>
+<span class="nc" id="L101">            }</span>
+<span class="nc" id="L102">        } catch (VaultRepositoryException | VaultBackupPermissionException exception) {</span>
+<span class="nc" id="L103">            Log.e(TAG, String.format(&quot;Unable to create backup: %s&quot;, exception));</span>
+<span class="nc" id="L104">            throw exception;</span>
+        } finally {
+<span class="nc" id="L106">            tempFile.delete();</span>
+        }
+<span class="nc" id="L108">    }</span>
+
+    private void createBackup(File tempFile, Uri dirUri, int versionsToKeep)
+            throws VaultRepositoryException, VaultBackupPermissionException {
+<span class="nc" id="L112">        FileInfo fileInfo = new FileInfo(FILENAME_PREFIX);</span>
+<span class="nc" id="L113">        DocumentFile dir = DocumentFile.fromTreeUri(_context, dirUri);</span>
+
+        try {
+<span class="nc" id="L116">            Log.i(TAG, String.format(&quot;Creating backup at %s: %s&quot;, Uri.decode(dir.getUri().toString()), fileInfo.toString()));</span>
+
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            if (!hasPermissionsAt(dirUri)) {</span>
+<span class="nc" id="L119">                throw new VaultBackupPermissionException(&quot;No persisted URI permissions&quot;);</span>
+            }
+
+            // If we create a file with a name that already exists, SAF will append a number
+            // to the filename and write to that instead. We can't overwrite existing files, so
+            // just avoid that altogether by checking beforehand.
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            if (dir.findFile(fileInfo.toString()) != null) {</span>
+<span class="nc" id="L126">                throw new VaultRepositoryException(&quot;Backup file already exists&quot;);</span>
+            }
+
+<span class="nc" id="L129">            DocumentFile file = dir.createFile(&quot;application/json&quot;, fileInfo.toString());</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (file == null) {</span>
+<span class="nc" id="L131">                throw new VaultRepositoryException(&quot;createFile returned null&quot;);</span>
+            }
+
+<span class="nc" id="L134">            try (FileInputStream inStream = new FileInputStream(tempFile);</span>
+<span class="nc" id="L135">                 OutputStream outStream = _context.getContentResolver().openOutputStream(file.getUri())) {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                if (outStream == null) {</span>
+<span class="nc" id="L137">                    throw new IOException(&quot;openOutputStream returned null&quot;);</span>
+                }
+<span class="nc" id="L139">                IOUtils.copy(inStream, outStream);</span>
+<span class="nc" id="L140">            } catch (IOException e) {</span>
+<span class="nc" id="L141">                throw new VaultRepositoryException(e);</span>
+<span class="nc" id="L142">            }</span>
+<span class="nc" id="L143">        } catch (VaultRepositoryException | VaultBackupPermissionException e) {</span>
+<span class="nc" id="L144">            Log.e(TAG, String.format(&quot;Unable to create backup: %s&quot;, e.toString()));</span>
+<span class="nc" id="L145">            throw e;</span>
+        } finally {
+<span class="nc" id="L147">            tempFile.delete();</span>
+        }
+
+<span class="nc" id="L150">        enforceVersioning(dir, versionsToKeep);</span>
+<span class="nc" id="L151">    }</span>
+
+    public boolean hasPermissionsAt(Uri uri) {
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        for (UriPermission perm : _context.getContentResolver().getPersistedUriPermissions()) {</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (perm.getUri().equals(uri)) {</span>
+<span class="nc bnc" id="L156" title="All 4 branches missed.">                return perm.isReadPermission() &amp;&amp; perm.isWritePermission();</span>
+            }
+<span class="nc" id="L158">        }</span>
+
+<span class="nc" id="L160">        return false;</span>
+    }
+
+    private void enforceVersioning(DocumentFile dir, int versionsToKeep) {
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (versionsToKeep &lt;= 0) {</span>
+<span class="nc" id="L165">            return;</span>
+        }
+
+<span class="nc" id="L168">        Log.i(TAG, String.format(&quot;Scanning directory %s for backup files&quot;, Uri.decode(dir.getUri().toString())));</span>
+
+<span class="nc" id="L170">        List&lt;BackupFile&gt; files = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        for (DocumentFile docFile : dir.listFiles()) {</span>
+<span class="nc bnc" id="L172" title="All 4 branches missed.">            if (docFile.isFile() &amp;&amp; !docFile.isVirtual()) {</span>
+                try {
+<span class="nc" id="L174">                    files.add(new BackupFile(docFile));</span>
+<span class="nc" id="L175">                } catch (ParseException ignored) { }</span>
+            }
+        }
+
+<span class="nc" id="L179">        Log.i(TAG, String.format(&quot;Found %d backup files, keeping the %d most recent&quot;, files.size(), versionsToKeep));</span>
+
+<span class="nc" id="L181">        Collections.sort(files, new FileComparator());</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (files.size() &gt; versionsToKeep) {</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            for (BackupFile file : files.subList(0, files.size() - versionsToKeep)) {</span>
+<span class="nc" id="L184">                Log.i(TAG, String.format(&quot;Deleting %s&quot;, file.getFile().getName()));</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                if (!file.getFile().delete()) {</span>
+<span class="nc" id="L186">                    Log.e(TAG, String.format(&quot;Unable to delete %s&quot;, file.getFile().getName()));</span>
+                }
+<span class="nc" id="L188">            }</span>
+        }
+<span class="nc" id="L190">    }</span>
+
+    public static class FileInfo {
+        private String _filename;
+        private String _ext;
+        private Date _date;
+
+<span class="nc" id="L197">        public FileInfo(String filename, String extension, Date date) {</span>
+<span class="nc" id="L198">            _filename = filename;</span>
+<span class="nc" id="L199">            _ext = extension;</span>
+<span class="nc" id="L200">            _date = date;</span>
+<span class="nc" id="L201">        }</span>
+
+        public FileInfo(String filename, Date date) {
+<span class="nc" id="L204">            this(filename, &quot;json&quot;, date);</span>
+<span class="nc" id="L205">        }</span>
+
+        public FileInfo(String filename) {
+<span class="nc" id="L208">            this(filename, Calendar.getInstance().getTime());</span>
+<span class="nc" id="L209">        }</span>
+
+        public FileInfo(String filename, String extension) {
+<span class="nc" id="L212">            this(filename, extension, Calendar.getInstance().getTime());</span>
+<span class="nc" id="L213">        }</span>
+
+        public static FileInfo parseFilename(String filename) throws ParseException {
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (filename == null) {</span>
+<span class="nc" id="L217">                throw new ParseException(&quot;The filename must not be null&quot;, 0);</span>
+            }
+
+<span class="nc" id="L220">            final String ext = &quot;.json&quot;;</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (!filename.endsWith(ext)) {</span>
+<span class="nc" id="L222">                throwBadFormat(filename);</span>
+            }
+<span class="nc" id="L224">            filename = filename.substring(0, filename.length() - ext.length());</span>
+
+<span class="nc" id="L226">            final String delim = &quot;-&quot;;</span>
+<span class="nc" id="L227">            String[] parts = filename.split(delim);</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            if (parts.length &lt; 3) {</span>
+<span class="nc" id="L229">                throwBadFormat(filename);</span>
+            }
+
+<span class="nc" id="L232">            filename = TextUtils.join(delim, Arrays.copyOf(parts, parts.length - 2));</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            if (!filename.equals(FILENAME_PREFIX)) {</span>
+<span class="nc" id="L234">                throwBadFormat(filename);</span>
+            }
+
+<span class="nc" id="L237">            Date date = _dateFormat.parse(parts[parts.length - 2] + delim + parts[parts.length - 1]);</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (date == null) {</span>
+<span class="nc" id="L239">                throwBadFormat(filename);</span>
+            }
+
+<span class="nc" id="L242">            return new FileInfo(filename, date);</span>
+        }
+
+        private static void throwBadFormat(String filename) throws ParseException {
+<span class="nc" id="L246">            throw new ParseException(String.format(&quot;Bad backup filename format: %s&quot;, filename), 0);</span>
+        }
+
+        public String getFilename() {
+<span class="nc" id="L250">            return _filename;</span>
+        }
+
+        public String getExtension() {
+<span class="nc" id="L254">            return _ext;</span>
+        }
+
+        public Date getDate() {
+<span class="nc" id="L258">            return _date;</span>
+        }
+
+        @NonNull
+        @Override
+        public String toString() {
+<span class="nc" id="L264">            return String.format(&quot;%s-%s.%s&quot;, _filename, _dateFormat.format(_date), _ext);</span>
+        }
+    }
+
+    private static class BackupFile {
+        private DocumentFile _file;
+        private FileInfo _info;
+
+<span class="nc" id="L272">        public BackupFile(DocumentFile file) throws ParseException {</span>
+<span class="nc" id="L273">            _file = file;</span>
+<span class="nc" id="L274">            _info = FileInfo.parseFilename(file.getName());</span>
+<span class="nc" id="L275">        }</span>
+
+        public DocumentFile getFile() {
+<span class="nc" id="L278">            return _file;</span>
+        }
+
+        public FileInfo getInfo() {
+<span class="nc" id="L282">            return _info;</span>
+        }
+    }
+
+    private static class FileComparator implements Comparator&lt;BackupFile&gt; {
+        @Override
+        public int compare(BackupFile o1, BackupFile o2) {
+<span class="nc" id="L289">            return o1.getInfo().getDate().compareTo(o2.getInfo().getDate());</span>
+        }
+    }
+
+    // https://stackoverflow.com/a/19503019
+    private static class StrictDateFormat extends SimpleDateFormat {
+        public StrictDateFormat(String pattern, Locale locale) {
+<span class="fc" id="L296">            super(pattern, locale);</span>
+<span class="fc" id="L297">            setLenient(false);</span>
+<span class="fc" id="L298">        }</span>
+
+        @Override
+        public Date parse(@NonNull String text, ParsePosition pos) {
+<span class="nc" id="L302">            int posIndex = pos.getIndex();</span>
+<span class="nc" id="L303">            Date d = super.parse(text, pos);</span>
+<span class="nc bnc" id="L304" title="All 4 branches missed.">            if (!isLenient() &amp;&amp; d != null) {</span>
+<span class="nc" id="L305">                String format = format(d);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">                if (posIndex + format.length() != text.length() ||</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">                        !text.endsWith(format)) {</span>
+<span class="nc" id="L308">                    d = null; // Not exact match</span>
+                }
+            }
+<span class="nc" id="L311">            return d;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

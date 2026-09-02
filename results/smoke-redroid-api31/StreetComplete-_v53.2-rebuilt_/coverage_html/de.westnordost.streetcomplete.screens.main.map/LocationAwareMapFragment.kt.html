@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocationAwareMapFragment.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.screens.main.map</a> &gt; <span class="el_source">LocationAwareMapFragment.kt</span></div><h1>LocationAwareMapFragment.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.screens.main.map
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.hardware.SensorManager
+import android.location.Location
+import android.os.Bundle
+import android.view.WindowManager
+import androidx.core.content.edit
+import androidx.core.content.getSystemService
+import de.westnordost.streetcomplete.data.osm.mapdata.LatLon
+import de.westnordost.streetcomplete.data.osmtracks.Trackpoint
+import de.westnordost.streetcomplete.screens.main.map.components.CurrentLocationMapComponent
+import de.westnordost.streetcomplete.screens.main.map.components.TracksMapComponent
+import de.westnordost.streetcomplete.screens.main.map.tangram.screenBottomToCenterDistance
+import de.westnordost.streetcomplete.util.ktx.hasLocationPermission
+import de.westnordost.streetcomplete.util.ktx.isLocationEnabled
+import de.westnordost.streetcomplete.util.ktx.toLatLon
+import de.westnordost.streetcomplete.util.ktx.viewLifecycleScope
+import de.westnordost.streetcomplete.util.location.FineLocationManager
+import de.westnordost.streetcomplete.util.location.LocationAvailabilityReceiver
+import de.westnordost.streetcomplete.util.math.translate
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.koin.android.ext.android.inject
+import kotlin.math.PI
+
+/** Manages a map that shows the device's GPS location and orientation as markers on the map with
+ *  the option to let the screen follow the location and rotation */
+<span class="fc" id="L34">open class LocationAwareMapFragment : MapFragment() {</span>
+
+<span class="fc" id="L36">    private val locationAvailabilityReceiver: LocationAvailabilityReceiver by inject()</span>
+
+    private lateinit var compass: Compass
+    private lateinit var locationManager: FineLocationManager
+
+    private var locationMapComponent: CurrentLocationMapComponent? = null
+    private var tracksMapComponent: TracksMapComponent? = null
+
+    /** The GPS position at which the user is displayed at */
+<span class="fc" id="L45">    var displayedLocation: Location? = null</span>
+        private set
+
+    /** The GPS trackpoints the user has walked */
+    private var tracks: ArrayList&lt;ArrayList&lt;Trackpoint&gt;&gt;
+
+    /** If we are actively recording track history */
+<span class="fc" id="L52">    var isRecordingTracks = false</span>
+        private set
+
+    /** The GPS trackpoints the user has recorded */
+    private var _recordedTracks: ArrayList&lt;Trackpoint&gt;
+
+<span class="nc" id="L58">    val recordedTracks: List&lt;Trackpoint&gt; get() = _recordedTracks</span>
+
+    /** Whether the view should automatically center on the GPS location */
+<span class="fc" id="L61">    var isFollowingPosition = true</span>
+        set(value) {
+<span class="fc" id="L63">            field = value</span>
+<span class="pc bpc" id="L64" title="3 of 4 branches missed.">            if (field != value &amp;&amp; !value) {</span>
+<span class="nc" id="L65">                _isNavigationMode = false</span>
+            }
+<span class="fc" id="L67">        }</span>
+
+    /** Whether the view should automatically rotate with bearing (like during navigation) */
+    private var _isNavigationMode: Boolean = false
+    var isNavigationMode: Boolean
+        set(value) {
+<span class="pc bpc" id="L73" title="3 of 4 branches missed.">            if (_isNavigationMode != value &amp;&amp; !value) {</span>
+<span class="nc" id="L74">                updateCameraPosition(300) { tilt = 0f }</span>
+            }
+<span class="fc" id="L76">            _isNavigationMode = value</span>
+<span class="fc" id="L77">        }</span>
+<span class="fc" id="L78">        get() = _isNavigationMode</span>
+
+    /** When the view follows the GPS position, whether the view already zoomed to the location once*/
+    private var zoomedYet = false
+
+    interface Listener {
+        /** Called after the map fragment updated its displayed location */
+        fun onDisplayedLocationDidChange()
+    }
+
+<span class="nc bnc" id="L88" title="All 6 branches missed.">    private val listener: Listener? get() = parentFragment as? Listener ?: activity as? Listener</span>
+
+    /* ------------------------------------ Lifecycle ------------------------------------------- */
+
+<span class="fc" id="L92">    init {</span>
+<span class="fc" id="L93">        tracks = ArrayList()</span>
+<span class="fc" id="L94">        tracks.add(ArrayList())</span>
+<span class="fc" id="L95">        _recordedTracks = ArrayList()</span>
+<span class="fc" id="L96">    }</span>
+
+    override fun onAttach(context: Context) {
+<span class="fc" id="L99">        super.onAttach(context)</span>
+<span class="fc" id="L100">        compass = Compass(</span>
+<span class="fc" id="L101">            context.getSystemService&lt;SensorManager&gt;()!!,</span>
+<span class="fc" id="L102">            context.getSystemService&lt;WindowManager&gt;()!!.defaultDisplay,</span>
+<span class="fc" id="L103">            this::onCompassRotationChanged</span>
+        )
+<span class="fc" id="L105">        lifecycle.addObserver(compass)</span>
+<span class="fc" id="L106">        locationManager = FineLocationManager(context, this::onLocationChanged)</span>
+<span class="fc" id="L107">    }</span>
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+<span class="fc" id="L110">        super.onCreate(savedInstanceState)</span>
+        // Restore value of members from saved state
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">        if (savedInstanceState != null) {</span>
+<span class="nc" id="L113">            displayedLocation = savedInstanceState.getParcelable(DISPLAYED_LOCATION)</span>
+<span class="nc" id="L114">            isRecordingTracks = savedInstanceState.getBoolean(TRACKS_IS_RECORDING)</span>
+<span class="nc" id="L115">            tracks = Json.decodeFromString(savedInstanceState.getString(TRACKS)!!)</span>
+        }
+<span class="fc" id="L117">    }</span>
+
+    override fun onStart() {
+<span class="fc" id="L120">        super.onStart()</span>
+<span class="fc" id="L121">        locationAvailabilityReceiver.addListener(::updateLocationAvailability)</span>
+<span class="pc bpc" id="L122" title="2 of 4 branches missed.">        updateLocationAvailability(requireContext().run { hasLocationPermission &amp;&amp; isLocationEnabled })</span>
+<span class="fc" id="L123">    }</span>
+
+    override fun onStop() {
+<span class="nc" id="L126">        super.onStop()</span>
+<span class="nc" id="L127">        locationAvailabilityReceiver.removeListener(::updateLocationAvailability)</span>
+<span class="nc" id="L128">        saveMapState()</span>
+<span class="nc" id="L129">        stopPositionTracking()</span>
+<span class="nc" id="L130">    }</span>
+
+    /* ---------------------------------- Map State Callbacks ----------------------------------- */
+
+    override suspend fun onMapReady() {
+<span class="fc" id="L135">        super.onMapReady()</span>
+<span class="fc" id="L136">        restoreMapState()</span>
+
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">        val ctrl = controller ?: return</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">        val ctx = context ?: return</span>
+<span class="fc" id="L140">        locationMapComponent = CurrentLocationMapComponent(ctx, ctrl)</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">        locationMapComponent?.location = displayedLocation</span>
+
+<span class="fc" id="L143">        tracksMapComponent = TracksMapComponent(ctrl)</span>
+<span class="pc" id="L144">        val positionsLists = tracks.map { track -&gt; track.map { it.position } }</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">        tracksMapComponent?.setTracks(positionsLists, isRecordingTracks)</span>
+
+<span class="fc" id="L147">        centerCurrentPositionIfFollowing()</span>
+<span class="fc" id="L148">    }</span>
+
+    override fun onMapIsChanging(position: LatLon, rotation: Float, tilt: Float, zoom: Float) {
+<span class="nc" id="L151">        super.onMapIsChanging(position, rotation, tilt, zoom)</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        locationMapComponent?.currentMapZoom = zoom</span>
+<span class="nc" id="L153">    }</span>
+
+    /* --------------------------------- Position tracking -------------------------------------- */
+
+    @SuppressLint(&quot;MissingPermission&quot;)
+    fun startPositionTracking() {
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        locationMapComponent?.isVisible = true</span>
+<span class="fc" id="L160">        locationManager.requestUpdates(0, 5000, 1f)</span>
+<span class="fc" id="L161">    }</span>
+
+    fun stopPositionTracking() {
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        locationMapComponent?.isVisible = false</span>
+<span class="nc" id="L165">        locationManager.removeUpdates()</span>
+<span class="nc" id="L166">    }</span>
+
+    fun clearPositionTracking() {
+<span class="nc" id="L169">        stopPositionTracking()</span>
+<span class="nc" id="L170">        displayedLocation = null</span>
+<span class="nc" id="L171">        isNavigationMode = false</span>
+
+<span class="nc" id="L173">        tracks = ArrayList()</span>
+<span class="nc" id="L174">        tracks.add(ArrayList())</span>
+
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        tracksMapComponent?.clear()</span>
+<span class="nc" id="L177">    }</span>
+
+    @SuppressLint(&quot;MissingPermission&quot;)
+    fun startPositionTrackRecording() {
+<span class="nc" id="L181">        isRecordingTracks = true</span>
+<span class="nc" id="L182">        _recordedTracks.clear()</span>
+<span class="nc" id="L183">        tracks.add(ArrayList())</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        locationMapComponent?.isVisible = true</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        tracksMapComponent?.startNewTrack(true)</span>
+<span class="nc" id="L186">    }</span>
+
+    fun stopPositionTrackRecording() {
+<span class="nc" id="L189">        isRecordingTracks = false</span>
+<span class="nc" id="L190">        _recordedTracks.clear()</span>
+<span class="nc" id="L191">        _recordedTracks.addAll(tracks.last())</span>
+<span class="nc" id="L192">        tracks.add(ArrayList())</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        tracksMapComponent?.startNewTrack(false)</span>
+<span class="nc" id="L194">    }</span>
+
+    protected open fun shouldCenterCurrentPosition(): Boolean {
+<span class="fc" id="L197">        return isFollowingPosition</span>
+    }
+
+    fun centerCurrentPosition() {
+<span class="pc bpc" id="L201" title="3 of 4 branches missed.">        val displayedPosition = displayedLocation?.toLatLon() ?: return</span>
+<span class="nc" id="L202">        var centerPosition = displayedPosition</span>
+
+<span class="nc" id="L204">        updateCameraPosition(600) {</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">            if (isNavigationMode) {</span>
+<span class="nc" id="L206">                val bearing = getTrackBearing(tracks.last())</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                if (bearing != null) {</span>
+<span class="nc" id="L208">                    rotation = -(bearing * PI / 180.0).toFloat()</span>
+                    /* move center position down a bit, so there is more space in front of than
+                       behind user */
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                    val distance = controller?.screenBottomToCenterDistance()</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                    if (distance != null) {</span>
+<span class="nc" id="L213">                        centerPosition = centerPosition.translate(distance * 0.4, bearing.toDouble())</span>
+                    }
+                }
+<span class="nc" id="L216">                tilt = PI.toFloat() / 6f</span>
+            }
+
+<span class="nc" id="L219">            position = centerPosition</span>
+
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (!zoomedYet) {</span>
+<span class="nc" id="L222">                zoomedYet = true</span>
+<span class="nc" id="L223">                zoom = 19f</span>
+            }
+<span class="nc" id="L225">        }</span>
+<span class="nc" id="L226">    }</span>
+
+    fun centerCurrentPositionIfFollowing() {
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">        if (shouldCenterCurrentPosition()) centerCurrentPosition()</span>
+<span class="fc" id="L230">    }</span>
+
+    private fun updateLocationAvailability(isAvailable: Boolean) {
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">        if (!isAvailable) {</span>
+<span class="nc" id="L234">            displayedLocation = null</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            locationMapComponent?.location = null</span>
+        }
+<span class="fc" id="L237">    }</span>
+
+    private fun onLocationChanged(location: Location) {
+<span class="nc" id="L240">        displayedLocation = location</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        locationMapComponent?.location = location</span>
+<span class="nc" id="L242">        addTrackLocation(location)</span>
+<span class="nc" id="L243">        compass.setLocation(location)</span>
+<span class="nc" id="L244">        centerCurrentPositionIfFollowing()</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        listener?.onDisplayedLocationDidChange()</span>
+<span class="nc" id="L246">    }</span>
+
+    private fun addTrackLocation(location: Location) {
+        // ignore if too imprecise
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (location.accuracy &gt; MIN_TRACK_ACCURACY) return</span>
+<span class="nc" id="L251">        val lastLocation = tracks.last().lastOrNull()</span>
+
+        // create new track if last position too old
+<span class="nc bnc" id="L254" title="All 4 branches missed.">        if (lastLocation != null &amp;&amp; !isRecordingTracks) {</span>
+<span class="nc bnc" id="L255" title="All 4 branches missed.">            if ((displayedLocation?.time ?: 0) - lastLocation.time &gt; MAX_TIME_BETWEEN_LOCATIONS) {</span>
+<span class="nc" id="L256">                tracks.add(ArrayList())</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                tracksMapComponent?.startNewTrack(false)</span>
+            }
+        }
+<span class="nc" id="L260">        val trackpoint = Trackpoint(location.toLatLon(), location.time, location.accuracy, location.altitude.toFloat())</span>
+
+<span class="nc" id="L262">        tracks.last().add(trackpoint)</span>
+        // delay update by 600 ms because the animation to the new location takes that long
+        // in rare cases, onLocationChanged may already be called before the view has been created
+        // so we need to check that first
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (view != null) {</span>
+<span class="nc" id="L267">            viewLifecycleScope.launch {</span>
+<span class="nc" id="L268">                delay(600)</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">                tracksMapComponent?.addToCurrentTrack(trackpoint.position)</span>
+<span class="nc" id="L270">            }</span>
+        }
+<span class="nc" id="L272">    }</span>
+
+    /* --------------------------------- Rotation tracking -------------------------------------- */
+
+    private fun onCompassRotationChanged(rot: Float, tilt: Float) {
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        locationMapComponent?.rotation = rot * 180 / PI</span>
+<span class="nc" id="L278">    }</span>
+
+    /* -------------------------------- Save and Restore State ---------------------------------- */
+
+    private fun restoreMapState() {
+<span class="pc bpc" id="L283" title="2 of 4 branches missed.">        val prefs = activity?.getPreferences(Activity.MODE_PRIVATE) ?: return</span>
+<span class="fc" id="L284">        isFollowingPosition = prefs.getBoolean(PREF_FOLLOWING, true)</span>
+<span class="fc" id="L285">        isNavigationMode = prefs.getBoolean(PREF_NAVIGATION_MODE, false)</span>
+<span class="fc" id="L286">    }</span>
+
+    private fun saveMapState() {
+<span class="nc bnc" id="L289" title="All 4 branches missed.">        activity?.getPreferences(Activity.MODE_PRIVATE)?.edit {</span>
+<span class="nc" id="L290">            putBoolean(PREF_FOLLOWING, isFollowingPosition)</span>
+<span class="nc" id="L291">            putBoolean(PREF_NAVIGATION_MODE, isNavigationMode)</span>
+<span class="nc" id="L292">        }</span>
+<span class="nc" id="L293">    }</span>
+
+    override fun onSaveInstanceState(outState: Bundle) {
+<span class="nc" id="L296">        super.onSaveInstanceState(outState)</span>
+<span class="nc" id="L297">        outState.putParcelable(DISPLAYED_LOCATION, displayedLocation)</span>
+        /* tracks can theoretically grow indefinitely, but one cannot put an indefinite amount of
+         * data into the saved instance state. Apparently only half an MB (~5000 trackpoints). So
+         * let's cut off at 1000 points to be on the safe side... (I don't know if the limit is
+         * for all of the app or just one fragment) */
+<span class="nc" id="L302">        outState.putString(TRACKS, Json.encodeToString(tracks.takeLastNested(1000)))</span>
+<span class="nc" id="L303">        outState.putBoolean(TRACKS_IS_RECORDING, isRecordingTracks)</span>
+<span class="nc" id="L304">    }</span>
+
+    companion object {
+        private const val PREF_FOLLOWING = &quot;map_following&quot;
+        private const val PREF_NAVIGATION_MODE = &quot;map_compass_mode&quot;
+
+        private const val DISPLAYED_LOCATION = &quot;displayed_location&quot;
+        private const val TRACKS = &quot;tracks&quot;
+        private const val TRACKS_IS_RECORDING = &quot;tracks_is_recording&quot;
+
+        private const val MIN_TRACK_ACCURACY = 20f
+        private const val MAX_TIME_BETWEEN_LOCATIONS = 60L * 1000 // 1 minute
+    }
+}
+
+private fun &lt;T&gt; ArrayList&lt;ArrayList&lt;T&gt;&gt;.takeLastNested(n: Int): ArrayList&lt;ArrayList&lt;T&gt;&gt; {
+<span class="nc" id="L320">    var sum = 0</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">    for (i in lastIndex downTo 0) {</span>
+<span class="nc" id="L322">        val s = get(i).size</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (sum + s &gt; n) {</span>
+<span class="nc" id="L324">            val result = ArrayList(subList(i + 1, size))</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            if (n &gt; sum) result.add(0, ArrayList(get(i).takeLast(n - sum)))</span>
+<span class="nc" id="L326">            return result</span>
+        }
+<span class="nc" id="L328">        sum += s</span>
+    }
+<span class="nc" id="L330">    return this</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlarmService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Fossify-Clock</a> &gt; <a href="index.source.html" class="el_package">org.fossify.clock.services</a> &gt; <span class="el_source">AlarmService.kt</span></div><h1>AlarmService.kt</h1><pre class="source lang-java linenums">package org.fossify.clock.services
+
+import android.app.Service
+import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.AudioManager.STREAM_ALARM
+import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import androidx.core.net.toUri
+import org.fossify.clock.activities.AlarmActivity
+import org.fossify.clock.extensions.alarmController
+import org.fossify.clock.extensions.config
+import org.fossify.clock.extensions.dbHelper
+import org.fossify.clock.helpers.ALARM_ID
+import org.fossify.clock.helpers.ALARM_NOTIFICATION_ID
+import org.fossify.clock.helpers.AlarmNotificationHelper
+import org.fossify.clock.models.Alarm
+import org.fossify.commons.helpers.SILENT
+import kotlin.time.Duration.Companion.seconds
+
+/**
+ * Service responsible for sounding the alarms and vibrations.
+ * It also shows a notification with actions to dismiss or snooze an alarm.
+ * Totally based on the previous implementation in the [AlarmActivity].
+ */
+<span class="nc" id="L30">class AlarmService : Service() {</span>
+
+    companion object {
+        private const val DEFAULT_ALARM_VOLUME = 7
+        private const val INCREASE_VOLUME_DELAY = 300L
+        private const val MIN_ALARM_VOLUME_FOR_INCREASING_ALARMS = 1
+        private const val VIBRATION_PATTERN_TIMING = 500L
+        private const val VOLUME_INCREASE_STEP = 0.1f
+
+        const val ACTION_START_ALARM = &quot;org.fossify.clock.START_ALARM&quot;
+        const val ACTION_STOP_ALARM = &quot;org.fossify.clock.STOP_ALARM&quot;
+    }
+
+    private var activeAlarm: Alarm? = null
+<span class="nc" id="L44">    private var initialAlarmVolume = DEFAULT_ALARM_VOLUME</span>
+    private var mediaPlayer: MediaPlayer? = null
+    private var vibrator: Vibrator? = null
+
+    private lateinit var audioManager: AudioManager
+    private lateinit var notificationHelper: AlarmNotificationHelper
+
+<span class="nc" id="L51">    private val autoDismissHandler = Handler(Looper.getMainLooper())</span>
+<span class="nc" id="L52">    private val increaseVolumeHandler = Handler(Looper.getMainLooper())</span>
+
+    override fun onCreate() {
+<span class="nc" id="L55">        super.onCreate()</span>
+<span class="nc" id="L56">        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager</span>
+<span class="nc" id="L57">        notificationHelper = AlarmNotificationHelper(this)</span>
+<span class="nc" id="L58">    }</span>
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+<span class="nc bnc" id="L61" title="All 4 branches missed.">        val action = intent?.action ?: ACTION_START_ALARM</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        val alarmId = intent?.getIntExtra(ALARM_ID, -1) ?: -1</span>
+<span class="nc" id="L63">        val newAlarm = applicationContext.dbHelper.getAlarmWithId(alarmId)</span>
+<span class="nc bnc" id="L64" title="All 4 branches missed.">        if (alarmId == -1 || newAlarm == null) {</span>
+<span class="nc" id="L65">            stopSelfIfIdle()</span>
+<span class="nc" id="L66">            return START_NOT_STICKY</span>
+        }
+
+<span class="nc" id="L69">        when (action) {</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            ACTION_START_ALARM -&gt; startNewAlarm(newAlarm)</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            ACTION_STOP_ALARM -&gt; stopActiveAlarm(alarmId)</span>
+<span class="nc" id="L72">            else -&gt; throw IllegalArgumentException(&quot;Unknown action: $action&quot;)</span>
+        }
+
+<span class="nc" id="L75">        return START_STICKY</span>
+    }
+
+    private fun startNewAlarm(newAlarm: Alarm) {
+<span class="nc" id="L79">        startForeground(</span>
+<span class="nc" id="L80">            ALARM_NOTIFICATION_ID,</span>
+<span class="nc" id="L81">            notificationHelper.buildActiveAlarmNotification(newAlarm)</span>
+        )
+
+<span class="nc" id="L84">        val currentAlarm = activeAlarm</span>
+<span class="nc" id="L85">        activeAlarm = newAlarm</span>
+
+<span class="nc bnc" id="L87" title="All 6 branches missed.">        if (currentAlarm?.id == newAlarm.id) {</span>
+            // No action needed, same alarm
+<span class="nc" id="L89">            return</span>
+        }
+
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        val replaceActiveAlarm = currentAlarm != null</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (replaceActiveAlarm) {</span>
+<span class="nc" id="L94">            stopPlayerAndCleanup()</span>
+<span class="nc" id="L95">            notificationHelper.postReplacedAlarmNotification(currentAlarm!!)</span>
+<span class="nc" id="L96">            alarmController.stopAlarm(currentAlarm.id)</span>
+        }
+
+<span class="nc" id="L99">        startAlarmEffects(newAlarm)</span>
+<span class="nc" id="L100">        startAutoDismiss(config.alarmMaxReminderSecs)</span>
+<span class="nc" id="L101">    }</span>
+
+    private fun stopActiveAlarm(alarmIdToStop: Int) {
+<span class="nc bnc" id="L104" title="All 6 branches missed.">        if (activeAlarm?.id == alarmIdToStop) {</span>
+<span class="nc" id="L105">            stopSelf()</span>
+        } else {
+<span class="nc" id="L107">            stopSelfIfIdle()</span>
+        }
+<span class="nc" id="L109">    }</span>
+
+    private fun startAlarmEffects(alarm: Alarm) {
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (alarm.soundUri != SILENT) {</span>
+<span class="nc" id="L113">            try {</span>
+<span class="nc" id="L114">                val audioAttributes = AudioAttributes.Builder()</span>
+<span class="nc" id="L115">                    .setUsage(AudioAttributes.USAGE_ALARM)</span>
+<span class="nc" id="L116">                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)</span>
+<span class="nc" id="L117">                    .build()</span>
+
+<span class="nc" id="L119">                mediaPlayer = MediaPlayer().apply {</span>
+<span class="nc" id="L120">                    setAudioAttributes(audioAttributes)</span>
+<span class="nc" id="L121">                    setDataSource(this@AlarmService, alarm.soundUri.toUri())</span>
+<span class="nc" id="L122">                    isLooping = true</span>
+<span class="nc" id="L123">                    prepare()</span>
+<span class="nc" id="L124">                    start()</span>
+<span class="nc" id="L125">                }</span>
+
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                if (config.increaseVolumeGradually) {</span>
+<span class="nc" id="L128">                    initialAlarmVolume = audioManager.getStreamVolume(STREAM_ALARM)</span>
+<span class="nc" id="L129">                    scheduleVolumeIncrease(</span>
+<span class="nc" id="L130">                        lastVolume = MIN_ALARM_VOLUME_FOR_INCREASING_ALARMS.toFloat(),</span>
+<span class="nc" id="L131">                        maxVolume = initialAlarmVolume.toFloat(),</span>
+<span class="nc" id="L132">                        delay = 0</span>
+                    )
+                }
+<span class="nc" id="L135">            } catch (e: Exception) {</span>
+<span class="nc" id="L136">                e.printStackTrace()</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                mediaPlayer?.release()</span>
+<span class="nc" id="L138">                mediaPlayer = null</span>
+            }
+        }
+
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (alarm.vibrate) {</span>
+<span class="nc" id="L143">            vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            vibrator?.vibrate(</span>
+<span class="nc" id="L145">                VibrationEffect.createWaveform(</span>
+<span class="nc" id="L146">                    longArrayOf(VIBRATION_PATTERN_TIMING, VIBRATION_PATTERN_TIMING), 0</span>
+                )
+            )
+        }
+<span class="nc" id="L150">    }</span>
+
+    // Revisit this. We are directly changing the system alarm volume here.
+    private fun scheduleVolumeIncrease(lastVolume: Float, maxVolume: Float, delay: Long) {
+<span class="nc" id="L154">        increaseVolumeHandler.postDelayed({</span>
+<span class="nc" id="L155">            val newVolume = (lastVolume + VOLUME_INCREASE_STEP).coerceAtMost(maxVolume)</span>
+<span class="nc" id="L156">            audioManager.setStreamVolume(STREAM_ALARM, newVolume.toInt(), 0)</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            if (newVolume &lt; maxVolume) {</span>
+<span class="nc" id="L158">                scheduleVolumeIncrease(newVolume, maxVolume, INCREASE_VOLUME_DELAY)</span>
+            }
+<span class="nc" id="L160">        }, delay)</span>
+<span class="nc" id="L161">    }</span>
+
+    private fun resetVolumeToInitialValue() {
+<span class="nc bnc" id="L164" title="All 4 branches missed.">        if (config.increaseVolumeGradually &amp;&amp; initialAlarmVolume != DEFAULT_ALARM_VOLUME) {</span>
+<span class="nc" id="L165">            audioManager.setStreamVolume(STREAM_ALARM, initialAlarmVolume, 0)</span>
+        }
+
+<span class="nc" id="L168">        initialAlarmVolume = DEFAULT_ALARM_VOLUME</span>
+<span class="nc" id="L169">    }</span>
+
+    private fun startAutoDismiss(durationSecs: Int) {
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        val alarmId = activeAlarm?.id ?: return</span>
+<span class="nc" id="L173">        autoDismissHandler.postDelayed({</span>
+<span class="nc" id="L174">            val missedAlarm = activeAlarm</span>
+<span class="nc bnc" id="L175" title="All 6 branches missed.">            if (missedAlarm?.id == alarmId) {</span>
+<span class="nc" id="L176">                notificationHelper.postMissedAlarmNotification(missedAlarm)</span>
+<span class="nc" id="L177">                alarmController.stopAlarm(alarmId)</span>
+            }
+<span class="nc" id="L179">        }, durationSecs.seconds.inWholeMilliseconds)</span>
+<span class="nc" id="L180">    }</span>
+
+    private fun stopPlayerAndCleanup() {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        mediaPlayer?.stop()</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        mediaPlayer?.release()</span>
+<span class="nc" id="L185">        mediaPlayer = null</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        vibrator?.cancel()</span>
+<span class="nc" id="L187">        vibrator = null</span>
+
+        // Clear any scheduled volume changes or auto-dismiss messages
+<span class="nc" id="L190">        increaseVolumeHandler.removeCallbacksAndMessages(null)</span>
+<span class="nc" id="L191">        autoDismissHandler.removeCallbacksAndMessages(null)</span>
+<span class="nc" id="L192">        resetVolumeToInitialValue()</span>
+<span class="nc" id="L193">    }</span>
+
+    private fun stopSelfIfIdle() {
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (activeAlarm == null) {</span>
+<span class="nc" id="L197">            stopSelf()</span>
+        }
+<span class="nc" id="L199">    }</span>
+
+    override fun onDestroy() {
+<span class="nc" id="L202">        super.onDestroy()</span>
+<span class="nc" id="L203">        stopForeground(STOP_FOREGROUND_REMOVE)</span>
+<span class="nc" id="L204">        stopPlayerAndCleanup()</span>
+<span class="nc" id="L205">    }</span>
+
+<span class="nc" id="L207">    override fun onBind(intent: Intent?) = null</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,603 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseEmailAddressAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.common.contacts</a> &gt; <span class="el_source">BaseEmailAddressAdapter.java</span></div><h1>BaseEmailAddressAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2010 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.common.contacts;
+
+import com.android.calendar.common.widget.CompositeCursorAdapter;
+
+import android.accounts.Account;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Message;
+import android.provider.ContactsContract;
+import android.provider.ContactsContract.CommonDataKinds.Email;
+import android.provider.ContactsContract.Contacts;
+import android.text.TextUtils;
+import android.text.util.Rfc822Token;
+import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Filter;
+import android.widget.Filterable;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * A base class for email address autocomplete adapters. It uses
+ * {@link Email#CONTENT_FILTER_URI} to search for data rows by email address
+ * and/or contact name. It also searches registered {@link Directory}'s.
+ */
+public abstract class BaseEmailAddressAdapter extends CompositeCursorAdapter implements Filterable {
+
+    private static final String TAG = &quot;BaseEmailAddressAdapter&quot;;
+
+    // TODO: revert to references to the Directory class as soon as the
+    // issue with the dependency on SDK 8 is resolved
+
+    // This is Directory.LOCAL_INVISIBLE
+    private static final long DIRECTORY_LOCAL_INVISIBLE = 1;
+
+    // This is ContactsContract.DIRECTORY_PARAM_KEY
+    private static final String DIRECTORY_PARAM_KEY = &quot;directory&quot;;
+
+    // This is ContactsContract.LIMIT_PARAM_KEY
+    private static final String LIMIT_PARAM_KEY = &quot;limit&quot;;
+
+    // This is ContactsContract.PRIMARY_ACCOUNT_NAME
+    private static final String PRIMARY_ACCOUNT_NAME = &quot;name_for_primary_account&quot;;
+    // This is ContactsContract.PRIMARY_ACCOUNT_TYPE
+    private static final String PRIMARY_ACCOUNT_TYPE = &quot;type_for_primary_account&quot;;
+
+    /**
+     * The preferred number of results to be retrieved. This number may be
+     * exceeded if there are several directories configured, because we will use
+     * the same limit for all directories.
+     */
+    private static final int DEFAULT_PREFERRED_MAX_RESULT_COUNT = 10;
+
+    /**
+     * The number of extra entries requested to allow for duplicates. Duplicates
+     * are removed from the overall result.
+     */
+    private static final int ALLOWANCE_FOR_DUPLICATES = 5;
+
+    /**
+     * The &quot;Searching...&quot; message will be displayed if search is not complete
+     * within this many milliseconds.
+     */
+    private static final int MESSAGE_SEARCH_PENDING_DELAY = 1000;
+
+    private static final int MESSAGE_SEARCH_PENDING = 1;
+
+    /**
+     * Model object for a {@link Directory} row. There is a partition in the
+     * {@link CompositeCursorAdapter} for every directory (except
+     * {@link Directory#LOCAL_INVISIBLE}.
+     */
+    public final static class DirectoryPartition extends CompositeCursorAdapter.Partition {
+        public long directoryId;
+        public String directoryType;
+        public String displayName;
+        public String accountName;
+        public String accountType;
+        public boolean loading;
+        public CharSequence constraint;
+        public DirectoryPartitionFilter filter;
+
+        public DirectoryPartition() {
+<span class="nc" id="L109">            super(false, false);</span>
+<span class="nc" id="L110">        }</span>
+    }
+
+    private static class EmailQuery {
+<span class="nc" id="L114">        public static final String[] PROJECTION = {</span>
+            Contacts.DISPLAY_NAME,  // 0
+            Email.DATA              // 1
+        };
+
+        public static final int NAME = 0;
+        public static final int ADDRESS = 1;
+    }
+
+    private static class DirectoryListQuery {
+
+        // TODO: revert to references to the Directory class as soon as the
+        // issue with the dependency on SDK 8 is resolved
+<span class="nc" id="L127">        public static final Uri URI =</span>
+<span class="nc" id="L128">                Uri.withAppendedPath(ContactsContract.AUTHORITY_URI, &quot;directories&quot;);</span>
+        private static final String DIRECTORY_ID = &quot;_id&quot;;
+        private static final String DIRECTORY_ACCOUNT_NAME = &quot;accountName&quot;;
+        private static final String DIRECTORY_ACCOUNT_TYPE = &quot;accountType&quot;;
+        private static final String DIRECTORY_DISPLAY_NAME = &quot;displayName&quot;;
+        private static final String DIRECTORY_PACKAGE_NAME = &quot;packageName&quot;;
+        private static final String DIRECTORY_TYPE_RESOURCE_ID = &quot;typeResourceId&quot;;
+
+<span class="nc" id="L136">        public static final String[] PROJECTION = {</span>
+            DIRECTORY_ID,               // 0
+            DIRECTORY_ACCOUNT_NAME,     // 1
+            DIRECTORY_ACCOUNT_TYPE,     // 2
+            DIRECTORY_DISPLAY_NAME,     // 3
+            DIRECTORY_PACKAGE_NAME,     // 4
+            DIRECTORY_TYPE_RESOURCE_ID, // 5
+        };
+
+        public static final int ID = 0;
+        public static final int ACCOUNT_NAME = 1;
+        public static final int ACCOUNT_TYPE = 2;
+        public static final int DISPLAY_NAME = 3;
+        public static final int PACKAGE_NAME = 4;
+        public static final int TYPE_RESOURCE_ID = 5;
+    }
+
+    /**
+     * A fake column name that indicates a &quot;Searching...&quot; item in the list.
+     */
+    private static final String SEARCHING_CURSOR_MARKER = &quot;searching&quot;;
+
+    /**
+     * An asynchronous filter used for loading two data sets: email rows from the local
+     * contact provider and the list of {@link Directory}'s.
+     */
+<span class="nc" id="L162">    private final class DefaultPartitionFilter extends Filter {</span>
+
+        @Override
+        protected FilterResults performFiltering(CharSequence constraint) {
+<span class="nc" id="L166">            Cursor directoryCursor = null;</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            if (!mDirectoriesLoaded) {</span>
+<span class="nc" id="L168">                directoryCursor = mContentResolver.query(</span>
+                        DirectoryListQuery.URI, DirectoryListQuery.PROJECTION, null, null, null);
+<span class="nc" id="L170">                mDirectoriesLoaded = true;</span>
+            }
+
+<span class="nc" id="L173">            FilterResults results = new FilterResults();</span>
+<span class="nc" id="L174">            Cursor cursor = null;</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (!TextUtils.isEmpty(constraint)) {</span>
+<span class="nc" id="L176">                Uri.Builder builder = Email.CONTENT_FILTER_URI.buildUpon()</span>
+<span class="nc" id="L177">                        .appendPath(constraint.toString())</span>
+<span class="nc" id="L178">                        .appendQueryParameter(LIMIT_PARAM_KEY,</span>
+<span class="nc" id="L179">                                String.valueOf(mPreferredMaxResultCount));</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                if (mAccount != null) {</span>
+<span class="nc" id="L181">                    builder.appendQueryParameter(PRIMARY_ACCOUNT_NAME, mAccount.name);</span>
+<span class="nc" id="L182">                    builder.appendQueryParameter(PRIMARY_ACCOUNT_TYPE, mAccount.type);</span>
+                }
+<span class="nc" id="L184">                Uri uri = builder.build();</span>
+<span class="nc" id="L185">                cursor = mContentResolver.query(uri, EmailQuery.PROJECTION, null, null, null);</span>
+<span class="nc" id="L186">                results.count = cursor.getCount();</span>
+            }
+<span class="nc" id="L188">            results.values = new Cursor[] { directoryCursor, cursor };</span>
+<span class="nc" id="L189">            return results;</span>
+        }
+
+        @Override
+        protected void publishResults(CharSequence constraint, FilterResults results) {
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            if (results.values != null) {</span>
+<span class="nc" id="L195">                Cursor[] cursors = (Cursor[]) results.values;</span>
+<span class="nc" id="L196">                onDirectoryLoadFinished(constraint, cursors[0], cursors[1]);</span>
+            }
+<span class="nc" id="L198">            results.count = getCount();</span>
+<span class="nc" id="L199">        }</span>
+
+        @Override
+        public CharSequence convertResultToString(Object resultValue) {
+<span class="nc" id="L203">            return makeDisplayString((Cursor) resultValue);</span>
+        }
+    }
+
+    /**
+     * An asynchronous filter that performs search in a particular directory.
+     */
+    private final class DirectoryPartitionFilter extends Filter {
+        private final int mPartitionIndex;
+        private final long mDirectoryId;
+        private int mLimit;
+
+<span class="nc" id="L215">        public DirectoryPartitionFilter(int partitionIndex, long directoryId) {</span>
+<span class="nc" id="L216">            this.mPartitionIndex = partitionIndex;</span>
+<span class="nc" id="L217">            this.mDirectoryId = directoryId;</span>
+<span class="nc" id="L218">        }</span>
+
+        public synchronized void setLimit(int limit) {
+<span class="nc" id="L221">            this.mLimit = limit;</span>
+<span class="nc" id="L222">        }</span>
+
+        public synchronized int getLimit() {
+<span class="nc" id="L225">            return this.mLimit;</span>
+        }
+
+        @Override
+        protected FilterResults performFiltering(CharSequence constraint) {
+<span class="nc" id="L230">            FilterResults results = new FilterResults();</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">            if (!TextUtils.isEmpty(constraint)) {</span>
+<span class="nc" id="L232">                Uri uri = Email.CONTENT_FILTER_URI.buildUpon()</span>
+<span class="nc" id="L233">                        .appendPath(constraint.toString())</span>
+<span class="nc" id="L234">                        .appendQueryParameter(DIRECTORY_PARAM_KEY, String.valueOf(mDirectoryId))</span>
+<span class="nc" id="L235">                        .appendQueryParameter(LIMIT_PARAM_KEY,</span>
+<span class="nc" id="L236">                                String.valueOf(getLimit() + ALLOWANCE_FOR_DUPLICATES))</span>
+<span class="nc" id="L237">                        .build();</span>
+<span class="nc" id="L238">                Cursor cursor = mContentResolver.query(</span>
+                        uri, EmailQuery.PROJECTION, null, null, null);
+<span class="nc" id="L240">                results.values = cursor;</span>
+            }
+<span class="nc" id="L242">            return results;</span>
+        }
+
+        @Override
+        protected void publishResults(CharSequence constraint, FilterResults results) {
+<span class="nc" id="L247">            Cursor cursor = (Cursor) results.values;</span>
+<span class="nc" id="L248">            onPartitionLoadFinished(constraint, mPartitionIndex, cursor);</span>
+<span class="nc" id="L249">            results.count = getCount();</span>
+<span class="nc" id="L250">        }</span>
+    }
+
+    protected final ContentResolver mContentResolver;
+    private boolean mDirectoriesLoaded;
+    private Account mAccount;
+    private int mPreferredMaxResultCount;
+    private Handler mHandler;
+
+    public BaseEmailAddressAdapter(Context context) {
+<span class="nc" id="L260">        this(context, DEFAULT_PREFERRED_MAX_RESULT_COUNT);</span>
+<span class="nc" id="L261">    }</span>
+
+    public BaseEmailAddressAdapter(Context context, int preferredMaxResultCount) {
+<span class="nc" id="L264">        super(context);</span>
+<span class="nc" id="L265">        mContentResolver = context.getContentResolver();</span>
+<span class="nc" id="L266">        mPreferredMaxResultCount = preferredMaxResultCount;</span>
+
+<span class="nc" id="L268">        mHandler = new Handler() {</span>
+
+            @Override
+            public void handleMessage(Message msg) {
+<span class="nc" id="L272">                showSearchPendingIfNotComplete(msg.arg1);</span>
+<span class="nc" id="L273">            }</span>
+        };
+<span class="nc" id="L275">    }</span>
+
+    /**
+     * Set the account when known. Causes the search to prioritize contacts from
+     * that account.
+     */
+    public void setAccount(Account account) {
+<span class="nc" id="L282">        mAccount = account;</span>
+<span class="nc" id="L283">    }</span>
+
+    /**
+     * Override to create a view for line item in the autocomplete suggestion list UI.
+     */
+    protected abstract View inflateItemView(ViewGroup parent);
+
+    /**
+     * Override to populate the autocomplete suggestion line item UI with data.
+     */
+    protected abstract void bindView(View view, String directoryType, String directoryName,
+            String displayName, String emailAddress);
+
+    /**
+     * Override to create a view for a &quot;Searching directory&quot; line item, which is
+     * displayed temporarily while the corresponding filter is running.
+     */
+    protected abstract View inflateItemViewLoading(ViewGroup parent);
+
+    /**
+     * Override to populate the &quot;Searching directory&quot; line item UI with data.
+     */
+    protected abstract void bindViewLoading(View view, String directoryType, String directoryName);
+
+    @Override
+    protected int getItemViewType(int partitionIndex, int position) {
+<span class="nc" id="L309">        DirectoryPartition partition = (DirectoryPartition)getPartition(partitionIndex);</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        return partition.loading ? 1 : 0;</span>
+    }
+
+    @Override
+    protected View newView(Context context, int partitionIndex, Cursor cursor,
+            int position, ViewGroup parent) {
+<span class="nc" id="L316">        DirectoryPartition partition = (DirectoryPartition)getPartition(partitionIndex);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (partition.loading) {</span>
+<span class="nc" id="L318">            return inflateItemViewLoading(parent);</span>
+        } else {
+<span class="nc" id="L320">            return inflateItemView(parent);</span>
+        }
+    }
+
+    @Override
+    protected void bindView(View v, int partition, Cursor cursor, int position) {
+<span class="nc" id="L326">        DirectoryPartition directoryPartition = (DirectoryPartition)getPartition(partition);</span>
+<span class="nc" id="L327">        String directoryType = directoryPartition.directoryType;</span>
+<span class="nc" id="L328">        String directoryName = directoryPartition.displayName;</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        if (directoryPartition.loading) {</span>
+<span class="nc" id="L330">            bindViewLoading(v, directoryType, directoryName);</span>
+        } else {
+<span class="nc" id="L332">            String displayName = cursor.getString(EmailQuery.NAME);</span>
+<span class="nc" id="L333">            String emailAddress = cursor.getString(EmailQuery.ADDRESS);</span>
+<span class="nc bnc" id="L334" title="All 4 branches missed.">            if (TextUtils.isEmpty(displayName) || TextUtils.equals(displayName, emailAddress)) {</span>
+<span class="nc" id="L335">                displayName = emailAddress;</span>
+<span class="nc" id="L336">                emailAddress = null;</span>
+            }
+<span class="nc" id="L338">            bindView(v, directoryType, directoryName, displayName, emailAddress);</span>
+        }
+<span class="nc" id="L340">    }</span>
+
+    @Override
+    public boolean areAllItemsEnabled() {
+<span class="nc" id="L344">        return false;</span>
+    }
+
+    @Override
+    protected boolean isEnabled(int partitionIndex, int position) {
+        // The &quot;Searching...&quot; item should not be selectable
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        return !isLoading(partitionIndex);</span>
+    }
+
+    private boolean isLoading(int partitionIndex) {
+<span class="nc" id="L354">        return ((DirectoryPartition)getPartition(partitionIndex)).loading;</span>
+    }
+
+    @Override
+    public Filter getFilter() {
+<span class="nc" id="L359">        return new DefaultPartitionFilter();</span>
+    }
+
+    /**
+     * Handles the result of the initial call, which brings back the list of
+     * directories as well as the search results for the local directories.
+     */
+    protected void onDirectoryLoadFinished(
+            CharSequence constraint, Cursor directoryCursor, Cursor defaultPartitionCursor) {
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (directoryCursor != null) {</span>
+<span class="nc" id="L369">            PackageManager packageManager = getContext().getPackageManager();</span>
+<span class="nc" id="L370">            DirectoryPartition preferredDirectory = null;</span>
+<span class="nc" id="L371">            List&lt;DirectoryPartition&gt; directories = new ArrayList&lt;DirectoryPartition&gt;();</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            while (directoryCursor.moveToNext()) {</span>
+<span class="nc" id="L373">                long id = directoryCursor.getLong(DirectoryListQuery.ID);</span>
+
+                // Skip the local invisible directory, because the default directory
+                // already includes all local results.
+<span class="nc bnc" id="L377" title="All 2 branches missed.">                if (id == DIRECTORY_LOCAL_INVISIBLE) {</span>
+<span class="nc" id="L378">                    continue;</span>
+                }
+
+<span class="nc" id="L381">                DirectoryPartition partition = new DirectoryPartition();</span>
+<span class="nc" id="L382">                partition.directoryId = id;</span>
+<span class="nc" id="L383">                partition.displayName = directoryCursor.getString(DirectoryListQuery.DISPLAY_NAME);</span>
+<span class="nc" id="L384">                partition.accountName = directoryCursor.getString(DirectoryListQuery.ACCOUNT_NAME);</span>
+<span class="nc" id="L385">                partition.accountType = directoryCursor.getString(DirectoryListQuery.ACCOUNT_TYPE);</span>
+<span class="nc" id="L386">                String packageName = directoryCursor.getString(DirectoryListQuery.PACKAGE_NAME);</span>
+<span class="nc" id="L387">                int resourceId = directoryCursor.getInt(DirectoryListQuery.TYPE_RESOURCE_ID);</span>
+<span class="nc bnc" id="L388" title="All 4 branches missed.">                if (packageName != null &amp;&amp; resourceId != 0) {</span>
+                    try {
+<span class="nc" id="L390">                        Resources resources =</span>
+<span class="nc" id="L391">                                packageManager.getResourcesForApplication(packageName);</span>
+<span class="nc" id="L392">                        partition.directoryType = resources.getString(resourceId);</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                        if (partition.directoryType == null) {</span>
+<span class="nc" id="L394">                            Log.e(TAG, &quot;Cannot resolve directory name: &quot;</span>
+                                    + resourceId + &quot;@&quot; + packageName);
+                        }
+<span class="nc" id="L397">                    } catch (NameNotFoundException e) {</span>
+<span class="nc" id="L398">                        Log.e(TAG, &quot;Cannot resolve directory name: &quot;</span>
+                                + resourceId + &quot;@&quot; + packageName, e);
+<span class="nc" id="L400">                    }</span>
+                }
+
+                // If an account has been provided and we found a directory that
+                // corresponds to that account, place that directory second, directly
+                // underneath the local contacts.
+<span class="nc bnc" id="L406" title="All 4 branches missed.">                if (mAccount != null &amp;&amp; mAccount.name.equals(partition.accountName) &amp;&amp;</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">                        mAccount.type.equals(partition.accountType)) {</span>
+<span class="nc" id="L408">                    preferredDirectory = partition;</span>
+                } else {
+<span class="nc" id="L410">                    directories.add(partition);</span>
+                }
+<span class="nc" id="L412">            }</span>
+
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            if (preferredDirectory != null) {</span>
+<span class="nc" id="L415">                directories.add(1, preferredDirectory);</span>
+            }
+
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            for (DirectoryPartition partition : directories) {</span>
+<span class="nc" id="L419">                addPartition(partition);</span>
+<span class="nc" id="L420">            }</span>
+        }
+
+<span class="nc" id="L423">        int count = getPartitionCount();</span>
+<span class="nc" id="L424">        int limit = 0;</span>
+
+        // Since we will be changing several partitions at once, hold the data change
+        // notifications
+<span class="nc" id="L428">        setNotificationsEnabled(false);</span>
+        try {
+            // The filter has loaded results for the default partition too.
+<span class="nc bnc" id="L431" title="All 4 branches missed.">            if (defaultPartitionCursor != null &amp;&amp; getPartitionCount() &gt; 0) {</span>
+<span class="nc" id="L432">                changeCursor(0, defaultPartitionCursor);</span>
+            }
+
+<span class="nc bnc" id="L435" title="All 2 branches missed.">            int defaultPartitionCount = (defaultPartitionCursor == null ? 0</span>
+<span class="nc" id="L436">                    : defaultPartitionCursor.getCount());</span>
+
+<span class="nc" id="L438">            limit = mPreferredMaxResultCount - defaultPartitionCount;</span>
+
+            // Show non-default directories as &quot;loading&quot;
+            // Note: skipping the default partition (index 0), which has already been loaded
+<span class="nc bnc" id="L442" title="All 2 branches missed.">            for (int i = 1; i &lt; count; i++) {</span>
+<span class="nc" id="L443">                DirectoryPartition partition = (DirectoryPartition) getPartition(i);</span>
+<span class="nc" id="L444">                partition.constraint = constraint;</span>
+
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                if (limit &gt; 0) {</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">                    if (!partition.loading) {</span>
+<span class="nc" id="L448">                        partition.loading = true;</span>
+<span class="nc" id="L449">                        changeCursor(i, null);</span>
+                    }
+                } else {
+<span class="nc" id="L452">                    partition.loading = false;</span>
+<span class="nc" id="L453">                    changeCursor(i, null);</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L457">            setNotificationsEnabled(true);</span>
+        }
+
+        // Start search in other directories
+        // Note: skipping the default partition (index 0), which has already been loaded
+<span class="nc bnc" id="L462" title="All 2 branches missed.">        for (int i = 1; i &lt; count; i++) {</span>
+<span class="nc" id="L463">            DirectoryPartition partition = (DirectoryPartition) getPartition(i);</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">            if (partition.loading) {</span>
+<span class="nc" id="L465">                mHandler.removeMessages(MESSAGE_SEARCH_PENDING, partition);</span>
+<span class="nc" id="L466">                Message msg = mHandler.obtainMessage(MESSAGE_SEARCH_PENDING, i, 0, partition);</span>
+<span class="nc" id="L467">                mHandler.sendMessageDelayed(msg, MESSAGE_SEARCH_PENDING_DELAY);</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                if (partition.filter == null) {</span>
+<span class="nc" id="L469">                    partition.filter = new DirectoryPartitionFilter(i, partition.directoryId);</span>
+                }
+<span class="nc" id="L471">                partition.filter.setLimit(limit);</span>
+<span class="nc" id="L472">                partition.filter.filter(constraint);</span>
+<span class="nc" id="L473">            } else {</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">                if (partition.filter != null) {</span>
+                    // Cancel any previous loading request
+<span class="nc" id="L476">                    partition.filter.filter(null);</span>
+                }
+            }
+        }
+<span class="nc" id="L480">    }</span>
+
+    void showSearchPendingIfNotComplete(int partitionIndex) {
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        if (partitionIndex &lt; getPartitionCount()) {</span>
+<span class="nc" id="L484">            DirectoryPartition partition = (DirectoryPartition) getPartition(partitionIndex);</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">            if (partition.loading) {</span>
+<span class="nc" id="L486">                changeCursor(partitionIndex, createLoadingCursor());</span>
+            }
+        }
+<span class="nc" id="L489">    }</span>
+
+    /**
+     * Creates a dummy cursor to represent the &quot;Searching directory...&quot; item.
+     */
+    private Cursor createLoadingCursor() {
+<span class="nc" id="L495">        MatrixCursor cursor = new MatrixCursor(new String[]{SEARCHING_CURSOR_MARKER});</span>
+<span class="nc" id="L496">        cursor.addRow(new Object[]{&quot;&quot;});</span>
+<span class="nc" id="L497">        return cursor;</span>
+    }
+
+    public void onPartitionLoadFinished(
+            CharSequence constraint, int partitionIndex, Cursor cursor) {
+<span class="nc bnc" id="L502" title="All 2 branches missed.">        if (partitionIndex &lt; getPartitionCount()) {</span>
+<span class="nc" id="L503">            DirectoryPartition partition = (DirectoryPartition) getPartition(partitionIndex);</span>
+
+            // Check if the received result matches the current constraint
+            // If not - the user must have continued typing after the request
+            // was issued
+<span class="nc bnc" id="L508" title="All 4 branches missed.">            if (partition.loading &amp;&amp; TextUtils.equals(constraint, partition.constraint)) {</span>
+<span class="nc" id="L509">                partition.loading = false;</span>
+<span class="nc" id="L510">                mHandler.removeMessages(MESSAGE_SEARCH_PENDING, partition);</span>
+<span class="nc" id="L511">                changeCursor(partitionIndex, removeDuplicatesAndTruncate(partitionIndex, cursor));</span>
+            } else {
+                // We got the result for an unexpected query (the user is still typing)
+                // Just ignore this result
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                if (cursor != null) {</span>
+<span class="nc" id="L516">                    cursor.close();</span>
+                }
+            }
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        } else if (cursor != null) {</span>
+<span class="nc" id="L520">            cursor.close();</span>
+        }
+<span class="nc" id="L522">    }</span>
+
+    /**
+     * Post-process the cursor to eliminate duplicates.  Closes the original cursor
+     * and returns a new one.
+     */
+    private Cursor removeDuplicatesAndTruncate(int partition, Cursor cursor) {
+<span class="nc bnc" id="L529" title="All 2 branches missed.">        if (cursor == null) {</span>
+<span class="nc" id="L530">            return null;</span>
+        }
+
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if (cursor.getCount() &lt;= DEFAULT_PREFERRED_MAX_RESULT_COUNT</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">                &amp;&amp; !hasDuplicates(cursor, partition)) {</span>
+<span class="nc" id="L535">            return cursor;</span>
+        }
+
+<span class="nc" id="L538">        int count = 0;</span>
+<span class="nc" id="L539">        MatrixCursor newCursor = new MatrixCursor(EmailQuery.PROJECTION);</span>
+<span class="nc" id="L540">        cursor.moveToPosition(-1);</span>
+<span class="nc bnc" id="L541" title="All 4 branches missed.">        while (cursor.moveToNext() &amp;&amp; count &lt; DEFAULT_PREFERRED_MAX_RESULT_COUNT) {</span>
+<span class="nc" id="L542">            String displayName = cursor.getString(EmailQuery.NAME);</span>
+<span class="nc" id="L543">            String emailAddress = cursor.getString(EmailQuery.ADDRESS);</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">            if (!isDuplicate(emailAddress, partition)) {</span>
+<span class="nc" id="L545">                newCursor.addRow(new Object[]{displayName, emailAddress});</span>
+<span class="nc" id="L546">                count++;</span>
+            }
+<span class="nc" id="L548">        }</span>
+<span class="nc" id="L549">        cursor.close();</span>
+
+<span class="nc" id="L551">        return newCursor;</span>
+    }
+
+    private boolean hasDuplicates(Cursor cursor, int partition) {
+<span class="nc" id="L555">        cursor.moveToPosition(-1);</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">        while (cursor.moveToNext()) {</span>
+<span class="nc" id="L557">            String emailAddress = cursor.getString(EmailQuery.ADDRESS);</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">            if (isDuplicate(emailAddress, partition)) {</span>
+<span class="nc" id="L559">                return true;</span>
+            }
+<span class="nc" id="L561">        }</span>
+<span class="nc" id="L562">        return false;</span>
+    }
+
+    /**
+     * Checks if the supplied email address is already present in partitions other
+     * than the supplied one.
+     */
+    private boolean isDuplicate(String emailAddress, int excludePartition) {
+<span class="nc" id="L570">        int partitionCount = getPartitionCount();</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">        for (int partition = 0; partition &lt; partitionCount; partition++) {</span>
+<span class="nc bnc" id="L572" title="All 4 branches missed.">            if (partition != excludePartition &amp;&amp; !isLoading(partition)) {</span>
+<span class="nc" id="L573">                Cursor cursor = getCursor(partition);</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                if (cursor != null) {</span>
+<span class="nc" id="L575">                    cursor.moveToPosition(-1);</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                    while (cursor.moveToNext()) {</span>
+<span class="nc" id="L577">                        String address = cursor.getString(EmailQuery.ADDRESS);</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">                        if (TextUtils.equals(emailAddress, address)) {</span>
+<span class="nc" id="L579">                            return true;</span>
+                        }
+<span class="nc" id="L581">                    }</span>
+                }
+            }
+        }
+
+<span class="nc" id="L586">        return false;</span>
+    }
+
+    private final String makeDisplayString(Cursor cursor) {
+<span class="nc bnc" id="L590" title="All 2 branches missed.">        if (cursor.getColumnName(0).equals(SEARCHING_CURSOR_MARKER)) {</span>
+<span class="nc" id="L591">            return &quot;&quot;;</span>
+        }
+
+<span class="nc" id="L594">        String displayName = cursor.getString(EmailQuery.NAME);</span>
+<span class="nc" id="L595">        String emailAddress = cursor.getString(EmailQuery.ADDRESS);</span>
+<span class="nc bnc" id="L596" title="All 4 branches missed.">        if (TextUtils.isEmpty(displayName) || TextUtils.equals(displayName, emailAddress)) {</span>
+<span class="nc" id="L597">             return emailAddress;</span>
+        } else {
+<span class="nc" id="L599">            return new Rfc822Token(displayName, emailAddress, null).toString();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

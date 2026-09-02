@@ -1,0 +1,50 @@
+package com.futsch1.medtimer.schedulertests
+
+import com.futsch1.medtimer.core.domain.model.ReminderEvent
+import com.futsch1.medtimer.core.common.time.TimeAccess
+import com.futsch1.medtimer.schedulertests.ReminderSchedulerUnitTest.Companion.getScheduler
+import com.futsch1.medtimer.schedulertests.TestHelper.buildReminder
+import com.futsch1.medtimer.schedulertests.TestHelper.buildTestMedicine
+import com.futsch1.medtimer.schedulertests.TestHelper.on
+import org.junit.Test
+import org.mockito.Mockito
+import java.time.LocalDate
+import java.time.ZoneId
+import kotlin.test.assertEquals
+
+internal class ReminderSchedulerActiveDayOfMonthUnitTest {
+    @Test
+    fun scheduleDayOfMonth() {
+        val mockTimeAccess: TimeAccess = Mockito.mock()
+        Mockito.`when`(mockTimeAccess.systemZone()).thenReturn(ZoneId.of("Z"))
+        Mockito.`when`(mockTimeAccess.localDate()).thenReturn(LocalDate.EPOCH.plusDays(1))
+        val scheduler = getScheduler(mockTimeAccess)
+
+        val medicineWithReminders = buildTestMedicine(1, "Test")
+        val reminder = buildReminder(1, 1, "1", 480, 1).copy(
+            activeDaysOfMonth = listOf(1, 2, 3)
+        )
+        medicineWithReminders.reminders.add(reminder)
+
+        val medicineList = mutableListOf(medicineWithReminders)
+
+        val reminderEventList = emptyList<ReminderEvent>()
+
+        var scheduledReminders =
+            scheduler.schedule(medicineList.map { it.toMedicine() }, reminderEventList)
+        assertEquals(1, scheduledReminders.size)
+        assertEquals(on(2, 480), scheduledReminders[0].timestamp)
+
+        Mockito.`when`(mockTimeAccess.localDate())
+            .thenReturn(LocalDate.EPOCH.plusDays(2))
+        scheduledReminders = scheduler.schedule(medicineList.map { it.toMedicine() }, reminderEventList)
+        assertEquals(1, scheduledReminders.size)
+        assertEquals(on(3, 480), scheduledReminders[0].timestamp)
+
+        Mockito.`when`(mockTimeAccess.localDate())
+            .thenReturn(LocalDate.EPOCH.plusDays(10))
+        scheduledReminders = scheduler.schedule(medicineList.map { it.toMedicine() }, reminderEventList)
+        assertEquals(1, scheduledReminders.size)
+        assertEquals(on(32, 480), scheduledReminders[0].timestamp)
+    }
+}

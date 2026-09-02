@@ -1,0 +1,1009 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncAdapter.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.sync</a> &gt; <span class="el_source">SyncAdapter.kt</span></div><h1>SyncAdapter.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.sync
+
+import android.accounts.Account
+import android.accounts.AccountManager
+import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.AbstractThreadedSyncAdapter
+import android.content.ContentProviderClient
+import android.content.ContentProviderOperation
+import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.OperationApplicationException
+import android.content.SyncResult
+import android.database.sqlite.SQLiteConstraintException
+import android.database.sqlite.SQLiteException
+import android.net.Uri
+import android.os.Bundle
+import android.os.RemoteException
+import android.util.SparseArray
+import androidx.annotation.StringRes
+import kotlinx.coroutines.runBlocking
+import org.totschnig.myexpenses.BuildConfig
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.activity.ManageSyncBackends
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.loadAccount
+import org.totschnig.myexpenses.db2.requireAccountTypeForSync
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.model2.CategoryInfo
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.provider.BaseTransactionProvider
+import org.totschnig.myexpenses.provider.KEY_ACCOUNTID
+import org.totschnig.myexpenses.provider.KEY_CATID
+import org.totschnig.myexpenses.provider.KEY_COLOR
+import org.totschnig.myexpenses.provider.KEY_CRITERION
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_DESCRIPTION
+import org.totschnig.myexpenses.provider.KEY_EXCHANGE_RATE
+import org.totschnig.myexpenses.provider.KEY_EXCLUDE_FROM_TOTALS
+import org.totschnig.myexpenses.provider.KEY_KEY
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_OPENING_BALANCE
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SYNC_ACCOUNT_NAME
+import org.totschnig.myexpenses.provider.KEY_SYNC_SEQUENCE_LOCAL
+import org.totschnig.myexpenses.provider.KEY_TRANSACTIONID
+import org.totschnig.myexpenses.provider.KEY_TYPE
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.KEY_VALUE
+import org.totschnig.myexpenses.provider.NULL_CHANGE_INDICATOR
+import org.totschnig.myexpenses.provider.NULL_ROW_ID
+import org.totschnig.myexpenses.provider.TABLE_TRANSACTIONS
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.appendBooleanQueryParameter
+import org.totschnig.myexpenses.provider.fromSyncAdapter
+import org.totschnig.myexpenses.provider.getIntOrNull
+import org.totschnig.myexpenses.provider.getLongOrNull
+import org.totschnig.myexpenses.provider.getString
+import org.totschnig.myexpenses.provider.useAndMapToSet
+import org.totschnig.myexpenses.service.SyncNotificationDismissHandler
+import org.totschnig.myexpenses.sync.GenericAccountService.Companion.deactivateSync
+import org.totschnig.myexpenses.sync.SequenceNumber.Companion.parse
+import org.totschnig.myexpenses.sync.SyncBackendProvider.AuthException
+import org.totschnig.myexpenses.sync.SyncBackendProvider.EncryptionException
+import org.totschnig.myexpenses.sync.SyncBackendProvider.SyncParseException
+import org.totschnig.myexpenses.sync.json.AccountMetaData
+import org.totschnig.myexpenses.sync.json.TagInfo
+import org.totschnig.myexpenses.sync.json.TransactionChange
+import org.totschnig.myexpenses.util.NotificationBuilderWrapper
+import org.totschnig.myexpenses.util.TextUtils.concatResStrings
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.io.isConnectedWifi
+import org.totschnig.myexpenses.util.safeMessage
+import timber.log.Timber
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.time.LocalTime
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import javax.inject.Inject
+import javax.inject.Provider
+import androidx.core.net.toUri
+
+<span class="nc" id="L91">class SyncAdapter @JvmOverloads constructor(</span>
+    context: Context,
+    autoInitialize: Boolean,
+<span class="nc" id="L94">    allowParallelSyncs: Boolean = false,</span>
+<span class="nc" id="L95">) : AbstractThreadedSyncAdapter(context, autoInitialize, allowParallelSyncs) {</span>
+<span class="nc" id="L96">    private var shouldNotify = true</span>
+
+<span class="nc" id="L98">    private var lastSynStart = LocalTime.now()</span>
+
+<span class="nc" id="L100">    lateinit var currentAccount: Account</span>
+
+    @Inject
+<span class="nc" id="L103">    lateinit var prefHandler: PrefHandler</span>
+
+    @Inject
+<span class="nc" id="L106">    lateinit var currencyContext: CurrencyContext</span>
+
+    @Inject
+<span class="nc" id="L109">    lateinit var syncDelegateProvider: Provider&lt;SyncDelegate&gt;</span>
+
+    @Inject
+<span class="nc" id="L112">    lateinit var repository: Repository</span>
+
+    @Suppress(&quot;SameParameterValue&quot;)
+    private fun getUserDataWithDefault(
+        accountManager: AccountManager, account: Account,
+        key: String, defaultValue: String,
+<span class="nc bnc" id="L118" title="All 2 branches missed.">    ): String = accountManager.getUserData(account, key) ?: defaultValue</span>
+
+    @SuppressLint(&quot;MissingPermission&quot;)
+    override fun onPerformSync(
+        account: Account, extras: Bundle, authority: String,
+        provider: ContentProviderClient, syncResult: SyncResult,
+    ) {
+<span class="nc" id="L125">        lastSynStart = LocalTime.now()</span>
+<span class="nc" id="L126">        currentAccount = account</span>
+<span class="nc" id="L127">        val syncDelegate = syncDelegateProvider.get()</span>
+<span class="nc" id="L128">        log().i(&quot;onPerformSync for %s at %s with extras %s&quot;, currentAccount, lastSynStart, extras)</span>
+<span class="nc" id="L129">        val uuidFromExtras = extras.getString(KEY_UUID)</span>
+<span class="nc" id="L130">        val notificationId = account.hashCode()</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (notificationContent[notificationId] == null) {</span>
+<span class="nc" id="L132">            notificationContent.put(notificationId, mutableListOf())</span>
+        }
+<span class="nc" id="L134">        shouldNotify = getBooleanSetting(provider, PrefKey.SYNC_NOTIFICATION, true)</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (getBooleanSetting(provider, PrefKey.SYNC_WIFI_ONLY, false) &amp;&amp;</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            !isConnectedWifi(context)</span>
+        ) {
+<span class="nc" id="L138">            val message = concatResStrings(</span>
+<span class="nc" id="L139">                context,</span>
+<span class="nc" id="L140">                R.string.wifi_not_connected,</span>
+<span class="nc" id="L141">                R.string.synchronization_postponed</span>
+            )
+<span class="nc" id="L143">            log().i(message)</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (extras.getBoolean(ContentResolver.SYNC_EXTRAS_MANUAL)) {</span>
+<span class="nc" id="L145">                maybeNotifyUser(notificationTitle, message, account)</span>
+            }
+<span class="nc" id="L147">            return</span>
+        }
+<span class="nc" id="L149">        val accountManager = AccountManager.get(context)</span>
+<span class="nc" id="L150">        val missingFeature = syncDelegate.requireFeatureForAccount(context, account.name)</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (missingFeature != null) {</span>
+<span class="nc" id="L152">            syncResult.stats.numIoExceptions++</span>
+<span class="nc" id="L153">            syncResult.delayUntil = featureLoadDelaySeconds</span>
+<span class="nc" id="L154">            appendToNotification(</span>
+<span class="nc" id="L155">                context.getString(</span>
+<span class="nc" id="L156">                    R.string.feature_download_requested,</span>
+<span class="nc" id="L157">                    context.getString(missingFeature.labelResId)</span>
+<span class="nc" id="L158">                ), account, true</span>
+            )
+<span class="nc" id="L160">            return</span>
+        }
+
+<span class="nc" id="L163">        try {</span>
+<span class="nc" id="L164">            runBlocking {</span>
+<span class="nc bnc" id="L165" title="All 4 branches missed.">                SyncBackendProviderFactory.get(context, account, false).onFailure { throwable -&gt;</span>
+<span class="nc bnc" id="L166" title="All 4 branches missed.">                    if (throwable is SyncParseException || throwable is EncryptionException) {</span>
+<span class="nc" id="L167">                        syncResult.databaseError = true</span>
+<span class="nc bnc" id="L168" title="All 4 branches missed.">                        (throwable as? SyncParseException)?.let { report(it) }</span>
+<span class="nc" id="L169">                        nonRecoverableError(</span>
+<span class="nc" id="L170">                            account,</span>
+<span class="nc" id="L171">                            &quot;The backend could not be instantiated. Reason: ${throwable.message}. Please try to delete and recreate it.&quot;</span>
+                        )
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                    } else if (!handleAuthException(throwable, account)) {</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                        if (throwable is IOException) {</span>
+<span class="nc" id="L175">                            log().i(throwable, &quot;Error setting up account %s&quot;, account)</span>
+                        } else {
+<span class="nc" id="L177">                            log().e(throwable, &quot;Error setting up account %s&quot;, account)</span>
+                        }
+<span class="nc" id="L179">                        syncResult.stats.numIoExceptions++</span>
+<span class="nc" id="L180">                        syncResult.delayUntil = getIoDelaySeconds()</span>
+<span class="nc" id="L181">                        appendToNotification(</span>
+<span class="nc" id="L182">                            concatResStrings(</span>
+<span class="nc" id="L183">                                context,</span>
+<span class="nc" id="L184">                                R.string.sync_io_error_cannot_connect,</span>
+<span class="nc" id="L185">                                R.string.sync_error_will_try_again_later</span>
+<span class="nc" id="L186">                            ), account, true</span>
+                        )
+                    }
+<span class="nc" id="L189">                    return@runBlocking</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                }.onSuccess { backend -&gt;</span>
+<span class="nc" id="L191">                    handleAutoBackupSync(account, provider, backend)</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                    if (extras.getBoolean(</span>
+<span class="nc" id="L193">                            KEY_AUTO_BACKUP_ONLY</span>
+                        )
+                    ) {
+<span class="nc" id="L196">                        return@runBlocking</span>
+                    }
+<span class="nc" id="L198">                    val selectionArgs: Array&lt;String&gt;</span>
+<span class="nc" id="L199">                    var selection = &quot;$KEY_SYNC_ACCOUNT_NAME = ?&quot;</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                    if (uuidFromExtras != null) {</span>
+<span class="nc" id="L201">                        selection += &quot; AND $KEY_UUID = ?&quot;</span>
+<span class="nc" id="L202">                        selectionArgs = arrayOf(account.name, uuidFromExtras)</span>
+                    } else {
+<span class="nc" id="L204">                        selectionArgs = arrayOf(account.name)</span>
+                    }
+<span class="nc" id="L206">                    val projection = arrayOf(KEY_ROWID)</span>
+<span class="nc" id="L207">                    try {</span>
+<span class="nc" id="L208">                        provider.query(</span>
+<span class="nc" id="L209">                            TransactionProvider.ACCOUNTS_URI,</span>
+<span class="nc" id="L210">                            projection,</span>
+<span class="nc" id="L211">                            &quot;$selection AND $KEY_SYNC_SEQUENCE_LOCAL = 0&quot;,</span>
+<span class="nc" id="L212">                            selectionArgs,</span>
+<span class="nc" id="L213">                            KEY_ROWID</span>
+<span class="nc" id="L214">                        ).also {</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">                            if (it == null) {</span>
+<span class="nc" id="L216">                                syncResult.databaseError = true</span>
+<span class="nc" id="L217">                                val exception = Exception(&quot;Cursor is null&quot;)</span>
+<span class="nc" id="L218">                                notifyDatabaseError(exception, account)</span>
+<span class="nc" id="L219">                                return@runBlocking</span>
+                            }
+<span class="nc" id="L221">                        }</span>
+<span class="nc" id="L222">                    } catch (e: RemoteException) {</span>
+<span class="nc" id="L223">                        syncResult.databaseError = true</span>
+<span class="nc" id="L224">                        notifyDatabaseError(e, account)</span>
+<span class="nc" id="L225">                        return@runBlocking</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    }?.use {</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                        if (it.moveToFirst()) {</span>
+                            do {
+<span class="nc" id="L229">                                val accountId = it.getLong(0)</span>
+<span class="nc" id="L230">                                try {</span>
+<span class="nc" id="L231">                                    provider.update(</span>
+<span class="nc" id="L232">                                        buildInitializationUri(accountId),</span>
+<span class="nc" id="L233">                                        ContentValues(0),</span>
+<span class="nc" id="L234">                                        null,</span>
+<span class="nc" id="L235">                                        null</span>
+                                    )
+                                    //make sure user data did not stick around after a user might have cleared data
+<span class="nc" id="L238">                                    accountManager.setUserData(</span>
+<span class="nc" id="L239">                                        account,</span>
+<span class="nc" id="L240">                                        KEY_LAST_SYNCED_LOCAL(accountId),</span>
+<span class="nc" id="L241">                                        null</span>
+                                    )
+<span class="nc" id="L243">                                    accountManager.setUserData(</span>
+<span class="nc" id="L244">                                        account,</span>
+<span class="nc" id="L245">                                        KEY_LAST_SYNCED_REMOTE(accountId),</span>
+<span class="nc" id="L246">                                        null</span>
+                                    )
+<span class="nc" id="L248">                                } catch (e: RemoteException) {</span>
+<span class="nc" id="L249">                                    syncResult.databaseError = true</span>
+<span class="nc" id="L250">                                    notifyDatabaseError(e, account)</span>
+<span class="nc" id="L251">                                    return@runBlocking</span>
+<span class="nc" id="L252">                                } catch (e: SQLiteConstraintException) {</span>
+<span class="nc" id="L253">                                    syncResult.databaseError = true</span>
+<span class="nc" id="L254">                                    notifyDatabaseError(e, account)</span>
+<span class="nc" id="L255">                                    return@runBlocking</span>
+                                }
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                            } while (it.moveToNext())</span>
+                        }
+<span class="nc" id="L259">                    }</span>
+
+
+<span class="nc" id="L262">                    try {</span>
+<span class="nc" id="L263">                        provider.query(</span>
+<span class="nc" id="L264">                            TransactionProvider.ACCOUNTS_URI, projection, selection, selectionArgs,</span>
+<span class="nc" id="L265">                            KEY_ROWID</span>
+                        )
+<span class="nc" id="L267">                    } catch (e: RemoteException) {</span>
+<span class="nc" id="L268">                        syncResult.databaseError = true</span>
+<span class="nc" id="L269">                        notifyDatabaseError(e, account)</span>
+<span class="nc" id="L270">                        return@runBlocking</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                    }?.use { cursor -&gt;</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                        if (cursor.moveToFirst()) {</span>
+                            do {
+<span class="nc" id="L274">                                val accountId = cursor.getLong(0)</span>
+<span class="nc" id="L275">                                val lastLocalSyncKey = KEY_LAST_SYNCED_LOCAL(accountId)</span>
+<span class="nc" id="L276">                                val lastRemoteSyncKey = KEY_LAST_SYNCED_REMOTE(accountId)</span>
+<span class="nc" id="L277">                                var lastSyncedLocal = getUserDataWithDefault(</span>
+<span class="nc" id="L278">                                    accountManager, account,</span>
+<span class="nc" id="L279">                                    lastLocalSyncKey, &quot;0&quot;</span>
+<span class="nc" id="L280">                                ).toLong()</span>
+<span class="nc" id="L281">                                var lastSyncedRemote = parse(</span>
+<span class="nc" id="L282">                                    getUserDataWithDefault(</span>
+<span class="nc" id="L283">                                        accountManager, account,</span>
+<span class="nc" id="L284">                                        lastRemoteSyncKey, &quot;0&quot;</span>
+                                    )
+                                )
+<span class="nc" id="L287">                                log().i(&quot;lastSyncedLocal: $lastSyncedLocal; lastSyncedRemote: $lastSyncedRemote&quot;)</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">                                val instanceFromDb = repository.loadAccount(accountId)</span>
+                                    ?: // might have been deleted by user in the meantime
+<span class="nc" id="L290">                                    continue</span>
+<span class="nc" id="L291">                                syncDelegate.account = instanceFromDb</span>
+<span class="nc bnc" id="L292" title="All 4 branches missed.">                                if (uuidFromExtras != null &amp;&amp; extras.getBoolean(</span>
+<span class="nc" id="L293">                                        KEY_RESET_REMOTE_ACCOUNT</span>
+                                    )
+                                ) {
+<span class="nc" id="L296">                                    try {</span>
+<span class="nc" id="L297">                                        backend.resetAccountData(uuidFromExtras)</span>
+<span class="nc" id="L298">                                        appendToNotification(</span>
+<span class="nc" id="L299">                                            context.getString(</span>
+<span class="nc" id="L300">                                                R.string.sync_success_reset_account_data,</span>
+<span class="nc" id="L301">                                                instanceFromDb.label</span>
+<span class="nc" id="L302">                                            ), account, true</span>
+                                        )
+<span class="nc" id="L304">                                    } catch (e: IOException) {</span>
+<span class="nc" id="L305">                                        handleIoException(</span>
+<span class="nc" id="L306">                                            e,</span>
+<span class="nc" id="L307">                                            account,</span>
+<span class="nc" id="L308">                                            backend,</span>
+<span class="nc" id="L309">                                            syncResult,</span>
+<span class="nc" id="L310">                                            R.string.sync_io_exception_reset_account_data</span>
+                                        )
+                                    }
+<span class="nc" id="L313">                                    break</span>
+                                }
+<span class="nc" id="L315">                                appendToNotification(</span>
+<span class="nc" id="L316">                                    context.getString(</span>
+<span class="nc" id="L317">                                        R.string.synchronization_start,</span>
+<span class="nc" id="L318">                                        instanceFromDb.label</span>
+<span class="nc" id="L319">                                    ), account, true</span>
+                                )
+<span class="nc" id="L321">                                try {</span>
+<span class="nc" id="L322">                                    backend.withAccount(instanceFromDb)</span>
+<span class="nc" id="L323">                                } catch (e: IOException) {</span>
+<span class="nc" id="L324">                                    handleIoException(</span>
+<span class="nc" id="L325">                                        e,</span>
+<span class="nc" id="L326">                                        account,</span>
+<span class="nc" id="L327">                                        backend,</span>
+<span class="nc" id="L328">                                        syncResult,</span>
+<span class="nc" id="L329">                                        R.string.sync_io_exception_setup_remote_account</span>
+                                    )
+<span class="nc" id="L331">                                    break</span>
+                                }
+<span class="nc" id="L333">                                try {</span>
+<span class="nc" id="L334">                                    backend.lock()</span>
+<span class="nc" id="L335">                                } catch (e: IOException) {</span>
+<span class="nc" id="L336">                                    handleIoException(</span>
+<span class="nc" id="L337">                                        e,</span>
+<span class="nc" id="L338">                                        account,</span>
+<span class="nc" id="L339">                                        backend,</span>
+<span class="nc" id="L340">                                        syncResult,</span>
+<span class="nc" id="L341">                                        R.string.sync_io_exception_locking,</span>
+<span class="nc" id="L342">                                        IO_LOCK_DELAY_MILLIS</span>
+                                    )
+<span class="nc" id="L344">                                    log().w(e)</span>
+<span class="nc" id="L345">                                    break</span>
+                                }
+<span class="nc" id="L347">                                var completedWithoutError = false</span>
+<span class="nc" id="L348">                                var successRemote2Local = 0</span>
+<span class="nc" id="L349">                                var successLocal2Remote = 0</span>
+<span class="nc" id="L350">                                try {</span>
+<span class="nc" id="L351">                                    val changeSetSince =</span>
+<span class="nc" id="L352">                                        backend.getChangeSetSince(lastSyncedRemote)</span>
+<span class="nc" id="L353">                                    var remoteChanges: List&lt;TransactionChange&gt; =</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                                        if (changeSetSince != null) {</span>
+<span class="nc" id="L355">                                            lastSyncedRemote = changeSetSince.sequenceNumber</span>
+<span class="nc" id="L356">                                            log().i(&quot;lastSyncedRemote: $lastSyncedRemote&quot;)</span>
+<span class="nc" id="L357">                                            changeSetSince.changes</span>
+<span class="nc" id="L358">                                        } else emptyList()</span>
+<span class="nc" id="L359">                                    var localChanges: MutableList&lt;TransactionChange&gt; =</span>
+<span class="nc" id="L360">                                        mutableListOf()</span>
+<span class="nc" id="L361">                                    var sequenceToTest = lastSyncedLocal</span>
+<span class="nc" id="L362">                                    while (true) {</span>
+<span class="nc" id="L363">                                        sequenceToTest++</span>
+<span class="nc" id="L364">                                        val nextChanges =</span>
+<span class="nc" id="L365">                                            getLocalChanges(provider, accountId, sequenceToTest)</span>
+<span class="nc bnc" id="L366" title="All 4 branches missed.">                                        lastSyncedLocal = if (nextChanges.isNotEmpty()) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                                            localChanges.addAll(nextChanges.filter { !it.isEmpty })</span>
+<span class="nc" id="L368">                                            sequenceToTest</span>
+                                        } else {
+<span class="nc" id="L370">                                            break</span>
+                                        }
+                                    }
+<span class="nc" id="L373">                                    log().i(&quot;lastSyncedLocal: $lastSyncedLocal&quot;)</span>
+<span class="nc bnc" id="L374" title="All 8 branches missed.">                                    if (localChanges.isNotEmpty() || remoteChanges.isNotEmpty()) {</span>
+<span class="nc" id="L375">                                        var localMetadataChange =</span>
+<span class="nc" id="L376">                                            syncDelegate.findMetadataChange(localChanges)</span>
+<span class="nc" id="L377">                                        var remoteMetadataChange =</span>
+<span class="nc" id="L378">                                            syncDelegate.findMetadataChange(remoteChanges)</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                                        if (remoteMetadataChange != null) {</span>
+<span class="nc" id="L380">                                            remoteChanges =</span>
+<span class="nc" id="L381">                                                syncDelegate.removeMetadataChange(remoteChanges)</span>
+                                        }
+<span class="nc bnc" id="L383" title="All 4 branches missed.">                                        if (localMetadataChange != null &amp;&amp; remoteMetadataChange != null) {</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                                            if (localMetadataChange.timeStamp &gt; remoteMetadataChange.timeStamp) {</span>
+<span class="nc" id="L385">                                                remoteMetadataChange = null</span>
+                                            } else {
+<span class="nc" id="L387">                                                localMetadataChange = null</span>
+<span class="nc" id="L388">                                                localChanges =</span>
+<span class="nc" id="L389">                                                    syncDelegate.removeMetadataChange(localChanges)</span>
+<span class="nc" id="L390">                                                        .toMutableList()</span>
+                                            }
+                                        }
+<span class="nc bnc" id="L393" title="All 2 branches missed.">                                        if (localMetadataChange != null) {</span>
+<span class="nc" id="L394">                                            backend.updateAccount(instanceFromDb)</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">                                        } else if (remoteMetadataChange != null) {</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">                                            backend.readAccountMetaData().onSuccess {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                                                if (updateAccountFromMetadata(</span>
+<span class="nc" id="L398">                                                        provider,</span>
+<span class="nc" id="L399">                                                        syncDelegate.account.id,</span>
+<span class="nc" id="L400">                                                        it</span>
+                                                    )
+                                                ) {
+<span class="nc" id="L403">                                                    successRemote2Local += 1</span>
+                                                } else {
+<span class="nc" id="L405">                                                    appendToNotification(</span>
+<span class="nc" id="L406">                                                        &quot;Error while writing account metadata to database&quot;,</span>
+<span class="nc" id="L407">                                                        account,</span>
+<span class="nc" id="L408">                                                        false</span>
+                                                    )
+                                                }
+<span class="nc" id="L411">                                            }</span>
+                                        }
+<span class="nc bnc" id="L413" title="All 4 branches missed.">                                        if (localChanges.isNotEmpty()) {</span>
+<span class="nc" id="L414">                                            localChanges =</span>
+<span class="nc" id="L415">                                                syncDelegate.collectSplits(localChanges)</span>
+<span class="nc" id="L416">                                                    .toMutableList()</span>
+                                        }
+<span class="nc bnc" id="L418" title="All 2 branches missed.">                                        val localChangesWasNotEmpty = localChanges.isNotEmpty()</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                                        val remoteChangesWasNotEmpty = remoteChanges.isNotEmpty()</span>
+<span class="nc" id="L420">                                        val mergeResult: Pair&lt;List&lt;TransactionChange&gt;, List&lt;TransactionChange&gt;&gt; =</span>
+<span class="nc" id="L421">                                            syncDelegate.mergeChangeSets(</span>
+<span class="nc" id="L422">                                                localChanges,</span>
+<span class="nc" id="L423">                                                remoteChanges</span>
+                                            )
+<span class="nc" id="L425">                                        localChanges = mergeResult.first.toMutableList()</span>
+<span class="nc" id="L426">                                        remoteChanges = mergeResult.second</span>
+<span class="nc bnc" id="L427" title="All 4 branches missed.">                                        if (remoteChanges.isNotEmpty()) {</span>
+<span class="nc" id="L428">                                            syncDelegate.writeRemoteChangesToDb(</span>
+<span class="nc" id="L429">                                                context,</span>
+<span class="nc" id="L430">                                                provider,</span>
+<span class="nc" id="L431">                                                remoteChanges</span>
+                                            )
+                                        }
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                                        if (remoteChangesWasNotEmpty) {</span>
+<span class="nc" id="L435">                                            accountManager.setUserData(</span>
+<span class="nc" id="L436">                                                account,</span>
+<span class="nc" id="L437">                                                lastRemoteSyncKey,</span>
+<span class="nc" id="L438">                                                lastSyncedRemote.toString()</span>
+                                            )
+<span class="nc" id="L440">                                            log().i(&quot;storing lastSyncedRemote: $lastSyncedRemote&quot;)</span>
+<span class="nc" id="L441">                                            successRemote2Local += remoteChanges.size</span>
+                                        }
+<span class="nc bnc" id="L443" title="All 4 branches missed.">                                        if (localChanges.isNotEmpty()) {</span>
+<span class="nc" id="L444">                                            lastSyncedRemote =</span>
+<span class="nc" id="L445">                                                backend.writeChangeSet(</span>
+<span class="nc" id="L446">                                                    lastSyncedRemote,</span>
+<span class="nc" id="L447">                                                    localChanges,</span>
+<span class="nc" id="L448">                                                    context</span>
+                                                )
+                                        }
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                                        if (localChangesWasNotEmpty) {</span>
+<span class="nc" id="L452">                                            accountManager.setUserData(</span>
+<span class="nc" id="L453">                                                account,</span>
+<span class="nc" id="L454">                                                lastLocalSyncKey,</span>
+<span class="nc" id="L455">                                                lastSyncedLocal.toString()</span>
+                                            )
+<span class="nc" id="L457">                                            log().i(&quot;storing lastSyncedLocal: $lastSyncedLocal&quot;)</span>
+<span class="nc bnc" id="L458" title="All 4 branches missed.">                                            if (localChanges.isNotEmpty()) {</span>
+<span class="nc" id="L459">                                                accountManager.setUserData(</span>
+<span class="nc" id="L460">                                                    account,</span>
+<span class="nc" id="L461">                                                    lastRemoteSyncKey,</span>
+<span class="nc" id="L462">                                                    lastSyncedRemote.toString()</span>
+                                                )
+<span class="nc" id="L464">                                                log().i(&quot;storing lastSyncedRemote: $lastSyncedRemote&quot;)</span>
+<span class="nc" id="L465">                                                successLocal2Remote = localChanges.size</span>
+                                            }
+                                        }
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                                        if (!BuildConfig.DEBUG) {</span>
+                                            // on debug build for auditing purposes, we keep changes in the table
+<span class="nc" id="L470">                                            provider.delete(</span>
+<span class="nc" id="L471">                                                TransactionProvider.CHANGES_URI,</span>
+<span class="nc" id="L472">                                                &quot;$KEY_ACCOUNTID = ? AND $KEY_SYNC_SEQUENCE_LOCAL &lt;= ?&quot;,</span>
+                                                arrayOf(
+<span class="nc" id="L474">                                                    accountId.toString(),</span>
+<span class="nc" id="L475">                                                    lastSyncedLocal.toString()</span>
+                                                )
+                                            )
+                                        }
+                                    }
+<span class="nc" id="L480">                                    completedWithoutError = true</span>
+<span class="nc" id="L481">                                } catch (e: IOException) {</span>
+<span class="nc" id="L482">                                    handleIoException(</span>
+<span class="nc" id="L483">                                        e,</span>
+<span class="nc" id="L484">                                        account,</span>
+<span class="nc" id="L485">                                        backend,</span>
+<span class="nc" id="L486">                                        syncResult,</span>
+<span class="nc" id="L487">                                        R.string.sync_io_exception_syncing</span>
+                                    )
+<span class="nc" id="L489">                                    log().w(e)</span>
+<span class="nc" id="L490">                                    break</span>
+<span class="nc" id="L491">                                } catch (e: RemoteException) {</span>
+<span class="nc" id="L492">                                    syncResult.databaseError = true</span>
+<span class="nc" id="L493">                                    notifyDatabaseError(e, account)</span>
+<span class="nc" id="L494">                                } catch (e: OperationApplicationException) {</span>
+<span class="nc" id="L495">                                    syncResult.databaseError = true</span>
+<span class="nc" id="L496">                                    notifyDatabaseError(e, account)</span>
+<span class="nc" id="L497">                                } catch (e: SQLiteException) {</span>
+<span class="nc" id="L498">                                    syncResult.databaseError = true</span>
+<span class="nc" id="L499">                                    nonRecoverableError(account, e.safeMessage)</span>
+<span class="nc" id="L500">                                } catch (e: Exception) {</span>
+<span class="nc" id="L501">                                    appendToNotification(</span>
+<span class="nc" id="L502">                                        &quot;ERROR (${e.javaClass.simpleName}): ${e.message} &quot;,</span>
+<span class="nc" id="L503">                                        account, true</span>
+                                    )
+<span class="nc" id="L505">                                    report(e)</span>
+                                } finally {
+<span class="nc bnc" id="L507" title="All 8 branches missed.">                                    if (successLocal2Remote &gt; 0 || successRemote2Local &gt; 0) {</span>
+<span class="nc" id="L508">                                        appendToNotification(</span>
+<span class="nc" id="L509">                                            context.getString(</span>
+<span class="nc" id="L510">                                                R.string.synchronization_end_success,</span>
+<span class="nc" id="L511">                                                successRemote2Local,</span>
+<span class="nc" id="L512">                                                successLocal2Remote</span>
+<span class="nc" id="L513">                                            ), account, false</span>
+                                        )
+<span class="nc" id="L515">                                    } else if (completedWithoutError) {</span>
+<span class="nc" id="L516">                                        appendToNotification(</span>
+<span class="nc" id="L517">                                            context.getString(R.string.synchronization_end_success_none),</span>
+<span class="nc" id="L518">                                            account,</span>
+<span class="nc" id="L519">                                            false</span>
+                                        )
+                                    }
+<span class="nc" id="L522">                                    try {</span>
+<span class="nc" id="L523">                                        backend.unlock()</span>
+<span class="nc" id="L524">                                    } catch (e: IOException) {</span>
+<span class="nc" id="L525">                                        handleIoException(</span>
+<span class="nc" id="L526">                                            e,</span>
+<span class="nc" id="L527">                                            account,</span>
+<span class="nc" id="L528">                                            backend,</span>
+<span class="nc" id="L529">                                            syncResult,</span>
+<span class="nc" id="L530">                                            R.string.sync_io_exception_unlocking,</span>
+<span class="nc" id="L531">                                            IO_LOCK_DELAY_MILLIS</span>
+                                        )
+<span class="nc" id="L533">                                        break</span>
+                                    }
+<span class="nc" id="L535">                                }</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                            } while (cursor.moveToNext())</span>
+                        }
+<span class="nc" id="L538">                    }</span>
+<span class="nc" id="L539">                }</span>
+<span class="nc" id="L540">            }</span>
+<span class="nc" id="L541">        } catch (_: InterruptedException) {</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">            if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L543">                notifyUser(&quot;Debug&quot;, &quot;InterruptedException&quot;)</span>
+            }
+
+        }
+<span class="nc" id="L547">    }</span>
+
+    @Throws(RemoteException::class, OperationApplicationException::class)
+    private fun updateAccountFromMetadata(
+        provider: ContentProviderClient,
+        accountId: Long,
+        accountMetaData: AccountMetaData,
+    ): Boolean {
+<span class="nc" id="L555">        val ops = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc" id="L556">        ops.add(TransactionProvider.pauseChangeTrigger())</span>
+<span class="nc" id="L557">        val values = ContentValues()</span>
+
+<span class="nc" id="L559">        values.put(KEY_LABEL, accountMetaData.label)</span>
+<span class="nc" id="L560">        values.put(KEY_OPENING_BALANCE, accountMetaData.openingBalance)</span>
+<span class="nc" id="L561">        values.put(KEY_DESCRIPTION, accountMetaData.description)</span>
+<span class="nc" id="L562">        val currency = accountMetaData.currency</span>
+<span class="nc" id="L563">        values.put(KEY_CURRENCY, currency)</span>
+<span class="nc" id="L564">        values.put(KEY_TYPE, repository.requireAccountTypeForSync(accountMetaData.type).id)</span>
+<span class="nc" id="L565">        values.put(KEY_COLOR, accountMetaData.color)</span>
+<span class="nc" id="L566">        values.put(KEY_EXCLUDE_FROM_TOTALS, accountMetaData.excludeFromTotals)</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">        if (accountMetaData.criterion != 0L) {</span>
+<span class="nc" id="L568">            values.put(KEY_CRITERION, accountMetaData.criterion)</span>
+        }
+
+<span class="nc" id="L571">        ops.add(</span>
+<span class="nc" id="L572">            ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L573">                ContentUris.withAppendedId(</span>
+<span class="nc" id="L574">                    TransactionProvider.ACCOUNTS_URI,</span>
+<span class="nc" id="L575">                    accountId</span>
+                )
+<span class="nc" id="L577">            ).withValues(values).build()</span>
+        )
+<span class="nc" id="L579">        val homeCurrency = prefHandler.getString(PrefKey.HOME_CURRENCY, null)</span>
+<span class="nc" id="L580">        val exchangeRate = accountMetaData.exchangeRate</span>
+<span class="nc bnc" id="L581" title="All 6 branches missed.">        if (exchangeRate != null &amp;&amp; homeCurrency != null &amp;&amp; homeCurrency == accountMetaData.exchangeRateOtherCurrency) {</span>
+<span class="nc" id="L582">            val uri =</span>
+<span class="nc" id="L583">                ContentUris.appendId(</span>
+<span class="nc" id="L584">                    TransactionProvider.ACCOUNT_EXCHANGE_RATE_URI.buildUpon(),</span>
+<span class="nc" id="L585">                    accountId</span>
+                )
+<span class="nc" id="L587">                    .appendEncodedPath(currency)</span>
+<span class="nc" id="L588">                    .appendEncodedPath(homeCurrency).build()</span>
+<span class="nc" id="L589">            ops.add(</span>
+<span class="nc" id="L590">                ContentProviderOperation.newInsert(uri).withValue(</span>
+<span class="nc" id="L591">                    KEY_EXCHANGE_RATE,</span>
+<span class="nc" id="L592">                    exchangeRate</span>
+<span class="nc" id="L593">                ).build()</span>
+            )
+        }
+<span class="nc" id="L596">        ops.add(TransactionProvider.resumeChangeTrigger())</span>
+<span class="nc" id="L597">        val contentProviderResults = provider.applyBatch(ops)</span>
+<span class="nc" id="L598">        val opsSize = ops.size</span>
+<span class="nc" id="L599">        val resultsSize = contentProviderResults.size</span>
+<span class="nc bnc" id="L600" title="All 2 branches missed.">        if (opsSize != resultsSize) {</span>
+<span class="nc" id="L601">            report(Exception(&quot;applied $opsSize operations, received $resultsSize results&quot;))</span>
+<span class="nc" id="L602">            return false</span>
+        }
+<span class="nc" id="L604">        return true</span>
+    }
+
+    private fun handleAutoBackupSync(
+        account: Account,
+        provider: ContentProviderClient,
+        backend: SyncBackendProvider,
+    ) {
+<span class="nc" id="L612">        val autoBackupFileUri = getStringSetting(provider, KEY_UPLOAD_AUTO_BACKUP_URI)</span>
+<span class="nc bnc" id="L613" title="All 2 branches missed.">        if (autoBackupFileUri != null) {</span>
+<span class="nc" id="L614">            val autoBackupCloud =</span>
+<span class="nc" id="L615">                getStringSetting(provider, prefHandler.getKey(PrefKey.AUTO_BACKUP_CLOUD))</span>
+<span class="nc bnc" id="L616" title="All 4 branches missed.">            if (autoBackupCloud != null &amp;&amp; autoBackupCloud == account.name) {</span>
+<span class="nc" id="L617">                var fileName = getStringSetting(provider, KEY_UPLOAD_AUTO_BACKUP_NAME)</span>
+<span class="nc" id="L618">                try {</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">                    if (fileName == null) {</span>
+<span class="nc" id="L620">                        report(Exception(&quot;KEY_UPLOAD_AUTO_BACKUP_NAME empty&quot;))</span>
+<span class="nc" id="L621">                        fileName = &quot;backup-&quot; + SimpleDateFormat(&quot;yyyMMdd&quot;, Locale.US).format(Date())</span>
+                    }
+<span class="nc" id="L623">                    log().i(&quot;Storing backup %s (%s)&quot;, fileName, autoBackupFileUri)</span>
+<span class="nc" id="L624">                    backend.storeBackup(autoBackupFileUri.toUri(), fileName)</span>
+<span class="nc" id="L625">                    removeSetting(provider, KEY_UPLOAD_AUTO_BACKUP_URI)</span>
+<span class="nc" id="L626">                    removeSetting(provider, KEY_UPLOAD_AUTO_BACKUP_NAME)</span>
+<span class="nc" id="L627">                    maybeNotifyUser(</span>
+<span class="nc" id="L628">                        context.getString(R.string.pref_auto_backup_title),</span>
+<span class="nc" id="L629">                        context.getString(</span>
+<span class="nc" id="L630">                            R.string.auto_backup_cloud_success,</span>
+<span class="nc" id="L631">                            fileName,</span>
+<span class="nc" id="L632">                            account.name</span>
+<span class="nc" id="L633">                        ), null</span>
+                    )
+<span class="nc" id="L635">                } catch (e: Exception) {</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">                    if (e is IOException) {</span>
+<span class="nc" id="L637">                        log().i(e, &quot;Error storing backup&quot;)</span>
+                    } else {
+<span class="nc" id="L639">                        report(e)</span>
+                    }
+<span class="nc bnc" id="L641" title="All 2 branches missed.">                    if (!handleAuthException(e, account)) {</span>
+<span class="nc" id="L642">                        notifyUser(</span>
+<span class="nc" id="L643">                            context.getString(R.string.pref_auto_backup_title),</span>
+<span class="nc" id="L644">                            context.getString(</span>
+<span class="nc" id="L645">                                R.string.write_fail_reason_cannot_write,</span>
+                            )
+<span class="nc" id="L647">                                    + &quot;(&quot; + fileName + &quot;): &quot; + e.message</span>
+                        )
+                    }
+                }
+            }
+        }
+<span class="nc" id="L653">    }</span>
+
+<span class="nc" id="L655">    private fun handleIoException(</span>
+        ioException: IOException,
+        account: Account,
+        backend: SyncBackendProvider,
+        syncResult: SyncResult,
+        @StringRes resId: Int,
+<span class="nc" id="L661">        defaultDelay: Long = IO_DEFAULT_DELAY_MILLIS,</span>
+    ) {
+<span class="nc" id="L663">        log().w(ioException)</span>
+<span class="nc bnc" id="L664" title="All 2 branches missed.">        if (!handleAuthException(ioException, account)) {</span>
+<span class="nc" id="L665">            syncResult.stats.numIoExceptions++</span>
+<span class="nc" id="L666">            syncResult.delayUntil =</span>
+<span class="nc" id="L667">                getIoDelaySeconds(backend.suggestDelay(ioException, defaultDelay))</span>
+<span class="nc" id="L668">            notifyIoException(resId, account)</span>
+        }
+<span class="nc" id="L670">    }</span>
+
+    private fun handleAuthException(e: Throwable, account: Account): Boolean {
+<span class="nc bnc" id="L673" title="All 2 branches missed.">        if (e is AuthException) {</span>
+<span class="nc" id="L674">            val resolution = e.resolution</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">            if (resolution != null) {</span>
+<span class="nc" id="L676">                notifyUser(</span>
+<span class="nc" id="L677">                    context.getString(R.string.sync_auth_exception),</span>
+<span class="nc" id="L678">                    context.getString(R.string.sync_login_again),</span>
+<span class="nc" id="L679">                    account,</span>
+<span class="nc" id="L680">                    e.resolution</span>
+                )
+<span class="nc" id="L682">                return true</span>
+            }
+        }
+<span class="nc" id="L685">        return false</span>
+    }
+
+    private val manageSyncBackendsIntent: Intent
+<span class="nc" id="L689">        get() = Intent(context, ManageSyncBackends::class.java)</span>
+
+    @Synchronized
+    private fun appendToNotification(content: String, account: Account, newLine: Boolean) {
+<span class="nc" id="L693">        log().i(content)</span>
+<span class="nc bnc" id="L694" title="All 2 branches missed.">        if (shouldNotify) {</span>
+<span class="nc bnc" id="L695" title="All 2 branches missed.">            notificationContent[account.hashCode()]?.let { contentArray -&gt;</span>
+<span class="nc" id="L696">                synchronized(contentArray) {</span>
+<span class="nc" id="L697">                    val contentBuilder: StringBuilder</span>
+<span class="nc bnc" id="L698" title="All 4 branches missed.">                    if (contentArray.isEmpty() || newLine) {</span>
+<span class="nc" id="L699">                        contentBuilder = StringBuilder()</span>
+<span class="nc" id="L700">                        contentArray.add(0, contentBuilder)</span>
+                    } else {
+<span class="nc" id="L702">                        contentBuilder = contentArray[0]</span>
+                    }
+<span class="nc bnc" id="L704" title="All 4 branches missed.">                    if (contentBuilder.isNotEmpty()) {</span>
+<span class="nc" id="L705">                        contentBuilder.append(&quot; &quot;)</span>
+                    }
+<span class="nc" id="L707">                    contentBuilder.append(content)</span>
+<span class="nc" id="L708">                    notifyUser(</span>
+<span class="nc" id="L709">                        notificationTitle,</span>
+<span class="nc" id="L710">                        concat(contentArray),</span>
+<span class="nc" id="L711">                        account</span>
+                    )
+<span class="nc" id="L713">                }</span>
+<span class="nc" id="L714">            }</span>
+        }
+<span class="nc" id="L716">    }</span>
+
+    fun concat(contentBuilders: List&lt;CharSequence&gt;) =
+<span class="nc" id="L719">        contentBuilders.foldIndexed(StringBuilder()) { index, sum, element -&gt;</span>
+<span class="nc bnc" id="L720" title="All 2 branches missed.">            if (index &gt; 0) {</span>
+<span class="nc" id="L721">                sum.append(&quot;\n&quot;)</span>
+            }
+<span class="nc" id="L723">            sum.append(element)</span>
+<span class="nc" id="L724">        }</span>
+
+    private fun report(e: Throwable) {
+<span class="nc" id="L727">        CrashHandler.report(e, TAG)</span>
+<span class="nc" id="L728">    }</span>
+
+    private fun maybeNotifyUser(title: String, content: String, account: Account?) {
+<span class="nc bnc" id="L731" title="All 2 branches missed.">        if (shouldNotify) {</span>
+<span class="nc" id="L732">            notifyUser(title, content, account)</span>
+        }
+<span class="nc" id="L734">    }</span>
+
+<span class="nc" id="L736">    private fun notifyUser(</span>
+        title: String,
+        content: CharSequence,
+<span class="nc" id="L739">        account: Account? = null,</span>
+<span class="nc" id="L740">        intent: Intent? = null,</span>
+    ) {
+<span class="nc" id="L742">        val builder = NotificationBuilderWrapper.bigTextStyleBuilder(</span>
+<span class="nc" id="L743">            context, NotificationBuilderWrapper.CHANNEL_ID_SYNC, title, content</span>
+        )
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        if (intent != null) {</span>
+<span class="nc" id="L746">            builder.setContentIntent(</span>
+                //noinspection InlinedApi
+<span class="nc" id="L748">                PendingIntent.getActivity(</span>
+<span class="nc" id="L749">                    context,</span>
+<span class="nc" id="L750">                    0,</span>
+<span class="nc" id="L751">                    intent,</span>
+<span class="nc" id="L752">                    PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+                )
+            )
+        }
+<span class="nc bnc" id="L756" title="All 2 branches missed.">        if (account != null) {</span>
+<span class="nc" id="L757">            val dismissIntent = Intent(context, SyncNotificationDismissHandler::class.java)</span>
+<span class="nc" id="L758">            dismissIntent.putExtra(KEY_SYNC_ACCOUNT_NAME, account.name)</span>
+            //noinspection InlinedApi
+<span class="nc" id="L760">            builder.setDeleteIntent(</span>
+<span class="nc" id="L761">                PendingIntent.getService(</span>
+<span class="nc" id="L762">                    context, 0,</span>
+<span class="nc" id="L763">                    dismissIntent, PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE</span>
+                )
+            )
+        }
+<span class="nc" id="L767">        val notification = builder.build()</span>
+<span class="nc" id="L768">        notification.flags = Notification.FLAG_AUTO_CANCEL</span>
+<span class="nc" id="L769">        (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">            &quot;SYNC&quot;, account?.hashCode() ?: 0, notification</span>
+        )
+<span class="nc" id="L772">    }</span>
+
+    private fun notifyIoException(@StringRes resId: Int, account: Account) {
+<span class="nc" id="L775">        appendToNotification(context.getString(resId), account, true)</span>
+<span class="nc" id="L776">    }</span>
+
+    private fun notifyDatabaseError(e: Exception, account: Account) {
+<span class="nc" id="L779">        report(e)</span>
+<span class="nc" id="L780">        appendToNotification(</span>
+<span class="nc" id="L781">            context.getString(R.string.sync_database_error) + &quot; &quot; + e.message,</span>
+<span class="nc" id="L782">            account, true</span>
+        )
+<span class="nc" id="L784">    }</span>
+
+    private fun nonRecoverableError(account: Account, message: String) {
+<span class="nc" id="L787">        log().w(&quot;nonRecoverableError: $message&quot;)</span>
+<span class="nc" id="L788">        deactivateSync(account)</span>
+<span class="nc" id="L789">        AccountManager.get(context).setUserData(account, GenericAccountService.KEY_BROKEN, &quot;1&quot;)</span>
+<span class="nc" id="L790">        notifyUser(</span>
+<span class="nc" id="L791">            &quot;Synchronization backend deactivated&quot;, message,</span>
+<span class="nc" id="L792">            null,</span>
+<span class="nc" id="L793">            manageSyncBackendsIntent</span>
+        )
+<span class="nc" id="L795">    }</span>
+
+    private val notificationTitle: String
+<span class="nc" id="L798">        get() = concatResStrings(context, R.string.app_name, R.string.synchronization)</span>
+
+    @Throws(RemoteException::class)
+    private fun getLocalChanges(
+        provider: ContentProviderClient, accountId: Long,
+        sequenceNumber: Long,
+    ): List&lt;TransactionChange&gt; {
+<span class="nc" id="L805">        val result: MutableList&lt;TransactionChange&gt; = mutableListOf()</span>
+<span class="nc" id="L806">        val changesUri = buildChangesUri(sequenceNumber, accountId)</span>
+<span class="nc" id="L807">        val hasLocalChanges = hasLocalChanges(provider, changesUri)</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">        if (hasLocalChanges) {</span>
+<span class="nc" id="L809">            val currentSyncIncrease = ContentValues(1)</span>
+<span class="nc" id="L810">            val nextSequence = sequenceNumber + 1</span>
+<span class="nc" id="L811">            currentSyncIncrease.put(KEY_SYNC_SEQUENCE_LOCAL, nextSequence)</span>
+            //in case of failed syncs due to non-available backends, sequence number might already be higher than nextSequence
+            //we must take care to not decrease it here
+<span class="nc" id="L814">            provider.update(</span>
+<span class="nc" id="L815">                TransactionProvider.ACCOUNTS_URI.fromSyncAdapter(),</span>
+<span class="nc" id="L816">                currentSyncIncrease,</span>
+<span class="nc" id="L817">                &quot;$KEY_ROWID = ? AND $KEY_SYNC_SEQUENCE_LOCAL &lt; ?&quot;,</span>
+<span class="nc" id="L818">                arrayOf(accountId.toString(), nextSequence.toString())</span>
+            )
+
+<span class="nc bnc" id="L821" title="All 2 branches missed.">            provider.query(changesUri, null, null, null, null)?.use { changesCursor -&gt;</span>
+<span class="nc bnc" id="L822" title="All 2 branches missed.">                if (changesCursor.moveToFirst()) {</span>
+                    do {
+<span class="nc" id="L824">                        var transactionChange = TransactionChange.fromCursor(changesCursor).let {</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">                            if (it.equivalentAmount != null) {</span>
+<span class="nc" id="L826">                                val homeCurrency = currencyContext.homeCurrencyString</span>
+<span class="nc" id="L827">                                it.copy(equivalentCurrency = homeCurrency)</span>
+<span class="nc" id="L828">                            } else it</span>
+                        }
+<span class="nc bnc" id="L830" title="All 2 branches missed.">                        changesCursor.getLongOrNull(KEY_CATID)?.let { catId -&gt;</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">                            if (catId == NULL_ROW_ID) {</span>
+<span class="nc" id="L832">                                transactionChange = transactionChange.copy(</span>
+<span class="nc" id="L833">                                    categoryInfo = listOf(</span>
+<span class="nc" id="L834">                                        CategoryInfo(NULL_CHANGE_INDICATOR, &quot;&quot;)</span>
+                                    )
+                                )
+                            } else {
+<span class="nc" id="L838">                                provider.query(</span>
+<span class="nc" id="L839">                                    ContentUris.withAppendedId(</span>
+<span class="nc" id="L840">                                        BaseTransactionProvider.CATEGORY_TREE_URI,</span>
+<span class="nc" id="L841">                                        catId</span>
+                                    ),
+<span class="nc" id="L843">                                    null, null, null, null</span>
+<span class="nc bnc" id="L844" title="All 2 branches missed.">                                )?.use { cursor -&gt;</span>
+<span class="nc" id="L845">                                    transactionChange = transactionChange.copy(</span>
+<span class="nc" id="L846">                                        categoryInfo = CategoryInfo.fromCursor(cursor)</span>
+                                    )
+<span class="nc" id="L848">                                }</span>
+<span class="nc" id="L849">                            }</span>
+                        }
+<span class="nc" id="L851">                        result.add(</span>
+<span class="nc bnc" id="L852" title="All 3 branches missed.">                            when (transactionChange.type) {</span>
+
+<span class="nc" id="L854">                                TransactionChange.Type.tags -&gt; transactionChange.copy(</span>
+<span class="nc" id="L855">                                    type = TransactionChange.Type.updated,</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">                                    tagsV2 =  provider.query(</span>
+<span class="nc" id="L857">                                        TransactionProvider.TRANSACTIONS_TAGS_URI,</span>
+<span class="nc" id="L858">                                        null,</span>
+<span class="nc" id="L859">                                        &quot;$KEY_TRANSACTIONID = (SELECT $KEY_ROWID FROM $TABLE_TRANSACTIONS WHERE $KEY_UUID = ?)&quot;,</span>
+<span class="nc" id="L860">                                        arrayOf(transactionChange.uuid),</span>
+<span class="nc" id="L861">                                        null</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">                                    )?.useAndMapToSet { cursor -&gt;</span>
+<span class="nc" id="L863">                                        TagInfo(</span>
+<span class="nc" id="L864">                                            cursor.getString(KEY_LABEL),</span>
+<span class="nc" id="L865">                                            cursor.getIntOrNull(KEY_COLOR)</span>
+<span class="nc" id="L866">                                        )</span>
+<span class="nc" id="L867">                                    } ?: emptySet()</span>
+                                )
+<span class="nc" id="L869">                                TransactionChange.Type.attachments -&gt; transactionChange.copy(</span>
+<span class="nc" id="L870">                                    type = TransactionChange.Type.updated,</span>
+<span class="nc bnc" id="L871" title="All 2 branches missed.">                                    attachments =                                         provider.query(</span>
+<span class="nc" id="L872">                                        TransactionProvider.ATTACHMENTS_URI</span>
+<span class="nc" id="L873">                                            .buildUpon()</span>
+<span class="nc" id="L874">                                            .appendQueryParameter(</span>
+<span class="nc" id="L875">                                                KEY_UUID,</span>
+<span class="nc" id="L876">                                                transactionChange.uuid</span>
+                                            )
+<span class="nc" id="L878">                                            .build(),</span>
+<span class="nc" id="L879">                                        arrayOf(KEY_UUID),</span>
+<span class="nc" id="L880">                                        null,</span>
+<span class="nc" id="L881">                                        arrayOf(transactionChange.uuid),</span>
+<span class="nc" id="L882">                                        null</span>
+<span class="nc bnc" id="L883" title="All 2 branches missed.">                                    )?.useAndMapToSet { it.getString(0) } ?: emptySet()</span>
+                                )
+<span class="nc" id="L885">                                else -&gt; transactionChange</span>
+                            }
+                        )
+<span class="nc bnc" id="L888" title="All 2 branches missed.">                    } while (changesCursor.moveToNext())</span>
+                }
+<span class="nc" id="L890">            }</span>
+        }
+<span class="nc" id="L892">        return result</span>
+    }
+
+    private fun buildChangesUri(currentSync: Long, accountId: Long): Uri {
+<span class="nc" id="L896">        return TransactionProvider.CHANGES_URI.buildUpon()</span>
+<span class="nc" id="L897">            .appendQueryParameter(KEY_ACCOUNTID, accountId.toString())</span>
+<span class="nc" id="L898">            .appendQueryParameter(</span>
+<span class="nc" id="L899">                KEY_SYNC_SEQUENCE_LOCAL,</span>
+<span class="nc" id="L900">                currentSync.toString()</span>
+            )
+<span class="nc" id="L902">            .build()</span>
+    }
+
+    private fun buildInitializationUri(accountId: Long): Uri {
+<span class="nc" id="L906">        return TransactionProvider.CHANGES_URI.buildUpon()</span>
+<span class="nc" id="L907">            .appendQueryParameter(KEY_ACCOUNTID, accountId.toString())</span>
+<span class="nc" id="L908">            .appendBooleanQueryParameter(TransactionProvider.QUERY_PARAMETER_INIT)</span>
+<span class="nc" id="L909">            .build()</span>
+    }
+
+    @Throws(RemoteException::class)
+    private fun hasLocalChanges(provider: ContentProviderClient, changesUri: Uri) =
+<span class="nc bnc" id="L914" title="All 4 branches missed.">        provider.query(changesUri, arrayOf(&quot;count(*)&quot;), null, null, null)?.use {</span>
+<span class="nc bnc" id="L915" title="All 2 branches missed.">            if (it.moveToFirst()) {</span>
+<span class="nc bnc" id="L916" title="All 2 branches missed.">                it.getLong(0) &gt; 0</span>
+<span class="nc" id="L917">            } else false</span>
+<span class="nc" id="L918">        } == true</span>
+
+    private fun getBooleanSetting(
+        provider: ContentProviderClient,
+        prefKey: PrefKey,
+        defaultValue: Boolean,
+    ): Boolean {
+<span class="nc" id="L925">        val value = getStringSetting(provider, prefHandler.getKey(prefKey))</span>
+<span class="nc bnc" id="L926" title="All 2 branches missed.">        return if (value != null) value == java.lang.Boolean.TRUE.toString() else defaultValue</span>
+    }
+
+    private fun getStringSetting(provider: ContentProviderClient, prefKey: String): String? {
+<span class="nc" id="L930">        val result: String? = try {</span>
+<span class="nc" id="L931">            provider.query(</span>
+<span class="nc" id="L932">                TransactionProvider.SETTINGS_URI, arrayOf(KEY_VALUE),</span>
+<span class="nc" id="L933">                &quot;$KEY_KEY = ?&quot;, arrayOf(prefKey), null</span>
+<span class="nc bnc" id="L934" title="All 2 branches missed.">            )?.use {</span>
+<span class="nc bnc" id="L935" title="All 2 branches missed.">                if (it.moveToFirst()) {</span>
+<span class="nc" id="L936">                    it.getString(0)</span>
+<span class="nc" id="L937">                } else null</span>
+            }
+<span class="nc" id="L939">        } catch (remoteException: RemoteException) {</span>
+<span class="nc" id="L940">            report(remoteException)</span>
+<span class="nc" id="L941">            null</span>
+        }
+<span class="nc" id="L943">        return result</span>
+    }
+
+    private fun removeSetting(provider: ContentProviderClient, prefKey: String) {
+<span class="nc" id="L947">        try {</span>
+<span class="nc" id="L948">            provider.delete(</span>
+<span class="nc" id="L949">                TransactionProvider.SETTINGS_URI,</span>
+<span class="nc" id="L950">                &quot;$KEY_KEY = ?&quot;,</span>
+<span class="nc" id="L951">                arrayOf(prefKey)</span>
+            )
+<span class="nc" id="L953">        } catch (remoteException: RemoteException) {</span>
+<span class="nc" id="L954">            report(remoteException)</span>
+        }
+<span class="nc" id="L956">    }</span>
+
+    override fun onSyncCanceled() {
+<span class="nc bnc" id="L959" title="All 2 branches missed.">        if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L960">            notifyUser(&quot;Debug&quot;, &quot;Sync canceled&quot;)</span>
+<span class="nc" id="L961">            log().w(</span>
+<span class="nc" id="L962">                &quot;Sync for %s was started at %s and is now cancelled&quot;,</span>
+<span class="nc" id="L963">                currentAccount,</span>
+<span class="nc" id="L964">                lastSynStart</span>
+            )
+        }
+<span class="nc" id="L967">        super.onSyncCanceled()</span>
+<span class="nc" id="L968">    }</span>
+
+    companion object {
+        const val KEY_RESET_REMOTE_ACCOUNT = &quot;reset_remote_account&quot;
+        const val KEY_UPLOAD_AUTO_BACKUP_URI = &quot;upload_auto_backup_uri&quot;
+        const val KEY_UPLOAD_AUTO_BACKUP_NAME = &quot;upload_auto_backup_name&quot;
+        const val KEY_AUTO_BACKUP_ONLY = &quot;auto_backup_only&quot;
+
+<span class="nc bnc" id="L976" title="All 2 branches missed.">        private val LOCK_TIMEOUT_MINUTES = if (BuildConfig.DEBUG) 1L else 5L</span>
+<span class="nc" id="L977">        private val IO_DEFAULT_DELAY_MILLIS = TimeUnit.MINUTES.toMillis(5)</span>
+<span class="nc" id="L978">        val IO_LOCK_DELAY_MILLIS = TimeUnit.MINUTES.toMillis(LOCK_TIMEOUT_MINUTES)</span>
+        const val TAG = &quot;SyncAdapter&quot;
+
+        @JvmStatic
+        fun KEY_LAST_SYNCED_REMOTE(accountId: Long): String {
+<span class="nc" id="L983">            return &quot;last_synced_remote_$accountId&quot;</span>
+<span class="nc" id="L984">        }</span>
+
+        @JvmStatic
+        fun KEY_LAST_SYNCED_LOCAL(accountId: Long): String {
+<span class="nc" id="L988">            return &quot;last_synced_local_$accountId&quot;</span>
+<span class="nc" id="L989">        }</span>
+
+<span class="nc" id="L991">        private fun getIoDelaySeconds(</span>
+<span class="nc" id="L992">            backOffMillis: Long = IO_DEFAULT_DELAY_MILLIS,</span>
+<span class="nc" id="L993">        ) = (System.currentTimeMillis() + backOffMillis) / 1000</span>
+
+        private val featureLoadDelaySeconds: Long
+<span class="nc" id="L996">            get() = System.currentTimeMillis() / 1000 + 60</span>
+
+        fun log(): Timber.Tree {
+<span class="nc" id="L999">            return Timber.tag(TAG)</span>
+        }
+
+<span class="nc" id="L1002">        private val notificationContent = SparseArray&lt;MutableList&lt;StringBuilder&gt;?&gt;()</span>
+
+        fun clearNotificationContent(account: Account) {
+<span class="nc bnc" id="L1005" title="All 2 branches missed.">            notificationContent[account.hashCode()]?.clear()</span>
+<span class="nc" id="L1006">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

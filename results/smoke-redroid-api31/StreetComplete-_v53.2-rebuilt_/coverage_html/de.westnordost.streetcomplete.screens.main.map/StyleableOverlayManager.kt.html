@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StyleableOverlayManager.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE StreetComplete</a> &gt; <a href="index.source.html" class="el_package">de.westnordost.streetcomplete.screens.main.map</a> &gt; <span class="el_source">StyleableOverlayManager.kt</span></div><h1>StyleableOverlayManager.kt</h1><pre class="source lang-java linenums">package de.westnordost.streetcomplete.screens.main.map
+
+import android.graphics.RectF
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import de.westnordost.streetcomplete.data.download.tiles.TilesRect
+import de.westnordost.streetcomplete.data.download.tiles.enclosingTilesRect
+import de.westnordost.streetcomplete.data.osm.edits.MapDataWithEditsSource
+import de.westnordost.streetcomplete.data.osm.mapdata.BoundingBox
+import de.westnordost.streetcomplete.data.osm.mapdata.ElementKey
+import de.westnordost.streetcomplete.data.osm.mapdata.MapDataWithGeometry
+import de.westnordost.streetcomplete.data.osm.mapdata.key
+import de.westnordost.streetcomplete.data.overlays.SelectedOverlaySource
+import de.westnordost.streetcomplete.overlays.Overlay
+import de.westnordost.streetcomplete.screens.main.map.components.StyleableOverlayMapComponent
+import de.westnordost.streetcomplete.screens.main.map.components.StyledElement
+import de.westnordost.streetcomplete.screens.main.map.tangram.KtMapController
+import de.westnordost.streetcomplete.util.math.intersect
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
+
+/** Manages the layer of styled map data in the map view:
+ *  Gets told by the MainMapFragment when a new area is in view and independently pulls the map
+ *  data for the bbox surrounding the area from database and holds it in memory. */
+<span class="fc" id="L33">class StyleableOverlayManager(</span>
+<span class="fc" id="L34">    private val ctrl: KtMapController,</span>
+<span class="fc" id="L35">    private val mapComponent: StyleableOverlayMapComponent,</span>
+<span class="fc" id="L36">    private val mapDataSource: MapDataWithEditsSource,</span>
+<span class="fc" id="L37">    private val selectedOverlaySource: SelectedOverlaySource</span>
+) : DefaultLifecycleObserver {
+
+    // last displayed rect of (zoom 16) tiles
+    private var lastDisplayedRect: TilesRect? = null
+    // map data in current view: key -&gt; [pin, ...]
+<span class="fc" id="L43">    private val mapDataInView: MutableMap&lt;ElementKey, StyledElement&gt; = mutableMapOf()</span>
+
+<span class="fc" id="L45">    private val viewLifecycleScope: CoroutineScope = CoroutineScope(SupervisorJob())</span>
+
+    private var updateJob: Job? = null
+
+    private var overlay: Overlay? = null
+    set(value) {
+<span class="pc bpc" id="L51" title="1 of 2 branches missed.">        if (field == value) return</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        val wasNull = field == null</span>
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        val isNullNow = value == null</span>
+<span class="nc" id="L54">        field = value</span>
+<span class="nc" id="L55">        when {</span>
+<span class="nc bnc" id="L56" title="All 2 branches missed.">            isNullNow -&gt; hide()</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">            wasNull -&gt;   show()</span>
+<span class="nc" id="L58">            else -&gt;      switchOverlay()</span>
+        }
+<span class="nc" id="L60">    }</span>
+
+<span class="fc" id="L62">    private val overlayListener = object : SelectedOverlaySource.Listener {</span>
+        override fun onSelectedOverlayChanged() {
+<span class="nc" id="L64">            overlay = selectedOverlaySource.selectedOverlay</span>
+<span class="nc" id="L65">        }</span>
+    }
+
+<span class="fc" id="L68">    private val mapDataListener = object : MapDataWithEditsSource.Listener {</span>
+        override fun onUpdated(updated: MapDataWithGeometry, deleted: Collection&lt;ElementKey&gt;) {
+<span class="nc" id="L70">            val oldUpdateJob = updateJob</span>
+<span class="nc" id="L71">            updateJob = viewLifecycleScope.launch {</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                oldUpdateJob?.join() // don't cancel, as updateStyledElements only updates existing data</span>
+<span class="nc" id="L73">                updateStyledElements(updated, deleted)</span>
+<span class="nc" id="L74">            }</span>
+<span class="nc" id="L75">        }</span>
+
+        override fun onReplacedForBBox(bbox: BoundingBox, mapDataWithGeometry: MapDataWithGeometry) {
+<span class="nc" id="L78">            clear()</span>
+<span class="nc" id="L79">            onNewScreenPosition()</span>
+<span class="nc" id="L80">        }</span>
+
+        override fun onCleared() {
+<span class="nc" id="L83">            clear()</span>
+<span class="nc" id="L84">        }</span>
+    }
+
+    override fun onStart(owner: LifecycleOwner) {
+<span class="fc" id="L88">        super.onStart(owner)</span>
+<span class="fc" id="L89">        overlay = selectedOverlaySource.selectedOverlay</span>
+<span class="fc" id="L90">        selectedOverlaySource.addListener(overlayListener)</span>
+<span class="fc" id="L91">    }</span>
+
+    override fun onStop(owner: LifecycleOwner) {
+<span class="nc" id="L94">        super.onStop(owner)</span>
+<span class="nc" id="L95">        overlay = null</span>
+<span class="nc" id="L96">        selectedOverlaySource.removeListener(overlayListener)</span>
+<span class="nc" id="L97">    }</span>
+
+    override fun onDestroy(owner: LifecycleOwner) {
+<span class="nc" id="L100">        viewLifecycleScope.cancel()</span>
+<span class="nc" id="L101">    }</span>
+
+    private fun show() {
+<span class="nc" id="L104">        clear()</span>
+<span class="nc" id="L105">        onNewScreenPosition()</span>
+<span class="nc" id="L106">        mapDataSource.addListener(mapDataListener)</span>
+<span class="nc" id="L107">    }</span>
+
+    private fun switchOverlay() {
+<span class="nc" id="L110">        clear()</span>
+<span class="nc" id="L111">        onNewScreenPosition()</span>
+<span class="nc" id="L112">    }</span>
+
+    private fun hide() {
+<span class="nc" id="L115">        viewLifecycleScope.coroutineContext.cancelChildren()</span>
+<span class="nc" id="L116">        clear()</span>
+<span class="nc" id="L117">        mapDataSource.removeListener(mapDataListener)</span>
+<span class="nc" id="L118">    }</span>
+
+    fun onNewScreenPosition() {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (overlay == null) return</span>
+<span class="nc" id="L122">        val zoom = ctrl.cameraPosition.zoom</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (zoom &lt; TILES_ZOOM) return</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        val displayedArea = ctrl.screenAreaToBoundingBox(RectF()) ?: return</span>
+<span class="nc" id="L125">        val tilesRect = displayedArea.enclosingTilesRect(TILES_ZOOM)</span>
+        // area too big -&gt; skip (performance)
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (tilesRect.size &gt; 16) return</span>
+<span class="nc bnc" id="L128" title="All 6 branches missed.">        if (lastDisplayedRect?.contains(tilesRect) != true) {</span>
+<span class="nc" id="L129">            lastDisplayedRect = tilesRect</span>
+<span class="nc" id="L130">            onNewTilesRect(tilesRect)</span>
+        }
+<span class="nc" id="L132">    }</span>
+
+    private fun onNewTilesRect(tilesRect: TilesRect) {
+<span class="nc" id="L135">        val bbox = tilesRect.asBoundingBox(TILES_ZOOM)</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        updateJob?.cancel()</span>
+<span class="nc" id="L137">        updateJob = viewLifecycleScope.launch {</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            val mapData = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L139">                synchronized(mapDataSource) {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                    if (!coroutineContext.isActive) null</span>
+<span class="nc" id="L141">                    else mapDataSource.getMapDataWithGeometry(bbox)</span>
+                }
+<span class="nc" id="L143">            } ?: return@launch</span>
+<span class="nc" id="L144">            setStyledElements(mapData)</span>
+<span class="nc" id="L145">        }</span>
+<span class="nc" id="L146">    }</span>
+
+    private fun clear() {
+<span class="nc" id="L149">        synchronized(mapDataInView) { mapDataInView.clear() }</span>
+<span class="nc" id="L150">        lastDisplayedRect = null</span>
+<span class="nc" id="L151">        viewLifecycleScope.launch { mapComponent.clear() }</span>
+<span class="nc" id="L152">    }</span>
+
+    private suspend fun setStyledElements(mapData: MapDataWithGeometry) {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        val layer = overlay ?: return</span>
+<span class="nc" id="L156">        synchronized(mapDataInView) {</span>
+<span class="nc" id="L157">            mapDataInView.clear()</span>
+<span class="nc" id="L158">            createStyledElementsByKey(layer, mapData).forEach { (key, styledElement) -&gt;</span>
+<span class="nc" id="L159">                mapDataInView[key] = styledElement</span>
+<span class="nc" id="L160">            }</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            if (coroutineContext.isActive) {</span>
+<span class="nc" id="L162">                mapComponent.set(mapDataInView.values)</span>
+<span class="nc" id="L163">                ctrl.requestRender()</span>
+            }
+<span class="nc" id="L165">        }</span>
+<span class="nc" id="L166">    }</span>
+
+    private suspend fun updateStyledElements(updated: MapDataWithGeometry, deleted: Collection&lt;ElementKey&gt;) {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        val overlay = overlay ?: return</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        val displayedBBox = lastDisplayedRect?.asBoundingBox(TILES_ZOOM)</span>
+<span class="nc" id="L171">        var changedAnything = false</span>
+<span class="nc" id="L172">        synchronized(mapDataInView) {</span>
+<span class="nc" id="L173">            deleted.forEach {</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                if (mapDataInView.remove(it) != null) {</span>
+<span class="nc" id="L175">                    changedAnything = true</span>
+                }
+<span class="nc" id="L177">            }</span>
+<span class="nc" id="L178">            val styledElementsByKey = createStyledElementsByKey(overlay, updated).toMap()</span>
+            // for elements that used to be displayed in the overlay but now not anymore
+<span class="nc" id="L180">            updated.forEach {</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                if (!styledElementsByKey.containsKey(it.key)) {</span>
+<span class="nc" id="L182">                    mapDataInView.remove(it.key)</span>
+<span class="nc" id="L183">                    changedAnything = true</span>
+                }
+<span class="nc" id="L185">            }</span>
+<span class="nc" id="L186">            styledElementsByKey.forEach { (key, styledElement) -&gt;</span>
+<span class="nc" id="L187">                mapDataInView[key] = styledElement</span>
+<span class="nc bnc" id="L188" title="All 8 branches missed.">                if (!changedAnything &amp;&amp; displayedBBox?.intersect(styledElement.geometry.getBounds()) != false) {</span>
+<span class="nc" id="L189">                    changedAnything = true</span>
+                }
+<span class="nc" id="L191">            }</span>
+
+<span class="nc bnc" id="L193" title="All 4 branches missed.">            if (changedAnything &amp;&amp; coroutineContext.isActive) {</span>
+<span class="nc" id="L194">                mapComponent.set(mapDataInView.values)</span>
+<span class="nc" id="L195">                ctrl.requestRender()</span>
+            }
+<span class="nc" id="L197">        }</span>
+<span class="nc" id="L198">    }</span>
+
+    private fun createStyledElementsByKey(
+        overlay: Overlay,
+        mapData: MapDataWithGeometry
+    ): Sequence&lt;Pair&lt;ElementKey, StyledElement&gt;&gt; =
+<span class="nc" id="L204">        overlay.getStyledElements(mapData).mapNotNull { (element, style) -&gt;</span>
+<span class="nc" id="L205">            val key = element.key</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">            val geometry = mapData.getGeometry(element.type, element.id) ?: return@mapNotNull null</span>
+<span class="nc" id="L207">            key to StyledElement(element, geometry, style)</span>
+<span class="nc" id="L208">        }</span>
+
+    companion object {
+        private const val TILES_ZOOM = 16
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

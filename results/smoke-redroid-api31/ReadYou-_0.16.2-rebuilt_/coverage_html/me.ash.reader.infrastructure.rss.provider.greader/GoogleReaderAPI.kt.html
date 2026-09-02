@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GoogleReaderAPI.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ReadYou</a> &gt; <a href="index.source.html" class="el_package">me.ash.reader.infrastructure.rss.provider.greader</a> &gt; <span class="el_source">GoogleReaderAPI.kt</span></div><h1>GoogleReaderAPI.kt</h1><pre class="source lang-java linenums">package me.ash.reader.infrastructure.rss.provider.greader
+
+import android.content.Context
+import androidx.annotation.CheckResult
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.text.hexToLong
+import kotlin.text.startsWith
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
+import me.ash.reader.domain.data.SyncLogger
+import me.ash.reader.infrastructure.di.USER_AGENT_STRING
+import me.ash.reader.infrastructure.exception.GoogleReaderAPIException
+import me.ash.reader.infrastructure.exception.RetryException
+import me.ash.reader.infrastructure.net.ApiResult
+import me.ash.reader.infrastructure.net.RetryConfig
+import me.ash.reader.infrastructure.net.RetryableTaskResult
+import me.ash.reader.infrastructure.net.getOrThrow
+import me.ash.reader.infrastructure.net.onFailure
+import me.ash.reader.infrastructure.net.onSuccess
+import me.ash.reader.infrastructure.net.withRetries
+import me.ash.reader.infrastructure.rss.provider.ProviderAPI
+import me.ash.reader.ui.ext.dollarLast
+import me.ash.reader.ui.ext.spacerDollar
+import okhttp3.FormBody
+import okhttp3.Request
+import okhttp3.executeAsync
+import okio.IOException
+import timber.log.Timber
+
+private const val TAG = &quot;GoogleReaderAPI&quot;
+
+class GoogleReaderAPI
+<span class="nc" id="L33">private constructor(</span>
+    context: Context,
+<span class="nc" id="L35">    private val serverUrl: String,</span>
+<span class="nc" id="L36">    private val username: String,</span>
+<span class="nc" id="L37">    private val password: String,</span>
+<span class="nc" id="L38">    private val httpUsername: String? = null,</span>
+<span class="nc" id="L39">    private val httpPassword: String? = null,</span>
+<span class="nc" id="L40">    private val syncLogger: SyncLogger,</span>
+<span class="nc" id="L41">    clientCertificateAlias: String? = null,</span>
+<span class="nc" id="L42">) : ProviderAPI(context, clientCertificateAlias) {</span>
+
+<span class="nc" id="L44">    sealed class Stream(val tag: String) {</span>
+<span class="nc" id="L45">        data object AllItems : Stream(&quot;user/-/state/com.google/reading-list&quot;)</span>
+
+<span class="nc" id="L47">        data object Read : Stream(&quot;user/-/state/com.google/read&quot;)</span>
+
+<span class="nc" id="L49">        data object Starred : Stream(&quot;user/-/state/com.google/starred&quot;)</span>
+
+<span class="nc" id="L51">        data object Like : Stream(&quot;user/-/state/com.google/like&quot;)</span>
+
+<span class="nc" id="L53">        data object Broadcast : Stream(&quot;user/-/state/com.google/broadcast&quot;)</span>
+
+<span class="nc" id="L55">        data class Feed(val feedId: String) : Stream(&quot;feed/$feedId&quot;)</span>
+
+<span class="nc" id="L57">        data class Category(val categoryId: String) : Stream(&quot;user/-/label/$categoryId&quot;)</span>
+    }
+
+<span class="nc" id="L60">    private data class AuthData(val clientLoginToken: String?, val actionToken: String?)</span>
+
+<span class="nc" id="L62">    private val authDataStateFlow = MutableStateFlow(AuthData(null, null))</span>
+
+<span class="nc" id="L64">    fun clearAuthData() = authDataStateFlow.update { it.copy(null, null) }</span>
+
+    private var authData
+<span class="nc" id="L67">        get() = authDataStateFlow.value</span>
+        set(value) {
+<span class="nc" id="L69">            authDataStateFlow.value = value</span>
+<span class="nc" id="L70">        }</span>
+
+<span class="nc" id="L72">    suspend fun validCredentials(): Boolean {</span>
+<span class="nc" id="L73">        val result = reAuthenticate().onSuccess { authData = it }</span>
+<span class="nc" id="L74">        return result.isSuccess</span>
+    }
+
+<span class="nc" id="L77">    suspend fun refreshCredentialsIfNeeded() {</span>
+<span class="nc bnc" id="L78" title="All 6 branches missed.">        if (authData.clientLoginToken.isNullOrEmpty()) {</span>
+<span class="nc" id="L79">            reAuthenticate().getOrThrow().let { authData = it }</span>
+        }
+<span class="nc" id="L81">    }</span>
+
+    @CheckResult
+    private suspend fun reAuthenticate(): ApiResult&lt;AuthData&gt; {
+        // Get client login token
+<span class="nc" id="L86">        val clResponse =</span>
+<span class="nc" id="L87">            try {</span>
+<span class="nc" id="L88">                client</span>
+<span class="nc" id="L89">                    .newCall(</span>
+<span class="nc" id="L90">                        Request.Builder()</span>
+<span class="nc" id="L91">                            .url(&quot;${serverUrl}accounts/ClientLogin&quot;)</span>
+<span class="nc" id="L92">                            .header(&quot;User-Agent&quot;, USER_AGENT_STRING)</span>
+<span class="nc" id="L93">                            .post(</span>
+<span class="nc" id="L94">                                FormBody.Builder()</span>
+<span class="nc" id="L95">                                    .add(&quot;output&quot;, &quot;json&quot;)</span>
+<span class="nc" id="L96">                                    .add(&quot;Email&quot;, username)</span>
+<span class="nc" id="L97">                                    .add(&quot;Passwd&quot;, password)</span>
+<span class="nc" id="L98">                                    .add(&quot;client&quot;, &quot;ReadYou&quot;)</span>
+<span class="nc" id="L99">                                    .add(&quot;accountType&quot;, &quot;HOSTED_OR_GOOGLE&quot;)</span>
+<span class="nc" id="L100">                                    .add(&quot;service&quot;, &quot;reader&quot;)</span>
+<span class="nc" id="L101">                                    .build()</span>
+                            )
+<span class="nc" id="L103">                            .build()</span>
+                    )
+<span class="nc" id="L105">                    .executeAsync()</span>
+<span class="nc" id="L106">            } catch (e: IOException) {</span>
+<span class="nc" id="L107">                return ApiResult.NetworkError(e)</span>
+            }
+
+<span class="nc" id="L110">        val clBody = clResponse.body.string()</span>
+<span class="nc" id="L111">        when (clResponse.code) {</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">            400 -&gt; return ApiResult.BizError(GoogleReaderAPIException(&quot;BadRequest for CL Token&quot;))</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            401 -&gt; return ApiResult.BizError(GoogleReaderAPIException(&quot;Unauthorized for CL Token&quot;))</span>
+<span class="nc bnc" id="L114" title="All 6 branches missed.">            !in 200..299 -&gt; {</span>
+<span class="nc" id="L115">                return ApiResult.BizError(GoogleReaderAPIException(clBody))</span>
+            }
+        }
+
+<span class="nc" id="L119">        val loginToken =</span>
+<span class="nc" id="L120">            try {</span>
+<span class="nc" id="L121">                toDTO&lt;GoogleReaderDTO.MinifluxAuthData&gt;(clBody).Auth</span>
+<span class="nc" id="L122">            } catch (ignore: Exception) {</span>
+<span class="nc bnc" id="L123" title="All 8 branches missed.">                clBody.split(&quot;\n&quot;).find { it.startsWith(&quot;Auth=&quot;) }?.substring(5)</span>
+<span class="nc" id="L124">                    ?: return ApiResult.BizError(</span>
+<span class="nc" id="L125">                        GoogleReaderAPIException(&quot;body format error for CL Token:\n$clBody&quot;)</span>
+                    )
+            }
+
+        // Get action token
+<span class="nc" id="L130">        val actResponse =</span>
+<span class="nc" id="L131">            try {</span>
+<span class="nc" id="L132">                client</span>
+<span class="nc" id="L133">                    .newCall(</span>
+<span class="nc" id="L134">                        Request.Builder()</span>
+<span class="nc" id="L135">                            .url(&quot;${serverUrl}reader/api/0/token&quot;)</span>
+<span class="nc" id="L136">                            .header(&quot;Authorization&quot;, &quot;GoogleLogin auth=${loginToken}&quot;)</span>
+<span class="nc" id="L137">                            .get()</span>
+<span class="nc" id="L138">                            .build()</span>
+                    )
+<span class="nc" id="L140">                    .executeAsync()</span>
+<span class="nc" id="L141">            } catch (e: IOException) {</span>
+<span class="nc" id="L142">                return ApiResult.NetworkError(e)</span>
+            }
+<span class="nc" id="L144">        val actionToken = actResponse.body.string()</span>
+
+<span class="nc bnc" id="L146" title="All 6 branches missed.">        if (actResponse.code !in 200..299) {</span>
+            // It's not used currently but may be used later the same way Google Reader uses it
+            // (expires in 30 minutes, with &quot;x-reader-google-bad-token: true&quot; header set).
+        }
+<span class="nc" id="L150">        return ApiResult.Success(AuthData(actionToken = actionToken, clientLoginToken = loginToken))</span>
+    }
+
+    private val retryConfig =
+<span class="nc" id="L154">        RetryConfig(</span>
+<span class="nc" id="L155">            onRetry = {</span>
+<span class="nc" id="L156">                Timber.e(it)</span>
+<span class="nc" id="L157">                clearAuthData()</span>
+<span class="nc" id="L158">            }</span>
+        )
+
+<span class="nc" id="L161">    private suspend inline fun &lt;reified T&gt; retryableGetRequest(</span>
+        query: String,
+<span class="nc" id="L163">        params: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+    ): T {
+<span class="nc" id="L165">        return withRetries(retryConfig) { getRequest&lt;T&gt;(query, params) }.getOrThrow()</span>
+    }
+
+<span class="nc" id="L168">    private suspend inline fun &lt;reified T&gt; retryablePostRequest(</span>
+        query: String,
+<span class="nc" id="L170">        params: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+<span class="nc" id="L171">        form: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+    ): T {
+<span class="nc" id="L173">        return withRetries(retryConfig) { postRequest&lt;T&gt;(query, params, form) }</span>
+<span class="nc" id="L174">            .onFailure {</span>
+<span class="nc" id="L175">                if (it is GoogleReaderAPIException) {</span>
+<span class="nc" id="L176">                    syncLogger.log(it.copy(query = query, params = params, form = form))</span>
+                } else {
+<span class="nc" id="L178">                    syncLogger.log(</span>
+<span class="nc" id="L179">                        GoogleReaderAPIException(</span>
+<span class="nc" id="L180">                            message = it.message.toString(),</span>
+<span class="nc" id="L181">                            query = query,</span>
+<span class="nc" id="L182">                            params = params,</span>
+<span class="nc" id="L183">                            form = form,</span>
+                        )
+                    )
+                }
+<span class="nc" id="L187">            }</span>
+<span class="nc" id="L188">            .getOrThrow()</span>
+    }
+
+<span class="nc" id="L191">    @CheckResult</span>
+    private suspend inline fun &lt;reified T&gt; retryableGetRequestWithResult(
+        query: String,
+<span class="nc" id="L194">        params: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+    ): RetryableTaskResult&lt;T&gt; {
+<span class="nc" id="L196">        return withRetries(retryConfig) { getRequest&lt;T&gt;(query, params) }</span>
+    }
+
+<span class="nc" id="L199">    @CheckResult</span>
+    private suspend inline fun &lt;reified T&gt; retryablePostRequestWithResult(
+        query: String,
+<span class="nc" id="L202">        params: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+<span class="nc" id="L203">        form: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+    ): RetryableTaskResult&lt;T&gt; {
+<span class="nc" id="L205">        return withRetries(retryConfig) { postRequest&lt;T&gt;(query, params, form) }</span>
+    }
+
+<span class="nc" id="L208">    private suspend inline fun &lt;reified T&gt; getRequest(</span>
+        query: String,
+<span class="nc" id="L210">        params: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+    ): T {
+<span class="nc" id="L212">        refreshCredentialsIfNeeded()</span>
+
+<span class="nc" id="L214">        val response =</span>
+<span class="nc" id="L215">            client</span>
+<span class="nc" id="L216">                .newCall(</span>
+<span class="nc" id="L217">                    Request.Builder()</span>
+<span class="nc" id="L218">                        .url(</span>
+<span class="nc" id="L219">                            &quot;$serverUrl$query?output=json${params?.joinToString(separator = &quot;&quot;) { &quot;&amp;${it.first}=${it.second}&quot; } ?: &quot;&quot;}&quot;</span>
+                        )
+<span class="nc" id="L221">                        .addHeader(&quot;Authorization&quot;, &quot;GoogleLogin auth=${authData.clientLoginToken}&quot;)</span>
+<span class="nc" id="L222">                        .addHeader(&quot;User-Agent&quot;, USER_AGENT_STRING)</span>
+<span class="nc" id="L223">                        .get()</span>
+<span class="nc" id="L224">                        .build()</span>
+                )
+<span class="nc" id="L226">                .executeAsync()</span>
+
+<span class="nc" id="L228">        val body = response.body.string()</span>
+<span class="nc" id="L229">        when (response.code) {</span>
+<span class="nc" id="L230">            400 -&gt; throw GoogleReaderAPIException(&quot;BadRequest&quot;)</span>
+<span class="nc" id="L231">            401 -&gt; throw RetryException(&quot;Unauthorized&quot;)</span>
+<span class="nc" id="L232">            !in 200..299 -&gt; {</span>
+<span class="nc" id="L233">                val gReaderError =</span>
+<span class="nc" id="L234">                    try {</span>
+<span class="nc" id="L235">                        toDTO&lt;GoogleReaderDTO.GReaderError&gt;(body)</span>
+<span class="nc" id="L236">                    } catch (ignore: Exception) {</span>
+<span class="nc" id="L237">                        GoogleReaderDTO.GReaderError(listOf(body))</span>
+                    }
+<span class="nc" id="L239">                throw GoogleReaderAPIException(gReaderError.errors.joinToString(&quot;;\n &quot;))</span>
+            }
+        }
+
+<span class="nc" id="L243">        return toDTO(body)</span>
+    }
+
+<span class="nc" id="L246">    private suspend inline fun &lt;reified T&gt; postRequest(</span>
+        query: String,
+<span class="nc" id="L248">        params: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+<span class="nc" id="L249">        form: List&lt;Pair&lt;String, String&gt;&gt;? = null,</span>
+    ): T {
+<span class="nc" id="L251">        refreshCredentialsIfNeeded()</span>
+<span class="nc" id="L252">        val response =</span>
+<span class="nc" id="L253">            client</span>
+<span class="nc" id="L254">                .newCall(</span>
+<span class="nc" id="L255">                    Request.Builder()</span>
+<span class="nc" id="L256">                        .url(</span>
+<span class="nc" id="L257">                            &quot;$serverUrl$query?output=json${params?.joinToString(separator = &quot;&quot;) { &quot;&amp;${it.first}=${it.second}&quot; } ?: &quot;&quot;}&quot;</span>
+                        )
+<span class="nc" id="L259">                        .addHeader(&quot;Authorization&quot;, &quot;GoogleLogin auth=${authData.clientLoginToken}&quot;)</span>
+<span class="nc" id="L260">                        .addHeader(&quot;Content-Type&quot;, &quot;application/x-www-form-urlencoded&quot;)</span>
+<span class="nc" id="L261">                        .addHeader(&quot;User-Agent&quot;, USER_AGENT_STRING)</span>
+<span class="nc" id="L262">                        .post(</span>
+<span class="nc" id="L263">                            FormBody.Builder()</span>
+<span class="nc" id="L264">                                .apply {</span>
+<span class="nc" id="L265">                                    form?.forEach { add(it.first, it.second) }</span>
+<span class="nc" id="L266">                                    authData.actionToken?.let { add(&quot;T&quot;, it) }</span>
+<span class="nc" id="L267">                                }</span>
+<span class="nc" id="L268">                                .build()</span>
+                        )
+<span class="nc" id="L270">                        .build()</span>
+                )
+<span class="nc" id="L272">                .executeAsync()</span>
+
+<span class="nc" id="L274">        val responseBody = response.body.string()</span>
+<span class="nc" id="L275">        when (response.code) {</span>
+<span class="nc" id="L276">            400 -&gt; throw GoogleReaderAPIException(&quot;BadRequest&quot;)</span>
+<span class="nc" id="L277">            401 -&gt; throw RetryException(&quot;Unauthorized&quot;)</span>
+<span class="nc" id="L278">            !in 200..299 -&gt; {</span>
+<span class="nc" id="L279">                throw GoogleReaderAPIException(responseBody)</span>
+            }
+        }
+
+<span class="nc" id="L283">        return toDTO(responseBody)</span>
+    }
+
+    suspend fun getUserInfo(): GoogleReaderDTO.User =
+<span class="nc" id="L287">        retryableGetRequest&lt;GoogleReaderDTO.User&gt;(&quot;reader/api/0/user-info&quot;)</span>
+
+    suspend fun getSubscriptionList(): GoogleReaderDTO.SubscriptionList? =
+<span class="nc" id="L290">        retryableGetRequestWithResult&lt;GoogleReaderDTO.SubscriptionList&gt;(</span>
+<span class="nc" id="L291">                &quot;reader/api/0/subscription/list&quot;</span>
+            )
+<span class="nc" id="L293">            .getOrNull()</span>
+
+<span class="nc" id="L295">    suspend fun getReadItemIds(</span>
+        since: Long,
+<span class="nc" id="L297">        useIt: Boolean = false,</span>
+<span class="nc" id="L298">        limit: String? = MAXIMUM_ITEMS_LIMIT,</span>
+<span class="nc" id="L299">        continuationId: String? = null,</span>
+    ): GoogleReaderDTO.ItemIds? =
+<span class="nc" id="L301">        retryableGetRequestWithResult&lt;GoogleReaderDTO.ItemIds&gt;(</span>
+<span class="nc" id="L302">                query = &quot;reader/api/0/stream/items/ids&quot;,</span>
+                params =
+<span class="nc" id="L304">                    mutableListOf&lt;Pair&lt;String, String&gt;&gt;().apply {</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                        if (useIt) add(&quot;s&quot; to Stream.AllItems.tag)</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">                        add(Pair(if (useIt) &quot;it&quot; else &quot;s&quot;, Stream.Read.tag))</span>
+<span class="nc" id="L307">                        add(Pair(&quot;ot&quot;, since.toString()))</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                        limit?.let { add(Pair(&quot;n&quot;, limit)) }</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                        continuationId?.let { add(Pair(&quot;c&quot;, continuationId)) }</span>
+<span class="nc" id="L310">                    },</span>
+            )
+<span class="nc" id="L312">            .getOrNull()</span>
+
+<span class="nc" id="L314">    suspend fun getItemIdsForFeed(</span>
+        feedId: String,
+<span class="nc" id="L316">        filterRead: Boolean = false,</span>
+<span class="nc" id="L317">        since: Long? = null,</span>
+<span class="nc" id="L318">        limit: String? = MAXIMUM_ITEMS_LIMIT,</span>
+<span class="nc" id="L319">        continuationId: String? = null,</span>
+    ): GoogleReaderDTO.ItemIds? =
+<span class="nc" id="L321">        retryableGetRequestWithResult&lt;GoogleReaderDTO.ItemIds&gt;(</span>
+<span class="nc" id="L322">                query = &quot;reader/api/0/stream/items/ids&quot;,</span>
+                params =
+<span class="nc" id="L324">                    mutableListOf&lt;Pair&lt;String, String&gt;&gt;().apply {</span>
+<span class="nc" id="L325">                        add(Pair(&quot;s&quot;, Stream.Feed(feedId).tag))</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                        if (filterRead) add(Pair(&quot;xt&quot;, Stream.Read.tag))</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                        limit?.let { add(Pair(&quot;n&quot;, limit)) }</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                        since?.let { add(Pair(&quot;ot&quot;, since.toString())) }</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                        continuationId?.let { add(Pair(&quot;c&quot;, continuationId)) }</span>
+<span class="nc" id="L330">                    },</span>
+            )
+<span class="nc" id="L332">            .getOrNull()</span>
+
+<span class="nc" id="L334">    suspend fun getItemIdsForCategory(</span>
+        categoryId: String,
+<span class="nc" id="L336">        filterRead: Boolean = false,</span>
+<span class="nc" id="L337">        since: Long? = null,</span>
+<span class="nc" id="L338">        limit: String? = MAXIMUM_ITEMS_LIMIT,</span>
+<span class="nc" id="L339">        continuationId: String? = null,</span>
+    ): GoogleReaderDTO.ItemIds? =
+<span class="nc" id="L341">        retryableGetRequestWithResult&lt;GoogleReaderDTO.ItemIds&gt;(</span>
+<span class="nc" id="L342">                query = &quot;reader/api/0/stream/items/ids&quot;,</span>
+                params =
+<span class="nc" id="L344">                    mutableListOf&lt;Pair&lt;String, String&gt;&gt;().apply {</span>
+<span class="nc" id="L345">                        add(Pair(&quot;s&quot;, Stream.Category(categoryId).tag))</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">                        if (filterRead) add(Pair(&quot;xt&quot;, Stream.Read.tag))</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                        limit?.let { add(Pair(&quot;n&quot;, limit)) }</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">                        since?.let { add(Pair(&quot;ot&quot;, since.toString())) }</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                        continuationId?.let { add(Pair(&quot;c&quot;, continuationId)) }</span>
+<span class="nc" id="L350">                    },</span>
+            )
+<span class="nc" id="L352">            .getOrNull()</span>
+
+<span class="nc" id="L354">    suspend fun getUnreadItemIds(</span>
+<span class="nc" id="L355">        since: Long? = null,</span>
+<span class="nc" id="L356">        limit: String? = MAXIMUM_ITEMS_LIMIT,</span>
+<span class="nc" id="L357">        continuationId: String? = null,</span>
+    ): GoogleReaderDTO.ItemIds? =
+<span class="nc" id="L359">        retryableGetRequestWithResult&lt;GoogleReaderDTO.ItemIds&gt;(</span>
+<span class="nc" id="L360">                query = &quot;reader/api/0/stream/items/ids&quot;,</span>
+                params =
+<span class="nc" id="L362">                    mutableListOf&lt;Pair&lt;String, String&gt;&gt;().apply {</span>
+<span class="nc" id="L363">                        add(Pair(&quot;s&quot;, Stream.AllItems.tag))</span>
+<span class="nc" id="L364">                        add(Pair(&quot;xt&quot;, Stream.Read.tag))</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">                        limit?.let { add(Pair(&quot;n&quot;, limit)) }</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">                        since?.let { add(Pair(&quot;ot&quot;, since.toString())) }</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                        continuationId?.let { add(Pair(&quot;c&quot;, continuationId)) }</span>
+<span class="nc" id="L368">                    },</span>
+            )
+<span class="nc" id="L370">            .getOrNull()</span>
+
+<span class="nc" id="L372">    suspend fun getStarredItemIds(</span>
+<span class="nc" id="L373">        since: Long? = null,</span>
+<span class="nc" id="L374">        limit: String? = MAXIMUM_ITEMS_LIMIT,</span>
+<span class="nc" id="L375">        continuationId: String? = null,</span>
+    ): GoogleReaderDTO.ItemIds? =
+<span class="nc" id="L377">        retryableGetRequestWithResult&lt;GoogleReaderDTO.ItemIds&gt;(</span>
+<span class="nc" id="L378">                query = &quot;reader/api/0/stream/items/ids&quot;,</span>
+                params =
+<span class="nc" id="L380">                    mutableListOf&lt;Pair&lt;String, String&gt;&gt;().apply {</span>
+<span class="nc" id="L381">                        add(Pair(&quot;s&quot;, Stream.Starred.tag))</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                        limit?.let { add(Pair(&quot;n&quot;, limit)) }</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                        since?.let { add(Pair(&quot;ot&quot;, since.toString())) }</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                        continuationId?.let { add(Pair(&quot;c&quot;, continuationId)) }</span>
+<span class="nc" id="L385">                    },</span>
+            )
+<span class="nc" id="L387">            .getOrNull()</span>
+
+<span class="nc" id="L389">    suspend fun getItemsContents(ids: List&lt;String&gt;?) =</span>
+<span class="nc" id="L390">        retryablePostRequest&lt;GoogleReaderDTO.ItemsContents&gt;(</span>
+<span class="nc" id="L391">            query = &quot;reader/api/0/stream/items/contents&quot;,</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            form = ids?.map { Pair(&quot;i&quot;, it) },</span>
+<span class="nc" id="L393">        )</span>
+
+<span class="nc" id="L395">    suspend fun subscriptionQuickAdd(feedUrl: String): GoogleReaderDTO.QuickAddFeed =</span>
+<span class="nc" id="L396">        retryablePostRequest&lt;GoogleReaderDTO.QuickAddFeed&gt;(</span>
+<span class="nc" id="L397">            query = &quot;reader/api/0/subscription/quickadd&quot;,</span>
+<span class="nc" id="L398">            params = listOf(Pair(&quot;quickadd&quot;, feedUrl)),</span>
+<span class="nc" id="L399">            form = listOf(Pair(&quot;quickadd&quot;, feedUrl)),</span>
+<span class="nc" id="L400">        )</span>
+
+<span class="nc" id="L402">    @CheckResult</span>
+    suspend fun editTag(
+        itemIds: List&lt;String&gt;,
+<span class="nc" id="L405">        mark: String? = null,</span>
+<span class="nc" id="L406">        unmark: String? = null,</span>
+    ): RetryableTaskResult&lt;String&gt; =
+<span class="nc" id="L408">        retryablePostRequestWithResult&lt;String&gt;(</span>
+<span class="nc" id="L409">            query = &quot;reader/api/0/edit-tag&quot;,</span>
+            form =
+<span class="nc" id="L411">                mutableListOf&lt;Pair&lt;String, String&gt;&gt;().apply {</span>
+<span class="nc" id="L412">                    itemIds.forEach { add(Pair(&quot;i&quot;, it)) }</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">                    mark?.let { add(Pair(&quot;a&quot;, mark)) }</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">                    unmark?.let { add(Pair(&quot;r&quot;, unmark)) }</span>
+<span class="nc" id="L415">                },</span>
+<span class="nc" id="L416">        )</span>
+
+<span class="nc" id="L418">    suspend fun disableTag(categoryId: String): String =</span>
+<span class="nc" id="L419">        retryablePostRequest&lt;String&gt;(</span>
+<span class="nc" id="L420">            query = &quot;reader/api/0/disable-tag&quot;,</span>
+<span class="nc" id="L421">            form = listOf(Pair(&quot;s&quot;, categoryId.ofCategoryIdToStreamId())),</span>
+<span class="nc" id="L422">        )</span>
+
+<span class="nc" id="L424">    suspend fun renameTag(categoryId: String, renameToName: String): String =</span>
+<span class="nc" id="L425">        retryablePostRequest&lt;String&gt;(</span>
+<span class="nc" id="L426">            query = &quot;reader/api/0/rename-tag&quot;,</span>
+            form =
+<span class="nc" id="L428">                listOf(</span>
+<span class="nc" id="L429">                    Pair(&quot;s&quot;, categoryId.ofCategoryIdToStreamId()),</span>
+<span class="nc" id="L430">                    Pair(&quot;dest&quot;, renameToName.ofCategoryIdToStreamId()),</span>
+                ),
+<span class="nc" id="L432">        )</span>
+
+<span class="nc" id="L434">    suspend fun subscriptionEdit(</span>
+<span class="nc" id="L435">        action: String = &quot;edit&quot;,</span>
+<span class="nc" id="L436">        destFeedId: String? = null,</span>
+<span class="nc" id="L437">        destCategoryId: String? = null,</span>
+<span class="nc" id="L438">        originCategoryId: String? = null,</span>
+<span class="nc" id="L439">        destFeedName: String? = null,</span>
+    ): String =
+<span class="nc" id="L441">        retryablePostRequest&lt;String&gt;(</span>
+<span class="nc" id="L442">            query = &quot;reader/api/0/subscription/edit&quot;,</span>
+            form =
+<span class="nc" id="L444">                mutableListOf(Pair(&quot;ac&quot;, action)).apply {</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">                    destFeedId?.let { add(Pair(&quot;s&quot;, it.ofFeedIdToStreamId())) }</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                    destCategoryId?.let { add(Pair(&quot;a&quot;, it.ofCategoryIdToStreamId())) }</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">                    originCategoryId?.let { add(Pair(&quot;r&quot;, it.ofCategoryIdToStreamId())) }</span>
+<span class="nc bnc" id="L448" title="All 8 branches missed.">                    destFeedName?.takeIf { it.isNotBlank() }?.let { add(Pair(&quot;t&quot;, destFeedName)) }</span>
+<span class="nc" id="L449">                },</span>
+<span class="nc" id="L450">        )</span>
+
+    // Not all services support it
+<span class="nc" id="L453">    suspend fun markAllAsRead(streamId: String, sinceTimestamp: Long? = null): String =</span>
+<span class="nc" id="L454">        retryablePostRequest&lt;String&gt;(</span>
+<span class="nc" id="L455">            query = &quot;reader/api/0/mark-all-as-read&quot;,</span>
+            form =
+<span class="nc" id="L457">                mutableListOf(Pair(&quot;s&quot;, streamId)).apply {</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                    sinceTimestamp?.let { add(Pair(&quot;ts&quot;, it.toString())) }</span>
+<span class="nc" id="L459">                },</span>
+<span class="nc" id="L460">        )</span>
+
+    companion object {
+
+        const val MAXIMUM_ITEMS_LIMIT = &quot;1000&quot;
+
+        private const val PREFIX = &quot;tag:google.com,2005:reader/item/&quot;
+
+        /*
+        || Long form || Short form || notes ||
+        || `tag:google.com,2005:reader/item/5d0cfa30041d4348` || `6705009029382226760` || ||
+        || `tag:google.com,2005:reader/item/024025978b5e50d2` ||  `162170919393841362` || Long form needs 0-padding ||
+        || `tag:google.com,2005:reader/item/fb115bd6d34a8e9f` || `-355401917359550817` || Short form ends up being negative ||
+        */
+        @OptIn(ExperimentalStdlibApi::class)
+<span class="nc" id="L475">        private val hexFormat = HexFormat {</span>
+<span class="nc" id="L476">            number {</span>
+<span class="nc" id="L477">                minLength = 16</span>
+<span class="nc" id="L478">                removeLeadingZeros = false</span>
+<span class="nc" id="L479">            }</span>
+<span class="nc" id="L480">        }</span>
+
+        val ItemId.isLongId: Boolean
+<span class="nc bnc" id="L483" title="All 4 branches missed.">            get() = startsWith(PREFIX) &amp;&amp; removePrefix(PREFIX).length == 16</span>
+
+        val ItemId.isShortId: Boolean
+<span class="nc bnc" id="L486" title="All 2 branches missed.">            get() = this.toLongOrNull() != null</span>
+
+<span class="nc bnc" id="L488" title="All 4 branches missed.">        fun ItemId.isValidItemId(): Boolean = isLongId || isShortId</span>
+
+        @OptIn(ExperimentalStdlibApi::class)
+        val ItemId.longId: String
+            get() =
+<span class="nc bnc" id="L493" title="All 2 branches missed.">                if (isLongId) {</span>
+<span class="nc" id="L494">                    this</span>
+                } else {
+<span class="nc" id="L496">                    PREFIX + this.toLong(10).toHexString(hexFormat)</span>
+<span class="nc" id="L497">                }</span>
+
+        @OptIn(ExperimentalStdlibApi::class)
+        val ItemId.shortId: String
+            get() =
+<span class="nc bnc" id="L502" title="All 2 branches missed.">                if (!isLongId) {</span>
+<span class="nc" id="L503">                    this</span>
+                } else {
+<span class="nc" id="L505">                    this.removePrefix(PREFIX).hexToLong().toString()</span>
+<span class="nc" id="L506">                }</span>
+
+<span class="nc" id="L508">        fun ItemId.dbId(accountId: Int) = accountId spacerDollar this</span>
+
+        val String.remoteId
+<span class="nc" id="L511">            get() = this.dollarLast()</span>
+
+        fun String.ofFeedIdToStreamId(): String {
+<span class="nc" id="L514">            return &quot;feed/$this&quot;</span>
+        }
+
+        fun String.ofFeedStreamIdToId(): String {
+<span class="nc" id="L518">            return replace(&quot;feed/&quot;, &quot;&quot;)</span>
+        }
+
+        fun String.ofCategoryIdToStreamId(): String {
+<span class="nc" id="L522">            return &quot;user/-/label/$this&quot;</span>
+        }
+
+<span class="nc" id="L525">        private val categoryStreamIdRegex = &quot;user/[^/]+/label/&quot;.toRegex()</span>
+
+        fun String.ofCategoryStreamIdToId(): String {
+<span class="nc" id="L528">            return replace(categoryStreamIdRegex, &quot;&quot;)</span>
+        }
+
+<span class="nc" id="L531">        private val instances: ConcurrentHashMap&lt;String, GoogleReaderAPI&gt; = ConcurrentHashMap()</span>
+
+<span class="nc" id="L533">        fun getInstance(</span>
+            context: Context,
+            serverUrl: String,
+            username: String,
+            password: String,
+<span class="nc" id="L538">            httpUsername: String? = null,</span>
+<span class="nc" id="L539">            httpPassword: String? = null,</span>
+<span class="nc" id="L540">            clientCertificateAlias: String? = null,</span>
+            syncLogger: SyncLogger,
+        ): GoogleReaderAPI =
+<span class="nc" id="L543">            instances.getOrPut(</span>
+<span class="nc" id="L544">                &quot;$serverUrl$username$password$httpUsername$httpPassword$clientCertificateAlias&quot;</span>
+            ) {
+<span class="nc" id="L546">                GoogleReaderAPI(</span>
+<span class="nc" id="L547">                    context,</span>
+<span class="nc" id="L548">                    serverUrl,</span>
+<span class="nc" id="L549">                    username,</span>
+<span class="nc" id="L550">                    password,</span>
+<span class="nc" id="L551">                    httpUsername,</span>
+<span class="nc" id="L552">                    httpPassword,</span>
+<span class="nc" id="L553">                    syncLogger,</span>
+<span class="nc" id="L554">                    clientCertificateAlias,</span>
+<span class="nc" id="L555">                )</span>
+<span class="nc" id="L556">            }</span>
+
+        fun clearInstance() {
+<span class="nc" id="L559">            instances.clear()</span>
+<span class="nc" id="L560">        }</span>
+    }
+}
+
+typealias ItemId = String
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,385 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>NotificationJob.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.jobs</a> &gt; <span class="el_source">NotificationJob.java</span></div><h1>NotificationJob.java</h1><pre class="source lang-java linenums">/*
+ * Nextcloud application
+ *
+ * @author Mario Danic
+ * @author Chris Narkiewicz
+ * Copyright (C) 2017-2018 Mario Danic &lt;mario@lovelyhq.com&gt;
+ * Copyright (C) 2019 Chris Narkiewicz &lt;hello@ezaquarii.com&gt;
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.jobs;
+
+import android.accounts.Account;
+import android.accounts.AuthenticatorException;
+import android.accounts.OperationCanceledException;
+import android.app.Activity;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.BitmapFactory;
+import android.media.RingtoneManager;
+import android.os.Build;
+import android.service.notification.StatusBarNotification;
+import android.text.TextUtils;
+import android.util.Base64;
+import android.util.Log;
+
+import com.evernote.android.job.Job;
+import com.evernote.android.job.util.support.PersistableBundleCompat;
+import com.google.gson.Gson;
+import com.nextcloud.client.account.UserAccountManager;
+import com.owncloud.android.R;
+import com.owncloud.android.datamodel.DecryptedPushMessage;
+import com.owncloud.android.datamodel.SignatureVerification;
+import com.owncloud.android.lib.common.OwnCloudAccount;
+import com.owncloud.android.lib.common.OwnCloudClient;
+import com.owncloud.android.lib.common.OwnCloudClientManagerFactory;
+import com.owncloud.android.lib.common.operations.RemoteOperation;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.lib.resources.notifications.DeleteNotificationRemoteOperation;
+import com.owncloud.android.lib.resources.notifications.GetNotificationRemoteOperation;
+import com.owncloud.android.lib.resources.notifications.models.Action;
+import com.owncloud.android.lib.resources.notifications.models.Notification;
+import com.owncloud.android.lib.resources.notifications.models.RichObject;
+import com.owncloud.android.ui.activity.FileDisplayActivity;
+import com.owncloud.android.ui.activity.NotificationsActivity;
+import com.owncloud.android.ui.notifications.NotificationUtils;
+import com.owncloud.android.utils.PushUtils;
+import com.owncloud.android.utils.ThemeUtils;
+
+import org.apache.commons.httpclient.HttpMethod;
+import org.apache.commons.httpclient.HttpStatus;
+import org.apache.commons.httpclient.methods.DeleteMethod;
+import org.apache.commons.httpclient.methods.GetMethod;
+import org.apache.commons.httpclient.methods.PostMethod;
+import org.apache.commons.httpclient.methods.PutMethod;
+
+import java.io.IOException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.SecureRandom;
+
+import javax.crypto.Cipher;
+import javax.crypto.NoSuchPaddingException;
+import javax.inject.Inject;
+
+import androidx.annotation.NonNull;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+import dagger.android.AndroidInjection;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
+public class NotificationJob extends Job {
+    public static final String TAG = &quot;NotificationJob&quot;;
+
+    public static final String KEY_NOTIFICATION_ACCOUNT = &quot;KEY_NOTIFICATION_ACCOUNT&quot;;
+    public static final String KEY_NOTIFICATION_SUBJECT = &quot;subject&quot;;
+    public static final String KEY_NOTIFICATION_SIGNATURE = &quot;signature&quot;;
+    private static final String KEY_NOTIFICATION_ACTION_LINK = &quot;KEY_NOTIFICATION_ACTION_LINK&quot;;
+    private static final String KEY_NOTIFICATION_ACTION_TYPE = &quot;KEY_NOTIFICATION_ACTION_TYPE&quot;;
+    private static final String PUSH_NOTIFICATION_ID = &quot;PUSH_NOTIFICATION_ID&quot;;
+    private static final String NUMERIC_NOTIFICATION_ID = &quot;NUMERIC_NOTIFICATION_ID&quot;;
+
+    private Context context;
+    private UserAccountManager accountManager;
+
+<span class="nc" id="L103">    NotificationJob(final Context context, final UserAccountManager accountManager) {</span>
+<span class="nc" id="L104">        this.context = context;</span>
+<span class="nc" id="L105">        this.accountManager = accountManager;</span>
+<span class="nc" id="L106">    }</span>
+
+    @NonNull
+    @Override
+    protected Result onRunJob(@NonNull Params params) {
+<span class="nc" id="L111">        context = getContext();</span>
+<span class="nc" id="L112">        NotificationManagerCompat notificationManager = NotificationManagerCompat.from(context);</span>
+<span class="nc" id="L113">        PersistableBundleCompat persistableBundleCompat = getParams().getExtras();</span>
+<span class="nc" id="L114">        String subject = persistableBundleCompat.getString(KEY_NOTIFICATION_SUBJECT, &quot;&quot;);</span>
+<span class="nc" id="L115">        String signature = persistableBundleCompat.getString(KEY_NOTIFICATION_SIGNATURE, &quot;&quot;);</span>
+
+<span class="nc bnc" id="L117" title="All 4 branches missed.">        if (!TextUtils.isEmpty(subject) &amp;&amp; !TextUtils.isEmpty(signature)) {</span>
+            try {
+<span class="nc" id="L119">                byte[] base64DecodedSubject = Base64.decode(subject, Base64.DEFAULT);</span>
+<span class="nc" id="L120">                byte[] base64DecodedSignature = Base64.decode(signature, Base64.DEFAULT);</span>
+<span class="nc" id="L121">                PrivateKey privateKey = (PrivateKey) PushUtils.readKeyFromFile(false);</span>
+
+                try {
+<span class="nc" id="L124">                    SignatureVerification signatureVerification = PushUtils.verifySignature(context,</span>
+                                                                                            accountManager,
+                                                                                            base64DecodedSignature,
+                                                                                            base64DecodedSubject);
+
+<span class="nc bnc" id="L129" title="All 4 branches missed.">                    if (signatureVerification != null &amp;&amp; signatureVerification.isSignatureValid()) {</span>
+<span class="nc" id="L130">                        Cipher cipher = Cipher.getInstance(&quot;RSA/None/PKCS1Padding&quot;);</span>
+<span class="nc" id="L131">                        cipher.init(Cipher.DECRYPT_MODE, privateKey);</span>
+<span class="nc" id="L132">                        byte[] decryptedSubject = cipher.doFinal(base64DecodedSubject);</span>
+
+<span class="nc" id="L134">                        Gson gson = new Gson();</span>
+<span class="nc" id="L135">                        DecryptedPushMessage decryptedPushMessage = gson.fromJson(new String(decryptedSubject),</span>
+                                                                                  DecryptedPushMessage.class);
+
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                        if (decryptedPushMessage.delete) {</span>
+<span class="nc" id="L139">                            notificationManager.cancel(decryptedPushMessage.nid);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                        } else if (decryptedPushMessage.deleteAll) {</span>
+<span class="nc" id="L141">                            notificationManager.cancelAll();</span>
+                        } else {
+<span class="nc" id="L143">                            fetchCompleteNotification(signatureVerification.getAccount(), decryptedPushMessage);</span>
+                        }
+                    }
+<span class="nc" id="L146">                } catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException e1) {</span>
+<span class="nc" id="L147">                    Log.d(TAG, &quot;Error decrypting message &quot; + e1.getClass().getName()</span>
+<span class="nc" id="L148">                        + &quot; &quot; + e1.getLocalizedMessage());</span>
+<span class="nc" id="L149">                }</span>
+<span class="nc" id="L150">            } catch (Exception exception) {</span>
+<span class="nc" id="L151">                Log.d(TAG, &quot;Something went very wrong&quot; + exception.getLocalizedMessage());</span>
+<span class="nc" id="L152">            }</span>
+        }
+<span class="nc" id="L154">        return Result.SUCCESS;</span>
+    }
+
+    private void sendNotification(Notification notification, Account account) {
+<span class="nc" id="L158">        SecureRandom randomId = new SecureRandom();</span>
+<span class="nc" id="L159">        RichObject file = notification.subjectRichParameters.get(&quot;file&quot;);</span>
+
+        Intent intent;
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (file == null) {</span>
+<span class="nc" id="L163">            intent = new Intent(context, NotificationsActivity.class);</span>
+        } else {
+<span class="nc" id="L165">            intent = new Intent(context, FileDisplayActivity.class);</span>
+<span class="nc" id="L166">            intent.setAction(Intent.ACTION_VIEW);</span>
+<span class="nc" id="L167">            intent.putExtra(FileDisplayActivity.KEY_FILE_ID, file.id);</span>
+        }
+<span class="nc" id="L169">        intent.putExtra(KEY_NOTIFICATION_ACCOUNT, account.name);</span>
+<span class="nc" id="L170">        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);</span>
+
+<span class="nc" id="L172">        PendingIntent pendingIntent = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_ONE_SHOT);</span>
+<span class="nc" id="L173">        int pushNotificationId = randomId.nextInt();</span>
+
+<span class="nc" id="L175">        NotificationCompat.Builder notificationBuilder =</span>
+            new NotificationCompat.Builder(context, NotificationUtils.NOTIFICATION_CHANNEL_PUSH)
+<span class="nc" id="L177">                .setSmallIcon(R.drawable.notification_icon)</span>
+<span class="nc" id="L178">                .setLargeIcon(BitmapFactory.decodeResource(context.getResources(), R.drawable.notification_icon))</span>
+<span class="nc" id="L179">                .setColor(ThemeUtils.primaryColor(account, false, context))</span>
+<span class="nc" id="L180">                .setShowWhen(true)</span>
+<span class="nc" id="L181">                .setSubText(account.name)</span>
+<span class="nc" id="L182">                .setContentTitle(notification.getSubject())</span>
+<span class="nc" id="L183">                .setContentText(notification.getMessage())</span>
+<span class="nc" id="L184">                .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))</span>
+<span class="nc" id="L185">                .setAutoCancel(true)</span>
+<span class="nc" id="L186">                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)</span>
+<span class="nc" id="L187">                .setContentIntent(pendingIntent);</span>
+
+        // Remove
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (notification.getActions().isEmpty()) {</span>
+<span class="nc" id="L191">            Intent disableDetection = new Intent(context, NotificationJob.NotificationReceiver.class);</span>
+<span class="nc" id="L192">            disableDetection.putExtra(NUMERIC_NOTIFICATION_ID, notification.getNotificationId());</span>
+<span class="nc" id="L193">            disableDetection.putExtra(PUSH_NOTIFICATION_ID, pushNotificationId);</span>
+<span class="nc" id="L194">            disableDetection.putExtra(KEY_NOTIFICATION_ACCOUNT, account.name);</span>
+
+<span class="nc" id="L196">            PendingIntent disableIntent = PendingIntent.getBroadcast(context, pushNotificationId, disableDetection,</span>
+                                                                     PendingIntent.FLAG_CANCEL_CURRENT);
+
+<span class="nc" id="L199">            notificationBuilder.addAction(new NotificationCompat.Action(R.drawable.ic_close,</span>
+<span class="nc" id="L200">                                                                        context.getString(R.string.remove_push_notification), disableIntent));</span>
+<span class="nc" id="L201">        } else {</span>
+            // Actions
+<span class="nc bnc" id="L203" title="All 2 branches missed.">            for (Action action : notification.getActions()) {</span>
+<span class="nc" id="L204">                Intent actionIntent = new Intent(context, NotificationJob.NotificationReceiver.class);</span>
+<span class="nc" id="L205">                actionIntent.putExtra(NUMERIC_NOTIFICATION_ID, notification.getNotificationId());</span>
+<span class="nc" id="L206">                actionIntent.putExtra(PUSH_NOTIFICATION_ID, pushNotificationId);</span>
+<span class="nc" id="L207">                actionIntent.putExtra(KEY_NOTIFICATION_ACCOUNT, account.name);</span>
+<span class="nc" id="L208">                actionIntent.putExtra(KEY_NOTIFICATION_ACTION_LINK, action.link);</span>
+<span class="nc" id="L209">                actionIntent.putExtra(KEY_NOTIFICATION_ACTION_TYPE, action.type);</span>
+
+
+<span class="nc" id="L212">                PendingIntent actionPendingIntent = PendingIntent.getBroadcast(context, randomId.nextInt(),</span>
+                                                                               actionIntent,
+                                                                               PendingIntent.FLAG_CANCEL_CURRENT);
+
+                int icon;
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if (action.primary) {</span>
+<span class="nc" id="L218">                    icon = R.drawable.ic_check_circle;</span>
+                } else {
+<span class="nc" id="L220">                    icon = R.drawable.ic_check_circle_outline;</span>
+                }
+
+<span class="nc" id="L223">                notificationBuilder.addAction(new NotificationCompat.Action(icon, action.label, actionPendingIntent));</span>
+<span class="nc" id="L224">            }</span>
+        }
+
+<span class="nc" id="L227">        notificationBuilder.setPublicVersion(</span>
+            new NotificationCompat.Builder(context, NotificationUtils.NOTIFICATION_CHANNEL_PUSH)
+<span class="nc" id="L229">                .setSmallIcon(R.drawable.notification_icon)</span>
+<span class="nc" id="L230">                .setLargeIcon(BitmapFactory.decodeResource(context.getResources(), R.drawable.notification_icon))</span>
+<span class="nc" id="L231">                .setColor(ThemeUtils.primaryColor(account, false, context))</span>
+<span class="nc" id="L232">                .setShowWhen(true)</span>
+<span class="nc" id="L233">                .setSubText(account.name)</span>
+<span class="nc" id="L234">                .setContentTitle(context.getString(R.string.new_notification))</span>
+<span class="nc" id="L235">                .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))</span>
+<span class="nc" id="L236">                .setAutoCancel(true)</span>
+<span class="nc" id="L237">                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)</span>
+<span class="nc" id="L238">                .setContentIntent(pendingIntent).build());</span>
+
+<span class="nc" id="L240">        NotificationManagerCompat notificationManager = NotificationManagerCompat.from(context);</span>
+<span class="nc" id="L241">        notificationManager.notify(notification.getNotificationId(), notificationBuilder.build());</span>
+<span class="nc" id="L242">    }</span>
+
+    private void fetchCompleteNotification(Account account, DecryptedPushMessage decryptedPushMessage) {
+<span class="nc" id="L245">        Account currentAccount = accountManager.getAccountByName(account.name);</span>
+
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        if (currentAccount == null) {</span>
+<span class="nc" id="L248">            Log_OC.e(this, &quot;Account may not be null&quot;);</span>
+<span class="nc" id="L249">            return;</span>
+        }
+
+        try {
+<span class="nc" id="L253">            OwnCloudAccount ocAccount = new OwnCloudAccount(currentAccount, context);</span>
+<span class="nc" id="L254">            OwnCloudClient client = OwnCloudClientManagerFactory.getDefaultSingleton()</span>
+<span class="nc" id="L255">                .getClientFor(ocAccount, context);</span>
+<span class="nc" id="L256">            client.setOwnCloudVersion(accountManager.getServerVersion(currentAccount));</span>
+
+<span class="nc" id="L258">            RemoteOperationResult result = new GetNotificationRemoteOperation(decryptedPushMessage.nid)</span>
+<span class="nc" id="L259">                .execute(client);</span>
+
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if (result.isSuccess()) {</span>
+<span class="nc" id="L262">                Notification notification = result.getNotificationData().get(0);</span>
+<span class="nc" id="L263">                sendNotification(notification, account);</span>
+            }
+
+<span class="nc" id="L266">        } catch (Exception e) {</span>
+<span class="nc" id="L267">            Log_OC.e(this, &quot;Error creating account&quot;, e);</span>
+<span class="nc" id="L268">        }</span>
+<span class="nc" id="L269">    }</span>
+
+<span class="nc" id="L271">    public static class NotificationReceiver extends BroadcastReceiver {</span>
+
+        @Inject UserAccountManager accountManager;
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+<span class="nc" id="L277">            AndroidInjection.inject(this, context);</span>
+<span class="nc" id="L278">            int numericNotificationId = intent.getIntExtra(NUMERIC_NOTIFICATION_ID, 0);</span>
+<span class="nc" id="L279">            String accountName = intent.getStringExtra(NotificationJob.KEY_NOTIFICATION_ACCOUNT);</span>
+
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            if (numericNotificationId != 0) {</span>
+<span class="nc" id="L282">                new Thread(() -&gt; {</span>
+<span class="nc" id="L283">                    NotificationManager notificationManager = (NotificationManager) context.getSystemService(</span>
+                        Activity.NOTIFICATION_SERVICE);
+
+<span class="nc" id="L286">                    android.app.Notification oldNotification = null;</span>
+<span class="nc bnc" id="L287" title="All 4 branches missed.">                    if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.M &amp;&amp; notificationManager != null) {</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">                        for (StatusBarNotification statusBarNotification : notificationManager.getActiveNotifications()) {</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                            if (numericNotificationId == statusBarNotification.getId()) {</span>
+<span class="nc" id="L290">                                oldNotification = statusBarNotification.getNotification();</span>
+<span class="nc" id="L291">                                break;</span>
+                            }
+                        }
+
+<span class="nc" id="L295">                        cancel(context, numericNotificationId);</span>
+                    }
+
+                    try {
+<span class="nc" id="L299">                        Account currentAccount = accountManager.getAccountByName(accountName);</span>
+
+<span class="nc bnc" id="L301" title="All 2 branches missed.">                        if (currentAccount == null) {</span>
+<span class="nc" id="L302">                            Log_OC.e(this, &quot;Account may not be null&quot;);</span>
+<span class="nc" id="L303">                            return;</span>
+                        }
+
+<span class="nc" id="L306">                        OwnCloudAccount ocAccount = new OwnCloudAccount(currentAccount, context);</span>
+<span class="nc" id="L307">                        OwnCloudClient client = OwnCloudClientManagerFactory.getDefaultSingleton()</span>
+<span class="nc" id="L308">                            .getClientFor(ocAccount, context);</span>
+<span class="nc" id="L309">                        client.setOwnCloudVersion(accountManager.getServerVersion(currentAccount));</span>
+
+<span class="nc" id="L311">                        String actionType = intent.getStringExtra(KEY_NOTIFICATION_ACTION_TYPE);</span>
+<span class="nc" id="L312">                        String actionLink = intent.getStringExtra(KEY_NOTIFICATION_ACTION_LINK);</span>
+
+                        boolean success;
+<span class="nc bnc" id="L315" title="All 4 branches missed.">                        if (!TextUtils.isEmpty(actionType) &amp;&amp; !TextUtils.isEmpty(actionLink)) {</span>
+<span class="nc" id="L316">                            int resultCode = executeAction(actionType, actionLink, client);</span>
+<span class="nc bnc" id="L317" title="All 4 branches missed.">                            success = resultCode == HttpStatus.SC_OK || resultCode == HttpStatus.SC_ACCEPTED;</span>
+<span class="nc" id="L318">                        } else {</span>
+<span class="nc" id="L319">                            success = new DeleteNotificationRemoteOperation(numericNotificationId)</span>
+<span class="nc" id="L320">                                .execute(client).isSuccess();</span>
+                        }
+
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                        if (success) {</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                            if (oldNotification == null) {</span>
+<span class="nc" id="L325">                                cancel(context, numericNotificationId);</span>
+                            }
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                        } else if (notificationManager != null) {</span>
+<span class="nc" id="L328">                            notificationManager.notify(numericNotificationId, oldNotification);</span>
+                        }
+<span class="nc" id="L330">                    } catch (com.owncloud.android.lib.common.accounts.AccountUtils.AccountNotFoundException |</span>
+                        IOException | OperationCanceledException | AuthenticatorException e) {
+<span class="nc" id="L332">                        Log_OC.e(TAG, &quot;Error initializing client&quot;, e);</span>
+<span class="nc" id="L333">                    }</span>
+<span class="nc" id="L334">                }).start();</span>
+            }
+<span class="nc" id="L336">        }</span>
+
+        @SuppressFBWarnings(value = &quot;HTTP_PARAMETER_POLLUTION&quot;,
+            justification = &quot;link and type are from server and expected to be safe&quot;)
+        private int executeAction(String actionType, String actionLink, OwnCloudClient client) {
+            HttpMethod method;
+
+<span class="nc bnc" id="L343" title="All 5 branches missed.">            switch (actionType) {</span>
+                case &quot;GET&quot;:
+<span class="nc" id="L345">                    method = new GetMethod(actionLink);</span>
+<span class="nc" id="L346">                    break;</span>
+
+                case &quot;POST&quot;:
+<span class="nc" id="L349">                    method = new PostMethod(actionLink);</span>
+<span class="nc" id="L350">                    break;</span>
+
+                case &quot;DELETE&quot;:
+<span class="nc" id="L353">                    method = new DeleteMethod(actionLink);</span>
+<span class="nc" id="L354">                    break;</span>
+
+                case &quot;PUT&quot;:
+<span class="nc" id="L357">                    method = new PutMethod(actionLink);</span>
+<span class="nc" id="L358">                    break;</span>
+
+                default:
+                    // do nothing
+<span class="nc" id="L362">                    return 0;</span>
+            }
+
+<span class="nc" id="L365">            method.setRequestHeader(RemoteOperation.OCS_API_HEADER, RemoteOperation.OCS_API_HEADER_VALUE);</span>
+
+            try {
+<span class="nc" id="L368">                return client.executeMethod(method);</span>
+<span class="nc" id="L369">            } catch (IOException e) {</span>
+<span class="nc" id="L370">                Log_OC.e(TAG, &quot;Execution of notification action failed: &quot; + e);</span>
+            }
+<span class="nc" id="L372">            return 0;</span>
+        }
+
+        private void cancel(Context context, int notificationId) {
+<span class="nc" id="L376">            NotificationManager notificationManager = (NotificationManager) context.getSystemService(</span>
+                Activity.NOTIFICATION_SERVICE);
+
+<span class="nc bnc" id="L379" title="All 2 branches missed.">            if (notificationManager != null) {</span>
+<span class="nc" id="L380">                notificationManager.cancel(notificationId);</span>
+            }
+<span class="nc" id="L382">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

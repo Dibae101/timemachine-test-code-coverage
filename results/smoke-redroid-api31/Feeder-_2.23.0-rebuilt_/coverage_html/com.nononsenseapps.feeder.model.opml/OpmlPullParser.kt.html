@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OpmlPullParser.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.model.opml</a> &gt; <span class="el_source">OpmlPullParser.kt</span></div><h1>OpmlPullParser.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.model.opml
+
+import android.util.Log
+import android.util.Xml
+import com.nononsenseapps.feeder.db.room.Feed
+import com.nononsenseapps.feeder.model.OPMLParserHandler
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.flatMap
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.withContext
+import okio.ByteString.Companion.toByteString
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserException
+import java.io.IOException
+import java.io.InputStream
+import java.net.MalformedURLException
+import java.net.URL
+import java.util.Arrays
+import kotlin.reflect.KProperty
+
+private const val TAG_SETTING = &quot;setting&quot;
+
+private const val TAG_OPML = &quot;opml&quot;
+
+private const val TAG_BODY = &quot;body&quot;
+
+private const val TAG_OUTLINE = &quot;outline&quot;
+
+private const val TAG_SETTINGS = &quot;settings&quot;
+
+private const val ATTR_XMLURL = &quot;xmlUrl&quot;
+
+private const val ATTR_TITLE = &quot;title&quot;
+
+private const val ATTR_TEXT = &quot;text&quot;
+
+private const val ATTR_NOTIFY = &quot;notify&quot;
+
+private const val ATTR_FULL_TEXT_BY_DEFAULT = &quot;fullTextByDefault&quot;
+
+private const val ATTR_FLYM_RETRIEVE_FULL_TEXT = &quot;retrieveFullText&quot;
+
+private const val ATTR_ALTERNATE_ID = &quot;alternateId&quot;
+
+private const val ATTR_IMAGE_URL = &quot;imageUrl&quot;
+
+private const val ATTR_OPEN_ARTICLES_WITH = &quot;openArticlesWith&quot;
+
+private const val ATTR_FETCH_OG_IMAGES = &quot;fetchOgImages&quot;
+
+private const val TAG_BLOCKED = &quot;blocked&quot;
+
+<span class="nc" id="L53">@Suppress(&quot;NAME_SHADOWING&quot;)</span>
+<span class="nc" id="L54">class OpmlPullParser(</span>
+<span class="nc" id="L55">    private val opmlToDb: OPMLParserHandler,</span>
+) {
+<span class="nc" id="L57">    private val feeds: MutableList&lt;Feed&gt; = mutableListOf()</span>
+<span class="nc" id="L58">    private val settings: MutableMap&lt;String, String&gt; = mutableMapOf()</span>
+<span class="nc" id="L59">    private val blockList: MutableSet&lt;String&gt; = mutableSetOf()</span>
+<span class="nc" id="L60">    private val parser: XmlPullParser = Xml.newPullParser()</span>
+
+<span class="nc" id="L62">    suspend fun parseInputStreamWithFallback(inputStream: InputStream): Either&lt;OpmlError, Unit&gt; =</span>
+<span class="nc" id="L63">        Either</span>
+<span class="nc" id="L64">            .catching(</span>
+                onCatch = {
+<span class="nc" id="L66">                    OpmlUnknownError(it)</span>
+                },
+            ) {
+<span class="nc" id="L69">                inputStream.use {</span>
+<span class="nc" id="L70">                    it.readTheBytes()</span>
+<span class="nc" id="L71">                }</span>
+<span class="nc" id="L72">            }.flatMap { bytes -&gt;</span>
+<span class="nc" id="L73">                val parseResult = parseInputStream(bytes.inputStream())</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">                if (parseResult.isRight()) {</span>
+<span class="nc" id="L76">                    parseResult</span>
+                } else {
+<span class="nc" id="L78">                    bytes</span>
+<span class="nc" id="L79">                        .toByteString()</span>
+<span class="nc" id="L80">                        .utf8()</span>
+<span class="nc" id="L81">                        .replace(</span>
+<span class="nc" id="L82">                            &quot;&lt;outline.*?xmlUrl=\&quot;([^\&quot;]+)\&quot;.*?/&gt;&quot;.toRegex(),</span>
+<span class="nc" id="L83">                            &quot;&lt;outline xmlUrl=\&quot;$1\&quot; type=\&quot;rss\&quot; /&gt;&quot;,</span>
+<span class="nc" id="L84">                        ).byteInputStream()</span>
+<span class="nc" id="L85">                        .let {</span>
+<span class="nc" id="L86">                            parseInputStream(it)</span>
+                        }
+<span class="nc" id="L88">                }</span>
+<span class="nc" id="L89">            }</span>
+
+    private suspend fun parseInputStream(inputStream: InputStream): Either&lt;OpmlError, Unit&gt; =
+<span class="nc" id="L92">        Either.catching(</span>
+            onCatch = { t -&gt;
+<span class="nc" id="L94">                Log.e(LOG_TAG, &quot;OPML Import exploded&quot;, t)</span>
+<span class="nc" id="L95">                when (t) {</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                    is XmlPullParserException -&gt; OpmlParsingError(t)</span>
+<span class="nc" id="L97">                    else -&gt; OpmlUnknownError(t)</span>
+<span class="nc" id="L98">                }</span>
+            },
+        ) {
+<span class="nc" id="L101">            withContext(IO) {</span>
+<span class="nc" id="L102">                inputStream.use { inputStream -&gt;</span>
+<span class="nc" id="L103">                    parser.setInput(inputStream, null)</span>
+<span class="nc" id="L104">                    parser.nextTag()</span>
+<span class="nc" id="L105">                    readOpml()</span>
+
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                    for (feed in feeds) {</span>
+<span class="nc" id="L108">                        opmlToDb.saveFeed(feed)</span>
+                    }
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                    for ((key, value) in settings) {</span>
+<span class="nc" id="L111">                        opmlToDb.saveSetting(key = key, value = value)</span>
+                    }
+
+<span class="nc" id="L114">                    opmlToDb.saveBlocklistPatterns(blockList)</span>
+<span class="nc" id="L115">                }</span>
+<span class="nc" id="L116">            }</span>
+<span class="nc" id="L117">        }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readOpml() {
+<span class="nc" id="L121">        parser.require(XmlPullParser.START_TAG, null, TAG_OPML)</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        while (parser.next() != XmlPullParser.END_TAG) {</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (parser.eventType != XmlPullParser.START_TAG) {</span>
+<span class="nc" id="L124">                continue</span>
+            }
+            // Starts by looking for the entry tag.
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (parser.name == TAG_BODY) {</span>
+<span class="nc" id="L128">                readBody()</span>
+            } else {
+<span class="nc" id="L130">                skip()</span>
+            }
+        }
+<span class="nc" id="L133">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readBody() {
+<span class="nc" id="L137">        parser.require(XmlPullParser.START_TAG, null, TAG_BODY)</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        while (parser.next() != XmlPullParser.END_TAG) {</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            if (parser.eventType != XmlPullParser.START_TAG) {</span>
+<span class="nc" id="L140">                continue</span>
+            }
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if (parser.name == TAG_OUTLINE) {</span>
+<span class="nc" id="L143">                readOutline(parser, parentOutlineTag = &quot;&quot;)</span>
+<span class="nc bnc" id="L144" title="All 4 branches missed.">            } else if (parser.name == TAG_SETTINGS &amp;&amp; parser.namespace == OPML_FEEDER_NAMESPACE) {</span>
+<span class="nc" id="L145">                readSettings()</span>
+            } else {
+<span class="nc" id="L147">                skip()</span>
+            }
+        }
+<span class="nc" id="L150">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readSettings() {
+<span class="nc" id="L154">        parser.require(XmlPullParser.START_TAG, OPML_FEEDER_NAMESPACE, TAG_SETTINGS)</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        while (parser.next() != XmlPullParser.END_TAG) {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (parser.eventType != XmlPullParser.START_TAG) {</span>
+<span class="nc" id="L157">                continue</span>
+            }
+<span class="nc" id="L159">            when {</span>
+<span class="nc bnc" id="L160" title="All 4 branches missed.">                parser.name == TAG_SETTING &amp;&amp; parser.namespace == OPML_FEEDER_NAMESPACE -&gt; {</span>
+<span class="nc" id="L161">                    readSetting()</span>
+                }
+
+<span class="nc bnc" id="L164" title="All 4 branches missed.">                parser.name == TAG_BLOCKED &amp;&amp; parser.namespace == OPML_FEEDER_NAMESPACE -&gt; {</span>
+<span class="nc" id="L165">                    readBlocked()</span>
+                }
+
+                else -&gt; {
+<span class="nc" id="L169">                    skip()</span>
+                }
+            }
+        }
+<span class="nc" id="L173">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readSetting() {
+<span class="nc" id="L177">        parser.require(XmlPullParser.START_TAG, OPML_FEEDER_NAMESPACE, TAG_SETTING)</span>
+
+<span class="nc" id="L179">        val key by this</span>
+<span class="nc" id="L180">        val value by this</span>
+
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        key?.let { key -&gt;</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            value?.let { value -&gt;</span>
+<span class="nc" id="L184">                settings[key] = unescape(value)</span>
+<span class="nc" id="L185">            }</span>
+        }
+
+<span class="nc" id="L188">        skip()</span>
+<span class="nc" id="L189">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readBlocked() {
+<span class="nc" id="L193">        parser.require(XmlPullParser.START_TAG, OPML_FEEDER_NAMESPACE, TAG_BLOCKED)</span>
+
+<span class="nc" id="L195">        val pattern by this</span>
+
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        pattern?.let { pattern -&gt;</span>
+<span class="nc" id="L198">            blockList.add(</span>
+<span class="nc" id="L199">                unescape(pattern),</span>
+<span class="nc" id="L200">            )</span>
+        }
+
+<span class="nc" id="L203">        skip()</span>
+<span class="nc" id="L204">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readOutline(
+        parser: XmlPullParser,
+        parentOutlineTag: String,
+    ) {
+<span class="nc" id="L211">        parser.require(XmlPullParser.START_TAG, null, TAG_OUTLINE)</span>
+
+<span class="nc" id="L213">        val xmlUrl by this</span>
+<span class="nc" id="L214">        when {</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            xmlUrl != null -&gt; readOutlineAsRss(parser, tag = parentOutlineTag)</span>
+<span class="nc" id="L216">            else -&gt; readOutlineAsTag()</span>
+        }
+<span class="nc" id="L218">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readOutlineAsTag() {
+<span class="nc" id="L222">        parser.require(XmlPullParser.START_TAG, null, TAG_OUTLINE)</span>
+
+<span class="nc" id="L224">        val tag =</span>
+<span class="nc" id="L225">            unescape(</span>
+<span class="nc bnc" id="L226" title="All 4 branches missed.">                parser.getAttributeValue(null, ATTR_TITLE)</span>
+<span class="nc" id="L227">                    ?: parser.getAttributeValue(null, ATTR_TEXT)</span>
+<span class="nc" id="L228">                    ?: &quot;&quot;,</span>
+            )
+
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        while (parser.next() != XmlPullParser.END_TAG) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (parser.eventType != XmlPullParser.START_TAG) {</span>
+<span class="nc" id="L233">                continue</span>
+            }
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            if (parser.name == TAG_OUTLINE) {</span>
+<span class="nc" id="L236">                readOutline(parser, parentOutlineTag = tag)</span>
+            } else {
+<span class="nc" id="L238">                skip()</span>
+            }
+        }
+<span class="nc" id="L241">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun readOutlineAsRss(
+        parser: XmlPullParser,
+        tag: String,
+    ) {
+<span class="nc" id="L248">        parser.require(XmlPullParser.START_TAG, null, TAG_OUTLINE)</span>
+
+<span class="nc" id="L250">        val feedTitle =</span>
+<span class="nc" id="L251">            unescape(</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">                parser.getAttributeValue(null, ATTR_TITLE)</span>
+<span class="nc" id="L253">                    ?: parser.getAttributeValue(null, ATTR_TEXT)</span>
+<span class="nc" id="L254">                    ?: &quot;&quot;,</span>
+            )
+<span class="nc" id="L256">        try {</span>
+<span class="nc" id="L257">            val parsedUrlOrUri = parser.getAttributeValue(null, ATTR_XMLURL)</span>
+<span class="nc" id="L258">            val feedUrl = URL(parsedUrlOrUri)</span>
+<span class="nc" id="L259">            val feed =</span>
+<span class="nc" id="L260">                Feed(</span>
+                    // Ensure not both are empty string: title will get replaced on sync
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                    title = feedTitle.ifBlank { feedUrl.toString() },</span>
+<span class="nc" id="L263">                    customTitle = feedTitle,</span>
+<span class="nc" id="L264">                    tag = tag,</span>
+<span class="nc" id="L265">                    url = feedUrl,</span>
+<span class="nc" id="L266">                ).let { feed -&gt;</span>
+                    // Copy so default values can be referenced
+<span class="nc" id="L268">                    feed.copy(</span>
+                        notify =
+<span class="nc" id="L270">                            parser</span>
+<span class="nc" id="L271">                                .getAttributeValue(OPML_FEEDER_NAMESPACE, ATTR_NOTIFY)</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                                ?.toBoolean()</span>
+<span class="nc" id="L273">                                ?: feed.notify,</span>
+                        fullTextByDefault =
+<span class="nc" id="L275">                            (</span>
+<span class="nc" id="L276">                                parser</span>
+<span class="nc" id="L277">                                    .getAttributeValue(</span>
+<span class="nc" id="L278">                                        OPML_FEEDER_NAMESPACE,</span>
+<span class="nc" id="L279">                                        ATTR_FULL_TEXT_BY_DEFAULT,</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                                    )?.toBoolean()</span>
+                                    // Support Flym's value for this
+<span class="nc" id="L282">                                    ?: parser</span>
+<span class="nc" id="L283">                                        .getAttributeValue(null, ATTR_FLYM_RETRIEVE_FULL_TEXT)</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                                        ?.toBoolean()</span>
+<span class="nc" id="L285">                            ) ?: feed.fullTextByDefault,</span>
+                        alternateId =
+<span class="nc" id="L287">                            parser</span>
+<span class="nc" id="L288">                                .getAttributeValue(OPML_FEEDER_NAMESPACE, ATTR_ALTERNATE_ID)</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                                ?.toBoolean()</span>
+<span class="nc" id="L290">                                ?: feed.alternateId,</span>
+                        openArticlesWith =
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                            parser.getAttributeValue(</span>
+<span class="nc" id="L293">                                OPML_FEEDER_NAMESPACE,</span>
+<span class="nc" id="L294">                                ATTR_OPEN_ARTICLES_WITH,</span>
+<span class="nc" id="L295">                            ) ?: feed.openArticlesWith,</span>
+                        fetchOgImages =
+<span class="nc" id="L297">                            parser</span>
+<span class="nc" id="L298">                                .getAttributeValue(OPML_FEEDER_NAMESPACE, ATTR_FETCH_OG_IMAGES)</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                                ?.toBoolean()</span>
+<span class="nc" id="L300">                                ?: feed.fetchOgImages,</span>
+                        imageUrl =
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                            parser</span>
+<span class="nc" id="L303">                                .getAttributeValue(OPML_FEEDER_NAMESPACE, ATTR_IMAGE_URL)</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">                                ?.let { imageUrl -&gt;</span>
+<span class="nc" id="L305">                                    try {</span>
+<span class="nc" id="L306">                                        URL(imageUrl)</span>
+<span class="nc" id="L307">                                    } catch (e: MalformedURLException) {</span>
+<span class="nc" id="L308">                                        Log.e(</span>
+<span class="nc" id="L309">                                            LOG_TAG,</span>
+<span class="nc" id="L310">                                            &quot;Invalid imageUrl [$imageUrl] on feed [$feedTitle] in OPML&quot;,</span>
+<span class="nc" id="L311">                                            e,</span>
+                                        )
+<span class="nc" id="L313">                                        null</span>
+<span class="nc" id="L314">                                    }</span>
+<span class="nc" id="L315">                                } ?: feed.imageUrl,</span>
+<span class="nc" id="L316">                    )</span>
+                }
+
+<span class="nc" id="L319">            feeds.add(feed)</span>
+<span class="nc" id="L320">        } catch (e: MalformedURLException) {</span>
+            // Feed URL is REQUIRED, so don't try to add feeds without valid URLs
+<span class="nc" id="L322">            Log.e(LOG_TAG, &quot;Bad url on feed [$feedTitle] in OPML&quot;, e)</span>
+        }
+
+<span class="nc" id="L325">        skip()</span>
+<span class="nc" id="L326">    }</span>
+
+    @Throws(XmlPullParserException::class, IOException::class)
+    private fun skip() {
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (parser.eventType != XmlPullParser.START_TAG) {</span>
+<span class="nc" id="L331">            throw IllegalStateException()</span>
+        }
+<span class="nc" id="L333">        var depth = 1</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        while (depth != 0) {</span>
+<span class="nc bnc" id="L335" title="All 3 branches missed.">            when (parser.next()) {</span>
+<span class="nc" id="L336">                XmlPullParser.END_TAG -&gt; depth--</span>
+<span class="nc" id="L337">                XmlPullParser.START_TAG -&gt; depth++</span>
+            }
+        }
+<span class="nc" id="L340">    }</span>
+
+    /**
+     * Lets you fetch an un-namespaced attribute like this
+     *
+     * val attr: String? by this
+     *
+     * where 'attr' is the case-sensitive attr you are fetching
+     */
+    operator fun getValue(
+        thisRef: Nothing?,
+        property: KProperty&lt;*&gt;,
+<span class="nc" id="L352">    ): String? = parser.getAttributeValue(null, property.name)</span>
+}
+
+private const val LOG_TAG = &quot;FEEDER_OPMLPULL&quot;
+
+sealed class OpmlError {
+    abstract val throwable: Throwable?
+}
+
+<span class="nc" id="L361">data class OpmlUnknownError(</span>
+<span class="nc" id="L362">    override val throwable: Throwable?,</span>
+) : OpmlError()
+
+<span class="nc" id="L365">data class OpmlParsingError(</span>
+<span class="nc" id="L366">    override val throwable: Throwable,</span>
+) : OpmlError()
+
+fun InputStream.readTheBytes(): ByteArray {
+<span class="nc" id="L370">    val len = Int.MAX_VALUE</span>
+<span class="nc" id="L371">    require(len &gt;= 0) { &quot;len &lt; 0&quot; }</span>
+<span class="nc" id="L372">    var bufs: MutableList&lt;ByteArray&gt;? = null</span>
+<span class="nc" id="L373">    var result: ByteArray? = null</span>
+<span class="nc" id="L374">    var total = 0</span>
+<span class="nc" id="L375">    var remaining = len</span>
+<span class="nc" id="L376">    var n: Int</span>
+    do {
+<span class="nc" id="L378">        val buf = ByteArray(Math.min(remaining, 8192))</span>
+<span class="nc" id="L379">        var nread = 0</span>
+
+        // read to EOF which may read more or less than buffer size
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        while (read(</span>
+<span class="nc" id="L383">                buf,</span>
+<span class="nc" id="L384">                nread,</span>
+<span class="nc" id="L385">                Math.min(buf.size - nread, remaining),</span>
+<span class="nc" id="L386">            ).also { n = it } &gt; 0</span>
+        ) {
+<span class="nc" id="L388">            nread += n</span>
+<span class="nc" id="L389">            remaining -= n</span>
+        }
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (nread &gt; 0) {</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            if ((Int.MAX_VALUE - 8) - total &lt; nread) {</span>
+<span class="nc" id="L393">                throw OutOfMemoryError(&quot;Required array size too large&quot;)</span>
+            }
+<span class="nc" id="L395">            total += nread</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">            if (result == null) {</span>
+<span class="nc" id="L397">                result = buf</span>
+            } else {
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                if (bufs == null) {</span>
+<span class="nc" id="L400">                    bufs = ArrayList()</span>
+<span class="nc" id="L401">                    bufs.add(result)</span>
+                }
+<span class="nc" id="L403">                bufs.add(buf)</span>
+            }
+        }
+        // if the last call to read returned -1 or the number of bytes
+        // requested have been read then break
+<span class="nc bnc" id="L408" title="All 4 branches missed.">    } while (n &gt;= 0 &amp;&amp; remaining &gt; 0)</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">    if (bufs == null) {</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L411">            return ByteArray(0)</span>
+        }
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        return if (result.size == total) result else Arrays.copyOf(result, total)</span>
+    }
+<span class="nc" id="L415">    result = ByteArray(total)</span>
+<span class="nc" id="L416">    var offset = 0</span>
+<span class="nc" id="L417">    remaining = total</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">    for (b in bufs) {</span>
+<span class="nc" id="L419">        val count = Math.min(b.size, remaining)</span>
+<span class="nc" id="L420">        System.arraycopy(b, 0, result, offset, count)</span>
+<span class="nc" id="L421">        offset += count</span>
+<span class="nc" id="L422">        remaining -= count</span>
+    }
+<span class="nc" id="L424">    return result</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

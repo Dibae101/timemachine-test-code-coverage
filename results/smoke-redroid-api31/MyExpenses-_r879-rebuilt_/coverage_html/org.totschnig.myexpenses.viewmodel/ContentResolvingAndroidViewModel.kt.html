@@ -1,0 +1,529 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContentResolvingAndroidViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">ContentResolvingAndroidViewModel.kt</span></div><h1>ContentResolvingAndroidViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.accounts.AccountManager
+import android.app.Application
+import android.content.ContentProviderOperation
+import android.content.ContentResolver
+import android.database.sqlite.SQLiteConstraintException
+import android.os.Bundle
+import android.text.TextUtils
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.liveData
+import androidx.lifecycle.viewModelScope
+import app.cash.copper.flow.mapToList
+import app.cash.copper.flow.observeQuery
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.compose.transactions.RenderType
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.asContentValues
+import org.totschnig.myexpenses.db2.countAccounts
+import org.totschnig.myexpenses.db2.createParty
+import org.totschnig.myexpenses.db2.deleteAccount
+import org.totschnig.myexpenses.db2.deleteTemplate
+import org.totschnig.myexpenses.db2.entities.Transaction
+import org.totschnig.myexpenses.db2.findSiblingParentId
+import org.totschnig.myexpenses.db2.getAccountFlags
+import org.totschnig.myexpenses.db2.getAccountTypes
+import org.totschnig.myexpenses.db2.getCategoryPath
+import org.totschnig.myexpenses.db2.getTransactionSum
+import org.totschnig.myexpenses.db2.loadAccountFlow
+import org.totschnig.myexpenses.db2.loadAggregateAccountFlow
+import org.totschnig.myexpenses.db2.loadAggregateAccountFlowV2
+import org.totschnig.myexpenses.db2.saveParty
+import org.totschnig.myexpenses.db2.updateNewPlanEnabled
+import org.totschnig.myexpenses.db2.updateTransferPeersForTransactionDelete
+import org.totschnig.myexpenses.dialog.select.SelectFromMappedTableDialogFragment.Companion.accountSelection
+import org.totschnig.myexpenses.dialog.select.SelectFromMappedTableDialogFragment.Companion.accountSelectionArgs
+import org.totschnig.myexpenses.dialog.select.SelectFromMappedTableDialogFragment.Companion.accountSelectionArgsV2
+import org.totschnig.myexpenses.dialog.select.SelectFromMappedTableDialogFragment.Companion.accountSelectionV2
+import org.totschnig.myexpenses.model.AccountGrouping
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.model.KEY_ACCOUNT_GROUPING
+import org.totschnig.myexpenses.model.KEY_ACCOUNT_GROUPING_GROUP
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.preference.ColorSource
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.preference.dynamicExchangeRatesPerAccount
+import org.totschnig.myexpenses.provider.BaseTransactionProvider.Companion.ACCOUNTS_MINIMAL_URI_WITH_AGGREGATES
+import org.totschnig.myexpenses.provider.KEY_ACCOUNTID
+import org.totschnig.myexpenses.provider.KEY_AMOUNT
+import org.totschnig.myexpenses.provider.KEY_DATE
+import org.totschnig.myexpenses.provider.KEY_IS_PORTFOLIO
+import org.totschnig.myexpenses.provider.KEY_OPENING_BALANCE
+import org.totschnig.myexpenses.provider.KEY_PARENTID
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SEALED
+import org.totschnig.myexpenses.provider.KEY_SORT_KEY
+import org.totschnig.myexpenses.provider.KEY_STATUS
+import org.totschnig.myexpenses.provider.KEY_SUM
+import org.totschnig.myexpenses.provider.KEY_TRANSACTIONID
+import org.totschnig.myexpenses.provider.KEY_TRANSFER_PEER
+import org.totschnig.myexpenses.provider.PORTFOLIO_NONE
+import org.totschnig.myexpenses.provider.STATUS_HELPER
+import org.totschnig.myexpenses.provider.TABLE_TRANSACTIONS
+import org.totschnig.myexpenses.provider.TransactionProvider.ACCOUNTS_MINIMAL_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.ACCOUNTS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.AUTHORITY
+import org.totschnig.myexpenses.provider.TransactionProvider.DEBTS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.DUAL_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.METHOD_SORT_ACCOUNTS
+import org.totschnig.myexpenses.provider.TransactionProvider.TRANSACTIONS_URI
+import org.totschnig.myexpenses.provider.buildTransactionRowSelect
+import org.totschnig.myexpenses.provider.checkForSealedDebt
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.sync.GenericAccountService
+import org.totschnig.myexpenses.sync.SyncAdapter
+import org.totschnig.myexpenses.util.ResultUnit
+import org.totschnig.myexpenses.util.ShortcutHelper
+import org.totschnig.myexpenses.util.Utils
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.enumValueOrDefault
+import org.totschnig.myexpenses.util.joinArrays
+import org.totschnig.myexpenses.util.licence.LicenceHandler
+import org.totschnig.myexpenses.viewmodel.ExportViewModel.Companion.EXPORT_HANDLE_DELETED_CREATE_HELPER
+import org.totschnig.myexpenses.viewmodel.ExportViewModel.Companion.EXPORT_HANDLE_DELETED_UPDATE_BALANCE
+import org.totschnig.myexpenses.viewmodel.data.AccountMinimal
+import org.totschnig.myexpenses.viewmodel.data.DateInfo
+import org.totschnig.myexpenses.viewmodel.data.DisplayDebt
+import org.totschnig.myexpenses.viewmodel.data.TransactionEditData
+import java.time.LocalDate
+import javax.inject.Inject
+
+const val KEY_ROW_IDS = &quot;rowIds&quot;
+
+<span class="nc" id="L111">class AccountSealedException : IllegalStateException()</span>
+
+<span class="fc" id="L113">open class ContentResolvingAndroidViewModel(application: Application) :</span>
+<span class="fc" id="L114">    BaseViewModel(application) {</span>
+
+    @Inject
+<span class="pc" id="L117">    lateinit var repository: Repository</span>
+
+    @Inject
+<span class="pc" id="L120">    lateinit var prefHandler: PrefHandler</span>
+
+    @Inject
+<span class="pc" id="L123">    lateinit var currencyContext: CurrencyContext</span>
+
+    @Inject
+<span class="pc" id="L126">    lateinit var dataStore: DataStore&lt;Preferences&gt;</span>
+
+    @Inject
+<span class="nc" id="L129">    lateinit var licenceHandler: LicenceHandler</span>
+
+    val collate: String
+<span class="nc" id="L132">        get() = prefHandler.collate</span>
+
+<span class="fc" id="L134">    private val bulkDeleteStateInternal: MutableStateFlow&lt;DeleteState?&gt; = MutableStateFlow(null)</span>
+<span class="pc" id="L135">    val bulkDeleteState: StateFlow&lt;DeleteState?&gt; = bulkDeleteStateInternal</span>
+
+    fun bulkDeleteCompleteShown() {
+<span class="nc" id="L138">        bulkDeleteStateInternal.update {</span>
+<span class="nc" id="L139">            null</span>
+        }
+<span class="nc" id="L141">    }</span>
+
+    val contentResolver: ContentResolver
+<span class="nc" id="L144">        get() = getApplication&lt;MyApplication&gt;().contentResolver</span>
+
+<span class="fc" id="L146">    val renderer: Flow&lt;RenderType&gt; by lazy {</span>
+<span class="fc" id="L147">        dataStore.data.map {</span>
+<span class="fc" id="L148">            if (it[prefHandler.getBooleanPreferencesKey(PrefKey.UI_ITEM_RENDERER_LEGACY)] == true)</span>
+<span class="fc" id="L149">                RenderType.Legacy else RenderType.New</span>
+<span class="fc" id="L150">        }</span>
+    }
+
+<span class="fc" id="L153">    val withCategoryIcon: Flow&lt;Boolean&gt; by lazy {</span>
+<span class="fc" id="L154">        dataStore.data.map {</span>
+<span class="fc" id="L155">            it[prefHandler.getBooleanPreferencesKey(PrefKey.UI_ITEM_RENDERER_CATEGORY_ICON)] != false</span>
+<span class="fc" id="L156">        }</span>
+    }
+
+<span class="pc" id="L159">    val dynamicExchangeRatesPerAccount: Flow&lt;Boolean&gt; by lazy {</span>
+<span class="nc" id="L160">        dataStore.dynamicExchangeRatesPerAccount</span>
+    }
+
+<span class="pc" id="L163">    val colorSource: Flow&lt;ColorSource&gt; by lazy {</span>
+<span class="nc" id="L164">        dataStore.data.map {</span>
+<span class="nc" id="L165">            enumValueOrDefault(</span>
+<span class="nc" id="L166">                it[prefHandler.getStringPreferencesKey(PrefKey.TRANSACTION_AMOUNT_COLOR_SOURCE)],</span>
+<span class="nc" id="L167">                ColorSource.TYPE</span>
+<span class="nc" id="L168">            )</span>
+<span class="nc" id="L169">        }</span>
+    }
+
+<span class="pc bnc" id="L172" title="All 3 branches missed.">    val dateInfo: Flow&lt;DateInfo&gt; = flow {</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        emit(DateInfo.load(contentResolver))</span>
+<span class="pc" id="L174">    }.flowOn(Dispatchers.IO)</span>
+
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">    fun account(extras: Bundle): Flow&lt;Account&gt; = if (extras.containsKey(KEY_ACCOUNTID)) {</span>
+<span class="nc" id="L178">        val accountId = extras.getLong(KEY_ACCOUNTID)</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (accountId &gt; 0)</span>
+<span class="nc" id="L180">            repository.loadAccountFlow(accountId)</span>
+        else
+<span class="nc" id="L182">            repository.loadAggregateAccountFlow(accountId)</span>
+    } else
+<span class="nc" id="L184">        repository.loadAggregateAccountFlowV2(extras)</span>
+
+<span class="nc" id="L186">    fun accountsMinimal(</span>
+<span class="nc" id="L187">        query: String? = null,</span>
+<span class="nc" id="L188">        queryArgs: Array&lt;String&gt;? = null,</span>
+<span class="nc" id="L189">        withAggregates: Boolean = true,</span>
+<span class="nc" id="L190">        sortOrder: String? = null,</span>
+<span class="nc" id="L191">        withPortfolios: Boolean = false,</span>
+<span class="nc" id="L192">    ): Flow&lt;List&lt;AccountMinimal&gt;&gt; = contentResolver.observeQuery(</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (withAggregates) ACCOUNTS_MINIMAL_URI_WITH_AGGREGATES else ACCOUNTS_MINIMAL_URI,</span>
+<span class="nc" id="L194">        null,</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        listOfNotNull(query, &quot;$KEY_PARENTID IS NULL&quot;, if (withPortfolios) null else &quot;$KEY_IS_PORTFOLIO = $PORTFOLIO_NONE&quot;).joinToString(&quot; AND &quot;),</span>
+<span class="nc" id="L196">        queryArgs, sortOrder, false</span>
+    )
+<span class="nc" id="L198">        .mapToList { AccountMinimal.fromCursor(localizedContext, it) }</span>
+
+<span class="fc" id="L200">    val accountTypesRaw by lazy {</span>
+<span class="fc" id="L201">        repository.getAccountTypes()</span>
+    }
+
+<span class="fc" id="L204">    val accountTypes by lazy {</span>
+<span class="fc" id="L205">        accountTypesRaw.stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, emptyList())</span>
+    }
+
+<span class="pc" id="L208">    val accountFlagsRaw by lazy {</span>
+<span class="nc" id="L209">        repository.getAccountFlags()</span>
+    }
+
+<span class="pc" id="L212">    val accountFlags by lazy {</span>
+<span class="nc" id="L213">        repository.getAccountFlags().stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, emptyList())</span>
+    }
+
+    sealed class DeleteState {
+<span class="nc" id="L217">        data class DeleteProgress(val count: Int, val total: Int) : DeleteState()</span>
+<span class="nc" id="L218">        data class DeleteComplete(val success: Int, val failure: Int) : DeleteState()</span>
+    }
+
+    fun deleteTemplates(ids: LongArray, deletePlan: Boolean): LiveData&lt;DeleteState.DeleteComplete&gt; =
+<span class="nc bnc" id="L222" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L223">            var success = 0</span>
+<span class="nc" id="L224">            var failure = 0</span>
+<span class="nc" id="L225">            ids.forEach {</span>
+<span class="nc" id="L226">                try {</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                    repository.deleteTemplate(it, deletePlan)</span>
+<span class="nc" id="L228">                    success++</span>
+<span class="nc" id="L229">                } catch (e: SQLiteConstraintException) {</span>
+<span class="nc" id="L230">                    CrashHandler.reportWithDbSchema(contentResolver, e)</span>
+<span class="nc" id="L231">                    failure++</span>
+                }
+<span class="nc" id="L233">            }</span>
+<span class="nc" id="L234">            repository.updateNewPlanEnabled(licenceHandler)</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            emit(DeleteState.DeleteComplete(success, failure))</span>
+<span class="nc" id="L236">        }</span>
+
+
+<span class="nc" id="L239">    open fun deleteTransactions(ids: LongArray, markAsVoid: Boolean = false) {</span>
+<span class="nc" id="L240">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L241">            val allIds = ids.toMutableSet()</span>
+<span class="nc" id="L242">            ids.forEach { id -&gt;</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                repository.findSiblingParentId(id)?.let { allIds.add(it) }</span>
+<span class="nc" id="L244">            }</span>
+<span class="nc" id="L245">            var success = 0</span>
+<span class="nc" id="L246">            var failure = 0</span>
+<span class="nc" id="L247">            val idsToDelete = allIds.toList()</span>
+<span class="nc" id="L248">            idsToDelete.forEach {</span>
+<span class="nc" id="L249">                try {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">                    if (repository.deleteTransaction(it, markAsVoid, true))</span>
+<span class="nc" id="L251">                        success++ else failure++</span>
+<span class="nc" id="L252">                } catch (e: SQLiteConstraintException) {</span>
+<span class="nc" id="L253">                    CrashHandler.reportWithDbSchema(contentResolver, e)</span>
+<span class="nc" id="L254">                    failure++</span>
+                }
+<span class="nc" id="L256">                bulkDeleteStateInternal.update {</span>
+<span class="nc" id="L257">                    DeleteState.DeleteProgress(success + failure, idsToDelete.size)</span>
+                }
+<span class="nc" id="L259">            }</span>
+<span class="nc" id="L260">            contentResolver.notifyChange(TRANSACTIONS_URI, null, true)</span>
+<span class="nc" id="L261">            contentResolver.notifyChange(ACCOUNTS_URI, null, false)</span>
+<span class="nc" id="L262">            contentResolver.notifyChange(DEBTS_URI, null, false)</span>
+<span class="nc" id="L263">            bulkDeleteStateInternal.update {</span>
+<span class="nc" id="L264">                DeleteState.DeleteComplete(success, failure)</span>
+            }
+<span class="nc" id="L266">        }</span>
+<span class="nc" id="L267">    }</span>
+
+    internal fun deleteAccountsInternal(accountIds: LongArray) =
+<span class="nc bnc" id="L270" title="All 4 branches missed.">        if (contentResolver.query(</span>
+<span class="nc" id="L271">                TRANSACTIONS_URI,</span>
+<span class="nc" id="L272">                arrayOf(&quot;MAX($checkForSealedDebt)&quot;),</span>
+<span class="nc" id="L273">                &quot;$KEY_ACCOUNTID IN (${accountIds.joinToString()})&quot;,</span>
+<span class="nc" id="L274">                null,</span>
+<span class="nc" id="L275">                null</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            )?.use {</span>
+<span class="nc" id="L277">                it.moveToFirst()</span>
+<span class="nc" id="L278">                it.getInt(0)</span>
+<span class="nc" id="L279">            } == 1</span>
+        ) {
+<span class="nc" id="L281">            Result.failure(AccountSealedException())</span>
+        } else {
+<span class="nc" id="L283">            val failures = mutableListOf&lt;Exception&gt;()</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            for (accountId in accountIds) {</span>
+<span class="nc" id="L285">                try {</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                    repository.deleteAccount(accountId)?.let {</span>
+<span class="nc" id="L287">                        val accountManager = AccountManager.get(getApplication())</span>
+<span class="nc" id="L288">                        val syncAccount = GenericAccountService.getAccount(it)</span>
+<span class="nc" id="L289">                        accountManager.setUserData(</span>
+<span class="nc" id="L290">                            syncAccount,</span>
+<span class="nc" id="L291">                            SyncAdapter.KEY_LAST_SYNCED_LOCAL(accountId), null</span>
+                        )
+<span class="nc" id="L293">                        accountManager.setUserData(</span>
+<span class="nc" id="L294">                            syncAccount,</span>
+<span class="nc" id="L295">                            SyncAdapter.KEY_LAST_SYNCED_REMOTE(accountId), null</span>
+                        )
+<span class="nc" id="L297">                    }</span>
+<span class="nc" id="L298">                } catch (e: Exception) {</span>
+<span class="nc" id="L299">                    CrashHandler.report(e)</span>
+<span class="nc" id="L300">                    failures.add(e)</span>
+                }
+            }
+<span class="nc" id="L303">            licenceHandler.updateNewAccountEnabled()</span>
+<span class="nc" id="L304">            updateTransferShortcut()</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">            if (failures.isEmpty())</span>
+<span class="nc" id="L306">                ResultUnit</span>
+            else
+<span class="nc" id="L308">                Result.failure(Exception(&quot;${failures.size} exceptions occurred. &quot;))</span>
+<span class="nc" id="L309">        }</span>
+
+    open fun updateTransferShortcut() {
+<span class="nc" id="L312">        ShortcutHelper.configureTransferShortcut(</span>
+<span class="nc" id="L313">            getApplication(),</span>
+<span class="nc" id="L314">            isTransferEnabled</span>
+        )
+<span class="nc" id="L316">    }</span>
+
+    val isTransferEnabled
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        get() = repository.countAccounts() &gt; 1</span>
+
+    /**
+     * @param rowId For split transactions, we check if any of their children is linked to a debt,
+     * in which case the parent should not be linkable to a debt, and we return an empty list
+     */
+<span class="nc" id="L325">    fun loadDebts(</span>
+<span class="nc" id="L326">        rowId: Long? = null,</span>
+<span class="nc" id="L327">        date: LocalDate? = null,</span>
+<span class="nc" id="L328">        showSealed: Boolean = false,</span>
+<span class="nc" id="L329">        showZero: Boolean = true,</span>
+<span class="nc" id="L330">        sortOrder: String? = null,</span>
+    ) =
+<span class="nc" id="L332">        contentResolver.observeQuery(</span>
+<span class="nc" id="L333">            uri = with(DEBTS_URI.buildUpon()) {</span>
+<span class="nc bnc" id="L334" title="All 8 branches missed.">                rowId?.takeIf { it != 0L }?.let {</span>
+<span class="nc" id="L335">                    appendQueryParameter(KEY_TRANSACTIONID, rowId.toString())</span>
+                }
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                date?.let {</span>
+<span class="nc" id="L338">                    appendQueryParameter(KEY_DATE, date.toString())</span>
+                }
+<span class="nc" id="L340">                build()</span>
+            },
+<span class="nc" id="L342">            selection = buildList {</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                if (!showSealed) add(&quot;$KEY_SEALED = 0&quot;)</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">                if (!showZero) add(&quot;$KEY_AMOUNT-$KEY_SUM != 0&quot;)</span>
+<span class="nc" id="L345">            }.joinToString(separator = &quot; AND &quot;),</span>
+<span class="nc" id="L346">            sortOrder = sortOrder,</span>
+<span class="nc" id="L347">            notifyForDescendants = true</span>
+        )
+<span class="nc" id="L349">            .mapToList { DisplayDebt.fromCursor(it, currencyContext) }</span>
+
+    /**
+     * deletes all expenses and updates account according to value of handleDelete
+     *
+     * @param filter        if not null only expenses matched by filter will be deleted
+     * @param handleDelete  if equals [EXPORT_HANDLE_DELETED_UPDATE_BALANCE] opening balance will
+     * be adjusted to account for the deleted expenses,
+     * if equals [EXPORT_HANDLE_DELETED_CREATE_HELPER] a helper transaction
+     * @param helperComment comment used for the helper transaction
+     */
+    fun reset(
+        account: Account,
+        filter: Criterion?,
+        handleDelete: Int,
+        helperComment: String?,
+    ) {
+<span class="nc" id="L366">        val ops = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc" id="L367">        var handleDeleteOperation: ContentProviderOperation? = null</span>
+<span class="nc" id="L368">        val sum = repository.getTransactionSum(account, filter)</span>
+<span class="nc bnc" id="L369" title="All 3 branches missed.">        if (handleDelete == EXPORT_HANDLE_DELETED_UPDATE_BALANCE) {</span>
+<span class="nc" id="L370">            val currentBalance: Long = account.openingBalance + sum</span>
+<span class="nc" id="L371">            handleDeleteOperation = ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L372">                ACCOUNTS_URI.buildUpon().appendPath(account.id.toString()).build()</span>
+            )
+<span class="nc" id="L374">                .withValue(KEY_OPENING_BALANCE, currentBalance)</span>
+<span class="nc" id="L375">                .build()</span>
+        } else if (handleDelete == EXPORT_HANDLE_DELETED_CREATE_HELPER) {
+<span class="nc" id="L377">            val helper = Transaction(</span>
+<span class="nc" id="L378">                accountId = account.id,</span>
+<span class="nc" id="L379">                amount = Money(currencyContext[account.currency], sum).amountMinor,</span>
+<span class="nc" id="L380">                comment = helperComment,</span>
+<span class="nc" id="L381">                uuid = generateUuid()</span>
+            )
+<span class="nc" id="L383">            handleDeleteOperation = ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L384">                .withValues(helper.asContentValues().apply {</span>
+<span class="nc" id="L385">                    put(KEY_STATUS, STATUS_HELPER)</span>
+<span class="nc" id="L386">                }).build()</span>
+        }
+<span class="nc" id="L388">        val rowSelect = buildTransactionRowSelect(filter)</span>
+<span class="nc" id="L389">        var selectionArgs: Array&lt;String&gt;? = arrayOf(account.id.toString())</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">        if (filter != null) {</span>
+<span class="nc" id="L391">            selectionArgs = joinArrays(selectionArgs, filter.getSelectionArgs(false))</span>
+        }
+<span class="nc" id="L393">        updateTransferPeersForTransactionDelete(</span>
+<span class="nc" id="L394">            ops,</span>
+<span class="nc" id="L395">            &quot;$KEY_TRANSFER_PEER IN ($rowSelect)&quot;,</span>
+<span class="nc" id="L396">            selectionArgs</span>
+        )
+<span class="nc" id="L398">        ops.add(</span>
+<span class="nc" id="L399">            ContentProviderOperation.newDelete(</span>
+<span class="nc" id="L400">                TRANSACTIONS_URI</span>
+            )
+<span class="nc" id="L402">                .withSelection(</span>
+<span class="nc" id="L403">                    &quot;$KEY_ROWID IN ($rowSelect)&quot;,</span>
+<span class="nc" id="L404">                    selectionArgs</span>
+                )
+<span class="nc" id="L406">                .build()</span>
+        )
+        //needs to be last, otherwise helper transaction would be deleted
+<span class="nc bnc" id="L409" title="All 2 branches missed.">        if (handleDeleteOperation != null) ops.add(handleDeleteOperation)</span>
+<span class="nc" id="L410">        contentResolver.applyBatch(AUTHORITY, ops)</span>
+<span class="nc" id="L411">    }</span>
+
+<span class="nc" id="L413">    fun childCount(transactionId: Long) = repository.count(</span>
+<span class="nc" id="L414">        TRANSACTIONS_URI,</span>
+<span class="nc" id="L415">        &quot;$KEY_PARENTID = ?&quot;, arrayOf(transactionId.toString())</span>
+<span class="nc" id="L416">    )</span>
+
+    fun joinQueryAndAccountFilter(
+        filter: String?,
+        savedStateHandle: SavedStateHandle,
+        filterColumn: String,
+        linkColumn: String,
+        tableName: String,
+    ): Pair&lt;String?, Array&lt;String&gt;?&gt; {
+<span class="nc" id="L425">        val filterSelection =</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">            if (TextUtils.isEmpty(filter)) null else &quot;$filterColumn LIKE ?&quot;</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">        val filterSelectionArgs: Array&lt;String&gt;? = if (TextUtils.isEmpty(filter)) null else</span>
+<span class="nc" id="L428">            arrayOf(&quot;%${Utils.escapeSqlLikeExpression(Utils.normalize(filter))}%&quot;)</span>
+<span class="nc" id="L429">        val accountId: Long? = savedStateHandle[KEY_ACCOUNTID]</span>
+<span class="nc" id="L430">        val isV2 = savedStateHandle.contains(KEY_ACCOUNT_GROUPING)</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">        val (accountSelection, accountSelectionArgs) = if (accountId == null) {</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (isV2) {</span>
+<span class="nc" id="L433">                val accountGrouping =</span>
+<span class="nc" id="L434">                    AccountGrouping.valueOf(savedStateHandle[KEY_ACCOUNT_GROUPING]!!)</span>
+<span class="nc" id="L435">                val group = savedStateHandle.get&lt;String&gt;(KEY_ACCOUNT_GROUPING_GROUP)!!</span>
+<span class="nc" id="L436">                accountSelectionV2(accountGrouping) to</span>
+<span class="nc" id="L437">                        accountSelectionArgsV2(accountGrouping, group)</span>
+<span class="nc" id="L438">            } else null to null</span>
+<span class="nc" id="L439">        } else accountSelection(accountId) to accountSelectionArgs(accountId)</span>
+
+<span class="nc" id="L441">        return buildString {</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">            filterSelection?.let { this.append(it) }</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            accountSelection?.let {</span>
+<span class="nc bnc" id="L444" title="All 4 branches missed.">                if (isNotEmpty()) this.append(&quot; AND &quot;)</span>
+<span class="nc" id="L445">                this.append(&quot;exists (SELECT 1 from $TABLE_TRANSACTIONS WHERE $linkColumn = $tableName.$KEY_ROWID&quot;)</span>
+<span class="nc bnc" id="L446" title="All 4 branches missed.">                if (it.isNotEmpty()) {</span>
+<span class="nc" id="L447">                    this.append(&quot; AND &quot;)</span>
+<span class="nc" id="L448">                    this.append(it)</span>
+                }
+<span class="nc" id="L450">                this.append(&quot;)&quot;)</span>
+<span class="nc" id="L451">            }</span>
+<span class="nc bnc" id="L452" title="All 4 branches missed.">        }.takeIf { it.isNotEmpty() } to joinArrays(filterSelectionArgs, accountSelectionArgs)</span>
+    }
+
+    fun saveParty(id: Long, name: String, shortName: String?): LiveData&lt;Boolean&gt; =
+<span class="nc bnc" id="L456" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L457">            val party = org.totschnig.myexpenses.model2.Party.create(</span>
+<span class="nc" id="L458">                id = id,</span>
+<span class="nc" id="L459">                name = name,</span>
+<span class="nc" id="L460">                shortName = shortName</span>
+            )
+<span class="nc bnc" id="L462" title="All 2 branches missed.">            emit(</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">                if (party == null) false else</span>
+<span class="nc" id="L464">                    try {</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">                        if (id == 0L) repository.createParty(party) else repository.saveParty(party)</span>
+<span class="nc" id="L466">                        true</span>
+<span class="nc" id="L467">                    } catch (_: SQLiteConstraintException) {</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                        false</span>
+                    }
+            )
+<span class="nc" id="L471">        }</span>
+
+    fun sortAccounts(sortedIds: LongArray) {
+<span class="nc" id="L474">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L475">            contentResolver.call(</span>
+<span class="nc" id="L476">                DUAL_URI,</span>
+<span class="nc" id="L477">                METHOD_SORT_ACCOUNTS,</span>
+<span class="nc" id="L478">                null,</span>
+<span class="nc" id="L479">                Bundle(1).apply {</span>
+<span class="nc" id="L480">                    putLongArray(KEY_SORT_KEY, sortedIds)</span>
+<span class="nc" id="L481">                }</span>
+            )
+<span class="nc" id="L483">        }</span>
+<span class="nc" id="L484">    }</span>
+
+    fun TransactionEditData.applyDefaultTransferCategory(): TransactionEditData {
+<span class="nc bnc" id="L487" title="All 2 branches missed.">        return if (isTransfer) {</span>
+<span class="nc bnc" id="L488" title="All 4 branches missed.">            prefHandler.defaultTransferCategory?.let { id -&gt;</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">                repository.getCategoryPath(id)?.let { path -&gt;</span>
+<span class="nc" id="L490">                    copy(</span>
+<span class="nc" id="L491">                        categoryId = id,</span>
+<span class="nc" id="L492">                        categoryPath = path</span>
+<span class="nc" id="L493">                    )</span>
+<span class="nc" id="L494">                }</span>
+<span class="nc" id="L495">            } ?: this</span>
+<span class="nc" id="L496">        } else this</span>
+    }
+
+    /*    fun loadDebugDebts(count: Int = 10) {
+            debts.postValue(List(
+                count
+            ) {
+                Debt(
+                    it.toLong(),
+                    &quot;Debt $it&quot;,
+                    &quot;Description&quot;,
+                    1,
+                    5000,
+                    &quot;EUR&quot;,
+                    System.currentTimeMillis() / 1000,
+                    &quot;John doe&quot;,
+                    false,
+                    4123
+                )
+            })
+        }*/
+
+    companion object {
+        fun &lt;K, V&gt; lazyMap(initializer: (K) -&gt; V): Map&lt;K, V&gt; {
+<span class="nc" id="L520">            val map = mutableMapOf&lt;K, V&gt;()</span>
+<span class="nc" id="L521">            return map.withDefault { key -&gt;</span>
+<span class="nc" id="L522">                val newValue = initializer(key)</span>
+<span class="nc" id="L523">                map[key] = newValue</span>
+<span class="nc" id="L524">                return@withDefault newValue</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

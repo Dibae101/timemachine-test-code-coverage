@@ -1,0 +1,584 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FeedParser.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.model</a> &gt; <span class="el_source">FeedParser.kt</span></div><h1>FeedParser.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.model
+
+import android.os.Parcelable
+import android.util.Log
+import androidx.annotation.VisibleForTesting
+import com.nononsenseapps.feeder.model.gofeed.FeederGoItem
+import com.nononsenseapps.feeder.model.gofeed.GoEnclosure
+import com.nononsenseapps.feeder.model.gofeed.GoFeed
+import com.nononsenseapps.feeder.model.gofeed.GoFeedAdapter
+import com.nononsenseapps.feeder.model.gofeed.GoPerson
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.flatMap
+import com.nononsenseapps.feeder.util.relativeLinkIntoAbsolute
+import com.nononsenseapps.feeder.util.relativeLinkIntoAbsoluteOrThrow
+import com.nononsenseapps.feeder.util.sloppyLinkToStrictURLOrNull
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.withContext
+import kotlinx.parcelize.IgnoredOnParcel
+import kotlinx.parcelize.Parcelize
+import okhttp3.CacheControl
+import okhttp3.Credentials
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.io.IOException
+import java.net.MalformedURLException
+import java.net.URL
+import java.net.URLDecoder
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+
+private const val YOUTUBE_CHANNEL_ID_ATTR = &quot;data-channel-external-id&quot;
+
+<span class="fc" id="L40">class FeedParser(</span>
+<span class="pc" id="L41">    override val di: DI,</span>
+) : DIAware {
+<span class="pc" id="L43">    private val client: OkHttpClient by instance()</span>
+<span class="fc" id="L44">    private val goFeedAdapter = GoFeedAdapter()</span>
+
+    /**
+     * Parses all relevant information from a main site so duplicate calls aren't needed
+     */
+<span class="nc" id="L49">    suspend fun getSiteMetaData(url: URL): Either&lt;FeedParserError, SiteMetaData&gt; =</span>
+<span class="nc" id="L50">        curl(url)</span>
+<span class="nc" id="L51">            .flatMap { html -&gt;</span>
+<span class="nc" id="L52">                getSiteMetaDataInHtml(url, html)</span>
+<span class="nc" id="L53">            }</span>
+
+    @VisibleForTesting
+    internal fun getSiteMetaDataInHtml(
+        url: URL,
+        html: String,
+    ): Either&lt;FeedParserError, SiteMetaData&gt; {
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        if (!html.contains(&quot;&lt;head&gt;&quot;, ignoreCase = true)) {</span>
+            // Probably a a feed URL and not a page
+<span class="nc" id="L62">            return Either.Left(NotHTML(url = url.toString()))</span>
+        }
+
+<span class="nc" id="L65">        return Either.catching(</span>
+            onCatch = { t -&gt;
+<span class="nc" id="L67">                MetaDataParseError(url = url.toString(), throwable = t).also {</span>
+<span class="nc" id="L68">                    Log.w(LOG_TAG, &quot;Error when fetching site metadata&quot;, t)</span>
+<span class="nc" id="L69">                }</span>
+            },
+        ) {
+<span class="nc" id="L72">            SiteMetaData(</span>
+<span class="nc" id="L73">                url = url,</span>
+<span class="nc" id="L74">                alternateFeedLinks = getAlternateFeedLinksInHtml(html, baseUrl = url),</span>
+<span class="nc" id="L75">                feedImage = getFeedIconInHtml(html, baseUrl = url),</span>
+<span class="nc" id="L76">            )</span>
+        }
+    }
+
+    @VisibleForTesting
+<span class="nc" id="L81">    internal fun getFeedIconInHtml(</span>
+        html: String,
+<span class="nc" id="L83">        baseUrl: URL? = null,</span>
+    ): String? {
+<span class="nc" id="L85">        val doc =</span>
+<span class="nc" id="L86">            html.byteInputStream().use {</span>
+<span class="nc bnc" id="L87" title="All 4 branches missed.">                Jsoup.parse(it, &quot;UTF-8&quot;, baseUrl?.toString() ?: &quot;&quot;)</span>
+            }
+
+<span class="nc" id="L90">        return (</span>
+<span class="nc" id="L91">            doc.getElementsByAttributeValue(&quot;rel&quot;, &quot;apple-touch-icon&quot;) +</span>
+<span class="nc" id="L92">                doc.getElementsByAttributeValue(&quot;rel&quot;, &quot;icon&quot;) +</span>
+<span class="nc" id="L93">                doc.getElementsByAttributeValue(&quot;rel&quot;, &quot;shortcut icon&quot;)</span>
+<span class="nc" id="L94">        ).filter { it.hasAttr(&quot;href&quot;) }</span>
+<span class="nc bnc" id="L95" title="All 4 branches missed.">            .firstNotNullOfOrNull { e -&gt;</span>
+<span class="nc" id="L96">                when {</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                    baseUrl != null -&gt;</span>
+<span class="nc" id="L98">                        relativeLinkIntoAbsolute(</span>
+<span class="nc" id="L99">                            base = baseUrl,</span>
+<span class="nc" id="L100">                            link = e.attr(&quot;href&quot;),</span>
+                        )
+
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                    else -&gt; sloppyLinkToStrictURLOrNull(e.attr(&quot;href&quot;))?.toString()</span>
+<span class="nc" id="L104">                }</span>
+            }
+    }
+
+    /**
+     * Returns all alternate links in the HTML/XML document pointing to feeds.
+     */
+<span class="nc" id="L111">    private fun getAlternateFeedLinksInHtml(</span>
+        html: String,
+<span class="nc" id="L113">        baseUrl: URL? = null,</span>
+    ): List&lt;AlternateLink&gt; {
+<span class="nc" id="L115">        val doc =</span>
+<span class="nc" id="L116">            html.byteInputStream().use {</span>
+<span class="nc" id="L117">                Jsoup.parse(it, &quot;UTF-8&quot;, &quot;&quot;)</span>
+            }
+
+<span class="nc" id="L120">        val feeds =</span>
+<span class="nc" id="L121">            doc</span>
+<span class="nc" id="L122">                .getElementsByAttributeValue(&quot;rel&quot;, &quot;alternate&quot;)</span>
+<span class="nc bnc" id="L123" title="All 6 branches missed.">                ?.filter { it.hasAttr(&quot;href&quot;) &amp;&amp; it.hasAttr(&quot;type&quot;) }</span>
+<span class="nc" id="L124">                ?.filter {</span>
+<span class="nc" id="L125">                    val t = it.attr(&quot;type&quot;).lowercase(Locale.getDefault())</span>
+<span class="nc" id="L126">                    when {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                        t.contains(&quot;application/atom&quot;) -&gt; true</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                        t.contains(&quot;application/rss&quot;) -&gt; true</span>
+                        // Youtube for example has alternate links with application/json+oembed type.
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                        t == &quot;application/json&quot; -&gt; true</span>
+<span class="nc" id="L131">                        else -&gt; false</span>
+<span class="nc" id="L132">                    }</span>
+<span class="nc" id="L133">                }?.filter {</span>
+<span class="nc" id="L134">                    val l = it.attr(&quot;href&quot;).lowercase(Locale.getDefault())</span>
+<span class="nc" id="L135">                    try {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                        if (baseUrl != null) {</span>
+<span class="nc" id="L137">                            relativeLinkIntoAbsoluteOrThrow(base = baseUrl, link = l)</span>
+                        } else {
+<span class="nc" id="L139">                            URL(l)</span>
+                        }
+<span class="nc" id="L141">                        true</span>
+<span class="nc" id="L142">                    } catch (_: MalformedURLException) {</span>
+<span class="nc" id="L143">                        false</span>
+<span class="nc" id="L144">                    }</span>
+<span class="nc" id="L145">                }?.mapNotNull { e -&gt;</span>
+<span class="nc" id="L146">                    when {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                        baseUrl != null -&gt; {</span>
+<span class="nc" id="L148">                            try {</span>
+<span class="nc" id="L149">                                AlternateLink(</span>
+<span class="nc" id="L150">                                    type = e.attr(&quot;type&quot;),</span>
+                                    link =
+<span class="nc" id="L152">                                        relativeLinkIntoAbsoluteOrThrow(</span>
+<span class="nc" id="L153">                                            base = baseUrl,</span>
+<span class="nc" id="L154">                                            link = e.attr(&quot;href&quot;),</span>
+                                        ),
+                                )
+<span class="nc" id="L157">                            } catch (e: Exception) {</span>
+<span class="nc" id="L158">                                null</span>
+                            }
+                        }
+
+                        else -&gt;
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                            sloppyLinkToStrictURLOrNull(e.attr(&quot;href&quot;))?.let { l -&gt;</span>
+<span class="nc" id="L164">                                AlternateLink(</span>
+<span class="nc" id="L165">                                    type = e.attr(&quot;type&quot;),</span>
+<span class="nc" id="L166">                                    link = l,</span>
+<span class="nc" id="L167">                                )</span>
+                            }
+<span class="nc" id="L169">                    }</span>
+<span class="nc" id="L170">                } ?: emptyList()</span>
+
+<span class="nc" id="L172">        return when {</span>
+<span class="nc bnc" id="L173" title="All 4 branches missed.">            feeds.isNotEmpty() -&gt; feeds</span>
+<span class="nc bnc" id="L174" title="All 8 branches missed.">            baseUrl?.host == &quot;www.youtube.com&quot; || baseUrl?.host == &quot;youtube.com&quot; -&gt;</span>
+<span class="nc" id="L175">                findFeedLinksForYoutube(</span>
+<span class="nc" id="L176">                    doc,</span>
+                )
+
+<span class="nc" id="L179">            else -&gt; emptyList()</span>
+        }
+    }
+
+    private fun findFeedLinksForYoutube(doc: Document): List&lt;AlternateLink&gt; {
+<span class="nc" id="L184">        val channelId: String? =</span>
+<span class="nc" id="L185">            doc</span>
+<span class="nc" id="L186">                .body()</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                ?.getElementsByAttribute(YOUTUBE_CHANNEL_ID_ATTR)</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                ?.firstOrNull()</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                ?.attr(YOUTUBE_CHANNEL_ID_ATTR)</span>
+
+<span class="nc" id="L191">        return when (channelId) {</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            null -&gt; emptyList()</span>
+            else -&gt;
+<span class="nc" id="L194">                listOf(</span>
+<span class="nc" id="L195">                    AlternateLink(</span>
+<span class="nc" id="L196">                        type = &quot;atom&quot;,</span>
+<span class="nc" id="L197">                        link = URL(&quot;https://www.youtube.com/feeds/videos.xml?channel_id=$channelId&quot;),</span>
+                    ),
+                )
+        }
+    }
+
+    /**
+     * @throws IOException if request fails due to network issue for example
+     */
+<span class="nc" id="L206">    private suspend fun curl(url: URL) = client.curl(url)</span>
+
+<span class="nc" id="L208">    suspend fun parseFeedUrl(url: URL): Either&lt;FeedParserError, ParsedFeed&gt; =</span>
+<span class="nc" id="L209">        client</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            .curlAndOnResponse(url) {</span>
+<span class="nc" id="L211">                parseFeedResponse(it)</span>
+<span class="nc" id="L212">            }.map {</span>
+                // Preserve original URL to maintain authentication data and/or tokens in query params
+                // but this is also done inside parse from the request URL
+<span class="nc" id="L215">                it.copy(feed_url = url.toString())</span>
+<span class="nc" id="L216">            }</span>
+
+    internal fun parseFeedResponse(response: Response): Either&lt;FeedParserError, ParsedFeed&gt; =
+<span class="nc bnc" id="L219" title="All 4 branches missed.">        response.body?.use {</span>
+            // OkHttp string method handles BOM and Content-Type header in request
+<span class="nc" id="L221">            parseFeedResponse(</span>
+<span class="nc" id="L222">                response.request.url.toUrl(),</span>
+<span class="nc" id="L223">                it,</span>
+<span class="nc" id="L224">            )</span>
+<span class="nc" id="L225">        } ?: Either.Left(NoBody(url = response.request.url.toString()))</span>
+
+    private fun parseFeedBytes(
+        url: URL,
+        body: ByteArray,
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">    ): ParsedFeed? = goFeedAdapter.parseBody(body)?.asFeed(url)</span>
+
+    /**
+     * Takes body as bytes to handle encoding correctly
+     */
+    fun parseFeedResponse(
+        url: URL,
+        responseBody: ResponseBody,
+    ): Either&lt;FeedParserError, ParsedFeed&gt; {
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">        val primaryType = responseBody.contentType()?.type</span>
+<span class="pc bpc" id="L240" title="2 of 4 branches missed.">        val subType = responseBody.contentType()?.subtype ?: &quot;&quot;</span>
+<span class="fc" id="L241">        return when {</span>
+<span class="pc bpc" id="L242" title="4 of 8 branches missed.">            primaryType == null || primaryType == &quot;text&quot; || subType.contains(&quot;json&quot;) || subType.contains(&quot;xml&quot;) -&gt;</span>
+<span class="fc" id="L243">                Either.catching(</span>
+                    onCatch = { t -&gt;
+<span class="nc" id="L245">                        RSSParseError(url = url.toString(), throwable = t)</span>
+                    },
+                ) {
+<span class="pc" id="L248">                    responseBody.byteStream().use { bs -&gt;</span>
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">                        parseFeedBytes(url, bs.readBytes())</span>
+<span class="nc" id="L250">                            ?: throw NullPointerException(&quot;Parsed feed is null&quot;)</span>
+<span class="fc" id="L251">                    }</span>
+                }
+
+<span class="nc" id="L254">            else -&gt; return Either.Left(</span>
+<span class="nc" id="L255">                UnsupportedContentType(</span>
+<span class="nc" id="L256">                    url = url.toString(),</span>
+<span class="nc" id="L257">                    mimeType = responseBody.contentType().toString(),</span>
+                ),
+            )
+        }
+    }
+
+    /**
+     * Takes body as bytes to handle encoding correctly
+     */
+    @VisibleForTesting
+    internal fun parseFeedResponse(
+        url: URL,
+        body: String,
+    ): Either&lt;FeedParserError, ParsedFeed&gt; =
+<span class="nc" id="L271">        Either.catching(</span>
+            onCatch = { t -&gt;
+<span class="nc" id="L273">                RSSParseError(url = url.toString(), throwable = t)</span>
+            },
+        ) {
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            parseFeedBytes(url, body.toByteArray())</span>
+<span class="nc" id="L277">                ?: throw NullPointerException(&quot;Parsed feed is null&quot;)</span>
+<span class="nc" id="L278">        }</span>
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_FEEDPARSER&quot;
+    }
+}
+
+private fun GoFeed.asFeed(url: URL): ParsedFeed =
+<span class="fc" id="L286">    ParsedFeed(</span>
+<span class="fc" id="L287">        title = title,</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">        home_page_url = link?.let { relativeLinkIntoAbsolute(url, it) },</span>
+<span class="pc bpc" id="L289" title="2 of 4 branches missed.">        feed_url = feedLink?.let { relativeLinkIntoAbsolute(url, it) } ?: url.toString(),</span>
+<span class="fc" id="L290">        description = description,</span>
+<span class="fc" id="L291">        user_comment = &quot;&quot;,</span>
+<span class="fc" id="L292">        next_url = &quot;&quot;,</span>
+<span class="pc bpc" id="L293" title="2 of 4 branches missed.">        icon = image?.url?.let { relativeLinkIntoAbsolute(url, it) },</span>
+<span class="fc" id="L294">        favicon = null,</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">        author = author?.asParsedAuthor(),</span>
+<span class="fc" id="L296">        expired = null,</span>
+<span class="pc bpc" id="L297" title="2 of 4 branches missed.">        items = items?.mapNotNull { it?.let { FeederGoItem(it, author, url).asParsedArticle() } },</span>
+<span class="fc" id="L298">    )</span>
+
+private fun FeederGoItem.asParsedArticle() =
+<span class="fc" id="L301">    ParsedArticle(</span>
+<span class="fc" id="L302">        id = guid,</span>
+<span class="fc" id="L303">        url = link,</span>
+<span class="fc" id="L304">        external_url = null,</span>
+<span class="fc" id="L305">        title = title,</span>
+<span class="fc" id="L306">        content_html = content,</span>
+<span class="fc" id="L307">        content_text = plainContent,</span>
+<span class="fc" id="L308">        summary = snippet,</span>
+<span class="fc" id="L309">        image = thumbnail,</span>
+<span class="fc" id="L310">        date_published = published,</span>
+<span class="fc" id="L311">        date_modified = updated,</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">        author = author?.asParsedAuthor(),</span>
+<span class="fc" id="L313">        tags = categories,</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">        attachments = enclosures?.map { it.asParsedEnclosure() },</span>
+<span class="pc bpc" id="L315" title="2 of 4 branches missed.">        hasFeedImage = thumbnail?.fromBody == false,</span>
+<span class="fc" id="L316">    )</span>
+
+private fun GoEnclosure.asParsedEnclosure() =
+<span class="nc" id="L319">    ParsedEnclosure(</span>
+<span class="nc" id="L320">        url = url,</span>
+<span class="nc" id="L321">        title = null,</span>
+<span class="nc" id="L322">        mime_type = type,</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        size_in_bytes = length?.toLongOrNull(),</span>
+<span class="nc" id="L324">        duration_in_seconds = null,</span>
+<span class="nc" id="L325">    )</span>
+
+private fun GoPerson.asParsedAuthor() =
+<span class="fc" id="L328">    ParsedAuthor(</span>
+<span class="fc" id="L329">        name = name,</span>
+<span class="fc" id="L330">        url = null,</span>
+<span class="fc" id="L331">        avatar = null,</span>
+<span class="fc" id="L332">    )</span>
+
+<span class="nc" id="L334">suspend fun OkHttpClient.getResponse(</span>
+    url: URL,
+<span class="nc" id="L336">    forceNetwork: Boolean = false,</span>
+): Response {
+<span class="fc" id="L338">    val request =</span>
+        Request
+<span class="fc" id="L340">            .Builder()</span>
+<span class="fc" id="L341">            .url(url)</span>
+<span class="fc" id="L342">            .run {</span>
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">                if (forceNetwork) {</span>
+<span class="nc" id="L344">                    cacheControl(</span>
+                        // Set a low max age to perform a conditional request, but preventing spamming the server
+<span class="nc" id="L346">                        CacheControl.Builder().maxAge(1, TimeUnit.MINUTES).build(),</span>
+                    )
+                } else {
+<span class="fc" id="L349">                    this</span>
+<span class="fc" id="L350">                }</span>
+<span class="fc" id="L351">            }.build()</span>
+
+    @Suppress(&quot;BlockingMethodInNonBlockingContext&quot;)
+<span class="fc" id="L354">    val clientToUse =</span>
+<span class="pc bpc" id="L355" title="6 of 8 branches missed.">        if (url.userInfo?.isNotBlank() == true) {</span>
+<span class="nc" id="L356">            val parts = url.userInfo.split(':')</span>
+<span class="nc" id="L357">            val user = parts.first()</span>
+<span class="nc" id="L358">            val pass =</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                if (parts.size &gt; 1) {</span>
+<span class="nc" id="L360">                    parts[1]</span>
+                } else {
+<span class="nc" id="L362">                    &quot;&quot;</span>
+                }
+<span class="nc" id="L364">            val decodedUser = URLDecoder.decode(user, &quot;UTF-8&quot;)</span>
+<span class="nc" id="L365">            val decodedPass = URLDecoder.decode(pass, &quot;UTF-8&quot;)</span>
+<span class="nc" id="L366">            val credentials = Credentials.basic(decodedUser, decodedPass)</span>
+<span class="nc" id="L367">            newBuilder()</span>
+<span class="nc" id="L368">                .authenticator { _, response -&gt;</span>
+<span class="nc" id="L369">                    when {</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                        response.request.header(&quot;Authorization&quot;) != null -&gt; {</span>
+<span class="nc" id="L371">                            null</span>
+                        }
+
+                        else -&gt; {
+<span class="nc" id="L375">                            response.request</span>
+<span class="nc" id="L376">                                .newBuilder()</span>
+<span class="nc" id="L377">                                .header(&quot;Authorization&quot;, credentials)</span>
+<span class="nc" id="L378">                                .build()</span>
+                        }
+<span class="nc" id="L380">                    }</span>
+<span class="nc" id="L381">                }.proxyAuthenticator { _, response -&gt;</span>
+<span class="nc" id="L382">                    when {</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                        response.request.header(&quot;Proxy-Authorization&quot;) != null -&gt; {</span>
+<span class="nc" id="L384">                            null</span>
+                        }
+
+                        else -&gt; {
+<span class="nc" id="L388">                            response.request</span>
+<span class="nc" id="L389">                                .newBuilder()</span>
+<span class="nc" id="L390">                                .header(&quot;Proxy-Authorization&quot;, credentials)</span>
+<span class="nc" id="L391">                                .build()</span>
+                        }
+<span class="nc" id="L393">                    }</span>
+<span class="nc" id="L394">                }.build()</span>
+        } else {
+<span class="fc" id="L396">            this</span>
+        }
+
+<span class="fc" id="L399">    return withContext(IO) {</span>
+<span class="fc" id="L400">        clientToUse.newCall(request).execute()</span>
+    }
+}
+
+suspend fun OkHttpClient.curl(url: URL): Either&lt;FeedParserError, String&gt; =
+<span class="nc bnc" id="L405" title="All 2 branches missed.">    curlAndOnResponse(url) {</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        val contentType = it.body?.contentType()</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        when (contentType?.type) {</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">            &quot;text&quot; -&gt; {</span>
+<span class="nc" id="L409">                when (contentType.subtype) {</span>
+<span class="nc bnc" id="L410" title="All 4 branches missed.">                    &quot;plain&quot;, &quot;html&quot; -&gt; {</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                        it.body?.let { body -&gt;</span>
+<span class="nc" id="L412">                            Either.catching(</span>
+                                onCatch = { throwable -&gt;
+<span class="nc" id="L414">                                    FetchError(</span>
+<span class="nc" id="L415">                                        throwable = throwable,</span>
+<span class="nc" id="L416">                                        url = url.toString(),</span>
+<span class="nc" id="L417">                                    )</span>
+                                },
+                            ) {
+<span class="nc" id="L420">                                body.string()</span>
+<span class="nc" id="L421">                            }</span>
+<span class="nc" id="L422">                        } ?: Either.Left(</span>
+<span class="nc" id="L423">                            NoBody(</span>
+<span class="nc" id="L424">                                url = url.toString(),</span>
+                            ),
+                        )
+                    }
+
+                    else -&gt;
+<span class="nc" id="L430">                        Either.Left(</span>
+<span class="nc" id="L431">                            UnsupportedContentType(</span>
+<span class="nc" id="L432">                                url = url.toString(),</span>
+<span class="nc" id="L433">                                mimeType = contentType.toString(),</span>
+                            ),
+                        )
+                }
+            }
+
+            else -&gt;
+<span class="nc" id="L440">                Either.Left(</span>
+<span class="nc" id="L441">                    UnsupportedContentType(</span>
+<span class="nc" id="L442">                        url = url.toString(),</span>
+<span class="nc" id="L443">                        mimeType = contentType.toString(),</span>
+                    ),
+                )
+<span class="nc" id="L446">        }</span>
+<span class="nc" id="L447">    }</span>
+
+suspend fun &lt;T&gt; OkHttpClient.curlAndOnResponse(
+    url: URL,
+    block: (suspend (Response) -&gt; Either&lt;FeedParserError, T&gt;),
+): Either&lt;FeedParserError, T&gt; =
+<span class="nc" id="L453">    Either</span>
+<span class="nc" id="L454">        .catching(</span>
+            onCatch = { t -&gt;
+<span class="nc" id="L456">                FetchError(url = url.toString(), throwable = t)</span>
+            },
+        ) {
+<span class="nc" id="L459">            getResponse(url)</span>
+<span class="nc" id="L460">        }.flatMap { response -&gt;</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            if (response.isSuccessful) {</span>
+<span class="nc" id="L462">                response.use {</span>
+<span class="nc" id="L463">                    block(it)</span>
+                }
+            } else {
+<span class="nc" id="L466">                Either.Left(</span>
+<span class="nc" id="L467">                    HttpError(</span>
+<span class="nc" id="L468">                        url = url.toString(),</span>
+<span class="nc" id="L469">                        code = response.code,</span>
+<span class="nc" id="L470">                        retryAfterSeconds = response.retryAfterSeconds,</span>
+<span class="nc" id="L471">                        message = response.message,</span>
+                    ),
+                )
+<span class="nc" id="L474">            }</span>
+<span class="nc" id="L475">        }</span>
+
+@Parcelize
+sealed class FeedParserError : Parcelable {
+    abstract val url: String
+    abstract val description: String
+    abstract val throwable: Throwable?
+}
+
+<span class="nc" id="L484">@Parcelize</span>
+data object NotInitializedYet : FeedParserError() {
+    @IgnoredOnParcel
+<span class="nc" id="L487">    override val url: String = &quot;&quot;</span>
+
+    @IgnoredOnParcel
+<span class="nc" id="L490">    override val description: String = &quot;&quot;</span>
+
+    @IgnoredOnParcel
+<span class="nc" id="L493">    override val throwable: Throwable? = null</span>
+<span class="nc" id="L494">}</span>
+
+<span class="nc" id="L496">@Parcelize</span>
+<span class="nc" id="L497">data class FetchError(</span>
+<span class="nc" id="L498">    override val url: String,</span>
+<span class="nc" id="L499">    override val throwable: Throwable?,</span>
+<span class="nc bnc" id="L500" title="All 4 branches missed.">    override val description: String = throwable?.message ?: &quot;&quot;,</span>
+<span class="nc" id="L501">) : FeedParserError()</span>
+
+<span class="nc" id="L503">@Parcelize</span>
+<span class="nc" id="L504">data class NotHTML(</span>
+<span class="nc" id="L505">    override val url: String,</span>
+<span class="nc" id="L506">    override val description: String = &quot;&quot;,</span>
+<span class="nc" id="L507">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L508">) : FeedParserError()</span>
+
+<span class="nc" id="L510">@Parcelize</span>
+<span class="nc" id="L511">data class MetaDataParseError(</span>
+<span class="nc" id="L512">    override val url: String,</span>
+<span class="nc" id="L513">    override val throwable: Throwable?,</span>
+<span class="nc bnc" id="L514" title="All 4 branches missed.">    override val description: String = throwable?.message ?: &quot;&quot;,</span>
+<span class="nc" id="L515">) : FeedParserError()</span>
+
+<span class="nc" id="L517">@Parcelize</span>
+<span class="nc" id="L518">data class RSSParseError(</span>
+<span class="nc" id="L519">    override val throwable: Throwable?,</span>
+<span class="nc" id="L520">    override val url: String,</span>
+<span class="nc bnc" id="L521" title="All 4 branches missed.">    override val description: String = throwable?.message ?: &quot;&quot;,</span>
+<span class="nc" id="L522">) : FeedParserError()</span>
+
+<span class="nc" id="L524">@Parcelize</span>
+<span class="nc" id="L525">data class JsonFeedParseError(</span>
+<span class="nc" id="L526">    override val throwable: Throwable?,</span>
+<span class="nc" id="L527">    override val url: String,</span>
+<span class="nc bnc" id="L528" title="All 4 branches missed.">    override val description: String = throwable?.message ?: &quot;&quot;,</span>
+<span class="nc" id="L529">) : FeedParserError()</span>
+
+<span class="nc" id="L531">@Parcelize</span>
+<span class="nc" id="L532">data class NoAlternateFeeds(</span>
+<span class="nc" id="L533">    override val url: String,</span>
+<span class="nc" id="L534">    override val description: String = &quot;&quot;,</span>
+<span class="nc" id="L535">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L536">) : FeedParserError()</span>
+
+<span class="nc" id="L538">@Parcelize</span>
+<span class="nc" id="L539">data class HttpError(</span>
+<span class="nc" id="L540">    override val url: String,</span>
+<span class="nc" id="L541">    val code: Int,</span>
+<span class="nc" id="L542">    val message: String,</span>
+<span class="nc" id="L543">    val retryAfterSeconds: Long?,</span>
+<span class="nc" id="L544">    override val description: String = &quot;$code: $message&quot;,</span>
+<span class="nc" id="L545">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L546">) : FeedParserError()</span>
+
+<span class="nc" id="L548">@Parcelize</span>
+<span class="nc" id="L549">data class UnsupportedContentType(</span>
+<span class="nc" id="L550">    override val url: String,</span>
+<span class="nc" id="L551">    val mimeType: String,</span>
+<span class="nc" id="L552">    override val description: String = mimeType,</span>
+<span class="nc" id="L553">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L554">) : FeedParserError()</span>
+
+<span class="nc" id="L556">@Parcelize</span>
+<span class="nc" id="L557">data class NoBody(</span>
+<span class="nc" id="L558">    override val url: String,</span>
+<span class="nc" id="L559">    override val description: String = &quot;&quot;,</span>
+<span class="nc" id="L560">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L561">) : FeedParserError()</span>
+
+<span class="nc" id="L563">@Parcelize</span>
+<span class="nc" id="L564">data class NoUrl(</span>
+<span class="nc" id="L565">    override val description: String = &quot;&quot;,</span>
+<span class="nc" id="L566">    override val url: String = &quot;&quot;,</span>
+<span class="nc" id="L567">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L568">) : FeedParserError()</span>
+
+<span class="nc" id="L570">@Parcelize</span>
+<span class="nc" id="L571">data class FullTextDecodingFailure(</span>
+<span class="nc" id="L572">    override val url: String,</span>
+<span class="nc" id="L573">    override val throwable: Throwable?,</span>
+<span class="nc bnc" id="L574" title="All 4 branches missed.">    override val description: String = throwable?.message ?: &quot;&quot;,</span>
+<span class="nc" id="L575">) : FeedParserError()</span>
+
+<span class="nc" id="L577">@Parcelize</span>
+<span class="nc" id="L578">data class FullTextTooLarge(</span>
+<span class="nc" id="L579">    override val url: String,</span>
+<span class="nc" id="L580">    val maxBytes: Int,</span>
+<span class="nc" id="L581">    override val description: String = &quot;Response body exceeded $maxBytes bytes&quot;,</span>
+<span class="nc" id="L582">    override val throwable: Throwable? = null,</span>
+<span class="nc" id="L583">) : FeedParserError()</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

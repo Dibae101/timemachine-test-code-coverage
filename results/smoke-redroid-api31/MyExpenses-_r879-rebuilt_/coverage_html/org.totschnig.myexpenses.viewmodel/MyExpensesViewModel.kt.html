@@ -1,0 +1,962 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MyExpensesViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">MyExpensesViewModel.kt</span></div><h1>MyExpensesViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.res.Resources
+import android.database.sqlite.SQLiteConstraintException
+import android.database.sqlite.SQLiteException
+import android.os.Bundle
+import android.os.Parcelable
+import android.text.TextUtils.concat
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.asFlow
+import androidx.lifecycle.liveData
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.SavedStateHandleSaveableApi
+import androidx.lifecycle.viewmodel.compose.saveable
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
+import app.cash.copper.flow.mapToList
+import app.cash.copper.flow.mapToOne
+import app.cash.copper.flow.observeQuery
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.parcelize.Parcelize
+import org.totschnig.myexpenses.adapter.ClearingLastPagingSourceFactory
+import org.totschnig.myexpenses.adapter.TransactionPagingSource
+import org.totschnig.myexpenses.compose.DataStoreExpansionHandler
+import org.totschnig.myexpenses.compose.addToSelection
+import org.totschnig.myexpenses.compose.filter.TYPE_COMPLEX
+import org.totschnig.myexpenses.compose.toggle
+import org.totschnig.myexpenses.compose.transactions.FutureCriterion
+import org.totschnig.myexpenses.compose.transactions.SelectionHandler
+import org.totschnig.myexpenses.compose.unselect
+import org.totschnig.myexpenses.db2.RepositoryTransaction
+import org.totschnig.myexpenses.db2.addAttachments
+import org.totschnig.myexpenses.db2.calculateSplitSummary
+import org.totschnig.myexpenses.db2.checkSealedStatus
+import org.totschnig.myexpenses.db2.checkTransferAccountOfSplitParts
+import org.totschnig.myexpenses.db2.createTransaction
+import org.totschnig.myexpenses.db2.entities.Transaction
+import org.totschnig.myexpenses.db2.groupToSplitTransaction
+import org.totschnig.myexpenses.db2.loadAccount
+import org.totschnig.myexpenses.db2.loadAttachments
+import org.totschnig.myexpenses.db2.loadBanks
+import org.totschnig.myexpenses.db2.loadTagsForTransaction
+import org.totschnig.myexpenses.db2.loadTrade
+import org.totschnig.myexpenses.db2.loadTransaction
+import org.totschnig.myexpenses.db2.saveTagsForTransaction
+import org.totschnig.myexpenses.db2.setAccountProperty
+import org.totschnig.myexpenses.db2.setGrouping
+import org.totschnig.myexpenses.db2.setSort
+import org.totschnig.myexpenses.db2.tagMapFlow
+import org.totschnig.myexpenses.db2.unarchive
+import org.totschnig.myexpenses.db2.undeleteTransaction
+import org.totschnig.myexpenses.export.pdf.BalanceSheetPdfGenerator
+import org.totschnig.myexpenses.export.pdf.PdfPrinter
+import org.totschnig.myexpenses.model.AccountGrouping
+import org.totschnig.myexpenses.model.ContribFeature
+import org.totschnig.myexpenses.model.CrStatus
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.model.Grouping
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model.sort.Sort
+import org.totschnig.myexpenses.model.sort.TransactionSort
+import org.totschnig.myexpenses.model2.Bank
+import org.totschnig.myexpenses.preference.ColorSource
+import org.totschnig.myexpenses.preference.Mapper
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.preference.PreferenceAccessor
+import org.totschnig.myexpenses.preference.enumValueOrDefault
+import org.totschnig.myexpenses.provider.BaseTransactionProvider
+import org.totschnig.myexpenses.provider.BaseTransactionProvider.Companion.balanceUri
+import org.totschnig.myexpenses.provider.DataBaseAccount
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.GROUPING_AGGREGATE
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.SORT_BY_AGGREGATE
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.SORT_DIRECTION_AGGREGATE
+import org.totschnig.myexpenses.provider.KEY_ACCOUNTID
+import org.totschnig.myexpenses.provider.KEY_BUDGET
+import org.totschnig.myexpenses.provider.KEY_BUDGETID
+import org.totschnig.myexpenses.provider.KEY_BUDGET_ROLLOVER_PREVIOUS
+import org.totschnig.myexpenses.provider.KEY_CATID
+import org.totschnig.myexpenses.provider.KEY_COMMODITY
+import org.totschnig.myexpenses.provider.KEY_CR_STATUS
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_DATE
+import org.totschnig.myexpenses.provider.KEY_DYNAMIC
+import org.totschnig.myexpenses.provider.KEY_EXCLUDE_FROM_TOTALS
+import org.totschnig.myexpenses.provider.KEY_FLAG
+import org.totschnig.myexpenses.provider.KEY_ONE_TIME
+import org.totschnig.myexpenses.provider.KEY_PARENTID
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SEALED
+import org.totschnig.myexpenses.provider.KEY_SECOND_GROUP
+import org.totschnig.myexpenses.provider.KEY_TAGLIST
+import org.totschnig.myexpenses.provider.KEY_TRANSACTIONID
+import org.totschnig.myexpenses.provider.KEY_TRANSFER_PEER
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.KEY_VALUE
+import org.totschnig.myexpenses.provider.KEY_VISIBLE
+import org.totschnig.myexpenses.provider.KEY_YEAR
+import org.totschnig.myexpenses.provider.TransactionProvider.ACCOUNTS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.DUAL_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_REPLACE
+import org.totschnig.myexpenses.provider.TransactionProvider.LATEST_PRICES_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.METHOD_SAVE_TRANSACTION_TAGS
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_MAPPED_OBJECTS
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_MERGE_CURRENCY_AGGREGATES
+import org.totschnig.myexpenses.provider.TransactionProvider.TRANSACTIONS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.UNSPLIT_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.URI_SEGMENT_LINK_TRANSFER
+import org.totschnig.myexpenses.provider.TransactionProvider.URI_SEGMENT_TOGGLE_CRSTATUS
+import org.totschnig.myexpenses.provider.TransactionProvider.URI_SEGMENT_TRANSFORM_TO_TRANSFER
+import org.totschnig.myexpenses.provider.TransactionProvider.URI_SEGMENT_UNLINK_TRANSFER
+import org.totschnig.myexpenses.provider.appendBooleanQueryParameter
+import org.totschnig.myexpenses.provider.asSequence
+import org.totschnig.myexpenses.provider.filter.CrStatusCriterion
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.filter.FilterPersistence
+import org.totschnig.myexpenses.provider.filter.NULL_ITEM_ID
+import org.totschnig.myexpenses.provider.getDouble
+import org.totschnig.myexpenses.provider.getInt
+import org.totschnig.myexpenses.provider.getLocalDate
+import org.totschnig.myexpenses.provider.getLongOrNull
+import org.totschnig.myexpenses.provider.getString
+import org.totschnig.myexpenses.provider.mapToListCatching
+import org.totschnig.myexpenses.provider.mapToListWithExtra
+import org.totschnig.myexpenses.provider.triggerAccountListRefresh
+import org.totschnig.myexpenses.util.AppDirHelper
+import org.totschnig.myexpenses.util.ICurrencyFormatter
+import org.totschnig.myexpenses.util.ResultUnit
+import org.totschnig.myexpenses.util.TextUtils.withAmountColor
+import org.totschnig.myexpenses.util.convAmount
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.enumValueOrDefault
+import org.totschnig.myexpenses.viewmodel.ExportViewModel.Companion.EXPORT_HANDLE_DELETED_UPDATE_BALANCE
+import org.totschnig.myexpenses.viewmodel.data.BudgetData
+import org.totschnig.myexpenses.viewmodel.data.BudgetRow
+import org.totschnig.myexpenses.viewmodel.data.FullAccount
+import org.totschnig.myexpenses.viewmodel.data.FullAccount.Companion.fromCursor
+import org.totschnig.myexpenses.viewmodel.data.FullAccount.Companion.nest
+import org.totschnig.myexpenses.viewmodel.data.FullAccount.Companion.partitionByAccountType
+import org.totschnig.myexpenses.viewmodel.data.HeaderData
+import org.totschnig.myexpenses.viewmodel.data.HeaderDataEmpty
+import org.totschnig.myexpenses.viewmodel.data.HeaderDataError
+import org.totschnig.myexpenses.viewmodel.data.PageAccount
+import org.totschnig.myexpenses.viewmodel.data.Tag
+import org.totschnig.myexpenses.viewmodel.data.Transaction2
+import timber.log.Timber
+import java.time.LocalDate
+import kotlin.math.sign
+
+<span class="nc" id="L177">enum class ScrollToCurrentDate { Never, AppLaunch, AccountOpen }</span>
+
+private const val BALANCE_DATE_KEY = &quot;balanceDate&quot;
+private const val SELECTED_ACCOUNT_KEY = &quot;selectedAccountId&quot;
+
+const val pageSize = 150
+
+sealed class ResolvedExtraInfo {
+<span class="nc" id="L185">    data class Split(val items: List&lt;Pair&lt;String, String?&gt;&gt;) : ResolvedExtraInfo()</span>
+<span class="nc" id="L186">    data class Trade(val trade: org.totschnig.myexpenses.viewmodel.data.Trade) : ResolvedExtraInfo()</span>
+}
+
+<span class="nc" id="L189">open class MyExpensesViewModel(</span>
+    application: Application,
+<span class="nc" id="L191">    val savedStateHandle: SavedStateHandle,</span>
+<span class="nc" id="L192">) : PrintViewModel(application) {</span>
+
+    var showBalanceSheet: Boolean
+<span class="nc" id="L195">        get() = savedStateHandle.get&lt;Boolean&gt;(&quot;showBalanceSheet&quot;) == true</span>
+        set(value) {
+<span class="nc" id="L197">            savedStateHandle[&quot;showBalanceSheet&quot;] = value</span>
+<span class="nc" id="L198">        }</span>
+
+    @OptIn(SavedStateHandleSaveableApi::class)
+<span class="nc" id="L201">    var showFilterDialog: Boolean by savedStateHandle.saveable {</span>
+<span class="nc" id="L202">        mutableStateOf(false)</span>
+    }
+
+<span class="nc" id="L205">    val showStatusHandle by lazy {</span>
+<span class="nc" id="L206">        PreferenceAccessor(</span>
+<span class="nc" id="L207">            dataStore,</span>
+<span class="nc" id="L208">            booleanPreferencesKey(&quot;showStatusHandle&quot;),</span>
+<span class="nc" id="L209">            defaultValue = true</span>
+<span class="nc" id="L210">        )</span>
+    }
+
+<span class="nc" id="L213">    val showEquivalentWorth by lazy {</span>
+<span class="nc" id="L214">        PreferenceAccessor(</span>
+<span class="nc" id="L215">            dataStore,</span>
+<span class="nc" id="L216">            booleanPreferencesKey(&quot;showEquivalentWorth&quot;), defaultValue = false</span>
+<span class="nc" id="L217">        )</span>
+    }
+
+<span class="nc" id="L220">    val preferredSearchType by lazy {</span>
+<span class="nc" id="L221">        PreferenceAccessor(</span>
+<span class="nc" id="L222">            dataStore,</span>
+<span class="nc" id="L223">            intPreferencesKey(&quot;preferredSearchType&quot;), defaultValue = TYPE_COMPLEX</span>
+<span class="nc" id="L224">        )</span>
+    }
+
+<span class="nc" id="L227">    val balanceSheetShowChart by lazy {</span>
+<span class="nc" id="L228">        PreferenceAccessor(</span>
+<span class="nc" id="L229">            dataStore,</span>
+<span class="nc" id="L230">            booleanPreferencesKey(&quot;balanceSheetShowChart&quot;), defaultValue = false</span>
+<span class="nc" id="L231">        )</span>
+    }
+
+<span class="nc" id="L234">    val balanceSheetShowHidden by lazy {</span>
+<span class="nc" id="L235">        PreferenceAccessor(</span>
+<span class="nc" id="L236">            dataStore,</span>
+<span class="nc" id="L237">            booleanPreferencesKey(&quot;balanceSheetShowHidden&quot;), defaultValue = true</span>
+<span class="nc" id="L238">        )</span>
+    }
+
+<span class="nc" id="L241">    val balanceSheetShowZero by lazy {</span>
+<span class="nc" id="L242">        PreferenceAccessor(</span>
+<span class="nc" id="L243">            dataStore,</span>
+<span class="nc" id="L244">            booleanPreferencesKey(&quot;balanceSheetShowZero&quot;), defaultValue = true</span>
+<span class="nc" id="L245">        )</span>
+    }
+
+<span class="nc" id="L248">    val listState = LazyListState(0, 0)</span>
+
+    suspend fun scrollToAccountIfNeeded(position: Int, key: Long, animate: Boolean) {
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        if (!listState.layoutInfo.visibleItemsInfo.any { it.key == key })</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            if (animate) {</span>
+<span class="nc" id="L253">                listState.animateScrollToItem(position)</span>
+            } else {
+<span class="nc" id="L255">                listState.requestScrollToItem(position)</span>
+            }
+<span class="nc" id="L257">    }</span>
+
+    fun expansionHandlerForTransactionGroups(account: PageAccount) =
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (account.grouping == Grouping.NONE) null else</span>
+<span class="nc" id="L261">            expansionHandler(</span>
+<span class="nc" id="L262">                &quot;collapsedHeaders_${account.id}_${account.grouping}&quot;</span>
+<span class="nc" id="L263">            )</span>
+
+<span class="nc" id="L265">    fun expansionHandler(key: String) = DataStoreExpansionHandler(key, dataStore, viewModelScope)</span>
+
+    val selectedTransactionSum: Long
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        get() = selectionState.value.sumOf { it.amount.amountMinor }</span>
+
+    fun actionModeTitle(
+        currencyFormatter: ICurrencyFormatter,
+        currencyUnit: CurrencyUnit,
+        resources: Resources,
+    ): CharSequence =
+<span class="nc" id="L275">        concat(</span>
+<span class="nc" id="L276">            selectionState.value.size.toString(),</span>
+<span class="nc" id="L277">            &quot; (Σ: &quot;,</span>
+<span class="nc" id="L278">            with(selectedTransactionSum) {</span>
+<span class="nc" id="L279">                currencyFormatter.convAmount(this, currencyUnit)</span>
+<span class="nc" id="L280">                    .withAmountColor(resources, sign)</span>
+            },
+<span class="nc" id="L282">            &quot;)&quot;</span>
+<span class="nc" id="L283">        )</span>
+
+<span class="nc" id="L285">    @Parcelize</span>
+<span class="nc" id="L286">    data class SelectionInfo(</span>
+<span class="nc" id="L287">        val id: Long,</span>
+<span class="nc" id="L288">        val accountId: Long,</span>
+<span class="nc" id="L289">        val amount: Money,</span>
+<span class="nc" id="L290">        val transferAccount: Long?,</span>
+<span class="nc" id="L291">        val isSplit: Boolean,</span>
+<span class="nc" id="L292">        val crStatus: CrStatus,</span>
+<span class="nc" id="L293">        val accountType: Long?,</span>
+<span class="nc" id="L294">        val isPortfolio: Boolean,</span>
+    ) : Parcelable {
+<span class="nc" id="L296">        constructor(transaction: Transaction2) : this(</span>
+<span class="nc" id="L297">            transaction.id,</span>
+<span class="nc" id="L298">            transaction.accountId,</span>
+<span class="nc" id="L299">            transaction.displayAmount,</span>
+<span class="nc" id="L300">            transaction.transferAccount,</span>
+<span class="nc" id="L301">            transaction.isSplit,</span>
+<span class="nc" id="L302">            transaction.crStatus,</span>
+<span class="nc" id="L303">            transaction.accountType,</span>
+<span class="nc" id="L304">            transaction.isPortfolio</span>
+<span class="nc" id="L305">        )</span>
+
+        val isTransfer: Boolean
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            get() = transferAccount != null</span>
+<span class="nc" id="L309">    }</span>
+
+<span class="nc" id="L311">    val selectedAccountId: StateFlow&lt;Long&gt; =</span>
+<span class="nc" id="L312">        savedStateHandle.getStateFlow(SELECTED_ACCOUNT_KEY, 1L)</span>
+
+    fun selectAccount(accountId: Long) {
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        if (selectedAccountId.value != accountId) {</span>
+<span class="nc" id="L316">            clearSelection() // Reset selection when moving to a different account</span>
+        }
+<span class="nc" id="L318">        Timber.d(&quot;selectAccount($accountId)&quot;)</span>
+<span class="nc" id="L319">        savedStateHandle[SELECTED_ACCOUNT_KEY] = accountId // This updates the StateFlow</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (scrollToCurrentDatePreference == ScrollToCurrentDate.AccountOpen) {</span>
+<span class="nc" id="L321">            scrollToCurrentDate.getValue(accountId).value = true</span>
+        }
+<span class="nc" id="L323">        prefHandler.putLong(PrefKey.CURRENT_ACCOUNT, accountId)</span>
+<span class="nc" id="L324">    }</span>
+
+<span class="nc" id="L326">    val selectAllState: MutableState&lt;Boolean&gt; = mutableStateOf(false)</span>
+
+    @OptIn(SavedStateHandleSaveableApi::class)
+<span class="nc" id="L329">    val selectionState: MutableState&lt;List&lt;SelectionInfo&gt;&gt; =</span>
+<span class="nc" id="L330">        savedStateHandle.saveable(&quot;selectionState&quot;) { mutableStateOf(emptyList()) }</span>
+
+    fun clearSelection() {
+<span class="nc" id="L333">        selectionState.value = emptyList()</span>
+<span class="nc" id="L334">    }</span>
+
+<span class="nc" id="L336">    val selectionHandler = object : SelectionHandler {</span>
+        override fun toggle(transaction: Transaction2) {
+<span class="nc" id="L338">            selectionState.toggle(SelectionInfo(transaction))</span>
+<span class="nc" id="L339">        }</span>
+
+        override fun isSelected(transaction: Transaction2) =
+<span class="nc" id="L342">            selectionState.value.contains(SelectionInfo(transaction))</span>
+
+        override fun select(transaction: Transaction2) {
+<span class="nc" id="L345">            selectionState.addToSelection(SelectionInfo(transaction))</span>
+<span class="nc" id="L346">        }</span>
+
+        override val selectionCount: Int
+<span class="nc" id="L349">            get() = selectionState.value.size</span>
+
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        override fun isSelectable(transaction: Transaction2) = !transaction.isArchive</span>
+
+    }
+
+<span class="nc" id="L355">    val showSumDetails: Flow&lt;Boolean&gt; by lazy {</span>
+<span class="nc" id="L356">        dataStore.data.map {</span>
+<span class="nc" id="L357">            it[prefHandler.getBooleanPreferencesKey(PrefKey.GROUP_HEADER)] != false</span>
+<span class="nc" id="L358">        }</span>
+    }
+
+<span class="nc" id="L361">    val futureCriterion: Flow&lt;FutureCriterion&gt; by lazy {</span>
+<span class="nc" id="L362">        dataStore.data.map {</span>
+<span class="nc" id="L363">            enumValueOrDefault(</span>
+<span class="nc" id="L364">                it[prefHandler.getStringPreferencesKey(PrefKey.CRITERION_FUTURE)],</span>
+<span class="nc" id="L365">                FutureCriterion.EndOfDay</span>
+<span class="nc" id="L366">            )</span>
+<span class="nc" id="L367">        }</span>
+    }
+
+<span class="nc" id="L370">    val accountGrouping: PreferenceAccessor&lt;AccountGrouping&lt;*&gt;, String&gt; by lazy {</span>
+
+<span class="nc" id="L372">        PreferenceAccessor(</span>
+<span class="nc" id="L373">            dataStore = dataStore,</span>
+<span class="nc" id="L374">            key = prefHandler.getStringPreferencesKey(PrefKey.ACCOUNT_GROUPING),</span>
+<span class="nc" id="L375">            defaultValue = AccountGrouping.DEFAULT,</span>
+<span class="nc" id="L376">            mapper = object : Mapper&lt;AccountGrouping&lt;*&gt;, String&gt; {</span>
+                override fun toPreference(userValue: AccountGrouping&lt;*&gt;): String {
+<span class="nc" id="L378">                    return userValue.name</span>
+                }
+
+                override fun fromPreference(persistedValue: String) =
+<span class="nc" id="L382">                    AccountGrouping.valueOf(persistedValue)</span>
+            }
+<span class="nc" id="L384">        )</span>
+    }
+
+<span class="nc" id="L387">    private val pagerCache = mutableMapOf&lt;Any, PagerInfo&gt;()</span>
+<span class="nc" id="L388">    protected val currentQueryKeys = mutableMapOf&lt;Any, Any&gt;()</span>
+
+<span class="nc" id="L390">    private data class PagerInfo(</span>
+<span class="nc" id="L391">        val factory: ClearingLastPagingSourceFactory&lt;Int, Transaction2, *&gt;,</span>
+<span class="nc" id="L392">        val flow: Flow&lt;PagingData&lt;Transaction2&gt;&gt;,</span>
+    )
+
+    fun getTransactions(account: PageAccount): Flow&lt;PagingData&lt;Transaction2&gt;&gt; {
+<span class="nc" id="L396">        val stableId = account.stableId</span>
+<span class="nc" id="L397">        val queryKey = account.queryKey</span>
+
+<span class="nc" id="L399">        val existingQueryKey = currentQueryKeys[stableId]</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">        if (existingQueryKey != queryKey) {</span>
+            // Sort order or grouping changed: Recreate Pager and clear old factory
+<span class="nc bnc" id="L402" title="All 4 branches missed.">            pagerCache[stableId]?.factory?.clear()</span>
+
+<span class="nc" id="L404">            val factory = ClearingLastPagingSourceFactory {</span>
+<span class="nc" id="L405">                buildTransactionPagingSource(account)</span>
+            }
+<span class="nc" id="L407">            val flow = Pager(</span>
+<span class="nc" id="L408">                config = PagingConfig(</span>
+<span class="nc" id="L409">                    pageSize = pageSize,</span>
+<span class="nc" id="L410">                    prefetchDistance = 40</span>
+                ),
+<span class="nc" id="L412">                pagingSourceFactory = factory</span>
+<span class="nc" id="L413">            ).flow.cachedIn(viewModelScope)</span>
+
+<span class="nc" id="L415">            pagerCache[stableId] = PagerInfo(factory, flow)</span>
+<span class="nc" id="L416">            currentQueryKeys[stableId] = queryKey</span>
+        }
+
+<span class="nc" id="L419">        return pagerCache.getValue(stableId).flow</span>
+    }
+
+<span class="nc" id="L422">    private val sums: Map&lt;PageAccount, Flow&lt;SumInfo&gt;&gt; = lazyMap { account -&gt;</span>
+<span class="nc" id="L423">        contentResolver.observeQuery(</span>
+<span class="nc" id="L424">            uri = account.uriBuilderForTransactionList(extended = false)</span>
+<span class="nc" id="L425">                .appendBooleanQueryParameter(QUERY_PARAMETER_MAPPED_OBJECTS)</span>
+<span class="nc" id="L426">                .build()</span>
+<span class="nc" id="L427">        ).mapToOne {</span>
+<span class="nc" id="L428">            SumInfo.fromCursor(it)</span>
+<span class="nc" id="L429">        }.stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, SumInfo.EMPTY)</span>
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+<span class="nc" id="L433">    private fun buildHeaderData(account: PageAccount, v2: Boolean = false) =</span>
+<span class="nc" id="L434">        filterPersistence.getValue(account.id).whereFilter.flatMapLatest { filter -&gt;</span>
+<span class="nc" id="L435">            val groupingQuery =</span>
+<span class="nc" id="L436">                if (v2) account.groupingQueryV2(filter) else account.groupingQuery(filter)</span>
+<span class="nc" id="L437">            contentResolver.observeQuery(</span>
+<span class="nc" id="L438">                uri = groupingQuery.first.build(),</span>
+<span class="nc" id="L439">                selection = groupingQuery.second,</span>
+<span class="nc" id="L440">                selectionArgs = groupingQuery.third</span>
+<span class="nc" id="L441">            ).map { query -&gt;</span>
+<span class="nc" id="L442">                try {</span>
+<span class="nc" id="L443">                    query.run()</span>
+<span class="nc" id="L444">                } catch (e: SQLiteException) {</span>
+<span class="nc" id="L445">                    CrashHandler.report(e)</span>
+<span class="nc" id="L446">                    null</span>
+<span class="nc" id="L447">                }?.use { cursor -&gt;</span>
+<span class="nc" id="L448">                    HeaderData.fromSequence(</span>
+<span class="nc" id="L449">                        account.openingBalance,</span>
+<span class="nc" id="L450">                        account.grouping,</span>
+<span class="nc" id="L451">                        account.currencyUnit,</span>
+<span class="nc" id="L452">                        cursor.asSequence</span>
+<span class="nc" id="L453">                    )</span>
+<span class="nc" id="L454">                }</span>
+            }
+<span class="nc" id="L456">                .flowOn(Dispatchers.IO)</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">                .combine(dateInfo) { headerData, dateInfo -&gt;</span>
+<span class="nc bnc" id="L458" title="All 4 branches missed.">                    headerData?.let { HeaderData(account, it, dateInfo, filter != null) }</span>
+<span class="nc" id="L459">                        ?: HeaderDataError</span>
+<span class="nc" id="L460">                }</span>
+<span class="nc" id="L461">        }.stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, HeaderDataEmpty)</span>
+
+<span class="nc" id="L463">    protected val tags: StateFlow&lt;Map&lt;String, Pair&lt;String, Int?&gt;&gt;&gt; by lazy {</span>
+<span class="nc" id="L464">        contentResolver.tagMapFlow</span>
+<span class="nc" id="L465">            .stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, emptyMap())</span>
+    }
+
+    open fun buildTransactionPagingSource(account: PageAccount) =
+<span class="nc" id="L469">        TransactionPagingSource(</span>
+<span class="nc" id="L470">            getApplication(),</span>
+<span class="nc" id="L471">            account,</span>
+<span class="nc" id="L472">            filterPersistence.getValue(account.id).whereFilter,</span>
+<span class="nc" id="L473">            tags,</span>
+<span class="nc" id="L474">            currencyContext,</span>
+<span class="nc" id="L475">            viewModelScope,</span>
+<span class="nc" id="L476">            prefHandler</span>
+<span class="nc" id="L477">        )</span>
+
+<span class="nc" id="L479">    val filterPersistence: Map&lt;Long, FilterPersistence&gt; = lazyMap {</span>
+<span class="nc" id="L480">        FilterPersistence(</span>
+<span class="nc" id="L481">            dataStore,</span>
+<span class="nc" id="L482">            prefNameForCriteria(it),</span>
+<span class="nc" id="L483">            viewModelScope</span>
+<span class="nc" id="L484">        )</span>
+    }
+
+<span class="nc" id="L487">    val scrollToCurrentDate: Map&lt;Long, MutableState&lt;Boolean&gt;&gt; =</span>
+<span class="nc" id="L488">        lazyMap {</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">            mutableStateOf(scrollToCurrentDatePreference != ScrollToCurrentDate.Never)</span>
+        }
+
+    val scrollToCurrentDatePreference
+<span class="nc" id="L493">        get() = prefHandler.enumValueOrDefault(</span>
+<span class="nc" id="L494">            PrefKey.SCROLL_TO_CURRENT_DATE,</span>
+<span class="nc" id="L495">            ScrollToCurrentDate.Never</span>
+<span class="nc" id="L496">        )</span>
+
+    @OptIn(SavedStateHandleSaveableApi::class)
+<span class="nc" id="L499">    var balanceDate =</span>
+<span class="nc" id="L500">        savedStateHandle.getLiveData&lt;LocalDate&gt;(BALANCE_DATE_KEY, LocalDate.now()).asFlow()</span>
+
+    fun setBalanceDate(date: LocalDate) {
+<span class="nc" id="L503">        savedStateHandle[BALANCE_DATE_KEY] = date</span>
+<span class="nc" id="L504">    }</span>
+
+<span class="nc" id="L506">    fun getLatestPrices(date: LocalDate? = null): Flow&lt;Map&lt;Pair&lt;String, String&gt;, Pair&lt;LocalDate, Double&gt;&gt;&gt; =</span>
+<span class="nc" id="L507">        contentResolver</span>
+<span class="nc" id="L508">            .observeQuery(LATEST_PRICES_URI.let {</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">                if (date == null) it else it.buildUpon()</span>
+<span class="nc" id="L510">                    .appendQueryParameter(KEY_DATE, date.toString()).build()</span>
+            })
+<span class="nc" id="L512">            .mapToList { cursor -&gt;</span>
+<span class="nc" id="L513">                (cursor.getString(KEY_COMMODITY) to cursor.getString(KEY_CURRENCY)) to</span>
+<span class="nc" id="L514">                        (cursor.getLocalDate(KEY_DATE) to cursor.getDouble(KEY_VALUE))</span>
+            }
+<span class="nc" id="L516">            .map { it.toMap() }</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">            .onEach {</span>
+<span class="nc" id="L518">                Timber.d(&quot;Latest prices for $date: %s&quot;, it)</span>
+<span class="nc" id="L519">            }</span>
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+<span class="nc" id="L522">    val accountsForBalanceSheet: StateFlow&lt;Pair&lt;LocalDate, List&lt;FullAccount&gt;&gt;&gt; =</span>
+<span class="nc" id="L523">        balanceDate.flatMapLatest { date -&gt;</span>
+<span class="nc" id="L524">            combine(</span>
+<span class="nc" id="L525">                contentResolver.observeQuery(</span>
+<span class="nc" id="L526">                    balanceUri(if (date == LocalDate.now()) &quot;now&quot; else date.toString(), true),</span>
+<span class="nc" id="L527">                    selection = &quot;$KEY_EXCLUDE_FROM_TOTALS = 0&quot;</span>
+                )
+<span class="nc" id="L529">                    .mapToList { it.fromCursor(currencyContext) }</span>
+<span class="nc" id="L530">                    .map { it.nest() }, getLatestPrices(date)</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">            ) { accounts, prices -&gt;</span>
+<span class="nc" id="L532">                date to accounts.map {</span>
+<span class="nc" id="L533">                    it.enrich(</span>
+<span class="nc" id="L534">                        prices,</span>
+<span class="nc" id="L535">                        currencyContext.homeCurrencyUnit</span>
+<span class="nc" id="L536">                    )</span>
+<span class="nc" id="L537">                }</span>
+<span class="nc" id="L538">            }</span>
+<span class="nc" id="L539">        }.stateIn(</span>
+<span class="nc" id="L540">            viewModelScope,</span>
+<span class="nc" id="L541">            SharingStarted.WhileSubscribedWithTimeout,</span>
+<span class="nc" id="L542">            LocalDate.now() to emptyList()</span>
+        )
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+<span class="nc" id="L546">    val debtSum: StateFlow&lt;Long&gt; = balanceDate.flatMapLatest { date -&gt;</span>
+<span class="nc" id="L547">        loadDebts(</span>
+<span class="nc" id="L548">            date = date,</span>
+<span class="nc" id="L549">            showSealed = true,</span>
+<span class="nc" id="L550">            showZero = false,</span>
+<span class="nc" id="L551">        ).map {</span>
+<span class="nc" id="L552">            it.fold(0L) { sum, debt -&gt; sum + debt.currentEquivalentBalance }</span>
+<span class="nc" id="L553">        }</span>
+<span class="nc" id="L554">    }.stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, 0L)</span>
+
+    val sortOrderAccounts: Sort
+<span class="nc" id="L557">        get() = prefHandler.enumValueOrDefault(</span>
+<span class="nc" id="L558">            PrefKey.SORT_ORDER_ACCOUNTS,</span>
+<span class="nc" id="L559">            Sort.USAGES</span>
+<span class="nc" id="L560">        )</span>
+
+    val List&lt;FullAccount&gt;.withNaturalSort: List&lt;FullAccount&gt;
+<span class="nc bnc" id="L563" title="All 2 branches missed.">        get() = if (sortOrderAccounts == Sort.LABEL) {</span>
+<span class="nc" id="L564">            val (aggregates, nonAggregates) = partition { it.isAggregate }</span>
+<span class="nc" id="L565">            nonAggregates.safeSortedWith(compareBy(getNaturalComparator()) { it.label }) + aggregates</span>
+<span class="nc" id="L566">        } else this</span>
+
+<span class="nc" id="L568">    val accountData: StateFlow&lt;Result&lt;List&lt;FullAccount&gt;&gt;?&gt; by lazy {</span>
+<span class="nc" id="L569">        contentResolver.observeQuery(</span>
+<span class="nc" id="L570">            uri = ACCOUNTS_URI.buildUpon()</span>
+<span class="nc" id="L571">                .appendBooleanQueryParameter(QUERY_PARAMETER_MERGE_CURRENCY_AGGREGATES)</span>
+<span class="nc" id="L572">                .build(),</span>
+<span class="nc" id="L573">            selection = &quot;$KEY_VISIBLE = 1&quot;,</span>
+<span class="nc" id="L574">            notifyForDescendants = true</span>
+        )
+<span class="nc" id="L576">            .mapToListCatching { it.fromCursor(currencyContext) }</span>
+<span class="nc" id="L577">            .map { result -&gt; result.map { it.withNaturalSort } }</span>
+<span class="nc" id="L578">            .stateIn(viewModelScope, SharingStarted.WhileSubscribedWithTimeout, null)</span>
+    }
+
+<span class="nc" id="L581">    fun headerData(account: PageAccount, v2: Boolean) = buildHeaderData(account, v2)</span>
+
+    fun budgetData(account: PageAccount): Flow&lt;BudgetData?&gt; =
+<span class="nc bnc" id="L584" title="All 2 branches missed.">        if (licenceHandler.hasTrialAccessTo(ContribFeature.BUDGET)) {</span>
+<span class="nc" id="L585">            when {</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                account.id != 0L -&gt; account.id.toString() //real account or legacy aggregate</span>
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                account.accountGrouping == AccountGrouping.CURRENCY -&gt; account.currency</span>
+<span class="nc" id="L588">                else -&gt; null</span>
+<span class="nc bnc" id="L589" title="All 2 branches missed.">            }?.let { accountSegment -&gt;</span>
+<span class="nc" id="L590">                contentResolver.observeQuery(</span>
+<span class="nc" id="L591">                    uri = BaseTransactionProvider.defaultBudgetAllocationUri(</span>
+<span class="nc" id="L592">                        accountSegment,</span>
+<span class="nc" id="L593">                        account.grouping</span>
+                    )
+<span class="nc" id="L595">                ).map { it }</span>
+<span class="nc" id="L596">                    .mapToListWithExtra {</span>
+<span class="nc" id="L597">                        BudgetRow(</span>
+<span class="nc" id="L598">                            headerId = Grouping.groupId(</span>
+<span class="nc" id="L599">                                it.getInt(KEY_YEAR),</span>
+<span class="nc" id="L600">                                it.getInt(KEY_SECOND_GROUP)</span>
+                            ),
+<span class="nc" id="L602">                            amount = it.getLongOrNull(KEY_BUDGET),</span>
+<span class="nc" id="L603">                            rollOverPrevious = it.getLongOrNull(KEY_BUDGET_ROLLOVER_PREVIOUS),</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">                            oneTime = it.getInt(KEY_ONE_TIME) == 1</span>
+<span class="nc" id="L605">                        )</span>
+<span class="nc" id="L606">                    }.map {</span>
+<span class="nc" id="L607">                        BudgetData(it.first.getLong(KEY_BUDGETID), it.second)</span>
+<span class="nc" id="L608">                    }</span>
+<span class="nc" id="L609">            } ?: emptyFlow()</span>
+<span class="nc" id="L610">        } else emptyFlow()</span>
+
+<span class="nc" id="L612">    fun sumInfo(account: PageAccount) = sums.getValue(account)</span>
+
+    fun persistGrouping(grouping: Grouping) {
+<span class="nc" id="L615">        viewModelScope.launch {</span>
+<span class="nc" id="L616">            performPersistGrouping(grouping)</span>
+<span class="nc" id="L617">        }</span>
+<span class="nc" id="L618">    }</span>
+
+    suspend fun performPersistGrouping(grouping: Grouping) {
+<span class="nc" id="L621">        withContext(coroutineContext()) {</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">            if (selectedAccountId.value == DataBaseAccount.HOME_AGGREGATE_ID) {</span>
+<span class="nc" id="L623">                prefHandler.putString(GROUPING_AGGREGATE, grouping.name)</span>
+<span class="nc" id="L624">                triggerAccountListRefresh()</span>
+            } else {
+<span class="nc" id="L626">                repository.setGrouping(selectedAccountId.value, grouping)</span>
+            }
+<span class="nc" id="L628">        }</span>
+<span class="nc" id="L629">    }</span>
+
+    fun persistSort(transactionSort: TransactionSort) {
+<span class="nc" id="L632">        viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L633">            performPersistSort(transactionSort)</span>
+<span class="nc" id="L634">        }</span>
+<span class="nc" id="L635">    }</span>
+
+    suspend fun performPersistSort(transactionSort: TransactionSort) {
+<span class="nc" id="L638">        withContext(coroutineContext()) {</span>
+<span class="nc bnc" id="L639" title="All 2 branches missed.">            if (selectedAccountId.value == DataBaseAccount.HOME_AGGREGATE_ID) {</span>
+<span class="nc" id="L640">                persistSortDirectionHomeAggregate(transactionSort)</span>
+            } else {
+<span class="nc" id="L642">                repository.setSort(selectedAccountId.value, transactionSort)</span>
+            }
+<span class="nc" id="L644">        }</span>
+<span class="nc" id="L645">    }</span>
+
+    private fun persistSortDirectionHomeAggregate(transactionSort: TransactionSort) {
+<span class="nc" id="L648">        prefHandler.putString(SORT_BY_AGGREGATE, transactionSort.column)</span>
+<span class="nc" id="L649">        prefHandler.putString(SORT_DIRECTION_AGGREGATE, transactionSort.sortDirection.name)</span>
+<span class="nc" id="L650">        triggerAccountListRefresh()</span>
+<span class="nc" id="L651">    }</span>
+
+    fun triggerAccountListRefresh() {
+<span class="nc" id="L654">        contentResolver.triggerAccountListRefresh()</span>
+<span class="nc" id="L655">    }</span>
+
+<span class="nc bnc" id="L657" title="All 3 branches missed.">    fun linkTransfer(itemIds: LongArray) = liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">        emit(runCatching {</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">            check(</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">                contentResolver.update(</span>
+<span class="nc" id="L661">                    TRANSACTIONS_URI.buildUpon()</span>
+<span class="nc" id="L662">                        .appendPath(URI_SEGMENT_LINK_TRANSFER)</span>
+<span class="nc" id="L663">                        .appendPath(repository.getUuidForTransaction(itemIds[0]))</span>
+<span class="nc" id="L664">                        .build(),</span>
+<span class="nc" id="L665">                    ContentValues(1).apply {</span>
+<span class="nc" id="L666">                        put(KEY_UUID, repository.getUuidForTransaction(itemIds[1]))</span>
+<span class="nc" id="L667">                    }, null, null</span>
+<span class="nc" id="L668">                ) == 2</span>
+            )
+<span class="nc" id="L670">        })</span>
+<span class="nc" id="L671">    }</span>
+
+<span class="nc bnc" id="L673" title="All 3 branches missed.">    fun unlinkTransfer(itemId: Long) = liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L674" title="All 2 branches missed.">        emit(runCatching {</span>
+<span class="nc" id="L675">            check(</span>
+<span class="nc bnc" id="L676" title="All 4 branches missed.">                contentResolver.update(</span>
+<span class="nc" id="L677">                    ContentUris.appendId(</span>
+<span class="nc" id="L678">                        TRANSACTIONS_URI.buildUpon().appendPath(URI_SEGMENT_UNLINK_TRANSFER),</span>
+<span class="nc" id="L679">                        itemId</span>
+<span class="nc" id="L680">                    ).build(), null, null, null</span>
+<span class="nc" id="L681">                ) == 2</span>
+            )
+<span class="nc" id="L683">        })</span>
+<span class="nc" id="L684">    }</span>
+
+    fun transformToTransfer(transactionId: Long, transferAccount: Long) =
+<span class="nc bnc" id="L687" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">            emit(runCatching {</span>
+<span class="nc" id="L689">                check(</span>
+<span class="nc bnc" id="L690" title="All 4 branches missed.">                    contentResolver.insert(</span>
+<span class="nc" id="L691">                        ContentUris.appendId(</span>
+<span class="nc" id="L692">                            ContentUris.appendId(TRANSACTIONS_URI.buildUpon(), transactionId)</span>
+<span class="nc" id="L693">                                .appendPath(URI_SEGMENT_TRANSFORM_TO_TRANSFER), transferAccount</span>
+                        )
+<span class="nc" id="L695">                            .build(), null</span>
+                    ) != null
+                )
+<span class="nc" id="L698">            })</span>
+<span class="nc" id="L699">        }</span>
+
+    fun deleteAccounts(accountIds: LongArray): LiveData&lt;Result&lt;Unit&gt;&gt; =
+<span class="nc bnc" id="L702" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">            emit(deleteAccountsInternal(accountIds))</span>
+<span class="nc" id="L704">        }</span>
+
+    fun setSealed(accountId: Long, isSealed: Boolean) {
+<span class="nc" id="L707">        setAccountProperty(accountId, KEY_SEALED, isSealed)</span>
+<span class="nc" id="L708">    }</span>
+
+    fun setExcludeFromTotals(accountId: Long, excludeFromTotals: Boolean) {
+<span class="nc" id="L711">        setAccountProperty(accountId, KEY_EXCLUDE_FROM_TOTALS, excludeFromTotals)</span>
+<span class="nc" id="L712">    }</span>
+
+    fun setDynamicExchangeRate(accountId: Long, dynamicExchangeRate: Boolean) {
+<span class="nc" id="L715">        setAccountProperty(accountId, KEY_DYNAMIC, dynamicExchangeRate)</span>
+<span class="nc" id="L716">    }</span>
+
+    fun setFlag(accountId: Long, flagId: Long) {
+<span class="nc" id="L719">        setAccountProperty(accountId, KEY_FLAG, flagId)</span>
+<span class="nc" id="L720">    }</span>
+
+    private fun setAccountProperty(accountId: Long, column: String, value: Any?) {
+<span class="nc bnc" id="L723" title="All 2 branches missed.">        if (DataBaseAccount.isAggregate(accountId)) {</span>
+<span class="nc" id="L724">            CrashHandler.report(IllegalStateException(&quot;setBooleanProperty for $column called on aggregate account&quot;))</span>
+        } else {
+<span class="nc" id="L726">            viewModelScope.launch(context = coroutineContext()) {</span>
+<span class="nc" id="L727">                repository.setAccountProperty(accountId, column, value)</span>
+<span class="nc" id="L728">            }</span>
+        }
+<span class="nc" id="L730">    }</span>
+
+    fun balanceAccount(accountId: Long, reset: Boolean): LiveData&lt;Result&lt;Unit&gt;&gt; =
+<span class="nc bnc" id="L733" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">            emit(runCatching {</span>
+<span class="nc" id="L735">                val args = ContentValues()</span>
+<span class="nc" id="L736">                args.put(KEY_CR_STATUS, CrStatus.RECONCILED.name)</span>
+<span class="nc" id="L737">                contentResolver.update(</span>
+<span class="nc" id="L738">                    TRANSACTIONS_URI,</span>
+<span class="nc" id="L739">                    args,</span>
+<span class="nc" id="L740">                    &quot;$KEY_ACCOUNTID = ? AND $KEY_PARENTID is null AND $KEY_CR_STATUS = '${CrStatus.CLEARED.name}'&quot;,</span>
+<span class="nc" id="L741">                    arrayOf(accountId.toString())</span>
+                )
+<span class="nc bnc" id="L743" title="All 2 branches missed.">                if (reset) {</span>
+<span class="nc" id="L744">                    reset(</span>
+<span class="nc" id="L745">                        account = repository.loadAccount(accountId)!!,</span>
+<span class="nc" id="L746">                        filter = CrStatusCriterion(listOf(CrStatus.RECONCILED)),</span>
+<span class="nc" id="L747">                        handleDelete = EXPORT_HANDLE_DELETED_UPDATE_BALANCE,</span>
+<span class="nc" id="L748">                        helperComment = null</span>
+                    )
+                }
+                Unit
+<span class="nc" id="L752">            })</span>
+<span class="nc" id="L753">        }</span>
+
+    fun undeleteTransactions(itemIds: List&lt;Long&gt;): LiveData&lt;Int&gt; =
+<span class="nc bnc" id="L756" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L757" title="All 2 branches missed.">            emit(itemIds.count {</span>
+<span class="nc" id="L758">                try {</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">                    repository.undeleteTransaction(it) &gt; 0</span>
+<span class="nc" id="L760">                } catch (e: SQLiteConstraintException) {</span>
+<span class="nc" id="L761">                    CrashHandler.reportWithDbSchema(contentResolver, e)</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">                    false</span>
+<span class="nc" id="L763">                }</span>
+            })
+<span class="nc" id="L765">        }</span>
+
+<span class="nc" id="L767">    val cloneAndRemapProgress: LiveData&lt;Pair&lt;Int, Int&gt;&gt;</span>
+<span class="nc" id="L768">        field = MutableLiveData&lt;Pair&lt;Int, Int&gt;&gt;()</span>
+
+    private fun RepositoryTransaction.clone(): RepositoryTransaction {
+        fun Transaction.clone(uuid: String) =
+<span class="nc" id="L772">            copy(id = 0, uuid = uuid, crStatus = CrStatus.UNRECONCILED)</span>
+
+<span class="nc" id="L774">        val uuid = generateUuid()</span>
+<span class="nc" id="L775">        return copy(</span>
+<span class="nc" id="L776">            data = data.clone(uuid),</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">            transferPeer = transferPeer?.clone(uuid),</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">            splitParts = splitParts?.map {</span>
+<span class="nc" id="L779">                it.clone()</span>
+            }
+        )
+    }
+
+    fun cloneAndRemap(transactionIds: List&lt;Long&gt;, column: String, value: Long) {
+<span class="nc" id="L785">        viewModelScope.launch(coroutineDispatcher) {</span>
+<span class="nc" id="L786">            var successCount = 0</span>
+<span class="nc" id="L787">            var failureCount = 0</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">            for (id in transactionIds) {</span>
+<span class="nc" id="L789">                val transaction = repository.loadTransaction(id).clone()</span>
+<span class="nc" id="L790">                val clone = repository.createTransaction(transaction)</span>
+<span class="nc" id="L791">                val update = remapDo(listOf(clone.id), column, value)</span>
+
+<span class="nc bnc" id="L793" title="All 2 branches missed.">                if (update &gt; 0) {</span>
+<span class="nc" id="L794">                    repository.saveTagsForTransaction(</span>
+<span class="nc" id="L795">                        repository.loadTagsForTransaction(id).map { it.id }.toLongArray(),</span>
+<span class="nc" id="L796">                        clone.id</span>
+                    )
+<span class="nc" id="L798">                    repository.addAttachments(clone.id, repository.loadAttachments(id))</span>
+<span class="nc" id="L799">                    successCount++</span>
+                } else {
+<span class="nc" id="L801">                    failureCount++</span>
+                }
+<span class="nc" id="L803">                cloneAndRemapProgress.postValue(Pair(successCount, failureCount))</span>
+            }
+<span class="nc" id="L805">        }</span>
+<span class="nc" id="L806">    }</span>
+
+    fun remap(transactionIds: List&lt;Long&gt;, column: String, value: Long): LiveData&lt;Int&gt; =
+<span class="nc bnc" id="L809" title="All 3 branches missed.">        liveData(context = coroutineDispatcher) {</span>
+<span class="nc bnc" id="L810" title="All 2 branches missed.">            emit(run {</span>
+<span class="nc" id="L811">                remapDo(transactionIds, column, value)</span>
+            })
+<span class="nc" id="L813">        }</span>
+
+    private fun remapDo(transactionIds: List&lt;Long&gt;, column: String, value: Long): Int {
+<span class="nc" id="L816">        val list = transactionIds.joinToString()</span>
+<span class="nc" id="L817">        var selection = &quot;$KEY_ROWID IN ($list)&quot;</span>
+<span class="nc bnc" id="L818" title="All 2 branches missed.">        if (column == KEY_ACCOUNTID) {</span>
+<span class="nc" id="L819">            selection += &quot; OR $KEY_PARENTID IN ($list)&quot;</span>
+        }
+<span class="nc bnc" id="L821" title="All 4 branches missed.">        if (column == KEY_CATID || column == KEY_DATE) {</span>
+<span class="nc" id="L822">            selection += &quot; OR $KEY_TRANSFER_PEER IN ($list)&quot;</span>
+        }
+<span class="nc" id="L824">        return contentResolver.update(</span>
+<span class="nc" id="L825">            TRANSACTIONS_URI,</span>
+<span class="nc bnc" id="L826" title="All 4 branches missed.">            ContentValues().apply { put(column, value.takeIf { it != NULL_ITEM_ID }) },</span>
+<span class="nc" id="L827">            selection,</span>
+<span class="nc" id="L828">            null</span>
+        )
+    }
+
+    fun tag(transactionIds: List&lt;Long&gt;, tagList: ArrayList&lt;Tag&gt;, replace: Boolean) {
+<span class="nc" id="L833">        val tagIds = tagList.map { tag -&gt; tag.id }</span>
+<span class="nc" id="L834">        viewModelScope.launch(coroutineDispatcher) {</span>
+<span class="nc bnc" id="L835" title="All 2 branches missed.">            for (id in transactionIds) {</span>
+<span class="nc" id="L836">                contentResolver.call(DUAL_URI, METHOD_SAVE_TRANSACTION_TAGS, null, Bundle().apply {</span>
+<span class="nc" id="L837">                    putBoolean(KEY_REPLACE, replace)</span>
+<span class="nc" id="L838">                    putLong(KEY_TRANSACTIONID, id)</span>
+<span class="nc" id="L839">                    putLongArray(KEY_TAGLIST, tagIds.toLongArray())</span>
+<span class="nc" id="L840">                })</span>
+            }
+<span class="nc" id="L842">        }</span>
+<span class="nc" id="L843">    }</span>
+
+    fun toggleCrStatus(id: Long) {
+<span class="nc bnc" id="L846" title="All 2 branches missed.">        selectionState.unselect { it.id == id }</span>
+<span class="nc" id="L847">        viewModelScope.launch(coroutineDispatcher) {</span>
+<span class="nc" id="L848">            contentResolver.update(</span>
+<span class="nc" id="L849">                TRANSACTIONS_URI</span>
+<span class="nc" id="L850">                    .buildUpon()</span>
+<span class="nc" id="L851">                    .appendPath(id.toString())</span>
+<span class="nc" id="L852">                    .appendPath(URI_SEGMENT_TOGGLE_CRSTATUS)</span>
+<span class="nc" id="L853">                    .build(),</span>
+<span class="nc" id="L854">                null, null, null</span>
+            )
+<span class="nc" id="L856">        }</span>
+<span class="nc" id="L857">    }</span>
+
+<span class="nc bnc" id="L859" title="All 3 branches missed.">    fun split(ids: LongArray) = liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">        emit(repository.groupToSplitTransaction(ids))</span>
+<span class="nc" id="L861">    }</span>
+
+<span class="nc bnc" id="L863" title="All 4 branches missed.">    fun revokeSplit(id: Long) = liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L864">        val values = ContentValues(1).apply {</span>
+<span class="nc" id="L865">            put(KEY_ROWID, id)</span>
+<span class="nc" id="L866">        }</span>
+<span class="nc bnc" id="L867" title="All 2 branches missed.">        if (contentResolver.update(</span>
+<span class="nc" id="L868">                UNSPLIT_URI,</span>
+<span class="nc" id="L869">                values,</span>
+<span class="nc" id="L870">                null,</span>
+<span class="nc" id="L871">                null</span>
+<span class="nc" id="L872">            ) &gt; 0</span>
+        ) {
+<span class="nc bnc" id="L874" title="All 2 branches missed.">            emit(ResultUnit)</span>
+        } else {
+<span class="nc bnc" id="L876" title="All 2 branches missed.">            emit(Result.failure(Exception()))</span>
+        }
+<span class="nc" id="L878">    }</span>
+
+    fun canLinkSelection(): Boolean {
+<span class="nc bnc" id="L881" title="All 4 branches missed.">        check(selectionState.value.size == 2)</span>
+<span class="nc" id="L882">        val transaction1 = selectionState.value[0]</span>
+<span class="nc" id="L883">        val transaction2 = selectionState.value[1]</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">        return transaction1.accountId != transaction2.accountId &amp;&amp; (</span>
+<span class="nc bnc" id="L885" title="All 2 branches missed.">                transaction1.amount.amountMinor == -transaction2.amount.amountMinor ||</span>
+<span class="nc bnc" id="L886" title="All 2 branches missed.">                        transaction1.amount.currencyUnit.code != transaction2.amount.currencyUnit.code</span>
+                )
+    }
+
+    override fun onCleared() {
+<span class="nc" id="L891">        pagerCache.values.forEach { it.factory.clear() }</span>
+<span class="nc" id="L892">    }</span>
+
+    fun unarchive(id: Long) {
+<span class="nc" id="L895">        viewModelScope.launch(coroutineContext()) {</span>
+<span class="nc" id="L896">            repository.unarchive(id)</span>
+<span class="nc" id="L897">        }</span>
+<span class="nc" id="L898">    }</span>
+
+    suspend fun resolveExtraInfo(transaction: Transaction2): ResolvedExtraInfo? {
+<span class="nc" id="L901">        return withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L902" title="All 2 branches missed.">            if (transaction.isTrade) {</span>
+<span class="nc bnc" id="L903" title="All 2 branches missed.">                repository.loadTrade(transaction.id)?.let { ResolvedExtraInfo.Trade(it) }</span>
+<span class="nc bnc" id="L904" title="All 2 branches missed.">            } else if (transaction.isSplit) {</span>
+<span class="nc" id="L905">                repository.calculateSplitSummary(transaction.id)</span>
+<span class="nc bnc" id="L906" title="All 2 branches missed.">                    ?.let { ResolvedExtraInfo.Split(it) }</span>
+<span class="nc" id="L907">            } else null</span>
+        }
+    }
+
+    fun print(account: PageAccount, whereFilter: Criterion?) {
+<span class="nc" id="L912">        viewModelScope.launch(coroutineContext()) {</span>
+<span class="nc" id="L913">            _pdfResult.update {</span>
+<span class="nc bnc" id="L914" title="All 2 branches missed.">                AppDirHelper.checkAppDir(getApplication()).mapCatching {</span>
+<span class="nc" id="L915">                    val colorSource = enumValueOrDefault(</span>
+<span class="nc" id="L916">                        dataStore.data.first()[prefHandler.getStringPreferencesKey(PrefKey.TRANSACTION_AMOUNT_COLOR_SOURCE)],</span>
+<span class="nc" id="L917">                        ColorSource.TYPE</span>
+                    )
+<span class="nc" id="L919">                    PdfPrinter.print(localizedContext, account, it, whereFilter, colorSource)</span>
+<span class="nc" id="L920">                }</span>
+            }
+<span class="nc" id="L922">        }</span>
+<span class="nc" id="L923">    }</span>
+
+    fun printBalanceSheet() {
+<span class="nc" id="L926">        viewModelScope.launch(coroutineContext()) {</span>
+<span class="nc" id="L927">            _pdfResult.update {</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">                AppDirHelper.checkAppDir(getApplication()).mapCatching {</span>
+<span class="nc" id="L929">                    val (date, accounts) = accountsForBalanceSheet.first()</span>
+<span class="nc" id="L930">                    BalanceSheetPdfGenerator(localizedContext).generatePdf(</span>
+<span class="nc" id="L931">                        destDir = it,</span>
+<span class="nc" id="L932">                        data = accounts.partitionByAccountType(),</span>
+<span class="nc" id="L933">                        date = date,</span>
+<span class="nc" id="L934">                        debts = debtSum.first()</span>
+<span class="nc" id="L935">                    )</span>
+<span class="nc" id="L936">                }</span>
+            }
+<span class="nc" id="L938">        }</span>
+<span class="nc" id="L939">    }</span>
+
+<span class="nc" id="L941">    val banks: StateFlow&lt;List&lt;Bank&gt;&gt; by lazy {</span>
+<span class="nc" id="L942">        repository.loadBanks().stateIn(</span>
+<span class="nc" id="L943">            viewModelScope,</span>
+<span class="nc" id="L944">            SharingStarted.Lazily,</span>
+<span class="nc" id="L945">            emptyList()</span>
+<span class="nc" id="L946">        )</span>
+    }
+
+<span class="nc" id="L949">    suspend fun checkSealedStatus(itemIds: List&lt;Long&gt;, withTransfer: Boolean) =</span>
+<span class="nc bnc" id="L950" title="All 4 branches missed.">        repository.checkSealedStatus(itemIds, withTransfer)</span>
+
+<span class="nc bnc" id="L952" title="All 2 branches missed.">    suspend fun checkSealedStatus(accountId: Long) = repository.checkSealedStatus(accountId)</span>
+
+<span class="nc" id="L954">    suspend fun checkTransferAccountOfSplitParts(itemIds: List&lt;Long&gt;) =</span>
+<span class="nc bnc" id="L955" title="All 2 branches missed.">        repository.checkTransferAccountOfSplitParts(itemIds)</span>
+
+    companion object {
+<span class="nc" id="L958">        fun prefNameForCriteriaLegacy(accountId: Long) = &quot;filter_%s_${accountId}&quot;</span>
+<span class="nc" id="L959">        fun prefNameForCriteria(accountId: Long) = &quot;filter_${accountId}&quot;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

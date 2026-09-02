@@ -1,0 +1,881 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalPlaylistFragment.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE newpipe</a> &gt; <a href="index.source.html" class="el_package">org.schabi.newpipe.local.playlist</a> &gt; <span class="el_source">LocalPlaylistFragment.java</span></div><h1>LocalPlaylistFragment.java</h1><pre class="source lang-java linenums">package org.schabi.newpipe.local.playlist;
+
+import static org.schabi.newpipe.error.ErrorUtil.showUiErrorSnackbar;
+import static org.schabi.newpipe.ktx.ViewUtils.animate;
+import static org.schabi.newpipe.util.ThemeHelper.shouldUseGridLayout;
+
+import android.content.Context;
+import android.content.DialogInterface;
+import android.os.Bundle;
+import android.os.Parcelable;
+import android.text.InputType;
+import android.text.TextUtils;
+import android.util.Log;
+import android.util.Pair;
+import android.view.LayoutInflater;
+import android.view.Menu;
+import android.view.MenuInflater;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
+import androidx.preference.PreferenceManager;
+import androidx.recyclerview.widget.ItemTouchHelper;
+import androidx.recyclerview.widget.RecyclerView;
+import androidx.viewbinding.ViewBinding;
+
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import org.schabi.newpipe.NewPipeDatabase;
+import org.schabi.newpipe.R;
+import org.schabi.newpipe.database.LocalItem;
+import org.schabi.newpipe.database.history.model.StreamHistoryEntry;
+import org.schabi.newpipe.database.playlist.PlaylistStreamEntry;
+import org.schabi.newpipe.database.playlist.model.PlaylistEntity;
+import org.schabi.newpipe.database.stream.model.StreamEntity;
+import org.schabi.newpipe.databinding.DialogEditTextBinding;
+import org.schabi.newpipe.databinding.LocalPlaylistHeaderBinding;
+import org.schabi.newpipe.databinding.PlaylistControlBinding;
+import org.schabi.newpipe.error.ErrorInfo;
+import org.schabi.newpipe.error.UserAction;
+import org.schabi.newpipe.extractor.stream.StreamInfoItem;
+import org.schabi.newpipe.info_list.dialog.InfoItemDialog;
+import org.schabi.newpipe.info_list.dialog.StreamDialogDefaultEntry;
+import org.schabi.newpipe.local.BaseLocalListFragment;
+import org.schabi.newpipe.local.history.HistoryRecordManager;
+import org.schabi.newpipe.player.PlayerType;
+import org.schabi.newpipe.player.playqueue.PlayQueue;
+import org.schabi.newpipe.player.playqueue.SinglePlayQueue;
+import org.schabi.newpipe.util.Localization;
+import org.schabi.newpipe.util.NavigationHelper;
+import org.schabi.newpipe.util.OnClickGesture;
+import org.schabi.newpipe.util.external_communication.ShareUtils;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+
+import icepick.State;
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
+import io.reactivex.rxjava3.core.Single;
+import io.reactivex.rxjava3.disposables.CompositeDisposable;
+import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+import io.reactivex.rxjava3.subjects.PublishSubject;
+
+<span class="nc" id="L73">public class LocalPlaylistFragment extends BaseLocalListFragment&lt;List&lt;PlaylistStreamEntry&gt;, Void&gt; {</span>
+    // Save the list 10 seconds after the last change occurred
+    private static final long SAVE_DEBOUNCE_MILLIS = 10000;
+    private static final int MINIMUM_INITIAL_DRAG_VELOCITY = 12;
+    @State
+    protected Long playlistId;
+    @State
+    protected String name;
+    @State
+    Parcelable itemsListState;
+
+    private LocalPlaylistHeaderBinding headerBinding;
+    private PlaylistControlBinding playlistControlBinding;
+
+    private ItemTouchHelper itemTouchHelper;
+
+    private LocalPlaylistManager playlistManager;
+    private Subscription databaseSubscription;
+
+    private PublishSubject&lt;Long&gt; debouncedSaveSignal;
+    private CompositeDisposable disposables;
+
+    /* Has the playlist been fully loaded from db */
+    private AtomicBoolean isLoadingComplete;
+    /* Has the playlist been modified (e.g. items reordered or deleted) */
+    private AtomicBoolean isModified;
+    /* Flag to prevent simultaneous rewrites of the playlist */
+<span class="nc" id="L100">    private boolean isRewritingPlaylist = false;</span>
+
+    public static LocalPlaylistFragment getInstance(final long playlistId, final String name) {
+<span class="nc" id="L103">        final LocalPlaylistFragment instance = new LocalPlaylistFragment();</span>
+<span class="nc" id="L104">        instance.setInitialData(playlistId, name);</span>
+<span class="nc" id="L105">        return instance;</span>
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Fragment LifeCycle - Creation
+    ///////////////////////////////////////////////////////////////////////////
+
+    @Override
+    public void onCreate(final Bundle savedInstanceState) {
+<span class="nc" id="L114">        super.onCreate(savedInstanceState);</span>
+<span class="nc" id="L115">        playlistManager = new LocalPlaylistManager(NewPipeDatabase.getInstance(requireContext()));</span>
+<span class="nc" id="L116">        debouncedSaveSignal = PublishSubject.create();</span>
+
+<span class="nc" id="L118">        disposables = new CompositeDisposable();</span>
+
+<span class="nc" id="L120">        isLoadingComplete = new AtomicBoolean();</span>
+<span class="nc" id="L121">        isModified = new AtomicBoolean();</span>
+<span class="nc" id="L122">    }</span>
+
+    @Override
+    public View onCreateView(@NonNull final LayoutInflater inflater,
+                             @Nullable final ViewGroup container,
+                             @Nullable final Bundle savedInstanceState) {
+<span class="nc" id="L128">        return inflater.inflate(R.layout.fragment_playlist, container, false);</span>
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Fragment Lifecycle - Views
+    ///////////////////////////////////////////////////////////////////////////
+
+    @Override
+    public void setTitle(final String title) {
+<span class="nc" id="L137">        super.setTitle(title);</span>
+
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        if (headerBinding != null) {</span>
+<span class="nc" id="L140">            headerBinding.playlistTitleView.setText(title);</span>
+        }
+<span class="nc" id="L142">    }</span>
+
+    @Override
+    protected void initViews(final View rootView, final Bundle savedInstanceState) {
+<span class="nc" id="L146">        super.initViews(rootView, savedInstanceState);</span>
+<span class="nc" id="L147">        setTitle(name);</span>
+<span class="nc" id="L148">    }</span>
+
+    @Override
+    protected ViewBinding getListHeader() {
+<span class="nc" id="L152">        headerBinding = LocalPlaylistHeaderBinding.inflate(activity.getLayoutInflater(), itemsList,</span>
+                false);
+<span class="nc" id="L154">        playlistControlBinding = headerBinding.playlistControl;</span>
+
+<span class="nc" id="L156">        headerBinding.playlistTitleView.setSelected(true);</span>
+
+<span class="nc" id="L158">        return headerBinding;</span>
+    }
+
+    @Override
+    protected void initListeners() {
+<span class="nc" id="L163">        super.initListeners();</span>
+
+<span class="nc" id="L165">        headerBinding.playlistTitleView.setOnClickListener(view -&gt; createRenameDialog());</span>
+
+<span class="nc" id="L167">        itemTouchHelper = new ItemTouchHelper(getItemTouchCallback());</span>
+<span class="nc" id="L168">        itemTouchHelper.attachToRecyclerView(itemsList);</span>
+
+<span class="nc" id="L170">        itemListAdapter.setSelectedListener(new OnClickGesture&lt;&gt;() {</span>
+            @Override
+            public void selected(final LocalItem selectedItem) {
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                if (selectedItem instanceof PlaylistStreamEntry) {</span>
+<span class="nc" id="L174">                    final StreamEntity item =</span>
+<span class="nc" id="L175">                            ((PlaylistStreamEntry) selectedItem).getStreamEntity();</span>
+<span class="nc" id="L176">                    NavigationHelper.openVideoDetailFragment(requireContext(), getFM(),</span>
+<span class="nc" id="L177">                            item.getServiceId(), item.getUrl(), item.getTitle(), null, false);</span>
+                }
+<span class="nc" id="L179">            }</span>
+
+            @Override
+            public void held(final LocalItem selectedItem) {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                if (selectedItem instanceof PlaylistStreamEntry) {</span>
+<span class="nc" id="L184">                    showInfoItemDialog((PlaylistStreamEntry) selectedItem);</span>
+                }
+<span class="nc" id="L186">            }</span>
+
+            @Override
+            public void drag(final LocalItem selectedItem,
+                             final RecyclerView.ViewHolder viewHolder) {
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                if (itemTouchHelper != null) {</span>
+<span class="nc" id="L192">                    itemTouchHelper.startDrag(viewHolder);</span>
+                }
+<span class="nc" id="L194">            }</span>
+        });
+<span class="nc" id="L196">    }</span>
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Fragment Lifecycle - Loading
+    ///////////////////////////////////////////////////////////////////////////
+
+    @Override
+    public void showLoading() {
+<span class="nc" id="L204">        super.showLoading();</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        if (headerBinding != null) {</span>
+<span class="nc" id="L206">            animate(headerBinding.getRoot(), false, 200);</span>
+<span class="nc" id="L207">            animate(playlistControlBinding.getRoot(), false, 200);</span>
+        }
+<span class="nc" id="L209">    }</span>
+
+    @Override
+    public void hideLoading() {
+<span class="nc" id="L213">        super.hideLoading();</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">        if (headerBinding != null) {</span>
+<span class="nc" id="L215">            animate(headerBinding.getRoot(), true, 200);</span>
+<span class="nc" id="L216">            animate(playlistControlBinding.getRoot(), true, 200);</span>
+        }
+<span class="nc" id="L218">    }</span>
+
+    @Override
+    public void startLoading(final boolean forceLoad) {
+<span class="nc" id="L222">        super.startLoading(forceLoad);</span>
+
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (disposables != null) {</span>
+<span class="nc" id="L225">            disposables.clear();</span>
+        }
+<span class="nc" id="L227">        disposables.add(getDebouncedSaver());</span>
+
+<span class="nc" id="L229">        isLoadingComplete.set(false);</span>
+<span class="nc" id="L230">        isModified.set(false);</span>
+
+<span class="nc" id="L232">        playlistManager.getPlaylistStreams(playlistId)</span>
+<span class="nc" id="L233">                .onBackpressureLatest()</span>
+<span class="nc" id="L234">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L235">                .subscribe(getPlaylistObserver());</span>
+<span class="nc" id="L236">    }</span>
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Fragment Lifecycle - Destruction
+    ///////////////////////////////////////////////////////////////////////////
+
+    @Override
+    public void onPause() {
+<span class="nc" id="L244">        super.onPause();</span>
+<span class="nc" id="L245">        itemsListState = itemsList.getLayoutManager().onSaveInstanceState();</span>
+
+        // Save on exit
+<span class="nc" id="L248">        saveImmediate();</span>
+<span class="nc" id="L249">    }</span>
+
+    @Override
+    public void onCreateOptionsMenu(@NonNull final Menu menu,
+                                    @NonNull final MenuInflater inflater) {
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        if (DEBUG) {</span>
+<span class="nc" id="L255">            Log.d(TAG, &quot;onCreateOptionsMenu() called with: &quot;</span>
+                    + &quot;menu = [&quot; + menu + &quot;], inflater = [&quot; + inflater + &quot;]&quot;);
+        }
+<span class="nc" id="L258">        super.onCreateOptionsMenu(menu, inflater);</span>
+<span class="nc" id="L259">        inflater.inflate(R.menu.menu_local_playlist, menu);</span>
+<span class="nc" id="L260">    }</span>
+
+    @Override
+    public void onDestroyView() {
+<span class="nc" id="L264">        super.onDestroyView();</span>
+
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (itemListAdapter != null) {</span>
+<span class="nc" id="L267">            itemListAdapter.unsetSelectedListener();</span>
+        }
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (playlistControlBinding != null) {</span>
+<span class="nc" id="L270">            playlistControlBinding.playlistCtrlPlayBgButton.setOnClickListener(null);</span>
+<span class="nc" id="L271">            playlistControlBinding.playlistCtrlPlayAllButton.setOnClickListener(null);</span>
+<span class="nc" id="L272">            playlistControlBinding.playlistCtrlPlayPopupButton.setOnClickListener(null);</span>
+
+<span class="nc" id="L274">            headerBinding = null;</span>
+<span class="nc" id="L275">            playlistControlBinding = null;</span>
+        }
+
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        if (databaseSubscription != null) {</span>
+<span class="nc" id="L279">            databaseSubscription.cancel();</span>
+        }
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        if (disposables != null) {</span>
+<span class="nc" id="L282">            disposables.clear();</span>
+        }
+
+<span class="nc" id="L285">        databaseSubscription = null;</span>
+<span class="nc" id="L286">        itemTouchHelper = null;</span>
+<span class="nc" id="L287">    }</span>
+
+    @Override
+    public void onDestroy() {
+<span class="nc" id="L291">        super.onDestroy();</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        if (debouncedSaveSignal != null) {</span>
+<span class="nc" id="L293">            debouncedSaveSignal.onComplete();</span>
+        }
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        if (disposables != null) {</span>
+<span class="nc" id="L296">            disposables.dispose();</span>
+        }
+
+<span class="nc" id="L299">        debouncedSaveSignal = null;</span>
+<span class="nc" id="L300">        playlistManager = null;</span>
+<span class="nc" id="L301">        disposables = null;</span>
+
+<span class="nc" id="L303">        isLoadingComplete = null;</span>
+<span class="nc" id="L304">        isModified = null;</span>
+<span class="nc" id="L305">    }</span>
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Playlist Stream Loader
+    ///////////////////////////////////////////////////////////////////////////
+
+    private Subscriber&lt;List&lt;PlaylistStreamEntry&gt;&gt; getPlaylistObserver() {
+<span class="nc" id="L312">        return new Subscriber&lt;&gt;() {</span>
+            @Override
+            public void onSubscribe(final Subscription s) {
+<span class="nc" id="L315">                showLoading();</span>
+<span class="nc" id="L316">                isLoadingComplete.set(false);</span>
+
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                if (databaseSubscription != null) {</span>
+<span class="nc" id="L319">                    databaseSubscription.cancel();</span>
+                }
+<span class="nc" id="L321">                databaseSubscription = s;</span>
+<span class="nc" id="L322">                databaseSubscription.request(1);</span>
+<span class="nc" id="L323">            }</span>
+
+            @Override
+            public void onNext(final List&lt;PlaylistStreamEntry&gt; streams) {
+                // Skip handling the result after it has been modified
+<span class="nc bnc" id="L328" title="All 4 branches missed.">                if (isModified == null || !isModified.get()) {</span>
+<span class="nc" id="L329">                    handleResult(streams);</span>
+<span class="nc" id="L330">                    isLoadingComplete.set(true);</span>
+                }
+
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                if (databaseSubscription != null) {</span>
+<span class="nc" id="L334">                    databaseSubscription.request(1);</span>
+                }
+<span class="nc" id="L336">            }</span>
+
+            @Override
+            public void onError(final Throwable exception) {
+<span class="nc" id="L340">                showError(new ErrorInfo(exception, UserAction.REQUESTED_BOOKMARK,</span>
+                        &quot;Loading local playlist&quot;));
+<span class="nc" id="L342">            }</span>
+
+            @Override
+            public void onComplete() {
+<span class="nc" id="L346">            }</span>
+        };
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(final MenuItem item) {
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (item.getItemId() == R.id.menu_item_share_playlist) {</span>
+<span class="nc" id="L353">            sharePlaylist();</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        } else if (item.getItemId() == R.id.menu_item_rename_playlist) {</span>
+<span class="nc" id="L355">            createRenameDialog();</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        } else if (item.getItemId() == R.id.menu_item_remove_watched) {</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">            if (!isRewritingPlaylist) {</span>
+<span class="nc" id="L358">                new AlertDialog.Builder(requireContext())</span>
+<span class="nc" id="L359">                        .setMessage(R.string.remove_watched_popup_warning)</span>
+<span class="nc" id="L360">                        .setTitle(R.string.remove_watched_popup_title)</span>
+<span class="nc" id="L361">                        .setPositiveButton(R.string.ok,</span>
+<span class="nc" id="L362">                                (DialogInterface d, int id) -&gt; removeWatchedStreams(false))</span>
+<span class="nc" id="L363">                        .setNeutralButton(</span>
+                                R.string.remove_watched_popup_yes_and_partially_watched_videos,
+<span class="nc" id="L365">                                (DialogInterface d, int id) -&gt; removeWatchedStreams(true))</span>
+<span class="nc" id="L366">                        .setNegativeButton(R.string.cancel,</span>
+<span class="nc" id="L367">                                (DialogInterface d, int id) -&gt; d.cancel())</span>
+<span class="nc" id="L368">                        .create()</span>
+<span class="nc" id="L369">                        .show();</span>
+            }
+<span class="nc bnc" id="L371" title="All 2 branches missed.">        } else if (item.getItemId() == R.id.menu_item_remove_duplicates) {</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            if (!isRewritingPlaylist) {</span>
+<span class="nc" id="L373">                openRemoveDuplicatesDialog();</span>
+            }
+        } else {
+<span class="nc" id="L376">            return super.onOptionsItemSelected(item);</span>
+        }
+<span class="nc" id="L378">        return true;</span>
+    }
+
+    /**
+     * Share the playlist as a newline-separated list of stream URLs.
+     */
+    public void sharePlaylist() {
+<span class="nc" id="L385">        disposables.add(playlistManager.getPlaylistStreams(playlistId)</span>
+<span class="nc" id="L386">                .flatMapSingle(playlist -&gt; Single.just(playlist.stream()</span>
+<span class="nc" id="L387">                        .map(PlaylistStreamEntry::getStreamEntity)</span>
+<span class="nc" id="L388">                        .map(StreamEntity::getUrl)</span>
+<span class="nc" id="L389">                        .collect(Collectors.joining(&quot;\n&quot;))))</span>
+<span class="nc" id="L390">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L391">                .subscribe(urlsText -&gt; ShareUtils.shareText(requireContext(), name, urlsText),</span>
+<span class="nc" id="L392">                        throwable -&gt; showUiErrorSnackbar(this, &quot;Sharing playlist&quot;, throwable)));</span>
+<span class="nc" id="L393">    }</span>
+
+    public void removeWatchedStreams(final boolean removePartiallyWatched) {
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (isRewritingPlaylist) {</span>
+<span class="nc" id="L397">            return;</span>
+        }
+<span class="nc" id="L399">        isRewritingPlaylist = true;</span>
+<span class="nc" id="L400">        showLoading();</span>
+
+<span class="nc" id="L402">        final var recordManager = new HistoryRecordManager(getContext());</span>
+<span class="nc" id="L403">        final var historyIdsMaybe = recordManager.getStreamHistorySortedById()</span>
+<span class="nc" id="L404">                .firstElement()</span>
+                // already sorted by ^ getStreamHistorySortedById(), binary search can be used
+<span class="nc" id="L406">                .map(historyList -&gt; historyList.stream().map(StreamHistoryEntry::getStreamId)</span>
+<span class="nc" id="L407">                        .collect(Collectors.toList()));</span>
+<span class="nc" id="L408">        final var streamsMaybe = playlistManager.getPlaylistStreams(playlistId)</span>
+<span class="nc" id="L409">                .firstElement()</span>
+<span class="nc" id="L410">                .zipWith(historyIdsMaybe, (playlist, historyStreamIds) -&gt; {</span>
+                    // Remove Watched, Functionality data
+<span class="nc" id="L412">                    final List&lt;PlaylistStreamEntry&gt; itemsToKeep = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L413">                    final boolean isThumbnailPermanent = playlistManager</span>
+<span class="nc" id="L414">                            .getIsPlaylistThumbnailPermanent(playlistId);</span>
+<span class="nc" id="L415">                    boolean thumbnailVideoRemoved = false;</span>
+
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                    if (removePartiallyWatched) {</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">                        for (final var playlistItem : playlist) {</span>
+<span class="nc" id="L419">                            final int indexInHistory = Collections.binarySearch(historyStreamIds,</span>
+<span class="nc" id="L420">                                    playlistItem.getStreamId());</span>
+
+<span class="nc bnc" id="L422" title="All 2 branches missed.">                            if (indexInHistory &lt; 0) {</span>
+<span class="nc" id="L423">                                itemsToKeep.add(playlistItem);</span>
+<span class="nc bnc" id="L424" title="All 4 branches missed.">                            } else if (!isThumbnailPermanent &amp;&amp; !thumbnailVideoRemoved</span>
+<span class="nc" id="L425">                                    &amp;&amp; playlistManager.getPlaylistThumbnailStreamId(playlistId)</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">                                    == playlistItem.getStreamEntity().getUid()) {</span>
+<span class="nc" id="L427">                                thumbnailVideoRemoved = true;</span>
+                            }
+<span class="nc" id="L429">                        }</span>
+                    } else {
+<span class="nc" id="L431">                        final var streamStates = recordManager</span>
+<span class="nc" id="L432">                                .loadLocalStreamStateBatch(playlist).blockingGet();</span>
+
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                        for (int i = 0; i &lt; playlist.size(); i++) {</span>
+<span class="nc" id="L435">                            final var playlistItem = playlist.get(i);</span>
+<span class="nc" id="L436">                            final var streamStateEntity = streamStates.get(i);</span>
+
+<span class="nc" id="L438">                            final int indexInHistory = Collections.binarySearch(historyStreamIds,</span>
+<span class="nc" id="L439">                                    playlistItem.getStreamId());</span>
+<span class="nc" id="L440">                            final long duration = playlistItem.toStreamInfoItem().getDuration();</span>
+
+<span class="nc bnc" id="L442" title="All 4 branches missed.">                            if (indexInHistory &lt; 0 || (streamStateEntity != null</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                                    &amp;&amp; !streamStateEntity.isFinished(duration))) {</span>
+<span class="nc" id="L444">                                itemsToKeep.add(playlistItem);</span>
+<span class="nc bnc" id="L445" title="All 4 branches missed.">                            } else if (!isThumbnailPermanent &amp;&amp; !thumbnailVideoRemoved</span>
+<span class="nc" id="L446">                                    &amp;&amp; playlistManager.getPlaylistThumbnailStreamId(playlistId)</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">                                    == playlistItem.getStreamEntity().getUid()) {</span>
+<span class="nc" id="L448">                                thumbnailVideoRemoved = true;</span>
+                            }
+                        }
+                    }
+
+<span class="nc" id="L453">                    return new Pair&lt;&gt;(itemsToKeep, thumbnailVideoRemoved);</span>
+                });
+
+<span class="nc" id="L456">        disposables.add(streamsMaybe.subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L457">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L458">                .subscribe(flow -&gt; {</span>
+<span class="nc" id="L459">                    final List&lt;PlaylistStreamEntry&gt; itemsToKeep = flow.first;</span>
+<span class="nc" id="L460">                    final boolean thumbnailVideoRemoved = flow.second;</span>
+
+<span class="nc" id="L462">                    itemListAdapter.clearStreamItemList();</span>
+<span class="nc" id="L463">                    itemListAdapter.addItems(itemsToKeep);</span>
+<span class="nc" id="L464">                    saveChanges();</span>
+
+<span class="nc bnc" id="L466" title="All 2 branches missed.">                    if (thumbnailVideoRemoved) {</span>
+<span class="nc" id="L467">                        updateThumbnailUrl();</span>
+                    }
+
+<span class="nc" id="L470">                    final long videoCount = itemListAdapter.getItemsList().size();</span>
+<span class="nc" id="L471">                    setVideoCount(videoCount);</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">                    if (videoCount == 0) {</span>
+<span class="nc" id="L473">                        showEmptyState();</span>
+                    }
+
+<span class="nc" id="L476">                    hideLoading();</span>
+<span class="nc" id="L477">                    isRewritingPlaylist = false;</span>
+<span class="nc" id="L478">                }, throwable -&gt; showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,</span>
+                        &quot;Removing watched videos, partially watched=&quot; + removePartiallyWatched))));
+<span class="nc" id="L480">    }</span>
+
+    @Override
+    public void handleResult(@NonNull final List&lt;PlaylistStreamEntry&gt; result) {
+<span class="nc" id="L484">        super.handleResult(result);</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        if (itemListAdapter == null) {</span>
+<span class="nc" id="L486">            return;</span>
+        }
+
+<span class="nc" id="L489">        itemListAdapter.clearStreamItemList();</span>
+
+<span class="nc bnc" id="L491" title="All 2 branches missed.">        if (result.isEmpty()) {</span>
+<span class="nc" id="L492">            showEmptyState();</span>
+<span class="nc" id="L493">            return;</span>
+        }
+
+<span class="nc" id="L496">        itemListAdapter.addItems(result);</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        if (itemsListState != null) {</span>
+<span class="nc" id="L498">            itemsList.getLayoutManager().onRestoreInstanceState(itemsListState);</span>
+<span class="nc" id="L499">            itemsListState = null;</span>
+        }
+<span class="nc" id="L501">        setVideoCount(itemListAdapter.getItemsList().size());</span>
+
+<span class="nc" id="L503">        playlistControlBinding.playlistCtrlPlayAllButton.setOnClickListener(view -&gt; {</span>
+<span class="nc" id="L504">            NavigationHelper.playOnMainPlayer(activity, getPlayQueue());</span>
+<span class="nc" id="L505">            showHoldToAppendTipIfNeeded();</span>
+<span class="nc" id="L506">        });</span>
+<span class="nc" id="L507">        playlistControlBinding.playlistCtrlPlayPopupButton.setOnClickListener(view -&gt; {</span>
+<span class="nc" id="L508">            NavigationHelper.playOnPopupPlayer(activity, getPlayQueue(), false);</span>
+<span class="nc" id="L509">            showHoldToAppendTipIfNeeded();</span>
+<span class="nc" id="L510">        });</span>
+<span class="nc" id="L511">        playlistControlBinding.playlistCtrlPlayBgButton.setOnClickListener(view -&gt; {</span>
+<span class="nc" id="L512">            NavigationHelper.playOnBackgroundPlayer(activity, getPlayQueue(), false);</span>
+<span class="nc" id="L513">            showHoldToAppendTipIfNeeded();</span>
+<span class="nc" id="L514">        });</span>
+<span class="nc" id="L515">        playlistControlBinding.playlistCtrlPlayPopupButton.setOnLongClickListener(view -&gt; {</span>
+<span class="nc" id="L516">            NavigationHelper.enqueueOnPlayer(activity, getPlayQueue(), PlayerType.POPUP);</span>
+<span class="nc" id="L517">            return true;</span>
+        });
+
+<span class="nc" id="L520">        playlistControlBinding.playlistCtrlPlayBgButton.setOnLongClickListener(view -&gt; {</span>
+<span class="nc" id="L521">            NavigationHelper.enqueueOnPlayer(activity, getPlayQueue(), PlayerType.AUDIO);</span>
+<span class="nc" id="L522">            return true;</span>
+        });
+
+<span class="nc" id="L525">        hideLoading();</span>
+<span class="nc" id="L526">    }</span>
+
+    private void showHoldToAppendTipIfNeeded() {
+<span class="nc" id="L529">        if (PreferenceManager.getDefaultSharedPreferences(activity)</span>
+<span class="nc bnc" id="L530" title="All 2 branches missed.">                .getBoolean(getString(R.string.show_hold_to_append_key), true)) {</span>
+<span class="nc" id="L531">            Toast.makeText(activity, R.string.hold_to_append, Toast.LENGTH_SHORT).show();</span>
+        }
+<span class="nc" id="L533">    }</span>
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Fragment Error Handling
+    ///////////////////////////////////////////////////////////////////////////
+
+    @Override
+    protected void resetFragment() {
+<span class="nc" id="L541">        super.resetFragment();</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">        if (databaseSubscription != null) {</span>
+<span class="nc" id="L543">            databaseSubscription.cancel();</span>
+        }
+<span class="nc" id="L545">    }</span>
+
+    /*//////////////////////////////////////////////////////////////////////////
+    // Playlist Metadata/Streams Manipulation
+    //////////////////////////////////////////////////////////////////////////*/
+
+    private void createRenameDialog() {
+<span class="nc bnc" id="L552" title="All 6 branches missed.">        if (playlistId == null || name == null || getContext() == null) {</span>
+<span class="nc" id="L553">            return;</span>
+        }
+
+<span class="nc" id="L556">        final DialogEditTextBinding dialogBinding =</span>
+<span class="nc" id="L557">                DialogEditTextBinding.inflate(getLayoutInflater());</span>
+<span class="nc" id="L558">        dialogBinding.dialogEditText.setHint(R.string.name);</span>
+<span class="nc" id="L559">        dialogBinding.dialogEditText.setInputType(InputType.TYPE_CLASS_TEXT);</span>
+<span class="nc" id="L560">        dialogBinding.dialogEditText.setSelection(dialogBinding.dialogEditText.getText().length());</span>
+<span class="nc" id="L561">        dialogBinding.dialogEditText.setText(name);</span>
+
+<span class="nc" id="L563">        final AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(getContext())</span>
+<span class="nc" id="L564">                .setTitle(R.string.rename_playlist)</span>
+<span class="nc" id="L565">                .setView(dialogBinding.getRoot())</span>
+<span class="nc" id="L566">                .setCancelable(true)</span>
+<span class="nc" id="L567">                .setNegativeButton(R.string.cancel, null)</span>
+<span class="nc" id="L568">                .setPositiveButton(R.string.rename, (dialogInterface, i) -&gt;</span>
+<span class="nc" id="L569">                        changePlaylistName(dialogBinding.dialogEditText.getText().toString()));</span>
+
+<span class="nc" id="L571">        dialogBuilder.show();</span>
+<span class="nc" id="L572">    }</span>
+
+    private void changePlaylistName(final String title) {
+<span class="nc bnc" id="L575" title="All 2 branches missed.">        if (playlistManager == null) {</span>
+<span class="nc" id="L576">            return;</span>
+        }
+
+<span class="nc" id="L579">        this.name = title;</span>
+<span class="nc" id="L580">        setTitle(title);</span>
+
+<span class="nc bnc" id="L582" title="All 2 branches missed.">        if (DEBUG) {</span>
+<span class="nc" id="L583">            Log.d(TAG, &quot;Updating playlist id=[&quot; + playlistId + &quot;] &quot;</span>
+                    + &quot;with new title=[&quot; + title + &quot;] items&quot;);
+        }
+
+<span class="nc" id="L587">        final Disposable disposable = playlistManager.renamePlaylist(playlistId, title)</span>
+<span class="nc" id="L588">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L589">                .subscribe(longs -&gt; { /*Do nothing on success*/ }, throwable -&gt;</span>
+<span class="nc" id="L590">                        showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,</span>
+                                &quot;Renaming playlist&quot;)));
+<span class="nc" id="L592">        disposables.add(disposable);</span>
+<span class="nc" id="L593">    }</span>
+
+    private void changeThumbnailStreamId(final long thumbnailStreamId, final boolean isPermanent) {
+<span class="nc bnc" id="L596" title="All 4 branches missed.">        if (playlistManager == null || (!isPermanent &amp;&amp; playlistManager</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">                .getIsPlaylistThumbnailPermanent(playlistId))) {</span>
+<span class="nc" id="L598">            return;</span>
+        }
+
+<span class="nc" id="L601">        final Toast successToast = Toast.makeText(getActivity(),</span>
+                R.string.playlist_thumbnail_change_success,
+                Toast.LENGTH_SHORT);
+
+<span class="nc bnc" id="L605" title="All 2 branches missed.">        if (DEBUG) {</span>
+<span class="nc" id="L606">            Log.d(TAG, &quot;Updating playlist id=[&quot; + playlistId + &quot;] &quot;</span>
+                    + &quot;with new thumbnail stream id=[&quot; + thumbnailStreamId + &quot;]&quot;);
+        }
+
+<span class="nc" id="L610">        final Disposable disposable = playlistManager</span>
+<span class="nc" id="L611">                .changePlaylistThumbnail(playlistId, thumbnailStreamId, isPermanent)</span>
+<span class="nc" id="L612">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L613">                .subscribe(ignore -&gt; successToast.show(), throwable -&gt;</span>
+<span class="nc" id="L614">                        showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,</span>
+                                &quot;Changing playlist thumbnail&quot;)));
+<span class="nc" id="L616">        disposables.add(disposable);</span>
+<span class="nc" id="L617">    }</span>
+
+    private void updateThumbnailUrl() {
+<span class="nc bnc" id="L620" title="All 2 branches missed.">        if (playlistManager.getIsPlaylistThumbnailPermanent(playlistId)) {</span>
+<span class="nc" id="L621">            return;</span>
+        }
+
+        final long thumbnailStreamId;
+
+<span class="nc bnc" id="L626" title="All 2 branches missed.">        if (!itemListAdapter.getItemsList().isEmpty()) {</span>
+<span class="nc" id="L627">            thumbnailStreamId = ((PlaylistStreamEntry) itemListAdapter.getItemsList().get(0))</span>
+<span class="nc" id="L628">                    .getStreamEntity().getUid();</span>
+        } else {
+<span class="nc" id="L630">            thumbnailStreamId = PlaylistEntity.DEFAULT_THUMBNAIL_ID;</span>
+        }
+
+<span class="nc" id="L633">        changeThumbnailStreamId(thumbnailStreamId, false);</span>
+<span class="nc" id="L634">    }</span>
+
+    private void openRemoveDuplicatesDialog() {
+<span class="nc" id="L637">        final AlertDialog.Builder builder = new AlertDialog.Builder(this.getActivity());</span>
+
+<span class="nc" id="L639">        builder.setTitle(R.string.remove_duplicates_title)</span>
+<span class="nc" id="L640">                .setMessage(R.string.remove_duplicates_message)</span>
+<span class="nc" id="L641">                .setPositiveButton(R.string.ok,</span>
+<span class="nc" id="L642">                        (dialog, i) -&gt; removeDuplicatesInPlaylist())</span>
+<span class="nc" id="L643">                .setNeutralButton(R.string.cancel, null);</span>
+
+<span class="nc" id="L645">        builder.create().show();</span>
+<span class="nc" id="L646">    }</span>
+
+    private void removeDuplicatesInPlaylist() {
+<span class="nc bnc" id="L649" title="All 2 branches missed.">        if (isRewritingPlaylist) {</span>
+<span class="nc" id="L650">            return;</span>
+        }
+<span class="nc" id="L652">        isRewritingPlaylist = true;</span>
+<span class="nc" id="L653">        showLoading();</span>
+
+<span class="nc" id="L655">        final var streamsMaybe = playlistManager</span>
+<span class="nc" id="L656">                .getDistinctPlaylistStreams(playlistId).firstElement();</span>
+
+
+<span class="nc" id="L659">        disposables.add(streamsMaybe.subscribeOn(Schedulers.io())</span>
+<span class="nc" id="L660">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L661">                .subscribe(itemsToKeep -&gt; {</span>
+<span class="nc" id="L662">                    itemListAdapter.clearStreamItemList();</span>
+<span class="nc" id="L663">                    itemListAdapter.addItems(itemsToKeep);</span>
+<span class="nc" id="L664">                    setVideoCount(itemListAdapter.getItemsList().size());</span>
+<span class="nc" id="L665">                    saveChanges();</span>
+
+<span class="nc" id="L667">                    hideLoading();</span>
+<span class="nc" id="L668">                    isRewritingPlaylist = false;</span>
+<span class="nc" id="L669">                }, throwable -&gt; showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,</span>
+                        &quot;Removing duplicated streams&quot;))));
+<span class="nc" id="L671">    }</span>
+
+    private void deleteItem(final PlaylistStreamEntry item) {
+<span class="nc bnc" id="L674" title="All 2 branches missed.">        if (itemListAdapter == null) {</span>
+<span class="nc" id="L675">            return;</span>
+        }
+
+<span class="nc" id="L678">        itemListAdapter.removeItem(item);</span>
+<span class="nc bnc" id="L679" title="All 2 branches missed.">        if (playlistManager.getPlaylistThumbnailStreamId(playlistId) == item.getStreamId()) {</span>
+<span class="nc" id="L680">            updateThumbnailUrl();</span>
+        }
+
+<span class="nc" id="L683">        setVideoCount(itemListAdapter.getItemsList().size());</span>
+<span class="nc" id="L684">        saveChanges();</span>
+<span class="nc" id="L685">    }</span>
+
+    private void saveChanges() {
+<span class="nc bnc" id="L688" title="All 4 branches missed.">        if (isModified == null || debouncedSaveSignal == null) {</span>
+<span class="nc" id="L689">            return;</span>
+        }
+
+<span class="nc" id="L692">        isModified.set(true);</span>
+<span class="nc" id="L693">        debouncedSaveSignal.onNext(System.currentTimeMillis());</span>
+<span class="nc" id="L694">    }</span>
+
+    private Disposable getDebouncedSaver() {
+<span class="nc bnc" id="L697" title="All 2 branches missed.">        if (debouncedSaveSignal == null) {</span>
+<span class="nc" id="L698">            return Disposable.empty();</span>
+        }
+
+<span class="nc" id="L701">        return debouncedSaveSignal</span>
+<span class="nc" id="L702">                .debounce(SAVE_DEBOUNCE_MILLIS, TimeUnit.MILLISECONDS)</span>
+<span class="nc" id="L703">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L704">                .subscribe(ignored -&gt; saveImmediate(), throwable -&gt;</span>
+<span class="nc" id="L705">                        showError(new ErrorInfo(throwable, UserAction.SOMETHING_ELSE,</span>
+                                &quot;Debounced saver&quot;)));
+    }
+
+    private void saveImmediate() {
+<span class="nc bnc" id="L710" title="All 4 branches missed.">        if (playlistManager == null || itemListAdapter == null) {</span>
+<span class="nc" id="L711">            return;</span>
+        }
+
+        // List must be loaded and modified in order to save
+<span class="nc bnc" id="L715" title="All 4 branches missed.">        if (isLoadingComplete == null || isModified == null</span>
+<span class="nc bnc" id="L716" title="All 4 branches missed.">                || !isLoadingComplete.get() || !isModified.get()) {</span>
+<span class="nc" id="L717">            Log.w(TAG, &quot;Attempting to save playlist when local playlist &quot;</span>
+                    + &quot;is not loaded or not modified: playlist id=[&quot; + playlistId + &quot;]&quot;);
+<span class="nc" id="L719">            return;</span>
+        }
+
+<span class="nc" id="L722">        final List&lt;LocalItem&gt; items = itemListAdapter.getItemsList();</span>
+<span class="nc" id="L723">        final List&lt;Long&gt; streamIds = new ArrayList&lt;&gt;(items.size());</span>
+<span class="nc bnc" id="L724" title="All 2 branches missed.">        for (final LocalItem item : items) {</span>
+<span class="nc bnc" id="L725" title="All 2 branches missed.">            if (item instanceof PlaylistStreamEntry) {</span>
+<span class="nc" id="L726">                streamIds.add(((PlaylistStreamEntry) item).getStreamId());</span>
+            }
+<span class="nc" id="L728">        }</span>
+
+<span class="nc bnc" id="L730" title="All 2 branches missed.">        if (DEBUG) {</span>
+<span class="nc" id="L731">            Log.d(TAG, &quot;Updating playlist id=[&quot; + playlistId + &quot;] &quot;</span>
+<span class="nc" id="L732">                    + &quot;with [&quot; + streamIds.size() + &quot;] items&quot;);</span>
+        }
+
+<span class="nc" id="L735">        final Disposable disposable = playlistManager.updateJoin(playlistId, streamIds)</span>
+<span class="nc" id="L736">                .observeOn(AndroidSchedulers.mainThread())</span>
+<span class="nc" id="L737">                .subscribe(</span>
+                        () -&gt; {
+<span class="nc bnc" id="L739" title="All 2 branches missed.">                            if (isModified != null) {</span>
+<span class="nc" id="L740">                                isModified.set(false);</span>
+                            }
+<span class="nc" id="L742">                        },</span>
+<span class="nc" id="L743">                        throwable -&gt; showError(new ErrorInfo(throwable,</span>
+                                UserAction.REQUESTED_BOOKMARK, &quot;Saving playlist&quot;))
+                );
+<span class="nc" id="L746">        disposables.add(disposable);</span>
+<span class="nc" id="L747">    }</span>
+
+
+    private ItemTouchHelper.SimpleCallback getItemTouchCallback() {
+<span class="nc" id="L751">        int directions = ItemTouchHelper.UP | ItemTouchHelper.DOWN;</span>
+<span class="nc bnc" id="L752" title="All 2 branches missed.">        if (shouldUseGridLayout(requireContext())) {</span>
+<span class="nc" id="L753">            directions |= ItemTouchHelper.LEFT | ItemTouchHelper.RIGHT;</span>
+        }
+<span class="nc" id="L755">        return new ItemTouchHelper.SimpleCallback(directions,</span>
+<span class="nc" id="L756">                ItemTouchHelper.ACTION_STATE_IDLE) {</span>
+            @Override
+            public int interpolateOutOfBoundsScroll(@NonNull final RecyclerView recyclerView,
+                                                    final int viewSize,
+                                                    final int viewSizeOutOfBounds,
+                                                    final int totalSize,
+                                                    final long msSinceStartScroll) {
+<span class="nc" id="L763">                final int standardSpeed = super.interpolateOutOfBoundsScroll(recyclerView,</span>
+                        viewSize, viewSizeOutOfBounds, totalSize, msSinceStartScroll);
+<span class="nc" id="L765">                final int minimumAbsVelocity = Math.max(MINIMUM_INITIAL_DRAG_VELOCITY,</span>
+<span class="nc" id="L766">                        Math.abs(standardSpeed));</span>
+<span class="nc" id="L767">                return minimumAbsVelocity * (int) Math.signum(viewSizeOutOfBounds);</span>
+            }
+
+            @Override
+            public boolean onMove(@NonNull final RecyclerView recyclerView,
+                                  @NonNull final RecyclerView.ViewHolder source,
+                                  @NonNull final RecyclerView.ViewHolder target) {
+<span class="nc bnc" id="L774" title="All 2 branches missed.">                if (source.getItemViewType() != target.getItemViewType()</span>
+<span class="nc bnc" id="L775" title="All 2 branches missed.">                        || itemListAdapter == null) {</span>
+<span class="nc" id="L776">                    return false;</span>
+                }
+
+<span class="nc" id="L779">                final int sourceIndex = source.getBindingAdapterPosition();</span>
+<span class="nc" id="L780">                final int targetIndex = target.getBindingAdapterPosition();</span>
+<span class="nc" id="L781">                final boolean isSwapped = itemListAdapter.swapItems(sourceIndex, targetIndex);</span>
+<span class="nc bnc" id="L782" title="All 2 branches missed.">                if (isSwapped) {</span>
+<span class="nc" id="L783">                    saveChanges();</span>
+                }
+<span class="nc" id="L785">                return isSwapped;</span>
+            }
+
+            @Override
+            public boolean isLongPressDragEnabled() {
+<span class="nc" id="L790">                return false;</span>
+            }
+
+            @Override
+            public boolean isItemViewSwipeEnabled() {
+<span class="nc" id="L795">                return false;</span>
+            }
+
+            @Override
+            public void onSwiped(@NonNull final RecyclerView.ViewHolder viewHolder,
+                                 final int swipeDir) {
+<span class="nc" id="L801">            }</span>
+        };
+    }
+
+    /*//////////////////////////////////////////////////////////////////////////
+    // Utils
+    //////////////////////////////////////////////////////////////////////////*/
+
+    private PlayQueue getPlayQueueStartingAt(final PlaylistStreamEntry infoItem) {
+<span class="nc" id="L810">        return getPlayQueue(Math.max(itemListAdapter.getItemsList().indexOf(infoItem), 0));</span>
+    }
+
+    protected void showInfoItemDialog(final PlaylistStreamEntry item) {
+<span class="nc" id="L814">        final StreamInfoItem infoItem = item.toStreamInfoItem();</span>
+
+        try {
+<span class="nc" id="L817">            final Context context = getContext();</span>
+<span class="nc" id="L818">            final InfoItemDialog.Builder dialogBuilder =</span>
+<span class="nc" id="L819">                    new InfoItemDialog.Builder(getActivity(), context, this, infoItem);</span>
+
+            // add entries in the middle
+<span class="nc" id="L822">            dialogBuilder.addAllEntries(</span>
+                    StreamDialogDefaultEntry.SET_AS_PLAYLIST_THUMBNAIL,
+                    StreamDialogDefaultEntry.DELETE
+            );
+
+            // set custom actions
+            // all entries modified below have already been added within the builder
+<span class="nc" id="L829">            dialogBuilder</span>
+<span class="nc" id="L830">                    .setAction(</span>
+                            StreamDialogDefaultEntry.START_HERE_ON_BACKGROUND,
+<span class="nc" id="L832">                            (f, i) -&gt; NavigationHelper.playOnBackgroundPlayer(</span>
+<span class="nc" id="L833">                                    context, getPlayQueueStartingAt(item), true))</span>
+<span class="nc" id="L834">                    .setAction(</span>
+                            StreamDialogDefaultEntry.SET_AS_PLAYLIST_THUMBNAIL,
+                            (f, i) -&gt;
+<span class="nc" id="L837">                                    changeThumbnailStreamId(item.getStreamEntity().getUid(),</span>
+                                            true))
+<span class="nc" id="L839">                    .setAction(</span>
+                            StreamDialogDefaultEntry.DELETE,
+<span class="nc" id="L841">                            (f, i) -&gt; deleteItem(item))</span>
+<span class="nc" id="L842">                    .create()</span>
+<span class="nc" id="L843">                    .show();</span>
+<span class="nc" id="L844">        } catch (final IllegalArgumentException e) {</span>
+<span class="nc" id="L845">            InfoItemDialog.Builder.reportErrorDuringInitialization(e, infoItem);</span>
+<span class="nc" id="L846">        }</span>
+<span class="nc" id="L847">    }</span>
+
+    private void setInitialData(final long pid, final String title) {
+<span class="nc" id="L850">        this.playlistId = pid;</span>
+<span class="nc bnc" id="L851" title="All 2 branches missed.">        this.name = !TextUtils.isEmpty(title) ? title : &quot;&quot;;</span>
+<span class="nc" id="L852">    }</span>
+
+    private void setVideoCount(final long count) {
+<span class="nc bnc" id="L855" title="All 4 branches missed.">        if (activity != null &amp;&amp; headerBinding != null) {</span>
+<span class="nc" id="L856">            headerBinding.playlistStreamCount.setText(Localization</span>
+<span class="nc" id="L857">                    .localizeStreamCount(activity, count));</span>
+        }
+<span class="nc" id="L859">    }</span>
+
+    private PlayQueue getPlayQueue() {
+<span class="nc" id="L862">        return getPlayQueue(0);</span>
+    }
+
+    private PlayQueue getPlayQueue(final int index) {
+<span class="nc bnc" id="L866" title="All 2 branches missed.">        if (itemListAdapter == null) {</span>
+<span class="nc" id="L867">            return new SinglePlayQueue(Collections.emptyList(), 0);</span>
+        }
+
+<span class="nc" id="L870">        final List&lt;LocalItem&gt; infoItems = itemListAdapter.getItemsList();</span>
+<span class="nc" id="L871">        final List&lt;StreamInfoItem&gt; streamInfoItems = new ArrayList&lt;&gt;(infoItems.size());</span>
+<span class="nc bnc" id="L872" title="All 2 branches missed.">        for (final LocalItem item : infoItems) {</span>
+<span class="nc bnc" id="L873" title="All 2 branches missed.">            if (item instanceof PlaylistStreamEntry) {</span>
+<span class="nc" id="L874">                streamInfoItems.add(((PlaylistStreamEntry) item).toStreamInfoItem());</span>
+            }
+<span class="nc" id="L876">        }</span>
+<span class="nc" id="L877">        return new SinglePlayQueue(streamInfoItems, index);</span>
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

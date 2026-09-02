@@ -1,0 +1,3 @@
+package com.example.util.simpletimetracker.feature_statistics_detail.viewData
+
+interface StatisticsDetailPreview

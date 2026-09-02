@@ -1,0 +1,576 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RssLocalSync.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.model</a> &gt; <span class="el_source">RssLocalSync.kt</span></div><h1>RssLocalSync.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.model
+
+import android.app.Application
+import android.util.Log
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.background.runOnceFullTextSync
+import com.nononsenseapps.feeder.blob.blobFile
+import com.nononsenseapps.feeder.blob.blobFullFile
+import com.nononsenseapps.feeder.blob.blobOutputStream
+import com.nononsenseapps.feeder.db.room.Feed
+import com.nononsenseapps.feeder.db.room.FeedItem
+import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.sync.SyncRestClient
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.FilePathProvider
+import com.nononsenseapps.feeder.util.fetchOgImage
+import com.nononsenseapps.feeder.util.flatMap
+import com.nononsenseapps.feeder.util.left
+import com.nononsenseapps.feeder.util.logDebug
+import com.nononsenseapps.feeder.util.right
+import com.nononsenseapps.feeder.util.sloppyLinkToStrictURLNoThrows
+import com.nononsenseapps.feeder.util.urlHasNoAuthParams
+import com.nononsenseapps.feeder.util.urlHasNoQueryParams
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Response
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.io.IOException
+import java.net.URL
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
+import java.util.concurrent.Executors
+import kotlin.math.max
+import kotlin.system.measureTimeMillis
+
+<span class="fc" id="L46">val singleThreadedSync = Executors.newSingleThreadExecutor().asCoroutineDispatcher()</span>
+<span class="fc" id="L47">val syncMutex = Mutex()</span>
+
+/**
+ * WARNING. DO NOT CHANGE THE DISPATCHER WITHIN THE LOGIC!
+ */
+<span class="fc" id="L52">class RssLocalSync(</span>
+<span class="fc" id="L53">    override val di: DI,</span>
+) : DIAware {
+<span class="fc" id="L55">    private val repository: Repository by instance()</span>
+<span class="fc" id="L56">    private val syncClient: SyncRestClient by instance()</span>
+<span class="fc" id="L57">    private val feedParser: FeedParser by instance()</span>
+<span class="fc" id="L58">    private val okHttpClient: OkHttpClient by instance()</span>
+<span class="fc" id="L59">    private val filePathProvider: FilePathProvider by instance()</span>
+<span class="pc" id="L60">    private val application: Application by instance()</span>
+
+<span class="fc" id="L62">    suspend fun syncFeeds(</span>
+<span class="nc" id="L63">        feedId: Long = ID_UNSET,</span>
+<span class="nc" id="L64">        feedTag: String = &quot;&quot;,</span>
+<span class="nc" id="L65">        forceNetwork: Boolean = false,</span>
+<span class="nc" id="L66">        minFeedAgeMinutes: Int = 5,</span>
+        // Used in tests to force network without having to wait
+<span class="fc" id="L68">        debugReallyForceNetwork: Boolean = false,</span>
+    ): Boolean {
+<span class="fc" id="L70">        logDebug(LOG_TAG, &quot;${Thread.currentThread().name}: Taking sync mutex&quot;)</span>
+<span class="fc" id="L71">        return syncMutex.withLock {</span>
+<span class="pc bpc" id="L72" title="2 of 4 branches missed.">            withContext(singleThreadedSync) {</span>
+<span class="fc" id="L73">                try {</span>
+<span class="fc" id="L74">                    repository.setSyncWorkerRunning(true)</span>
+
+<span class="fc" id="L76">                    syncFeeds(</span>
+<span class="fc" id="L77">                        feedId = feedId,</span>
+<span class="fc" id="L78">                        feedTag = feedTag,</span>
+<span class="fc" id="L79">                        maxFeedItemCount = repository.maximumCountPerFeed.value,</span>
+<span class="fc" id="L80">                        forceNetwork = forceNetwork,</span>
+<span class="fc" id="L81">                        minFeedAgeMinutes = minFeedAgeMinutes,</span>
+<span class="fc" id="L82">                        debugReallyForceNetwork = debugReallyForceNetwork,</span>
+                    )
+                } finally {
+<span class="pc bpc" id="L85" title="1 of 2 branches missed.">                    repository.setSyncWorkerRunning(false)</span>
+<span class="fc" id="L86">                }</span>
+<span class="fc" id="L87">            }</span>
+        }
+    }
+
+<span class="nc" id="L91">    internal suspend fun syncFeeds(</span>
+<span class="nc" id="L92">        feedId: Long = ID_UNSET,</span>
+<span class="nc" id="L93">        feedTag: String = &quot;&quot;,</span>
+<span class="nc" id="L94">        maxFeedItemCount: Int = 100,</span>
+<span class="nc" id="L95">        forceNetwork: Boolean = false,</span>
+<span class="nc" id="L96">        minFeedAgeMinutes: Int = 5,</span>
+        // Used in tests to force network without having to wait
+<span class="nc" id="L98">        debugReallyForceNetwork: Boolean = false,</span>
+    ): Boolean {
+<span class="fc" id="L100">        var result = false</span>
+<span class="fc" id="L101">        var needFullTextSync = false</span>
+        // Let all new items share download time
+<span class="fc" id="L103">        val downloadTime = Instant.now()</span>
+<span class="fc" id="L104">        val time =</span>
+<span class="fc" id="L105">            measureTimeMillis {</span>
+<span class="fc" id="L106">                try {</span>
+<span class="pc bpc" id="L107" title="3 of 14 branches missed.">                    supervisorScope {</span>
+<span class="fc" id="L108">                        val staleTime: Long =</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">                            if (debugReallyForceNetwork) {</span>
+<span class="nc" id="L110">                                Instant.now().plus(1, ChronoUnit.DAYS).toEpochMilli()</span>
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">                            } else if (forceNetwork) {</span>
+                                // Under no circumstances should we spam servers more than once per minute intentionally
+<span class="nc" id="L113">                                Instant.now().minus(1, ChronoUnit.MINUTES).toEpochMilli()</span>
+                            } else {
+                                Instant
+<span class="fc" id="L116">                                    .now()</span>
+<span class="fc" id="L117">                                    .minus(minFeedAgeMinutes.toLong().coerceAtLeast(1), ChronoUnit.MINUTES)</span>
+<span class="fc" id="L118">                                    .toEpochMilli()</span>
+                            }
+                        // Fetch sync stuff first - this is fast
+<span class="fc" id="L121">                        try {</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">                            syncClient.getFeeds()</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">                            syncClient.getRead()</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">                            syncClient.getDevices()</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">                            syncClient.sendUpdatedFeeds()</span>
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">                            syncClient.markAsRead()</span>
+<span class="nc" id="L127">                        } catch (e: Exception) {</span>
+<span class="nc" id="L128">                            Log.e(LOG_TAG, &quot;error with syncClient: ${e.message}&quot;, e)</span>
+                        }
+
+<span class="fc" id="L131">                        val feedsToFetch =</span>
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">                            feedsToSync(feedId, feedTag, staleTime = staleTime)</span>
+
+<span class="fc" id="L134">                        logDebug(LOG_TAG, &quot;Syncing ${feedsToFetch.size} feeds&quot;)</span>
+
+<span class="fc" id="L136">                        needFullTextSync = feedsToFetch.any { it.fullTextByDefault }</span>
+
+                        // These coroutines are concurrent but on a single thread,
+                        // so they are not truly parallel by design to ensure
+                        // IO waits are minimized
+<span class="fc" id="L141">                        val concurrentJobs = 2</span>
+<span class="fc" id="L142">                        val jobs =</span>
+<span class="fc" id="L143">                            (0 until concurrentJobs)</span>
+<span class="fc" id="L144">                                .map { jobIndex -&gt;</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">                                    launch {</span>
+<span class="fc" id="L146">                                        feedsToFetch</span>
+<span class="fc" id="L147">                                            .asSequence()</span>
+<span class="fc" id="L148">                                            .filterIndexed { index, _ -&gt;</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">                                                index % concurrentJobs == jobIndex</span>
+<span class="fc" id="L150">                                            }.forEach { feed -&gt;</span>
+<span class="fc" id="L151">                                                handleFeed(</span>
+<span class="fc" id="L152">                                                    feed = feed,</span>
+<span class="fc" id="L153">                                                    maxFeedItemCount = maxFeedItemCount,</span>
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">                                                    forceNetwork = forceNetwork,</span>
+<span class="fc" id="L155">                                                    downloadTime = downloadTime,</span>
+                                                )
+<span class="fc" id="L157">                                            }</span>
+<span class="fc" id="L158">                                    }</span>
+                                }
+
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">                        jobs.joinAll()</span>
+
+<span class="fc" id="L163">                        try {</span>
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">                            repository.applyRemoteReadMarks()</span>
+<span class="nc" id="L165">                        } catch (e: Exception) {</span>
+<span class="nc" id="L166">                            Log.e(LOG_TAG, &quot;Error on final apply&quot;, e)</span>
+                        }
+
+<span class="fc" id="L169">                        result = true</span>
+<span class="fc" id="L170">                    }</span>
+<span class="nc" id="L171">                } catch (e: Throwable) {</span>
+<span class="nc" id="L172">                    Log.e(LOG_TAG, &quot;Outer error&quot;, e)</span>
+                } finally {
+<span class="pc bpc" id="L174" title="1 of 2 branches missed.">                    if (needFullTextSync) {</span>
+<span class="nc" id="L175">                        runOnceFullTextSync(</span>
+<span class="nc" id="L176">                            di = di,</span>
+<span class="nc" id="L177">                            triggeredByUser = false,</span>
+                        )
+                    }
+                }
+<span class="fc" id="L181">            }</span>
+<span class="fc" id="L182">        logDebug(LOG_TAG, &quot;Completed in $time ms&quot;)</span>
+<span class="fc" id="L183">        return result</span>
+    }
+
+<span class="fc" id="L186">    private suspend fun handleFeed(</span>
+        feed: Feed,
+        maxFeedItemCount: Int,
+        forceNetwork: Boolean,
+        downloadTime: Instant,
+    ) {
+<span class="fc" id="L192">        try {</span>
+            // Want unique sync times.
+<span class="fc" id="L194">            val syncTime = Instant.now()</span>
+<span class="fc" id="L195">            repository.setCurrentlySyncingOn(</span>
+<span class="fc" id="L196">                feedId = feed.id,</span>
+<span class="fc" id="L197">                syncing = true,</span>
+<span class="fc" id="L198">                lastSync = syncTime,</span>
+            )
+<span class="fc" id="L200">            syncFeed(</span>
+<span class="fc" id="L201">                feedId = feed.id,</span>
+<span class="fc" id="L202">                maxFeedItemCount = maxFeedItemCount,</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">                forceNetwork = forceNetwork,</span>
+<span class="fc" id="L204">                downloadTime = downloadTime,</span>
+<span class="fc" id="L205">            ).onLeft { feedParserError -&gt;</span>
+<span class="nc" id="L206">                Log.e(</span>
+<span class="nc" id="L207">                    LOG_TAG,</span>
+<span class="nc" id="L208">                    &quot;Failed to sync ${feed.displayTitle}: ${feed.url} because:\n${feedParserError.description}&quot;,</span>
+                )
+
+                // Handle retry-after
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                if (feedParserError is HttpError) {</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                    feedParserError.retryAfterSeconds?.let { retryAfterSeconds -&gt;</span>
+                        // Feeds can share retry after if they are on the same server
+<span class="nc" id="L215">                        repository.setRetryAfterForFeedsWithBaseUrl(</span>
+<span class="nc" id="L216">                            host = feed.url.host,</span>
+<span class="nc" id="L217">                            retryAfter = Instant.now().plusSeconds(retryAfterSeconds),</span>
+                        )
+<span class="nc" id="L219">                    }</span>
+                }
+<span class="pc" id="L221">            }.onRight {</span>
+<span class="fc" id="L222">                repository.setBlockStatusForNewInFeed(feedId = feed.id, blockTime = syncTime)</span>
+<span class="fc" id="L223">            }</span>
+<span class="nc" id="L224">        } catch (e: Throwable) {</span>
+<span class="nc" id="L225">            Log.e(</span>
+<span class="nc" id="L226">                LOG_TAG,</span>
+<span class="nc" id="L227">                &quot;Failed to sync ${feed.displayTitle}: ${feed.url}&quot;,</span>
+<span class="nc" id="L228">                e,</span>
+            )
+        } finally {
+<span class="pc" id="L231">            repository.setCurrentlySyncingOn(</span>
+<span class="pc" id="L232">                feedId = feed.id,</span>
+<span class="pc" id="L233">                syncing = false,</span>
+            )
+<span class="pc" id="L235">        }</span>
+<span class="pc" id="L236">    }</span>
+
+<span class="pc" id="L238">    private suspend fun syncFeed(</span>
+        feedId: Long,
+        maxFeedItemCount: Int,
+<span class="nc" id="L241">        forceNetwork: Boolean = false,</span>
+        downloadTime: Instant,
+    ): Either&lt;FeedParserError, Unit&gt; {
+        // Load it again to ensure we get the latest value for retry-after since this can be shared across feeds
+        // if they share the same server
+<span class="fc" id="L246">        val feedSql =</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">            repository.syncLoadFeed(feedId, retryAfter = Instant.now())</span>
+<span class="nc" id="L248">                ?: run {</span>
+                    // not loaded due to retry-after
+<span class="nc" id="L250">                    Log.i(LOG_TAG, &quot;Skipping feed $feedId due to retry-after changing mid sync&quot;)</span>
+<span class="nc" id="L251">                    return Unit.right()</span>
+                }
+
+<span class="fc" id="L254">        val url = feedSql.url</span>
+
+        // Belts and suspenders
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">        if (feedSql.retryAfter &gt; Instant.now()) {</span>
+<span class="nc" id="L258">            Log.i(LOG_TAG, &quot;Skipping ${feedSql.displayTitle} due to retry-after. Earliest retry: ${feedSql.retryAfter}&quot;)</span>
+<span class="nc" id="L259">            return Unit.right()</span>
+        }
+
+<span class="fc" id="L262">        logDebug(LOG_TAG, &quot;Fetching ${feedSql.displayTitle}&quot;)</span>
+
+<span class="fc" id="L264">        return Either</span>
+<span class="fc" id="L265">            .catching(</span>
+                onCatch = { t -&gt;
+<span class="nc" id="L267">                    FetchError(url = url.toString(), throwable = t)</span>
+                },
+            ) {
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">                okHttpClient.getResponse(feedSql.url, forceNetwork = forceNetwork)</span>
+<span class="fc" id="L271">            }.flatMap { response -&gt;</span>
+<span class="pc" id="L272">                response.use {</span>
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">                    if (response.isSuccessful) {</span>
+<span class="pc bpc" id="L274" title="2 of 4 branches missed.">                        response.body?.let { responseBody -&gt;</span>
+<span class="fc" id="L275">                            feedParser.parseFeedResponse(</span>
+<span class="fc" id="L276">                                response.request.url.toUrl(),</span>
+<span class="fc" id="L277">                                responseBody,</span>
+<span class="fc" id="L278">                            )</span>
+<span class="nc" id="L279">                        } ?: NoBody(url = url.toString()).left()</span>
+                    } else {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                        response.retryAfterSeconds?.let { retryAfterSeconds -&gt;</span>
+<span class="nc" id="L282">                            logDebug(LOG_TAG, &quot;$url, Retry after: $retryAfterSeconds&quot;)</span>
+<span class="nc" id="L283">                        }</span>
+<span class="nc" id="L284">                        HttpError(</span>
+<span class="nc" id="L285">                            url = url.toString(),</span>
+<span class="nc" id="L286">                            code = response.code,</span>
+<span class="nc" id="L287">                            retryAfterSeconds = response.retryAfterSeconds,</span>
+<span class="nc" id="L288">                            message = response.message,</span>
+<span class="nc" id="L289">                        ).left()</span>
+<span class="fc" id="L290">                    }</span>
+<span class="fc" id="L291">                }</span>
+<span class="fc" id="L292">            }.onLeft {</span>
+                // Nothing was parsed, nothing to do. lastSync time has already been updated
+<span class="pc" id="L294">            }.flatMap { feed -&gt;</span>
+<span class="fc" id="L295">                Either.catching(</span>
+                    onCatch = { t -&gt;
+<span class="nc" id="L297">                        FetchError(url = url.toString(), throwable = t)</span>
+                    },
+                ) {
+<span class="fc" id="L300">                    val items = feed.items</span>
+<span class="pc bpc" id="L301" title="2 of 4 branches missed.">                    val uniqueIdCount = items?.map { it.id }?.toSet()?.size</span>
+                    // This can only detect between items present in one feed. See NIXOS
+<span class="pc bpc" id="L303" title="2 of 4 branches missed.">                    val isNotUniqueIds = uniqueIdCount != items?.size</span>
+
+<span class="fc" id="L305">                    val alreadyReadGuids = repository.getGuidsWhichAreSyncedAsReadInFeed(feedSql)</span>
+
+<span class="fc" id="L307">                    val itemsWithGuids =</span>
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">                        items</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">                            ?.map {</span>
+<span class="fc" id="L310">                                val guid =</span>
+<span class="pc bpc" id="L311" title="2 of 4 branches missed.">                                    when (isNotUniqueIds || feedSql.alternateId) {</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">                                        true -&gt; it.alternateId</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">                                        else -&gt; it.id ?: it.alternateId</span>
+                                    }
+
+<span class="fc" id="L316">                                it to guid</span>
+                                // Feed convention: items are listed newest-first.
+                                // Reverse so we process oldest-first, giving items at higher
+                                // indices (earlier in the feed) a more recent fallback timestamp.
+<span class="fc" id="L320">                            }?.reversed()</span>
+<span class="nc" id="L321">                            ?: emptyList()</span>
+
+<span class="fc" id="L323">                    val totalItems = itemsWithGuids.size</span>
+
+<span class="fc" id="L325">                    val feedItemSqls =</span>
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">                        itemsWithGuids</span>
+<span class="fc" id="L327">                            .mapIndexedNotNull { index, (item, guid) -&gt;</span>
+                                // Each undated item in the feed gets a distinct fallback clock.
+                                // Items are in reversed feed order here (oldest position = index 0),
+                                // so higher indices correspond to items that appeared earlier in the feed
+                                // and should therefore be considered more recent.
+<span class="fc" id="L332">                                val fallbackClock =</span>
+<span class="fc" id="L333">                                    Clock.fixed(</span>
+<span class="fc" id="L334">                                        downloadTime.minusSeconds((totalItems - 1 - index).toLong()),</span>
+<span class="fc" id="L335">                                        ZoneOffset.UTC,</span>
+                                    )
+                                // Always attempt to load existing items using both id schemes
+                                // Id is rewritten to preferred on update
+<span class="fc" id="L339">                                val feedItemSql =</span>
+<span class="pc bpc" id="L340" title="2 of 4 branches missed.">                                    repository.loadFeedItem(</span>
+<span class="fc" id="L341">                                        guid = item.alternateId,</span>
+<span class="fc" id="L342">                                        feedId = feedSql.id,</span>
+<span class="fc" id="L343">                                    ) ?: repository.loadFeedItem(</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">                                        guid = item.id ?: item.alternateId,</span>
+<span class="fc" id="L345">                                        feedId = feedSql.id,</span>
+<span class="fc" id="L346">                                    ) ?: FeedItem(firstSyncedTime = downloadTime)</span>
+
+                                // If new item, see if duplicates exist
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">                                if (feedItemSql.id != ID_UNSET ||</span>
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">                                    !feedSql.skipDuplicates ||</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                                    !repository.duplicateStoryExists(</span>
+<span class="nc" id="L352">                                        id = feedItemSql.id,</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                                        title = item.title ?: &quot;&quot;,</span>
+<span class="nc" id="L354">                                        link = item.url,</span>
+                                    )
+                                ) {
+<span class="fc" id="L357">                                    feedItemSql.updateFromParsedEntry(item, guid, feed, fallbackClock)</span>
+<span class="fc" id="L358">                                    feedItemSql.feedId = feedSql.id</span>
+
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">                                    if (feedSql.fetchOgImages) {</span>
+<span class="nc" id="L361">                                        feedItemSql.thumbnailImage =</span>
+<span class="nc" id="L362">                                            resolveThumbnailImage(</span>
+<span class="nc" id="L363">                                                current = feedItemSql.thumbnailImage,</span>
+<span class="nc" id="L364">                                                articleUrl = item.url,</span>
+<span class="nc" id="L365">                                                hasFeedImage = item.hasFeedImage,</span>
+                                            )
+                                    }
+
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">                                    if (feedItemSql.guid in alreadyReadGuids) {</span>
+                                        // TODO get read time from sync service
+<span class="nc bnc" id="L371" title="All 2 branches missed.">                                        feedItemSql.readTime = feedItemSql.readTime ?: Instant.now()</span>
+<span class="nc" id="L372">                                        feedItemSql.notified = true</span>
+                                    }
+
+<span class="pc bpc" id="L375" title="3 of 4 branches missed.">                                    feedItemSql to (item.content_html ?: item.content_text ?: &quot;&quot;)</span>
+                                } else {
+<span class="nc" id="L377">                                    Log.i(LOG_TAG, &quot;Duplicate story ignored: [${item.title}] [${feed.title}]&quot;)</span>
+<span class="nc" id="L378">                                    null</span>
+<span class="fc" id="L379">                                }</span>
+<span class="nc" id="L380">                            } ?: emptyList()</span>
+
+<span class="pc bpc" id="L382" title="2 of 3 branches missed.">                    repository.upsertFeedItems(feedItemSqls) { feedItem, text -&gt;</span>
+<span class="fc" id="L383">                        filePathProvider.articleDir.mkdirs()</span>
+<span class="fc" id="L384">                        blobOutputStream(feedItem.id, filePathProvider.articleDir)</span>
+<span class="pc bpc" id="L385" title="1 of 2 branches missed.">                            .bufferedWriter()</span>
+<span class="pc" id="L386">                            .use {</span>
+<span class="fc" id="L387">                                it.write(text)</span>
+<span class="fc" id="L388">                            }</span>
+                        // If this item was pre-marked as read from a remote read-mark (alreadyReadGuids),
+                        // immediately set it as synced so it won't be echoed back to the server.
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">                        if (feedItem.guid in alreadyReadGuids) {</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">                            repository.setSynced(feedItem.id)</span>
+                        }
+<span class="pc" id="L394">                    }</span>
+                    // Try to look for image if not done before
+<span class="pc bpc" id="L396" title="2 of 4 branches missed.">                    if (feedSql.imageUrl == null &amp;&amp; feedSql.siteFetched == Instant.EPOCH) {</span>
+<span class="fc" id="L397">                        val siteUrl =</span>
+<span class="fc" id="L398">                            try {</span>
+<span class="nc" id="L399">                                val url = URL(feed.home_page_url)</span>
+<span class="nc" id="L400">                                URL(url.protocol, url.host, url.port, &quot;&quot;)</span>
+<span class="fc" id="L401">                            } catch (e: Throwable) {</span>
+<span class="fc" id="L402">                                logDebug(LOG_TAG, &quot;Bad site url: ${feed.home_page_url}&quot;, e)</span>
+<span class="fc" id="L403">                                null</span>
+                            }
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">                        if (siteUrl != null) {</span>
+<span class="nc" id="L406">                            feedSql.siteFetched = Instant.now()</span>
+<span class="nc" id="L407">                            feedParser</span>
+<span class="nc" id="L408">                                .getSiteMetaData(siteUrl)</span>
+<span class="nc" id="L409">                                .onRight { metadata -&gt;</span>
+<span class="nc" id="L410">                                    try {</span>
+<span class="nc" id="L411">                                        feedSql.imageUrl = URL(metadata.feedImage)</span>
+<span class="nc" id="L412">                                    } catch (e: Throwable) {</span>
+<span class="nc" id="L413">                                        logDebug(LOG_TAG, &quot;Bad feedImage url: ${feed.home_page_url}&quot;, e)</span>
+                                    }
+<span class="nc" id="L415">                                }</span>
+                        }
+                    }
+
+                    // Update feed last so lastsync is only set after all items have been handled
+                    // for the rare case that the job is cancelled prematurely
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">                    feedSql.title = feed.title ?: feedSql.title</span>
+
+                    // Do not update feed url if auth or token params
+<span class="pc bpc" id="L424" title="2 of 4 branches missed.">                    if (urlHasNoAuthParams(feedSql.url) &amp;&amp; urlHasNoQueryParams(feedSql.url)) {</span>
+<span class="pc bpc" id="L425" title="2 of 4 branches missed.">                        feedSql.url = feed.feed_url?.let { sloppyLinkToStrictURLNoThrows(it) } ?: feedSql.url</span>
+                    }
+
+                    // Important to keep image if there is one in case of null
+                    // the image is fetched when adding a feed by fetching the main site and looking
+                    // for favicons - but only when first added and icon missing from feed.
+<span class="pc bpc" id="L431" title="2 of 4 branches missed.">                    feedSql.imageUrl = feed.icon?.let { sloppyLinkToStrictURLNoThrows(it) }</span>
+<span class="nc" id="L432">                        ?: feedSql.imageUrl</span>
+
+<span class="fc" id="L434">                    repository.upsertFeed(feedSql)</span>
+
+                    // Finally, prune database of old items
+                    // Ensure we don't delete items that are still present in the feed
+<span class="fc" id="L438">                    val presentIds =</span>
+<span class="fc" id="L439">                        feedItemSqls</span>
+<span class="fc" id="L440">                            .mapTo(mutableSetOf()) { (fi, _) -&gt; fi.id }</span>
+
+<span class="fc" id="L442">                    val articlesToDelete =</span>
+<span class="fc" id="L443">                        repository</span>
+<span class="fc" id="L444">                            .getItemsToBeCleanedFromFeed(</span>
+<span class="fc" id="L445">                                feedId = feedSql.id,</span>
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">                                keepCount = max(maxFeedItemCount, items?.size ?: 0),</span>
+<span class="fc" id="L447">                            ).filterNot { id -&gt;</span>
+                                // Don't delete articles that are present in feed or currently selected
+<span class="nc bnc" id="L449" title="All 4 branches missed.">                                id in presentIds || id == repository.currentArticleId.value</span>
+                            }
+
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">                    for (id in articlesToDelete) {</span>
+<span class="nc" id="L453">                        blobFile(itemId = id, filesDir = filePathProvider.articleDir).let { file -&gt;</span>
+<span class="nc" id="L454">                            try {</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                                if (file.isFile) {</span>
+<span class="nc" id="L456">                                    file.delete()</span>
+                                }
+<span class="nc" id="L458">                            } catch (e: IOException) {</span>
+<span class="nc" id="L459">                                Log.e(LOG_TAG, &quot;Failed to delete $file&quot;, e)</span>
+                            }
+                            Unit
+<span class="nc" id="L462">                        }</span>
+<span class="nc" id="L463">                        blobFullFile(</span>
+<span class="nc" id="L464">                            itemId = id,</span>
+<span class="nc" id="L465">                            filesDir = filePathProvider.fullArticleDir,</span>
+<span class="nc" id="L466">                        ).let { file -&gt;</span>
+<span class="nc" id="L467">                            try {</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                                if (file.isFile) {</span>
+<span class="nc" id="L469">                                    file.delete()</span>
+                                }
+<span class="nc" id="L471">                            } catch (e: IOException) {</span>
+<span class="nc" id="L472">                                Log.e(LOG_TAG, &quot;Failed to delete $file&quot;, e)</span>
+                            }
+                            Unit
+<span class="nc" id="L475">                        }</span>
+                    }
+
+<span class="fc" id="L478">                    repository.deleteFeedItems(articlesToDelete)</span>
+<span class="fc" id="L479">                    repository.deleteStaleRemoteReadMarks()</span>
+
+<span class="fc" id="L481">                    logDebug(LOG_TAG, &quot;Fetched ${feedSql.displayTitle}&quot;)</span>
+<span class="fc" id="L482">                }</span>
+            }
+    }
+
+<span class="nc" id="L486">    internal suspend fun feedsToSync(</span>
+        feedId: Long,
+        tag: String,
+<span class="nc" id="L489">        staleTime: Long = -1L,</span>
+    ): List&lt;Feed&gt; =
+<span class="fc" id="L491">        when {</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">            feedId &gt; 0 -&gt; {</span>
+<span class="fc" id="L493">                val feed =</span>
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">                    if (staleTime &gt; 0) {</span>
+<span class="fc" id="L495">                        repository.syncLoadFeedIfStale(</span>
+<span class="fc" id="L496">                            feedId,</span>
+<span class="fc" id="L497">                            staleTime = staleTime,</span>
+<span class="fc" id="L498">                            retryAfter = Instant.now(),</span>
+                        )
+                    } else {
+                        // Used internally too
+<span class="nc" id="L502">                        repository.syncLoadFeed(feedId, retryAfter = Instant.now())</span>
+                    }
+<span class="pc bpc" id="L504" title="1 of 2 branches missed.">                if (feed != null) {</span>
+<span class="fc" id="L505">                    listOf(feed)</span>
+                } else {
+<span class="nc" id="L507">                    emptyList()</span>
+                }
+            }
+
+<span class="pc bpc" id="L511" title="2 of 4 branches missed.">            tag.isNotEmpty() -&gt;</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">                if (staleTime &gt; 0) {</span>
+<span class="nc" id="L513">                    repository.syncLoadFeedsIfStale(</span>
+<span class="nc" id="L514">                        tag = tag,</span>
+<span class="nc" id="L515">                        staleTime = staleTime,</span>
+<span class="nc" id="L516">                        retryAfter = Instant.now(),</span>
+                    )
+                } else {
+<span class="nc" id="L519">                    repository.syncLoadFeeds(tag, retryAfter = Instant.now())</span>
+                }
+
+            else -&gt;
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">                if (staleTime &gt; 0) {</span>
+<span class="fc" id="L524">                    repository.syncLoadFeedsIfStale(</span>
+<span class="fc" id="L525">                        staleTime,</span>
+<span class="fc" id="L526">                        retryAfter = Instant.now(),</span>
+                    )
+                } else {
+<span class="nc" id="L529">                    repository.syncLoadFeeds(retryAfter = Instant.now())</span>
+                }
+<span class="pc" id="L531">        }</span>
+
+    /**
+     * Final thumbnail priority policy:
+     * 1) Keep feed-provided thumbnail (media/enclosure/etc) when it's not body-derived.
+     * 2) Otherwise try og:image from article &lt;head&gt;.
+     * 3) If no og:image found, keep current value (body fallback or null).
+     */
+    private suspend fun resolveThumbnailImage(
+        current: ThumbnailImage?,
+        articleUrl: String?,
+        hasFeedImage: Boolean,
+    ): ThumbnailImage? {
+<span class="nc bnc" id="L544" title="All 10 branches missed.">        val url = articleUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return current</span>
+<span class="nc bnc" id="L545" title="All 4 branches missed.">        if (!ThumbnailImagePolicy.shouldFetchOgImage(current, url, hasFeedImage)) return current</span>
+
+<span class="nc" id="L547">        val ogImage =</span>
+<span class="nc" id="L548">            try {</span>
+<span class="nc" id="L549">                okHttpClient.fetchOgImage(url)</span>
+<span class="nc" id="L550">            } catch (e: Exception) {</span>
+<span class="nc" id="L551">                logDebug(LOG_TAG, &quot;Failed to fetch og:image for $url&quot;, e)</span>
+<span class="nc" id="L552">                null</span>
+            }
+
+<span class="nc" id="L555">        return ThumbnailImagePolicy.applyOgImage(current, ogImage)</span>
+    }
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_RSS_LOCAL_SYNC&quot;
+    }
+}
+
+/**
+ * Remember that text or title literally can mean injection problems if the contain % or similar,
+ * so do NOT use them literally
+ */
+private val ParsedArticle.alternateId: String
+<span class="pc bpc" id="L568" title="2 of 4 branches missed.">    get() = &quot;$id|${content_text.hashCode()}|${title.hashCode()}&quot;</span>
+
+internal val Response.retryAfterSeconds: Long?
+    get() =
+<span class="nc bnc" id="L572" title="All 6 branches missed.">        headers(&quot;retry-after&quot;).maxOfOrNull { retryAfter -&gt;</span>
+            // Fallback to 1 hour if response is incorrect
+<span class="nc bnc" id="L574" title="All 4 branches missed.">            retryAfter.toLongOrNull() ?: 3600L</span>
+<span class="nc" id="L575">        }</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

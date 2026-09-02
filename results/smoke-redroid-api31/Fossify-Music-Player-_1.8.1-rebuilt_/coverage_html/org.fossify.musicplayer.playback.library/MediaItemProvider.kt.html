@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MediaItemProvider.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Fossify-Music-Player</a> &gt; <a href="index.source.html" class="el_package">org.fossify.musicplayer.playback.library</a> &gt; <span class="el_source">MediaItemProvider.kt</span></div><h1>MediaItemProvider.kt</h1><pre class="source lang-java linenums">package org.fossify.musicplayer.playback.library
+
+import android.content.ContentResolver
+import android.content.Context
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import androidx.annotation.DrawableRes
+import androidx.annotation.StringRes
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MediaMetadata.MediaType
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.MediaSession.MediaItemsWithStartPosition
+import com.google.common.util.concurrent.MoreExecutors
+import org.fossify.musicplayer.R
+import org.fossify.musicplayer.extensions.*
+import org.fossify.musicplayer.helpers.TAB_ALBUMS
+import org.fossify.musicplayer.helpers.TAB_ARTISTS
+import org.fossify.musicplayer.helpers.TAB_FOLDERS
+import org.fossify.musicplayer.helpers.TAB_GENRES
+import org.fossify.musicplayer.helpers.TAB_PLAYLISTS
+import org.fossify.musicplayer.helpers.TAB_TRACKS
+import org.fossify.musicplayer.models.QueueItem
+import org.fossify.musicplayer.models.toMediaItems
+import java.util.concurrent.Executors
+
+private const val STATE_CREATED = 1
+private const val STATE_INITIALIZING = 2
+private const val STATE_INITIALIZED = 3
+private const val STATE_ERROR = 4
+
+private const val SMP_ROOT_ID = &quot;__ROOT__&quot;
+private const val SMP_PLAYLISTS_ROOT_ID = &quot;__PLAYLISTS__&quot;
+private const val SMP_FOLDERS_ROOT_ID = &quot;__FOLDERS__&quot;
+private const val SMP_ARTISTS_ROOT_ID = &quot;__ARTISTS__&quot;
+private const val SMP_ALBUMS_ROOT_ID = &quot;__ALBUMS__&quot;
+private const val SMP_TRACKS_ROOT_ID = &quot;__TRACKS__&quot;
+private const val SMP_GENRES_ROOT_ID = &quot;__GENRES__&quot;
+
+/**
+ * This is not (yet) used internally and currently only required (mostly) for media browser's outside the app.
+ */
+@UnstableApi
+<span class="fc" id="L45">internal class MediaItemProvider(private val context: Context) {</span>
+<span class="fc" id="L46">    private val executor by lazy {</span>
+<span class="fc" id="L47">        MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor())</span>
+    }
+
+<span class="pc" id="L50">    inner class MediaItemNode(val item: MediaItem) {</span>
+<span class="fc" id="L51">        private val children: MutableList&lt;MediaItem&gt; = ArrayList()</span>
+<span class="fc" id="L52">        fun addChild(mediaId: String) = children.add(treeNodes[mediaId]!!.item)</span>
+<span class="nc" id="L53">        fun getChildren() = children.toList()</span>
+    }
+
+<span class="fc" id="L56">    private val treeNodes = mutableMapOf&lt;String, MediaItemNode&gt;()</span>
+<span class="fc" id="L57">    private var titleMap: MutableMap&lt;String, MediaItemNode&gt; = mutableMapOf()</span>
+<span class="fc" id="L58">    private val onReadyListeners = mutableListOf&lt;(Boolean) -&gt; Unit&gt;()</span>
+
+<span class="fc" id="L60">    private var state: Int = STATE_CREATED</span>
+        set(value) {
+<span class="fc bfc" id="L62" title="All 2 branches covered.">            if (value == STATE_INITIALIZED || value == STATE_ERROR) {</span>
+<span class="fc" id="L63">                synchronized(onReadyListeners) {</span>
+<span class="fc" id="L64">                    field = value</span>
+<span class="fc" id="L65">                    Handler(Looper.getMainLooper()).post {</span>
+<span class="fc" id="L66">                        onReadyListeners.forEach { listener -&gt;</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                            listener(state == STATE_INITIALIZED)</span>
+<span class="nc" id="L68">                        }</span>
+<span class="fc" id="L69">                    }</span>
+                }
+            } else {
+<span class="fc" id="L72">                field = value</span>
+            }
+<span class="fc" id="L74">        }</span>
+
+<span class="fc" id="L76">    private val audioHelper = context.audioHelper</span>
+
+<span class="fc" id="L78">    init {</span>
+<span class="fc" id="L79">        buildRoot()</span>
+<span class="fc" id="L80">    }</span>
+
+    fun whenReady(performAction: (Boolean) -&gt; Unit): Boolean {
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        return when (state) {</span>
+            STATE_CREATED, STATE_INITIALIZING -&gt; {
+<span class="nc" id="L85">                onReadyListeners += performAction</span>
+<span class="nc" id="L86">                false</span>
+            }
+
+            else -&gt; {
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                performAction(state != STATE_ERROR)</span>
+<span class="nc" id="L91">                true</span>
+            }
+        }
+    }
+
+    operator fun get(mediaId: String): MediaItem? {
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        val mediaItem = getNode(mediaId)?.item</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (mediaItem == null) {</span>
+            // assume it's a track
+<span class="nc bnc" id="L100" title="All 2 branches missed.">            val mediaStoreId = mediaId.toLongOrNull() ?: return null</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">            return audioHelper.getTrack(mediaStoreId)?.toMediaItem()</span>
+        }
+
+<span class="nc" id="L104">        return mediaItem</span>
+    }
+
+<span class="nc" id="L107">    fun getRootItem() = get(SMP_ROOT_ID)!!</span>
+
+<span class="nc bnc" id="L109" title="All 2 branches missed.">    fun getChildren(id: String) = getNode(id)?.getChildren()</span>
+
+    fun getRandomItem(): MediaItem {
+<span class="nc" id="L112">        var curRoot = getRootItem()</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        while (curRoot.mediaMetadata.isBrowsable == true) {</span>
+<span class="nc" id="L114">            val children = getChildren(curRoot.mediaId)!!</span>
+<span class="nc" id="L115">            curRoot = children.random()</span>
+        }
+<span class="nc" id="L117">        return curRoot</span>
+    }
+
+    fun getItemFromSearch(searchQuery: String): MediaItem? {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        var mediaItem = titleMap[searchQuery]?.item</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (mediaItem == null) {</span>
+<span class="nc bnc" id="L123" title="All 6 branches missed.">            val partialMatch = titleMap.keys.find { it.contains(searchQuery) } ?: return null</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            mediaItem = titleMap[partialMatch]?.item</span>
+        }
+
+<span class="nc" id="L127">        return mediaItem</span>
+    }
+
+<span class="nc" id="L130">    fun getDefaultQueue() = getChildren(SMP_TRACKS_ROOT_ID)</span>
+
+    fun getRecentItemsLazily(callback: (itemsWithStartPosition: MediaItemsWithStartPosition) -&gt; Unit) {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (state == STATE_INITIALIZED) {</span>
+<span class="nc" id="L134">            callback(getRecentItemsWithStartPosition())</span>
+        } else {
+<span class="nc" id="L136">            audioHelper.getQueuedTracksLazily { tracks, startIndex, startPositionMs -&gt;</span>
+<span class="nc" id="L137">                callback(MediaItemsWithStartPosition(tracks.toMediaItems(), startIndex, startPositionMs))</span>
+<span class="nc" id="L138">            }</span>
+        }
+<span class="nc" id="L140">    }</span>
+
+    fun getRecentItemsWithStartPosition(): MediaItemsWithStartPosition {
+<span class="nc" id="L143">        val recentItems = context.queueDAO.getAll().mapNotNull { getMediaItemFromQueueItem(it) }</span>
+<span class="nc" id="L144">        var startPosition = 0L</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        val currentItem = context.queueDAO.getCurrent()?.let {</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            val mediaItem = getMediaItemFromQueueItem(it) ?: return@let null</span>
+<span class="nc" id="L147">            val metadata = mediaItem.mediaMetadata.buildUpon().build()</span>
+<span class="nc" id="L148">            startPosition = it.lastPosition * 1000L</span>
+<span class="nc" id="L149">            mediaItem.buildUpon().setMediaMetadata(metadata).build()</span>
+        }
+
+<span class="nc" id="L152">        val startIndex = maxOf(recentItems.indexOf(currentItem), 0)</span>
+<span class="nc" id="L153">        return MediaItemsWithStartPosition(recentItems, startIndex, startPosition)</span>
+    }
+
+    fun saveRecentItemsWithStartPosition(mediaItems: List&lt;MediaItem&gt;, current: MediaItem, startPosition: Long) {
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (mediaItems.isEmpty()) {</span>
+<span class="nc" id="L158">            return</span>
+        }
+
+<span class="nc" id="L161">        executor.execute {</span>
+<span class="nc" id="L162">            val trackId = current.mediaId.toLong()</span>
+<span class="nc" id="L163">            val queueItems = mediaItems.mapIndexed { index, mediaItem -&gt;</span>
+<span class="nc" id="L164">                QueueItem(trackId = mediaItem.mediaId.toLong(), trackOrder = index, isCurrent = false, lastPosition = 0)</span>
+            }
+
+<span class="nc" id="L167">            audioHelper.resetQueue(queueItems, trackId, startPosition)</span>
+<span class="nc" id="L168">        }</span>
+<span class="nc" id="L169">    }</span>
+
+    fun reload() {
+<span class="fc" id="L172">        state = STATE_INITIALIZING</span>
+<span class="fc" id="L173">        executor.execute {</span>
+<span class="fc" id="L174">            buildRoot()</span>
+
+<span class="fc" id="L176">            try {</span>
+<span class="fc" id="L177">                buildPlaylists()</span>
+<span class="fc" id="L178">                buildFolders()</span>
+<span class="fc" id="L179">                buildArtists()</span>
+<span class="fc" id="L180">                buildAlbums()</span>
+<span class="fc" id="L181">                buildTracks()</span>
+<span class="fc" id="L182">                buildGenres()</span>
+<span class="nc" id="L183">            } catch (e: Exception) {</span>
+<span class="nc" id="L184">                state = STATE_ERROR</span>
+            }
+
+<span class="fc" id="L187">            state = STATE_INITIALIZED</span>
+<span class="fc" id="L188">        }</span>
+<span class="fc" id="L189">    }</span>
+
+    private fun buildRoot() {
+<span class="fc" id="L192">        val root = buildMediaItem(</span>
+<span class="fc" id="L193">            title = context.getString(org.fossify.commons.R.string.root),</span>
+<span class="fc" id="L194">            mediaId = SMP_ROOT_ID,</span>
+<span class="fc" id="L195">            mediaType = MediaMetadata.MEDIA_TYPE_FOLDER_MIXED</span>
+        )
+<span class="fc" id="L197">        val rootChildren = RootCategories.buildRootChildren(context)</span>
+<span class="fc" id="L198">        addNodeAndChildren(item = root, children = rootChildren)</span>
+<span class="fc" id="L199">    }</span>
+
+<span class="fc" id="L201">    private fun buildPlaylists() = with(audioHelper) {</span>
+<span class="fc" id="L202">        getAllPlaylists().forEach { playlist -&gt;</span>
+<span class="nc" id="L203">            addNodeAndChildren(SMP_PLAYLISTS_ROOT_ID, playlist.toMediaItem(), getPlaylistTracks(playlist.id).map { it.toMediaItem() })</span>
+<span class="nc" id="L204">        }</span>
+<span class="fc" id="L205">    }</span>
+
+<span class="fc" id="L207">    private fun buildFolders() = with(audioHelper) {</span>
+<span class="fc" id="L208">        getAllFolders().forEach { folder -&gt;</span>
+<span class="nc" id="L209">            addNodeAndChildren(SMP_FOLDERS_ROOT_ID, folder.toMediaItem(), getFolderTracks(folder.title).map { it.toMediaItem() })</span>
+<span class="nc" id="L210">        }</span>
+<span class="fc" id="L211">    }</span>
+
+<span class="fc" id="L213">    private fun buildArtists() = with(audioHelper) {</span>
+<span class="fc" id="L214">        getAllArtists().forEach { artist -&gt;</span>
+<span class="nc" id="L215">            addNodeAndChildren(SMP_ARTISTS_ROOT_ID, artist.toMediaItem(), getArtistAlbums(artist.id).map { it.toMediaItem() })</span>
+<span class="nc" id="L216">        }</span>
+<span class="fc" id="L217">    }</span>
+
+<span class="fc" id="L219">    private fun buildAlbums() = with(audioHelper) {</span>
+<span class="fc" id="L220">        getAllAlbums().forEach { album -&gt;</span>
+<span class="nc" id="L221">            addNodeAndChildren(SMP_ALBUMS_ROOT_ID, album.toMediaItem(), getAlbumTracks(album.id).map { it.toMediaItem() })</span>
+<span class="nc" id="L222">        }</span>
+<span class="fc" id="L223">    }</span>
+
+<span class="fc" id="L225">    private fun buildTracks() = with(audioHelper) {</span>
+<span class="fc" id="L226">        getAllTracks().forEach { track -&gt;</span>
+<span class="nc" id="L227">            addNodeAndChildren(SMP_TRACKS_ROOT_ID, track.toMediaItem())</span>
+<span class="nc" id="L228">            titleMap[track.title.lowercase()] = MediaItemNode(track.toMediaItem())</span>
+<span class="nc" id="L229">        }</span>
+<span class="fc" id="L230">    }</span>
+
+<span class="fc" id="L232">    private fun buildGenres() = with(audioHelper) {</span>
+<span class="fc" id="L233">        getAllGenres().forEach { genre -&gt;</span>
+<span class="nc" id="L234">            addNodeAndChildren(SMP_GENRES_ROOT_ID, genre.toMediaItem(), getGenreTracks(genre.id).map { it.toMediaItem() })</span>
+<span class="nc" id="L235">        }</span>
+<span class="fc" id="L236">    }</span>
+
+<span class="nc" id="L238">    private fun getNode(id: String) = treeNodes[id]</span>
+
+<span class="pc" id="L240">    private fun addNodeAndChildren(parentId: String? = null, item: MediaItem, children: List&lt;MediaItem&gt;? = null) {</span>
+<span class="fc" id="L241">        val itemNode = MediaItemNode(item)</span>
+<span class="fc" id="L242">        treeNodes[item.mediaId] = itemNode</span>
+
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">        children?.forEach { child -&gt;</span>
+<span class="fc" id="L245">            treeNodes[child.mediaId] = MediaItemNode(child)</span>
+<span class="fc" id="L246">            itemNode.addChild(child.mediaId)</span>
+<span class="fc" id="L247">        }</span>
+
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">        if (parentId != null) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            getNode(parentId)?.addChild(item.mediaId)</span>
+        }
+<span class="fc" id="L252">    }</span>
+
+<span class="nc bnc" id="L254" title="All 2 branches missed.">    private fun getMediaItemFromQueueItem(queueItem: QueueItem) = getNode(queueItem.trackId.toString())?.item</span>
+}
+
+<span class="fc" id="L257">private enum class RootCategories(@StringRes val titleRes: Int, @DrawableRes val drawableRes: Int, val mediaId: String, val mediaType: @MediaType Int) {</span>
+<span class="fc" id="L258">    PLAYLISTS(R.string.playlists, R.drawable.ic_playlist_vector, SMP_PLAYLISTS_ROOT_ID, MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS),</span>
+<span class="fc" id="L259">    FOLDERS(R.string.folders, R.drawable.ic_folders_vector, SMP_FOLDERS_ROOT_ID, MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS),</span>
+<span class="fc" id="L260">    ARTISTS(R.string.artists, org.fossify.commons.R.drawable.ic_person_vector, SMP_ARTISTS_ROOT_ID, MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS),</span>
+<span class="fc" id="L261">    ALBUMS(R.string.albums, R.drawable.ic_album_vector, SMP_ALBUMS_ROOT_ID, MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS),</span>
+<span class="fc" id="L262">    TRACKS(R.string.tracks, R.drawable.ic_music_note_vector, SMP_TRACKS_ROOT_ID, MediaMetadata.MEDIA_TYPE_PLAYLIST),</span>
+<span class="fc" id="L263">    GENRES(R.string.genres, R.drawable.ic_genre_vector, SMP_GENRES_ROOT_ID, MediaMetadata.MEDIA_TYPE_FOLDER_GENRES);</span>
+
+    companion object {
+        fun buildRootChildren(context: Context): List&lt;MediaItem&gt; {
+<span class="fc" id="L267">            val rootChildren = mutableListOf&lt;MediaItem&gt;()</span>
+<span class="fc" id="L268">            values().forEach {</span>
+<span class="fc" id="L269">                val flag = getTabFlag(it.mediaId)</span>
+<span class="fc bfc" id="L270" title="All 2 branches covered.">                if (context.isTabVisible(flag)) {</span>
+<span class="fc" id="L271">                    rootChildren += buildMediaItem(</span>
+<span class="fc" id="L272">                        title = context.getString(it.titleRes),</span>
+<span class="fc" id="L273">                        artworkUri = buildDrawableUri(context, it.drawableRes),</span>
+<span class="fc" id="L274">                        mediaId = it.mediaId,</span>
+<span class="fc" id="L275">                        mediaType = it.mediaType</span>
+                    )
+                }
+<span class="fc" id="L278">            }</span>
+
+<span class="fc" id="L280">            return rootChildren</span>
+        }
+
+        private fun getTabFlag(mediaId: String): Int {
+<span class="pc bpc" id="L284" title="7 of 19 branches missed.">            return when (mediaId) {</span>
+<span class="fc" id="L285">                SMP_PLAYLISTS_ROOT_ID -&gt; TAB_PLAYLISTS</span>
+<span class="fc" id="L286">                SMP_FOLDERS_ROOT_ID -&gt; TAB_FOLDERS</span>
+<span class="fc" id="L287">                SMP_ARTISTS_ROOT_ID -&gt; TAB_ARTISTS</span>
+<span class="fc" id="L288">                SMP_ALBUMS_ROOT_ID -&gt; TAB_ALBUMS</span>
+<span class="fc" id="L289">                SMP_TRACKS_ROOT_ID -&gt; TAB_TRACKS</span>
+<span class="fc" id="L290">                SMP_GENRES_ROOT_ID -&gt; TAB_GENRES</span>
+<span class="nc" id="L291">                else -&gt; throw IllegalArgumentException(&quot;Invalid media id: $mediaId&quot;)</span>
+            }
+        }
+
+        private fun buildDrawableUri(context: Context, drawableRes: Int): Uri? {
+<span class="fc" id="L296">            return Uri.Builder()</span>
+<span class="fc" id="L297">                .scheme(ContentResolver.SCHEME_ANDROID_RESOURCE)</span>
+<span class="fc" id="L298">                .authority(context.resources.getResourcePackageName(drawableRes))</span>
+<span class="fc" id="L299">                .appendPath(context.resources.getResourceTypeName(drawableRes))</span>
+<span class="fc" id="L300">                .appendPath(context.resources.getResourceEntryName(drawableRes))</span>
+<span class="fc" id="L301">                .build()</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

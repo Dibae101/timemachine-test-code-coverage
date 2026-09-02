@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LoggerImpl.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.nextcloud.client.logger</a> &gt; <span class="el_source">LoggerImpl.kt</span></div><h1>LoggerImpl.kt</h1><pre class="source lang-java linenums">/*
+ * Nextcloud Android client application
+ *
+ * @author Chris Narkiewicz
+ * Copyright (C) 2019 Chris Narkiewicz &lt;hello@ezaquarii.com&gt;
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+package com.nextcloud.client.logger
+
+import android.os.Handler
+import android.util.Log
+import com.nextcloud.client.core.Clock
+import java.util.Date
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+@Suppress(&quot;TooManyFunctions&quot;)
+<span class="fc" id="L33">internal class LoggerImpl(</span>
+    private val clock: Clock,
+    private val handler: FileLogHandler,
+    private val mainThreadHandler: Handler,
+    queueCapacity: Int
+) : Logger, LogsRepository {
+
+<span class="nc" id="L40">    data class Load(val onResult: (List&lt;LogEntry&gt;, Long) -&gt; Unit)</span>
+<span class="nc" id="L41">    class Delete</span>
+
+<span class="fc" id="L43">    private val looper = ThreadLoop()</span>
+<span class="fc" id="L44">    private val eventQueue: BlockingQueue&lt;Any&gt; = LinkedBlockingQueue(queueCapacity)</span>
+
+<span class="fc" id="L46">    private val processedEvents = mutableListOf&lt;Any&gt;()</span>
+<span class="fc" id="L47">    private val otherEvents = mutableListOf&lt;Any&gt;()</span>
+<span class="fc" id="L48">    private val missedLogs = AtomicBoolean()</span>
+<span class="fc" id="L49">    private val missedLogsCount = AtomicLong()</span>
+
+    override val lostEntries: Boolean
+        get() {
+<span class="nc" id="L53">            return missedLogs.get()</span>
+        }
+
+    fun start() {
+<span class="fc" id="L57">        looper.start(this::eventLoop)</span>
+<span class="fc" id="L58">    }</span>
+
+    override fun v(tag: String, message: String) {
+<span class="fc" id="L61">        Log.v(tag, message)</span>
+<span class="fc" id="L62">        enqueue(Level.VERBOSE, tag, message)</span>
+<span class="fc" id="L63">    }</span>
+
+    override fun d(tag: String, message: String) {
+<span class="fc" id="L66">        Log.d(tag, message)</span>
+<span class="fc" id="L67">        enqueue(Level.DEBUG, tag, message)</span>
+<span class="fc" id="L68">    }</span>
+
+    override fun d(tag: String, message: String, t: Throwable) {
+<span class="nc" id="L71">        Log.d(tag, message)</span>
+<span class="nc" id="L72">        enqueue(Level.DEBUG, tag, message)</span>
+<span class="nc" id="L73">    }</span>
+
+    override fun i(tag: String, message: String) {
+<span class="fc" id="L76">        Log.i(tag, message)</span>
+<span class="fc" id="L77">        enqueue(Level.INFO, tag, message)</span>
+<span class="fc" id="L78">    }</span>
+
+    override fun w(tag: String, message: String) {
+<span class="nc" id="L81">        Log.w(tag, message)</span>
+<span class="nc" id="L82">        enqueue(Level.WARNING, tag, message)</span>
+<span class="nc" id="L83">    }</span>
+
+    override fun e(tag: String, message: String) {
+<span class="fc" id="L86">        Log.e(tag, message)</span>
+<span class="fc" id="L87">        enqueue(Level.ERROR, tag, message)</span>
+<span class="fc" id="L88">    }</span>
+
+    override fun e(tag: String, message: String, t: Throwable) {
+<span class="nc" id="L91">        Log.e(tag, message)</span>
+<span class="nc" id="L92">        enqueue(Level.ERROR, tag, message)</span>
+<span class="nc" id="L93">    }</span>
+
+    override fun load(onLoaded: (entries: List&lt;LogEntry&gt;, totalLogSize: Long) -&gt; Unit) {
+<span class="nc" id="L96">        eventQueue.put(Load(onLoaded))</span>
+<span class="nc" id="L97">    }</span>
+
+    override fun deleteAll() {
+<span class="nc" id="L100">        eventQueue.put(Delete())</span>
+<span class="nc" id="L101">    }</span>
+
+    private fun enqueue(level: Level, tag: String, message: String) {
+<span class="fc" id="L104">        try {</span>
+<span class="fc" id="L105">            val entry = LogEntry(timestamp = clock.currentDate, level = level, tag = tag, message = message)</span>
+<span class="fc" id="L106">            val enqueued = eventQueue.offer(entry, 1, TimeUnit.SECONDS)</span>
+<span class="pc bpc" id="L107" title="1 of 2 branches missed.">            if (!enqueued) {</span>
+<span class="nc" id="L108">                missedLogs.set(true)</span>
+<span class="nc" id="L109">                missedLogsCount.incrementAndGet()</span>
+            }
+<span class="nc" id="L111">        } catch (ex: InterruptedException) {</span>
+            // since interrupted flag is consumed now, we need to re-set the flag so
+            // the caller can continue handling the thread interruption in it's own way
+<span class="nc" id="L114">            Thread.currentThread().interrupt()</span>
+        }
+<span class="fc" id="L116">    }</span>
+
+    private fun eventLoop() {
+<span class="fc" id="L119">        try {</span>
+<span class="fc" id="L120">            processedEvents.clear()</span>
+<span class="fc" id="L121">            otherEvents.clear()</span>
+
+<span class="fc" id="L123">            processedEvents.add(eventQueue.take())</span>
+<span class="fc" id="L124">            eventQueue.drainTo(processedEvents)</span>
+
+            // process all writes in bulk - this is most frequest use case and we can
+            // assume handler must be opened 99.999% of time; anything that is not a log
+            // write should be deferred
+<span class="fc" id="L129">            handler.open()</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">            for (event in processedEvents) {</span>
+<span class="pc bpc" id="L131" title="1 of 2 branches missed.">                if (event is LogEntry) {</span>
+<span class="fc" id="L132">                    handler.write(event.toString() + &quot;\n&quot;)</span>
+                } else {
+<span class="nc" id="L134">                    otherEvents.add(event)</span>
+                }
+            }
+<span class="fc" id="L137">            handler.close()</span>
+
+            // Those events are very sporadic and we don't have to be clever here
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">            for (event in otherEvents) {</span>
+<span class="nc" id="L141">                when (event) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                    is Load -&gt; {</span>
+<span class="nc" id="L143">                        val loaded = handler.loadLogFiles()</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                        val entries = loaded.lines.mapNotNull { LogEntry.parse(it) }</span>
+<span class="nc" id="L145">                        mainThreadHandler.post {</span>
+<span class="nc" id="L146">                            event.onResult(entries, loaded.logSize)</span>
+<span class="nc" id="L147">                        }</span>
+                    }
+<span class="nc bnc" id="L149" title="All 2 branches missed.">                    is Delete -&gt; handler.deleteAll()</span>
+                }
+            }
+
+<span class="fc" id="L153">            checkAndLogLostMessages()</span>
+<span class="nc" id="L154">        } catch (ex: InterruptedException) {</span>
+<span class="nc" id="L155">            handler.close()</span>
+<span class="nc" id="L156">            throw ex</span>
+        }
+<span class="fc" id="L158">    }</span>
+
+    private fun checkAndLogLostMessages() {
+<span class="fc" id="L161">        val lastMissedLogsCount = missedLogsCount.getAndSet(0)</span>
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">        if (lastMissedLogsCount &gt; 0) {</span>
+<span class="nc" id="L163">            handler.open()</span>
+<span class="nc" id="L164">            val warning = LogEntry(</span>
+<span class="nc" id="L165">                timestamp = Date(),</span>
+<span class="nc" id="L166">                level = Level.WARNING,</span>
+<span class="nc" id="L167">                tag = &quot;Logger&quot;,</span>
+<span class="nc" id="L168">                message = &quot;Logger queue overflow. Approx $lastMissedLogsCount entries lost. You write too much.&quot;</span>
+<span class="nc" id="L169">            ).toString()</span>
+<span class="nc" id="L170">            handler.write(warning)</span>
+<span class="nc" id="L171">            handler.close()</span>
+        }
+<span class="fc" id="L173">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

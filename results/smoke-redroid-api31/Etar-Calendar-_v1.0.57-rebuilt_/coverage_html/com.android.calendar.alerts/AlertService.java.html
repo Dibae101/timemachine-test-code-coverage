@@ -1,0 +1,1061 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlertService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.alerts</a> &gt; <span class="el_source">AlertService.java</span></div><h1>AlertService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2008 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.alerts;
+
+import android.Manifest;
+import android.annotation.TargetApi;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Build;
+import android.provider.CalendarContract;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.CalendarAlerts;
+import android.text.TextUtils;
+import android.text.format.DateUtils;
+import android.util.Log;
+
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+import androidx.core.content.ContextCompat;
+
+import com.android.calendar.Utils;
+import com.android.calendar.settings.GeneralPreferences;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.TimeZone;
+
+import ws.xsoh.etar.R;
+
+/**
+ * Static service class is used to handle calendar event reminders. Called by AlertWorker.
+ */
+<span class="nc" id="L59">public class AlertService {</span>
+
+    public static final String ALERT_CHANNEL_GROUP_ID = &quot;alert_channel_group_01&quot;;
+    public static final String FOREGROUND_CHANNEL_ID = &quot;foreground_channel_01&quot;;
+
+    // Hard limit to the number of notifications displayed.
+    public static final int MAX_NOTIFICATIONS = 20;
+    static final boolean DEBUG = true;
+<span class="fc" id="L67">    static final String[] ALERT_PROJECTION = new String[] {</span>
+        CalendarAlerts._ID,                     // 0
+        CalendarAlerts.EVENT_ID,                // 1
+        CalendarAlerts.STATE,                   // 2
+        CalendarAlerts.TITLE,                   // 3
+        CalendarAlerts.EVENT_LOCATION,          // 4
+        CalendarAlerts.SELF_ATTENDEE_STATUS,    // 5
+        CalendarAlerts.ALL_DAY,                 // 6
+        CalendarAlerts.ALARM_TIME,              // 7
+        CalendarAlerts.MINUTES,                 // 8
+        CalendarAlerts.BEGIN,                   // 9
+        CalendarAlerts.END,                     // 10
+        CalendarAlerts.DESCRIPTION,             // 11
+        CalendarAlerts.CALENDAR_ID,             // 12
+    };
+    private static final String TAG = &quot;AlertService&quot;;
+    private static final int ALERT_INDEX_ID = 0;
+    private static final int ALERT_INDEX_EVENT_ID = 1;
+    private static final int ALERT_INDEX_STATE = 2;
+    private static final int ALERT_INDEX_TITLE = 3;
+    private static final int ALERT_INDEX_EVENT_LOCATION = 4;
+    private static final int ALERT_INDEX_SELF_ATTENDEE_STATUS = 5;
+    private static final int ALERT_INDEX_ALL_DAY = 6;
+    private static final int ALERT_INDEX_ALARM_TIME = 7;
+    private static final int ALERT_INDEX_MINUTES = 8;
+    private static final int ALERT_INDEX_BEGIN = 9;
+    private static final int ALERT_INDEX_END = 10;
+    private static final int ALERT_INDEX_DESCRIPTION = 11;
+    private static final int ALERT_INDEX_CALENDAR_ID = 12;
+    private static final String ACTIVE_ALERTS_SELECTION = &quot;(&quot; + CalendarAlerts.STATE + &quot;=? OR &quot;
+            + CalendarAlerts.STATE + &quot;=?) AND &quot; + CalendarAlerts.ALARM_TIME + &quot;&lt;=&quot;;
+<span class="fc" id="L98">    private static final String[] ACTIVE_ALERTS_SELECTION_ARGS = new String[] {</span>
+<span class="fc" id="L99">            Integer.toString(CalendarAlerts.STATE_FIRED),</span>
+<span class="fc" id="L100">            Integer.toString(CalendarAlerts.STATE_SCHEDULED)</span>
+    };
+    private static final String ACTIVE_ALERTS_SORT = &quot;begin DESC, end DESC&quot;;
+    private static final String DISMISS_OLD_SELECTION = CalendarAlerts.END + &quot;&lt;? AND &quot;
+            + CalendarAlerts.STATE + &quot;=?&quot;;
+    private static final int MINUTE_MS = 60 * 1000;
+    // The grace period before changing a notification's priority bucket.
+    private static final int MIN_DEPRIORITIZE_GRACE_PERIOD_MS = 15 * MINUTE_MS;
+    // Shared prefs key for storing whether the EVENT_REMINDER event from the provider
+    // was ever received.  Some OEMs modified this provider broadcast, so we had to
+    // do the alarm scheduling here in the app, for the unbundled app's reminders to work.
+    // If the EVENT_REMINDER event was ever received, we know we can skip our secondary
+    // alarm scheduling.
+    private static final String PROVIDER_REMINDER_PREF_KEY =
+            &quot;preference_received_provider_reminder_broadcast&quot;;
+    private static final String SORT_ORDER_ALARMTIME_ASC =
+            CalendarContract.CalendarAlerts.ALARM_TIME + &quot; ASC&quot;;
+    private static final String WHERE_RESCHEDULE_MISSED_ALARMS =
+            CalendarContract.CalendarAlerts.STATE
+                    + &quot;=&quot;
+                    + CalendarContract.CalendarAlerts.STATE_SCHEDULED
+                    + &quot; AND &quot;
+                    + CalendarContract.CalendarAlerts.ALARM_TIME
+                    + &quot;&lt;?&quot;
+                    + &quot; AND &quot;
+                    + CalendarContract.CalendarAlerts.ALARM_TIME
+                    + &quot;&gt;?&quot;
+                    + &quot; AND &quot;
+                    + CalendarContract.CalendarAlerts.END + &quot;&gt;=?&quot;;
+<span class="fc" id="L129">    private static Boolean sReceivedProviderReminderBroadcast = null;</span>
+
+    static void dismissOldAlerts(Context context) {
+<span class="nc" id="L132">        ContentResolver cr = context.getContentResolver();</span>
+<span class="nc" id="L133">        final long currentTime = System.currentTimeMillis();</span>
+<span class="nc" id="L134">        ContentValues vals = new ContentValues();</span>
+<span class="nc" id="L135">        vals.put(CalendarAlerts.STATE, CalendarAlerts.STATE_DISMISSED);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (ContextCompat.checkSelfPermission(context,</span>
+                Manifest.permission.WRITE_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            //If permission is not granted then just return.
+<span class="nc" id="L139">            Log.d(TAG, &quot;Manifest.permission.WRITE_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L140">            return;</span>
+        }
+<span class="nc" id="L142">        cr.update(CalendarAlerts.CONTENT_URI, vals, DISMISS_OLD_SELECTION, new String[] {</span>
+<span class="nc" id="L143">                Long.toString(currentTime), Integer.toString(CalendarAlerts.STATE_SCHEDULED)</span>
+        });
+<span class="nc" id="L145">    }</span>
+
+    static boolean updateAlertNotification(Context context) {
+<span class="nc" id="L148">        ContentResolver cr = context.getContentResolver();</span>
+<span class="nc" id="L149">        NotificationMgr nm = new NotificationMgrWrapper(</span>
+<span class="nc" id="L150">                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE));</span>
+
+
+<span class="nc" id="L153">        final long currentTime = System.currentTimeMillis();</span>
+<span class="nc" id="L154">        SharedPreferences prefs = GeneralPreferences.Companion.getSharedPreferences(context);</span>
+
+        if (DEBUG) {
+<span class="nc" id="L157">            Log.d(TAG, &quot;Beginning updateAlertNotification&quot;);</span>
+        }
+
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (!Utils.isCalendarPermissionGranted(context, false)) {</span>
+            //If permission is not granted then just return.
+<span class="nc" id="L162">            Log.d(TAG, &quot;Manifest.permission.READ_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L163">            return false;</span>
+        }
+
+
+<span class="nc bnc" id="L167" title="All 4 branches missed.">        if (!prefs.getBoolean(GeneralPreferences.KEY_ALERTS, true) &amp;&amp; !Utils.isOreoOrLater()) {</span>
+            if (DEBUG) {
+<span class="nc" id="L169">                Log.d(TAG, &quot;alert preference is OFF&quot;);</span>
+            }
+
+            // If we shouldn't be showing notifications cancel any existing ones
+            // and return.
+<span class="nc" id="L174">            nm.cancelAll();</span>
+<span class="nc" id="L175">            return true;</span>
+        }
+
+<span class="nc" id="L178">        Cursor alertCursor = cr.query(CalendarAlerts.CONTENT_URI, ALERT_PROJECTION,</span>
+                (ACTIVE_ALERTS_SELECTION + currentTime), ACTIVE_ALERTS_SELECTION_ARGS,
+                ACTIVE_ALERTS_SORT);
+
+<span class="nc bnc" id="L182" title="All 4 branches missed.">        if (alertCursor == null || alertCursor.getCount() == 0) {</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            if (alertCursor != null) {</span>
+<span class="nc" id="L184">                alertCursor.close();</span>
+            }
+
+<span class="nc" id="L187">            if (DEBUG) Log.d(TAG, &quot;No fired or scheduled alerts&quot;);</span>
+<span class="nc" id="L188">            nm.cancelAll();</span>
+<span class="nc" id="L189">            return false;</span>
+        }
+
+<span class="nc" id="L192">        return generateAlerts(context, nm, AlertUtils.createAlarmManager(context), prefs,</span>
+                alertCursor, currentTime, MAX_NOTIFICATIONS);
+    }
+
+    public static boolean generateAlerts(Context context, NotificationMgr nm,
+            AlarmManagerInterface alarmMgr, SharedPreferences prefs, Cursor alertCursor,
+            final long currentTime, final int maxNotifications) {
+        if (DEBUG) {
+<span class="nc" id="L200">            Log.d(TAG, &quot;alertCursor count:&quot; + alertCursor.getCount());</span>
+        }
+
+        // Process the query results and bucketize events.
+<span class="nc" id="L204">        ArrayList&lt;NotificationInfo&gt; highPriorityEvents = new ArrayList&lt;NotificationInfo&gt;();</span>
+<span class="nc" id="L205">        ArrayList&lt;NotificationInfo&gt; mediumPriorityEvents = new ArrayList&lt;NotificationInfo&gt;();</span>
+<span class="nc" id="L206">        ArrayList&lt;NotificationInfo&gt; lowPriorityEvents = new ArrayList&lt;NotificationInfo&gt;();</span>
+<span class="nc" id="L207">        int numFired = processQuery(alertCursor, context, currentTime, highPriorityEvents,</span>
+                mediumPriorityEvents, lowPriorityEvents);
+
+<span class="nc" id="L210">        if (highPriorityEvents.size() + mediumPriorityEvents.size()</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                + lowPriorityEvents.size() == 0) {</span>
+<span class="nc" id="L212">            nm.cancelAll();</span>
+<span class="nc" id="L213">            return true;</span>
+        }
+
+<span class="nc" id="L216">        long nextRefreshTime = Long.MAX_VALUE;</span>
+<span class="nc" id="L217">        int currentNotificationId = 1;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        NotificationPrefs notificationPrefs = new NotificationPrefs(context, prefs,</span>
+                (numFired == 0));
+
+        // If there are more high/medium priority events than we can show, bump some to
+        // the low priority digest.
+<span class="nc" id="L223">        redistributeBuckets(highPriorityEvents, mediumPriorityEvents, lowPriorityEvents,</span>
+                maxNotifications);
+
+        // Post the individual higher priority events (future and recently started
+        // concurrent events).  Order these so that earlier start times appear higher in
+        // the notification list.
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        for (int i = 0; i &lt; highPriorityEvents.size(); i++) {</span>
+<span class="nc" id="L230">            NotificationInfo info = highPriorityEvents.get(i);</span>
+<span class="nc" id="L231">            String summaryText = AlertUtils.formatTimeLocation(context, info.startMillis,</span>
+                    info.allDay, info.location);
+<span class="nc" id="L233">            postNotification(info, summaryText, context, true, notificationPrefs, nm,</span>
+                    currentNotificationId++);
+
+            // Keep concurrent events high priority (to appear higher in the notification list)
+            // until 15 minutes into the event.
+<span class="nc" id="L238">            nextRefreshTime = Math.min(nextRefreshTime, getNextRefreshTime(info, currentTime));</span>
+        }
+
+        // Post the medium priority events (concurrent events that started a while ago).
+        // Order these so more recent start times appear higher in the notification list.
+        //
+        // TODO: Post these with the same notification priority level as the higher priority
+        // events, so that all notifications will be co-located together.
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        for (int i = mediumPriorityEvents.size() - 1; i &gt;= 0; i--) {</span>
+<span class="nc" id="L247">            NotificationInfo info = mediumPriorityEvents.get(i);</span>
+            // TODO: Change to a relative time description like: &quot;Started 40 minutes ago&quot;.
+            // This requires constant refreshing to the message as time goes.
+<span class="nc" id="L250">            String summaryText = AlertUtils.formatTimeLocation(context, info.startMillis,</span>
+                    info.allDay, info.location);
+<span class="nc" id="L252">            postNotification(info, summaryText, context, false, notificationPrefs, nm,</span>
+                    currentNotificationId++);
+
+            // Refresh when concurrent event ends so it will drop into the expired digest.
+<span class="nc" id="L256">            nextRefreshTime = Math.min(nextRefreshTime, getNextRefreshTime(info, currentTime));</span>
+        }
+
+        // Post the low priority events as 1 combined notification.
+<span class="nc" id="L260">        int numLowPriority = lowPriorityEvents.size();</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (numLowPriority &gt; 0) {</span>
+<span class="nc" id="L262">            String expiredDigestTitle = getDigestTitle(lowPriorityEvents);</span>
+            NotificationWrapper notification;
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            if (numLowPriority == 1) {</span>
+                // If only 1 expired event, display an &quot;old-style&quot; basic alert.
+<span class="nc" id="L266">                NotificationInfo info = lowPriorityEvents.get(0);</span>
+<span class="nc" id="L267">                String summaryText = AlertUtils.formatTimeLocation(context, info.startMillis,</span>
+                        info.allDay, info.location);
+<span class="nc" id="L269">                notification = AlertReceiver.makeBasicNotification(context, info.eventName,</span>
+                        summaryText, info.startMillis, info.endMillis, info.eventId, info.calendarId,
+                        AlertUtils.EXPIRED_GROUP_NOTIFICATION_ID, false,
+                        Notification.PRIORITY_MIN);
+<span class="nc" id="L273">            } else {</span>
+                // Multiple expired events are listed in a digest.
+<span class="nc" id="L275">                notification = AlertReceiver.makeDigestNotification(context,</span>
+                    lowPriorityEvents, expiredDigestTitle, false);
+            }
+
+            // Add options for a quiet update.
+<span class="nc" id="L280">            addNotificationOptions(notification, true, expiredDigestTitle,</span>
+<span class="nc" id="L281">                    notificationPrefs.getDefaultVibrate(),</span>
+<span class="nc" id="L282">                    notificationPrefs.getRingtoneAndSilence(),</span>
+                    false); /* Do not show the LED for the expired events. */
+
+            if (DEBUG) {
+<span class="nc" id="L286">              Log.d(TAG, &quot;Quietly posting digest alarm notification, numEvents:&quot; + numLowPriority</span>
+                      + &quot;, notificationId:&quot; + AlertUtils.EXPIRED_GROUP_NOTIFICATION_ID);
+          }
+
+            // Post the new notification for the group.
+<span class="nc" id="L291">            nm.notify(context, AlertUtils.EXPIRED_GROUP_NOTIFICATION_ID, notification);</span>
+<span class="nc" id="L292">        } else {</span>
+<span class="nc" id="L293">            nm.cancel(AlertUtils.EXPIRED_GROUP_NOTIFICATION_ID);</span>
+            if (DEBUG) {
+<span class="nc" id="L295">                Log.d(TAG, &quot;No low priority events, canceling the digest notification.&quot;);</span>
+            }
+        }
+
+        // Remove the notifications that are hanging around from the previous refresh.
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (currentNotificationId &lt;= maxNotifications) {</span>
+<span class="nc" id="L301">            nm.cancelAllBetween(currentNotificationId, maxNotifications);</span>
+            if (DEBUG) {
+<span class="nc" id="L303">                Log.d(TAG, &quot;Canceling leftover notification IDs &quot; + currentNotificationId + &quot;-&quot;</span>
+                        + maxNotifications);
+            }
+        }
+
+        // Schedule the next silent refresh time so notifications will change
+        // buckets (eg. drop into expired digest, etc).
+<span class="nc bnc" id="L310" title="All 4 branches missed.">        if (nextRefreshTime &lt; Long.MAX_VALUE &amp;&amp; nextRefreshTime &gt; currentTime) {</span>
+<span class="nc" id="L311">            AlertUtils.scheduleNextNotificationRefresh(context, alarmMgr, nextRefreshTime);</span>
+            if (DEBUG) {
+<span class="nc" id="L313">                long minutesBeforeRefresh = (nextRefreshTime - currentTime) / MINUTE_MS;</span>
+<span class="nc" id="L314">                Time time = new Time();</span>
+<span class="nc" id="L315">                time.set(nextRefreshTime);</span>
+<span class="nc" id="L316">                String msg = String.format(&quot;Scheduling next notification refresh in %d min at: &quot;</span>
+<span class="nc" id="L317">                        + &quot;%d:%02d&quot;, minutesBeforeRefresh, time.getHour(), time.getMinute());</span>
+<span class="nc" id="L318">                Log.d(TAG, msg);</span>
+<span class="nc" id="L319">            }</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        } else if (nextRefreshTime &lt; currentTime) {</span>
+<span class="nc" id="L321">            Log.e(TAG, &quot;Illegal state: next notification refresh time found to be in the past.&quot;);</span>
+        }
+
+        // Flushes old fired alerts from internal storage, if needed.
+<span class="nc" id="L325">        AlertUtils.flushOldAlertsFromInternalStorage(context);</span>
+
+<span class="nc" id="L327">        return true;</span>
+    }
+
+    /**
+     * Redistributes events in the priority lists based on the max # of notifications we
+     * can show.
+     */
+    static void redistributeBuckets(ArrayList&lt;NotificationInfo&gt; highPriorityEvents,
+            ArrayList&lt;NotificationInfo&gt; mediumPriorityEvents,
+            ArrayList&lt;NotificationInfo&gt; lowPriorityEvents, int maxNotifications) {
+
+        // If too many high priority alerts, shift the remaining high priority and all the
+        // medium priority ones to the low priority bucket.  Note that order is important
+        // here; these lists are sorted by descending start time.  Maintain that ordering
+        // so posted notifications are in the expected order.
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (highPriorityEvents.size() &gt; maxNotifications) {</span>
+            // Move mid-priority to the digest.
+<span class="nc" id="L344">            lowPriorityEvents.addAll(0, mediumPriorityEvents);</span>
+
+            // Move the rest of the high priority ones (latest ones) to the digest.
+<span class="nc" id="L347">            List&lt;NotificationInfo&gt; itemsToMoveSublist = highPriorityEvents.subList(</span>
+<span class="nc" id="L348">                    0, highPriorityEvents.size() - maxNotifications);</span>
+            // TODO: What order for high priority in the digest?
+<span class="nc" id="L350">            lowPriorityEvents.addAll(0, itemsToMoveSublist);</span>
+            if (DEBUG) {
+<span class="nc" id="L352">                logEventIdsBumped(mediumPriorityEvents, itemsToMoveSublist);</span>
+            }
+<span class="nc" id="L354">            mediumPriorityEvents.clear();</span>
+            // Clearing the sublist view removes the items from the highPriorityEvents list.
+<span class="nc" id="L356">            itemsToMoveSublist.clear();</span>
+        }
+
+        // Bump the medium priority events if necessary.
+<span class="nc bnc" id="L360" title="All 2 branches missed.">        if (mediumPriorityEvents.size() + highPriorityEvents.size() &gt; maxNotifications) {</span>
+<span class="nc" id="L361">            int spaceRemaining = maxNotifications - highPriorityEvents.size();</span>
+
+            // Reached our max, move the rest to the digest.  Since these are concurrent
+            // events, we move the ones with the earlier start time first since they are
+            // further in the past and less important.
+<span class="nc" id="L366">            List&lt;NotificationInfo&gt; itemsToMoveSublist = mediumPriorityEvents.subList(</span>
+<span class="nc" id="L367">                    spaceRemaining, mediumPriorityEvents.size());</span>
+<span class="nc" id="L368">            lowPriorityEvents.addAll(0, itemsToMoveSublist);</span>
+            if (DEBUG) {
+<span class="nc" id="L370">                logEventIdsBumped(itemsToMoveSublist, null);</span>
+            }
+
+            // Clearing the sublist view removes the items from the mediumPriorityEvents list.
+<span class="nc" id="L374">            itemsToMoveSublist.clear();</span>
+        }
+<span class="nc" id="L376">    }</span>
+
+    private static void logEventIdsBumped(List&lt;NotificationInfo&gt; list1,
+            List&lt;NotificationInfo&gt; list2) {
+<span class="nc" id="L380">        StringBuilder ids = new StringBuilder();</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        if (list1 != null) {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            for (NotificationInfo info : list1) {</span>
+<span class="nc" id="L383">                ids.append(info.eventId);</span>
+<span class="nc" id="L384">                ids.append(&quot;,&quot;);</span>
+<span class="nc" id="L385">            }</span>
+        }
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        if (list2 != null) {</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">            for (NotificationInfo info : list2) {</span>
+<span class="nc" id="L389">                ids.append(info.eventId);</span>
+<span class="nc" id="L390">                ids.append(&quot;,&quot;);</span>
+<span class="nc" id="L391">            }</span>
+        }
+<span class="nc bnc" id="L393" title="All 4 branches missed.">        if (ids.length() &gt; 0 &amp;&amp; ids.charAt(ids.length() - 1) == ',') {</span>
+<span class="nc" id="L394">            ids.setLength(ids.length() - 1);</span>
+        }
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (ids.length() &gt; 0) {</span>
+<span class="nc" id="L397">            Log.d(TAG, &quot;Reached max postings, bumping event IDs {&quot; + ids</span>
+                    + &quot;} to digest.&quot;);
+        }
+<span class="nc" id="L400">    }</span>
+
+    private static long getNextRefreshTime(NotificationInfo info, long currentTime) {
+<span class="nc" id="L403">        long startAdjustedForAllDay = info.startMillis;</span>
+<span class="nc" id="L404">        long endAdjustedForAllDay = info.endMillis;</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">        if (info.allDay) {</span>
+<span class="nc" id="L406">            Time t = new Time();</span>
+<span class="nc" id="L407">            startAdjustedForAllDay = Utils.convertAlldayUtcToLocal(t, info.startMillis,</span>
+<span class="nc" id="L408">                    Utils.getCurrentTimezone());</span>
+<span class="nc" id="L409">            endAdjustedForAllDay = Utils.convertAlldayUtcToLocal(t, info.startMillis,</span>
+<span class="nc" id="L410">                    Utils.getCurrentTimezone());</span>
+        }
+
+        // We change an event's priority bucket at 15 minutes into the event or 1/4 event duration.
+<span class="nc" id="L414">        long nextRefreshTime = Long.MAX_VALUE;</span>
+<span class="nc" id="L415">        long gracePeriodCutoff = startAdjustedForAllDay +</span>
+<span class="nc" id="L416">                getGracePeriodMs(startAdjustedForAllDay, endAdjustedForAllDay, info.allDay);</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        if (gracePeriodCutoff &gt; currentTime) {</span>
+<span class="nc" id="L418">            nextRefreshTime = Math.min(nextRefreshTime, gracePeriodCutoff);</span>
+        }
+
+        // ... and at the end (so expiring ones drop into a digest).
+<span class="nc bnc" id="L422" title="All 4 branches missed.">        if (endAdjustedForAllDay &gt; currentTime &amp;&amp; endAdjustedForAllDay &gt; gracePeriodCutoff) {</span>
+<span class="nc" id="L423">            nextRefreshTime = Math.min(nextRefreshTime, endAdjustedForAllDay);</span>
+        }
+<span class="nc" id="L425">        return nextRefreshTime;</span>
+    }
+
+    /**
+     * Processes the query results and bucketizes the alerts.
+     *
+     * @param highPriorityEvents This will contain future events, and concurrent events
+     *     that started recently (less than the interval DEPRIORITIZE_GRACE_PERIOD_MS).
+     * @param mediumPriorityEvents This will contain concurrent events that started
+     *     more than DEPRIORITIZE_GRACE_PERIOD_MS ago.
+     * @param lowPriorityEvents Will contain events that have ended.
+     * @return Returns the number of new alerts to fire.  If this is 0, it implies
+     *     a quiet update.
+     */
+    static int processQuery(final Cursor alertCursor, final Context context,
+            final long currentTime, ArrayList&lt;NotificationInfo&gt; highPriorityEvents,
+            ArrayList&lt;NotificationInfo&gt; mediumPriorityEvents,
+            ArrayList&lt;NotificationInfo&gt; lowPriorityEvents) {
+        // Experimental reminder setting to only remind for events that have
+        // been responded to with &quot;yes&quot; or &quot;maybe&quot;.
+<span class="nc" id="L445">        String skipRemindersPref = Utils.getSharedPreference(context,</span>
+                GeneralPreferences.KEY_OTHER_REMINDERS_RESPONDED, &quot;&quot;);
+        // Skip no-response events if the &quot;Skip Reminders&quot; preference has the second option,
+        // &quot;If declined or not responded&quot;, is selected.
+        // Note that by default, the first option will be selected, so this will be false.
+<span class="nc" id="L450">        boolean remindRespondedOnly = skipRemindersPref.equals(context.getResources().</span>
+<span class="nc" id="L451">                getStringArray(R.array.preferences_skip_reminders_values)[1]);</span>
+<span class="nc" id="L452">        Time time = new Time();</span>
+
+<span class="nc" id="L454">        ContentResolver cr = context.getContentResolver();</span>
+<span class="nc" id="L455">        HashMap&lt;Long, NotificationInfo&gt; eventIds = new HashMap&lt;Long, NotificationInfo&gt;();</span>
+<span class="nc" id="L456">        int numFired = 0;</span>
+        try {
+<span class="nc bnc" id="L458" title="All 2 branches missed.">            while (alertCursor.moveToNext()) {</span>
+<span class="nc" id="L459">                final long alertId = alertCursor.getLong(ALERT_INDEX_ID);</span>
+<span class="nc" id="L460">                final long eventId = alertCursor.getLong(ALERT_INDEX_EVENT_ID);</span>
+<span class="nc" id="L461">                final long calendarId = alertCursor.getLong(ALERT_INDEX_CALENDAR_ID);</span>
+<span class="nc" id="L462">                final int minutes = alertCursor.getInt(ALERT_INDEX_MINUTES);</span>
+<span class="nc" id="L463">                final String eventName = alertCursor.getString(ALERT_INDEX_TITLE);</span>
+<span class="nc" id="L464">                final String description = alertCursor.getString(ALERT_INDEX_DESCRIPTION);</span>
+<span class="nc" id="L465">                final String location = alertCursor.getString(ALERT_INDEX_EVENT_LOCATION);</span>
+<span class="nc" id="L466">                final int status = alertCursor.getInt(ALERT_INDEX_SELF_ATTENDEE_STATUS);</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">                final boolean declined = status == Attendees.ATTENDEE_STATUS_DECLINED;</span>
+<span class="nc bnc" id="L468" title="All 4 branches missed.">                final boolean responded = status != Attendees.ATTENDEE_STATUS_NONE</span>
+                        &amp;&amp; status != Attendees.ATTENDEE_STATUS_INVITED;
+<span class="nc" id="L470">                final long beginTime = alertCursor.getLong(ALERT_INDEX_BEGIN);</span>
+<span class="nc" id="L471">                final long endTime = alertCursor.getLong(ALERT_INDEX_END);</span>
+<span class="nc" id="L472">                final Uri alertUri = ContentUris</span>
+<span class="nc" id="L473">                        .withAppendedId(CalendarAlerts.CONTENT_URI, alertId);</span>
+<span class="nc" id="L474">                final long alarmTime = alertCursor.getLong(ALERT_INDEX_ALARM_TIME);</span>
+<span class="nc" id="L475">                boolean forceQuiet = false;</span>
+
+<span class="nc" id="L477">                int state = alertCursor.getInt(ALERT_INDEX_STATE);</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">                final boolean allDay = alertCursor.getInt(ALERT_INDEX_ALL_DAY) != 0;</span>
+
+                // Use app local storage to keep track of fired alerts to fix problem of multiple
+                // installed calendar apps potentially causing missed alarms.
+<span class="nc" id="L482">                boolean newAlertOverride = false;</span>
+<span class="nc bnc" id="L483" title="All 4 branches missed.">                if (AlertUtils.BYPASS_DB &amp;&amp; ((currentTime - alarmTime) / MINUTE_MS &lt; 1)) {</span>
+                    // To avoid re-firing alerts, only fire if alarmTime is very recent.  Otherwise
+                    // we can get refires for non-dismissed alerts after app installation, or if the
+                    // SharedPrefs was cleared too early.  This means alerts that were timed while
+                    // the phone was off may show up silently in the notification bar.
+<span class="nc" id="L488">                    boolean alreadyFired = AlertUtils.hasAlertFiredInSharedPrefs(context, eventId,</span>
+                            beginTime, alarmTime);
+<span class="nc bnc" id="L490" title="All 2 branches missed.">                    if (!alreadyFired) {</span>
+<span class="nc" id="L491">                        newAlertOverride = true;</span>
+                    }
+                }
+
+                if (DEBUG) {
+<span class="nc" id="L496">                    StringBuilder msgBuilder = new StringBuilder();</span>
+<span class="nc" id="L497">                    msgBuilder.append(&quot;alertCursor result: alarmTime:&quot;).append(alarmTime)</span>
+<span class="nc" id="L498">                            .append(&quot; alertId:&quot;).append(alertId)</span>
+<span class="nc" id="L499">                            .append(&quot; eventId:&quot;).append(eventId)</span>
+<span class="nc" id="L500">                            .append(&quot; calendarId:&quot;).append(calendarId)</span>
+<span class="nc" id="L501">                            .append(&quot; state: &quot;).append(state)</span>
+<span class="nc" id="L502">                            .append(&quot; minutes:&quot;).append(minutes)</span>
+<span class="nc" id="L503">                            .append(&quot; declined:&quot;).append(declined)</span>
+<span class="nc" id="L504">                            .append(&quot; responded:&quot;).append(responded)</span>
+<span class="nc" id="L505">                            .append(&quot; beginTime:&quot;).append(beginTime)</span>
+<span class="nc" id="L506">                            .append(&quot; endTime:&quot;).append(endTime)</span>
+<span class="nc" id="L507">                            .append(&quot; allDay:&quot;).append(allDay)</span>
+<span class="nc" id="L508">                            .append(&quot; alarmTime:&quot;).append(alarmTime)</span>
+<span class="nc" id="L509">                            .append(&quot; forceQuiet:&quot;).append(forceQuiet);</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">                    if (AlertUtils.BYPASS_DB) {</span>
+<span class="nc" id="L511">                        msgBuilder.append(&quot; newAlertOverride: &quot; + newAlertOverride);</span>
+                    }
+<span class="nc" id="L513">                    Log.d(TAG, msgBuilder.toString());</span>
+                }
+
+<span class="nc" id="L516">                ContentValues values = new ContentValues();</span>
+<span class="nc" id="L517">                int newState = -1;</span>
+<span class="nc" id="L518">                boolean newAlert = false;</span>
+
+                // Uncomment for the behavior of clearing out alerts after the
+                // events ended. b/1880369
+                //
+                // if (endTime &lt; currentTime) {
+                //     newState = CalendarAlerts.DISMISSED;
+                // } else
+
+                // Remove declined events
+<span class="nc bnc" id="L528" title="All 2 branches missed.">                boolean sendAlert = !declined;</span>
+                // Check for experimental reminder settings.
+<span class="nc bnc" id="L530" title="All 2 branches missed.">                if (remindRespondedOnly) {</span>
+                    // If the experimental setting is turned on, then only send
+                    // the alert if you've responded to the event.
+<span class="nc bnc" id="L533" title="All 4 branches missed.">                    sendAlert = sendAlert &amp;&amp; responded;</span>
+                }
+<span class="nc bnc" id="L535" title="All 2 branches missed.">                if (sendAlert) {</span>
+<span class="nc bnc" id="L536" title="All 4 branches missed.">                    if (state == CalendarAlerts.STATE_SCHEDULED || newAlertOverride) {</span>
+<span class="nc" id="L537">                        newState = CalendarAlerts.STATE_FIRED;</span>
+
+                        // When using local storage to track alert state (BYPASS_DB),
+                        // check if this alert was already fired previously.  The
+                        // calendar provider may re-insert SCHEDULED alert entries
+                        // when events are re-synced (e.g. contact birthday events
+                        // during a contact sync), which would otherwise cause
+                        // duplicate notifications with sound/vibrate.
+<span class="nc bnc" id="L545" title="All 2 branches missed.">                        boolean alreadyFired = AlertUtils.BYPASS_DB</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">                                &amp;&amp; AlertUtils.hasAlertFiredInSharedPrefs(</span>
+                                        context, eventId, beginTime, alarmTime);
+
+<span class="nc bnc" id="L549" title="All 2 branches missed.">                        if (!alreadyFired) {</span>
+<span class="nc" id="L550">                            numFired++;</span>
+                            // If quiet hours are forcing the alarm to be silent,
+                            // keep newAlert as false so it will not make noise.
+<span class="nc bnc" id="L553" title="All 2 branches missed.">                            if (!forceQuiet) {</span>
+<span class="nc" id="L554">                                newAlert = true;</span>
+                            }
+                        }
+
+                        // Record the received time in the CalendarAlerts table.
+                        // This is useful for finding bugs that cause alarms to be
+                        // missed or delayed.
+<span class="nc" id="L561">                        values.put(CalendarAlerts.RECEIVED_TIME, currentTime);</span>
+<span class="nc" id="L562">                    }</span>
+                } else {
+<span class="nc" id="L564">                    newState = CalendarAlerts.STATE_DISMISSED;</span>
+                }
+
+                // Update row if state changed
+<span class="nc bnc" id="L568" title="All 2 branches missed.">                if (newState != -1) {</span>
+<span class="nc" id="L569">                    values.put(CalendarAlerts.STATE, newState);</span>
+<span class="nc" id="L570">                    state = newState;</span>
+
+<span class="nc bnc" id="L572" title="All 2 branches missed.">                    if (AlertUtils.BYPASS_DB) {</span>
+<span class="nc" id="L573">                        AlertUtils.setAlertFiredInSharedPrefs(context, eventId, beginTime,</span>
+                                alarmTime);
+                    }
+                }
+
+<span class="nc bnc" id="L578" title="All 2 branches missed.">                if (state == CalendarAlerts.STATE_FIRED) {</span>
+                    // Record the time posting to notification manager.
+                    // This is used for debugging missed alarms.
+<span class="nc" id="L581">                    values.put(CalendarAlerts.NOTIFY_TIME, currentTime);</span>
+                }
+
+                // Write row to if anything changed
+<span class="nc bnc" id="L585" title="All 2 branches missed.">                if (values.size() &gt; 0) cr.update(alertUri, values, null, null);</span>
+
+<span class="nc bnc" id="L587" title="All 2 branches missed.">                if (state != CalendarAlerts.STATE_FIRED) {</span>
+<span class="nc" id="L588">                    continue;</span>
+                }
+
+                // TODO: Prefer accepted events in case of ties.
+<span class="nc" id="L592">                NotificationInfo newInfo = new NotificationInfo(eventName, location,</span>
+                        description, beginTime, endTime, eventId, calendarId, allDay, newAlert);
+
+                // Adjust for all day events to ensure the right bucket.  Don't use the 1/4 event
+                // duration grace period for these.
+<span class="nc" id="L597">                long beginTimeAdjustedForAllDay = beginTime;</span>
+<span class="nc" id="L598">                String tz = null;</span>
+<span class="nc bnc" id="L599" title="All 2 branches missed.">                if (allDay) {</span>
+<span class="nc" id="L600">                    tz = TimeZone.getDefault().getID();</span>
+<span class="nc" id="L601">                    beginTimeAdjustedForAllDay = Utils.convertAlldayUtcToLocal(null, beginTime,</span>
+                            tz);
+                }
+
+                // Handle multiple alerts for the same event ID.
+<span class="nc bnc" id="L606" title="All 2 branches missed.">                if (eventIds.containsKey(eventId)) {</span>
+<span class="nc" id="L607">                    NotificationInfo oldInfo = eventIds.get(eventId);</span>
+<span class="nc" id="L608">                    long oldBeginTimeAdjustedForAllDay = oldInfo.startMillis;</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">                    if (allDay) {</span>
+<span class="nc" id="L610">                        oldBeginTimeAdjustedForAllDay = Utils.convertAlldayUtcToLocal(null,</span>
+                                oldInfo.startMillis, tz);
+                    }
+
+                    // Determine whether to replace the previous reminder with this one.
+                    // Query results are sorted so this one will always have a lower start time.
+<span class="nc" id="L616">                    long oldStartInterval = oldBeginTimeAdjustedForAllDay - currentTime;</span>
+<span class="nc" id="L617">                    long newStartInterval = beginTimeAdjustedForAllDay - currentTime;</span>
+                    boolean dropOld;
+<span class="nc bnc" id="L619" title="All 4 branches missed.">                    if (newStartInterval &lt; 0 &amp;&amp; oldStartInterval &gt; 0) {</span>
+                        // Use this reminder if this event started recently
+<span class="nc bnc" id="L621" title="All 2 branches missed.">                        dropOld = Math.abs(newStartInterval) &lt; MIN_DEPRIORITIZE_GRACE_PERIOD_MS;</span>
+                    } else {
+                        // ... or if this one has a closer start time.
+<span class="nc bnc" id="L624" title="All 2 branches missed.">                        dropOld = Math.abs(newStartInterval) &lt; Math.abs(oldStartInterval);</span>
+                    }
+
+<span class="nc bnc" id="L627" title="All 2 branches missed.">                    if (dropOld) {</span>
+                        // This is a recurring event that has a more relevant start time,
+                        // drop other reminder in favor of this one.
+                        //
+                        // It will only be present in 1 of these buckets; just remove from
+                        // multiple buckets since this occurrence is rare enough that the
+                        // inefficiency of multiple removals shouldn't be a big deal to
+                        // justify a more complicated data structure.  Expired events don't
+                        // have individual notifications so we don't need to clean that up.
+<span class="nc" id="L636">                        highPriorityEvents.remove(oldInfo);</span>
+<span class="nc" id="L637">                        mediumPriorityEvents.remove(oldInfo);</span>
+                        if (DEBUG) {
+<span class="nc" id="L639">                            Log.d(TAG, &quot;Dropping alert for recurring event ID:&quot; + oldInfo.eventId</span>
+                                    + &quot;, startTime:&quot; + oldInfo.startMillis
+                                    + &quot; in favor of startTime:&quot; + newInfo.startMillis);
+                        }
+                    } else {
+                        // Skip duplicate reminders for the same event instance.
+                        continue;
+                    }
+                }
+
+                // TODO: Prioritize by &quot;primary&quot; calendar
+<span class="nc" id="L650">                eventIds.put(eventId, newInfo);</span>
+<span class="nc" id="L651">                long highPriorityCutoff = currentTime -</span>
+<span class="nc" id="L652">                        getGracePeriodMs(beginTime, endTime, allDay);</span>
+
+<span class="nc bnc" id="L654" title="All 2 branches missed.">                if (beginTimeAdjustedForAllDay &gt; highPriorityCutoff) {</span>
+                    // High priority = future events or events that just started
+<span class="nc" id="L656">                    highPriorityEvents.add(newInfo);</span>
+<span class="nc bnc" id="L657" title="All 6 branches missed.">                } else if (allDay &amp;&amp; tz != null &amp;&amp; DateUtils.isToday(beginTimeAdjustedForAllDay)) {</span>
+                    // Medium priority = in progress all day events
+<span class="nc" id="L659">                    mediumPriorityEvents.add(newInfo);</span>
+                } else {
+<span class="nc" id="L661">                    lowPriorityEvents.add(newInfo);</span>
+                }
+<span class="nc" id="L663">            }</span>
+        } finally {
+<span class="nc bnc" id="L665" title="All 2 branches missed.">            if (alertCursor != null) {</span>
+<span class="nc" id="L666">                alertCursor.close();</span>
+            }
+        }
+<span class="nc" id="L669">        return numFired;</span>
+    }
+
+    /**
+     * High priority cutoff should be 1/4 event duration or 15 min, whichever is longer.
+     */
+    private static long getGracePeriodMs(long beginTime, long endTime, boolean allDay) {
+<span class="nc bnc" id="L676" title="All 2 branches missed.">        if (allDay) {</span>
+            // We don't want all day events to be high priority for hours, so automatically
+            // demote these after 15 min.
+<span class="nc" id="L679">            return MIN_DEPRIORITIZE_GRACE_PERIOD_MS;</span>
+        } else {
+<span class="nc" id="L681">            return Math.max(MIN_DEPRIORITIZE_GRACE_PERIOD_MS, ((endTime - beginTime) / 4));</span>
+        }
+    }
+
+    private static String getDigestTitle(ArrayList&lt;NotificationInfo&gt; events) {
+<span class="nc" id="L686">        StringBuilder digestTitle = new StringBuilder();</span>
+<span class="nc bnc" id="L687" title="All 2 branches missed.">        for (NotificationInfo eventInfo : events) {</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">            if (!TextUtils.isEmpty(eventInfo.eventName)) {</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                if (digestTitle.length() &gt; 0) {</span>
+<span class="nc" id="L690">                    digestTitle.append(&quot;, &quot;);</span>
+                }
+<span class="nc" id="L692">                digestTitle.append(eventInfo.eventName);</span>
+            }
+<span class="nc" id="L694">        }</span>
+<span class="nc" id="L695">        return digestTitle.toString();</span>
+    }
+
+    private static void postNotification(NotificationInfo info, String summaryText,
+            Context context, boolean highPriority, NotificationPrefs prefs,
+            NotificationMgr notificationMgr, int notificationId) {
+<span class="nc" id="L701">        int priorityVal = Notification.PRIORITY_DEFAULT;</span>
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        if (highPriority) {</span>
+<span class="nc" id="L703">            priorityVal = Notification.PRIORITY_HIGH;</span>
+        }
+
+<span class="nc" id="L706">        String tickerText = getTickerText(info.eventName, info.location);</span>
+<span class="nc" id="L707">        NotificationWrapper notification = AlertReceiver.makeExpandingNotification(context,</span>
+                info.eventName, summaryText, info.description, info.startMillis, info.endMillis,
+<span class="nc" id="L709">                info.eventId, info.calendarId, notificationId, prefs.getDoPopup(), priorityVal);</span>
+
+<span class="nc" id="L711">        boolean quietUpdate = true;</span>
+<span class="nc" id="L712">        String ringtone = NotificationPrefs.EMPTY_RINGTONE;</span>
+<span class="nc bnc" id="L713" title="All 2 branches missed.">        if (info.newAlert) {</span>
+<span class="nc" id="L714">            quietUpdate = prefs.quietUpdate;</span>
+
+            // If we've already played a ringtone, don't play any more sounds so only
+            // 1 sound per group of notifications.
+<span class="nc" id="L718">            ringtone = prefs.getRingtoneAndSilence();</span>
+        }
+<span class="nc" id="L720">        addNotificationOptions(notification, quietUpdate, tickerText,</span>
+<span class="nc" id="L721">                prefs.getDefaultVibrate(), ringtone,</span>
+                true); /* Show the LED for these non-expired events */
+
+        // Post the notification.
+<span class="nc" id="L725">        notificationMgr.notify(context, notificationId, notification);</span>
+
+        if (DEBUG) {
+<span class="nc" id="L728">            Log.d(TAG, &quot;Posting individual alarm notification, eventId:&quot; + info.eventId</span>
+                    + &quot;, notificationId:&quot; + notificationId
+<span class="nc bnc" id="L730" title="All 2 branches missed.">                    + (TextUtils.isEmpty(ringtone) ? &quot;, quiet&quot; : &quot;, LOUD&quot;)</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">                    + (highPriority ? &quot;, high-priority&quot; : &quot;&quot;));</span>
+        }
+<span class="nc" id="L733">    }</span>
+
+    private static String getTickerText(String eventName, String location) {
+<span class="nc" id="L736">        String tickerText = eventName;</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        if (!TextUtils.isEmpty(location)) {</span>
+<span class="nc" id="L738">            tickerText = eventName + &quot; - &quot; + location;</span>
+        }
+<span class="nc" id="L740">        return tickerText;</span>
+    }
+
+    private static void addNotificationOptions(NotificationWrapper nw, boolean quietUpdate,
+            String tickerText, boolean defaultVibrate, String reminderRingtone,
+            boolean showLights) {
+<span class="nc" id="L746">        Notification notification = nw.mNotification;</span>
+
+<span class="nc bnc" id="L748" title="All 2 branches missed.">        if (showLights) {</span>
+<span class="nc" id="L749">            notification.flags |= Notification.FLAG_SHOW_LIGHTS;</span>
+<span class="nc" id="L750">            notification.defaults |= Notification.DEFAULT_LIGHTS;</span>
+        }
+
+        // Quietly update notification bar. Nothing new. Maybe something just got deleted.
+<span class="nc bnc" id="L754" title="All 2 branches missed.">        if (!quietUpdate) {</span>
+            // Flash ticker in status bar
+<span class="nc bnc" id="L756" title="All 2 branches missed.">            if (!TextUtils.isEmpty(tickerText)) {</span>
+<span class="nc" id="L757">                notification.tickerText = tickerText;</span>
+            }
+
+            // Generate either a pop-up dialog, status bar notification, or
+            // neither. Pop-up dialog and status bar notification may include a
+            // sound, an alert, or both. A status bar notification also includes
+            // a toast.
+<span class="nc bnc" id="L764" title="All 2 branches missed.">            if (defaultVibrate) {</span>
+<span class="nc" id="L765">                notification.defaults |= Notification.DEFAULT_VIBRATE;</span>
+            }
+
+            // Possibly generate a sound. If 'Silent' is chosen, the ringtone
+            // string will be empty.
+<span class="nc bnc" id="L770" title="All 2 branches missed.">            notification.sound = TextUtils.isEmpty(reminderRingtone) ? null : Uri</span>
+<span class="nc" id="L771">                    .parse(reminderRingtone);</span>
+        }
+<span class="nc" id="L773">    }</span>
+
+    /**
+     * Searches the CalendarAlerts table for alarms that should have fired but
+     * have not and then reschedules them. This method can be called at boot
+     * time to restore alarms that may have been lost due to a phone reboot.
+     *
+     * @param cr the ContentResolver
+     * @param context the Context
+     * @param manager the AlarmManager
+     */
+    private static final void rescheduleMissedAlarms(ContentResolver cr, Context context,
+            AlarmManagerInterface manager) {
+        // Get all the alerts that have been scheduled but have not fired
+        // and should have fired by now and are not too old.
+<span class="nc" id="L788">        long now = System.currentTimeMillis();</span>
+<span class="nc" id="L789">        long ancient = now - DateUtils.DAY_IN_MILLIS;</span>
+<span class="nc" id="L790">        String[] projection = new String[] {</span>
+            CalendarContract.CalendarAlerts.ALARM_TIME,
+        };
+
+<span class="nc bnc" id="L794" title="All 2 branches missed.">        if (!Utils.isCalendarPermissionGranted(context, false)) {</span>
+            //If permission is not granted then just return.
+<span class="nc" id="L796">            Log.d(TAG, &quot;Manifest.permission.READ_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L797">            return;</span>
+        }
+
+
+        // TODO: construct an explicit SQL query so that we can add
+        // &quot;GROUPBY&quot; instead of doing a sort and de-dup
+<span class="nc" id="L803">        Cursor cursor = cr.query(CalendarAlerts.CONTENT_URI, projection,</span>
+                WHERE_RESCHEDULE_MISSED_ALARMS, (new String[] {
+<span class="nc" id="L805">                        Long.toString(now), Long.toString(ancient), Long.toString(now)</span>
+                }), SORT_ORDER_ALARMTIME_ASC);
+<span class="nc bnc" id="L807" title="All 2 branches missed.">        if (cursor == null) {</span>
+<span class="nc" id="L808">            return;</span>
+        }
+
+        if (DEBUG) {
+<span class="nc" id="L812">            Log.d(TAG, &quot;missed alarms found: &quot; + cursor.getCount());</span>
+        }
+
+        try {
+<span class="nc" id="L816">            long alarmTime = -1;</span>
+
+<span class="nc bnc" id="L818" title="All 2 branches missed.">            while (cursor.moveToNext()) {</span>
+<span class="nc" id="L819">                long newAlarmTime = cursor.getLong(0);</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">                if (alarmTime != newAlarmTime) {</span>
+                    if (DEBUG) {
+<span class="nc" id="L822">                        Log.w(TAG, &quot;rescheduling missed alarm. alarmTime: &quot; + newAlarmTime);</span>
+                    }
+<span class="nc" id="L824">                    AlertUtils.scheduleAlarm(context, manager, newAlarmTime);</span>
+<span class="nc" id="L825">                    alarmTime = newAlarmTime;</span>
+                }
+<span class="nc" id="L827">            }</span>
+        } finally {
+<span class="nc" id="L829">            cursor.close();</span>
+        }
+<span class="nc" id="L831">    }</span>
+
+
+    public static void handleAction(Context context, String action) {
+        if (DEBUG) {
+<span class="nc" id="L836">            Log.d(TAG, &quot;Handling action: &quot; + action);</span>
+        }
+
+<span class="nc bnc" id="L839" title="All 2 branches missed.">        if (sReceivedProviderReminderBroadcast == null) {</span>
+<span class="nc" id="L840">            sReceivedProviderReminderBroadcast = Utils.getSharedPreference(context,</span>
+                    PROVIDER_REMINDER_PREF_KEY, false);
+        }
+
+        // Some OEMs had changed the provider's EVENT_REMINDER broadcast to their own event,
+        // which broke our unbundled app's reminders.  So we added backup alarm scheduling to the
+        // app, but we know we can turn it off if we ever receive the EVENT_REMINDER broadcast.
+<span class="nc" id="L847">        boolean providerReminder = action.equals(</span>
+                android.provider.CalendarContract.ACTION_EVENT_REMINDER);
+<span class="nc bnc" id="L849" title="All 2 branches missed.">        if (providerReminder) {</span>
+<span class="nc bnc" id="L850" title="All 2 branches missed.">            if (!sReceivedProviderReminderBroadcast) {</span>
+<span class="nc" id="L851">                sReceivedProviderReminderBroadcast = true;</span>
+<span class="nc" id="L852">                Log.d(TAG, &quot;Setting key &quot; + PROVIDER_REMINDER_PREF_KEY + &quot; to: true&quot;);</span>
+<span class="nc" id="L853">                Utils.setSharedPreference(context, PROVIDER_REMINDER_PREF_KEY, true);</span>
+            }
+        }
+
+<span class="nc bnc" id="L857" title="All 2 branches missed.">        if (providerReminder ||</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">                action.equals(Intent.ACTION_PROVIDER_CHANGED) ||</span>
+<span class="nc bnc" id="L859" title="All 2 branches missed.">                action.equals(android.provider.CalendarContract.ACTION_EVENT_REMINDER) ||</span>
+<span class="nc bnc" id="L860" title="All 2 branches missed.">                (action.equals(AlertReceiver.EVENT_REMINDER_APP_ACTION) &amp;&amp;</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">                !Boolean.TRUE.equals(sReceivedProviderReminderBroadcast)) ||</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">                action.equals(Intent.ACTION_LOCALE_CHANGED)) {</span>
+
+            // b/7652098: Add a delay after the provider-changed event before refreshing
+            // notifications to help issue with the unbundled app installed on HTC having
+            // stale notifications.
+<span class="nc bnc" id="L867" title="All 2 branches missed.">            if (action.equals(Intent.ACTION_PROVIDER_CHANGED)) {</span>
+                try {
+<span class="nc" id="L869">                    Thread.sleep(5000);</span>
+<span class="nc" id="L870">                } catch (Exception e) {</span>
+                    // Ignore.
+<span class="nc" id="L872">                }</span>
+            }
+
+<span class="nc" id="L875">            updateAlertNotification(context);</span>
+<span class="nc bnc" id="L876" title="All 2 branches missed.">        } else if (action.equals(Intent.ACTION_TIME_CHANGED)) {</span>
+<span class="nc" id="L877">            rescheduleAndDisplayTimeChanged(context);</span>
+<span class="nc bnc" id="L878" title="All 2 branches missed.">        } else if (action.equals(AlertReceiver.ACTION_DISMISS_OLD_REMINDERS)) {</span>
+<span class="nc" id="L879">            dismissOldAlerts(context);</span>
+        } else {
+<span class="nc" id="L881">            Log.w(TAG, &quot;Invalid action: &quot; + action);</span>
+        }
+
+        // Scheduling next alarm
+<span class="nc bnc" id="L885" title="All 4 branches missed.">        if (sReceivedProviderReminderBroadcast == null || !sReceivedProviderReminderBroadcast) {</span>
+<span class="nc" id="L886">            Log.d(TAG, &quot;Scheduling next alarm with AlarmScheduler. &quot;</span>
+                    + &quot;sEventReminderReceived: &quot; + sReceivedProviderReminderBroadcast);
+<span class="nc" id="L888">            AlarmScheduler.scheduleNextAlarm(context);</span>
+        }
+<span class="nc" id="L890">    }</span>
+
+    private static void rescheduleAndDisplayTimeChanged(Context context) {
+<span class="nc" id="L893">        ContentResolver cr = context.getContentResolver();</span>
+<span class="nc" id="L894">        rescheduleMissedAlarms(cr, context, AlertUtils.createAlarmManager(context));</span>
+<span class="nc" id="L895">        updateAlertNotification(context);</span>
+<span class="nc" id="L896">    }</span>
+
+    public static Notification buildForegroundNotification(Context context, String title, int iconResId, String channelId) {
+
+<span class="nc" id="L900">        return new NotificationCompat.Builder(context, channelId)</span>
+<span class="nc" id="L901">                .setContentTitle(title)</span>
+<span class="nc" id="L902">                .setSmallIcon(iconResId)</span>
+<span class="nc" id="L903">                .setShowWhen(false)</span>
+<span class="nc" id="L904">                .setCategory(Notification.CATEGORY_SERVICE)</span>
+<span class="nc" id="L905">                .build();</span>
+    }
+
+    public static void createChannels(Context context) {
+<span class="pc bpc" id="L909" title="1 of 2 branches missed.">        if (Utils.isOreoOrLater()) {</span>
+<span class="fc" id="L910">            NotificationManager nm =</span>
+<span class="fc" id="L911">                    (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);</span>
+
+            // Create a channel per calendar (so that the user can turn it off with granularity)
+<span class="fc" id="L914">            UtilsKt.createPerCalendarChannels(context, nm);</span>
+
+            // Create a &quot;Background tasks&quot; channel to keep the app alive
+<span class="fc" id="L917">            NotificationChannel foregroundChannel = new NotificationChannel(</span>
+                    FOREGROUND_CHANNEL_ID,
+<span class="fc" id="L919">                    context.getString(R.string.foreground_notification_channel_name),</span>
+                    NotificationManager.IMPORTANCE_LOW);
+<span class="fc" id="L921">            foregroundChannel.setDescription(</span>
+<span class="fc" id="L922">                    context.getString(R.string.foreground_notification_channel_description));</span>
+
+<span class="fc" id="L924">            nm.createNotificationChannel(foregroundChannel);</span>
+        }
+<span class="fc" id="L926">    }</span>
+
+    // Added wrapper for testing
+    public static class NotificationWrapper {
+        Notification mNotification;
+        long mEventId;
+        long mBegin;
+        long mEnd;
+        ArrayList&lt;NotificationWrapper&gt; mNw;
+
+        public NotificationWrapper(Notification n, int notificationId, long eventId,
+<span class="nc" id="L937">                                   long startMillis, long endMillis, boolean doPopup) {</span>
+<span class="nc" id="L938">            mNotification = n;</span>
+<span class="nc" id="L939">            mEventId = eventId;</span>
+<span class="nc" id="L940">            mBegin = startMillis;</span>
+<span class="nc" id="L941">            mEnd = endMillis;</span>
+
+            // popup?
+            // notification id?
+<span class="nc" id="L945">        }</span>
+
+<span class="nc" id="L947">        public NotificationWrapper(Notification n) {</span>
+<span class="nc" id="L948">            mNotification = n;</span>
+<span class="nc" id="L949">        }</span>
+
+        public void add(NotificationWrapper nw) {
+<span class="nc bnc" id="L952" title="All 2 branches missed.">            if (mNw == null) {</span>
+<span class="nc" id="L953">                mNw = new ArrayList&lt;NotificationWrapper&gt;();</span>
+            }
+<span class="nc" id="L955">            mNw.add(nw);</span>
+<span class="nc" id="L956">        }</span>
+    }
+
+    // Added wrapper for testing
+    public static class NotificationMgrWrapper extends NotificationMgr {
+        NotificationManager mNm;
+
+<span class="nc" id="L963">        public NotificationMgrWrapper(NotificationManager nm) {</span>
+<span class="nc" id="L964">            mNm = nm;</span>
+<span class="nc" id="L965">        }</span>
+
+        @Override
+        public void cancel(int id) {
+<span class="nc" id="L969">            mNm.cancel(id);</span>
+<span class="nc" id="L970">        }</span>
+
+        @TargetApi(Build.VERSION_CODES.O)
+        @Override
+        public void createNotificationChannel(NotificationChannel channel) {
+<span class="nc" id="L975">            mNm.createNotificationChannel(channel);</span>
+<span class="nc" id="L976">        }</span>
+
+        @Override
+        public void notify(Context context, int id, NotificationWrapper nw) {
+<span class="nc bnc" id="L980" title="All 2 branches missed.">            if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {</span>
+<span class="nc" id="L981">                mNm.notify(id, nw.mNotification);</span>
+            } else {
+<span class="nc" id="L983">                Log.d(TAG, &quot;Notifications are disabled!&quot;);</span>
+            }
+<span class="nc" id="L985">        }</span>
+    }
+
+    static class NotificationInfo {
+        String eventName;
+        String location;
+        String description;
+        long startMillis;
+        long endMillis;
+        long eventId;
+        long calendarId;
+        boolean allDay;
+        boolean newAlert;
+
+        NotificationInfo(String eventName, String location, String description, long startMillis,
+<span class="nc" id="L1000">                         long endMillis, long eventId, long calendarId, boolean allDay, boolean newAlert) {</span>
+<span class="nc" id="L1001">            this.eventName = eventName;</span>
+<span class="nc" id="L1002">            this.location = location;</span>
+<span class="nc" id="L1003">            this.description = description;</span>
+<span class="nc" id="L1004">            this.startMillis = startMillis;</span>
+<span class="nc" id="L1005">            this.endMillis = endMillis;</span>
+<span class="nc" id="L1006">            this.eventId = eventId;</span>
+<span class="nc" id="L1007">            this.calendarId = calendarId;</span>
+<span class="nc" id="L1008">            this.newAlert = newAlert;</span>
+<span class="nc" id="L1009">            this.allDay = allDay;</span>
+<span class="nc" id="L1010">        }</span>
+    }
+
+    /* package */ static class NotificationPrefs {
+        private static final String EMPTY_RINGTONE = &quot;&quot;;
+        boolean quietUpdate;
+        private Context context;
+        private SharedPreferences prefs;
+        // These are lazily initialized, do not access any of the following directly; use getters.
+<span class="nc" id="L1019">        private int doPopup = -1;</span>
+<span class="nc" id="L1020">        private int defaultVibrate = -1;</span>
+<span class="nc" id="L1021">        private String ringtone = null;</span>
+
+<span class="nc" id="L1023">        NotificationPrefs(Context context, SharedPreferences prefs, boolean quietUpdate) {</span>
+<span class="nc" id="L1024">            this.context = context;</span>
+<span class="nc" id="L1025">            this.prefs = prefs;</span>
+<span class="nc" id="L1026">            this.quietUpdate = quietUpdate;</span>
+<span class="nc" id="L1027">        }</span>
+
+        private boolean getDoPopup() {
+<span class="nc bnc" id="L1030" title="All 2 branches missed.">            if (doPopup &lt; 0) {</span>
+<span class="nc bnc" id="L1031" title="All 2 branches missed.">                if (prefs.getBoolean(GeneralPreferences.KEY_ALERTS_POPUP, false)) {</span>
+<span class="nc" id="L1032">                    doPopup = 1;</span>
+                } else {
+<span class="nc" id="L1034">                    doPopup = 0;</span>
+                }
+            }
+<span class="nc bnc" id="L1037" title="All 2 branches missed.">            return doPopup == 1;</span>
+        }
+
+        private boolean getDefaultVibrate() {
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">            if (defaultVibrate &lt; 0) {</span>
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">                defaultVibrate = Utils.getDefaultVibrate(context, prefs) ? 1 : 0;</span>
+            }
+<span class="nc bnc" id="L1044" title="All 2 branches missed.">            return defaultVibrate == 1;</span>
+        }
+
+        private String getRingtoneAndSilence() {
+<span class="nc bnc" id="L1048" title="All 2 branches missed.">            if (ringtone == null) {</span>
+<span class="nc bnc" id="L1049" title="All 2 branches missed.">                if (quietUpdate) {</span>
+<span class="nc" id="L1050">                    ringtone = EMPTY_RINGTONE;</span>
+                } else {
+<span class="nc" id="L1052">                    ringtone = Utils.getRingtonePreference(context);</span>
+                }
+            }
+<span class="nc" id="L1055">            String retVal = ringtone;</span>
+<span class="nc" id="L1056">            ringtone = EMPTY_RINGTONE;</span>
+<span class="nc" id="L1057">            return retVal;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

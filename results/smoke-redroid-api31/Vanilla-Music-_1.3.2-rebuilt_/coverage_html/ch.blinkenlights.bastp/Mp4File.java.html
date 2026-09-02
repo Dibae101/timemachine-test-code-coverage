@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Mp4File.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vanilla-Music</a> &gt; <a href="index.source.html" class="el_package">ch.blinkenlights.bastp</a> &gt; <span class="el_source">Mp4File.java</span></div><h1>Mp4File.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2016 Ian Harmon
+ * Copyright (C) 2017 Google Inc.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package ch.blinkenlights.bastp;
+
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Stack;
+
+/*
+* Helper class for tracking the traversal of the atom tree
+*/
+class Atom {
+	String name;
+	long start;
+	int length;
+	
+<span class="nc" id="L36">	public Atom(String name, long start, int length) {</span>
+<span class="nc" id="L37">		this.name = name;</span>
+<span class="nc" id="L38">		this.start = start;</span>
+<span class="nc" id="L39">		this.length = length;</span>
+<span class="nc" id="L40">	}</span>
+}
+
+/*
+* MP4 tag parser
+*/
+<span class="nc" id="L46">public class Mp4File extends Common {</span>
+
+	// only these tags are returned. others may be parsed, but discarded.
+<span class="nc" id="L49">	final static List&lt;String&gt; ALLOWED_TAGS = Arrays.asList(</span>
+		&quot;replaygain_track_gain&quot;,
+		&quot;replaygain_album_gain&quot;,
+		&quot;title&quot;,
+		&quot;album&quot;,
+		&quot;artist&quot;,
+		&quot;albumartist&quot;,
+		&quot;composer&quot;,
+		&quot;genre&quot;,
+		&quot;year&quot;,
+		&quot;tracknumber&quot;,
+		&quot;discnumber&quot;
+	);
+
+	// mapping between atom &lt;-&gt; vorbis tags
+	final static HashMap&lt;String, String&gt; ATOM_TAGS;
+	static {
+<span class="nc" id="L66">		ATOM_TAGS = new HashMap&lt;String, String&gt;();</span>
+<span class="nc" id="L67">		ATOM_TAGS.put(&quot;�nam&quot;, &quot;title&quot;);</span>
+<span class="nc" id="L68">		ATOM_TAGS.put(&quot;�alb&quot;, &quot;album&quot;);</span>
+<span class="nc" id="L69">		ATOM_TAGS.put(&quot;�ART&quot;, &quot;artist&quot;);</span>
+<span class="nc" id="L70">		ATOM_TAGS.put(&quot;aART&quot;, &quot;albumartist&quot;);</span>
+<span class="nc" id="L71">		ATOM_TAGS.put(&quot;�wrt&quot;, &quot;composer&quot;);</span>
+<span class="nc" id="L72">		ATOM_TAGS.put(&quot;�gen&quot;, &quot;genre&quot;);</span>
+<span class="nc" id="L73">		ATOM_TAGS.put(&quot;�day&quot;, &quot;year&quot;);</span>
+<span class="nc" id="L74">		ATOM_TAGS.put(&quot;trkn&quot;, &quot;tracknumber&quot;);</span>
+<span class="nc" id="L75">		ATOM_TAGS.put(&quot;disk&quot;, &quot;discnumber&quot;);</span>
+	}
+
+	// These tags are 32bit integers, not strings.
+<span class="nc" id="L79">	final static List&lt;String&gt; BINARY_TAGS = Arrays.asList(</span>
+		&quot;tracknumber&quot;,
+		&quot;discnumber&quot;
+	);
+
+	// maximum size for tag names or values
+	final static int MAX_BUFFER_SIZE = 512;
+	// only used when developing
+	final static boolean PRINT_DEBUG = false;
+
+	// When processing atoms, we first read the atom length (4 bytes),
+	// and then the atom name (also 4 bytes). This value should not be changed.
+	final static int ATOM_HEADER_SIZE = 8;
+	
+	/*
+	* Traverses the atom structure of an MP4 file and returns as soon as tags
+	* are parsed
+	*/
+	public HashMap getTags(RandomAccessFile s) throws IOException {
+<span class="nc" id="L98">		HashMap tags = new HashMap();</span>
+		if (PRINT_DEBUG) { System.out.println(); }
+		try {
+
+			// maintain a trail of breadcrumbs to know what part of the file we're in,
+			// so e.g. that we only parse [name] atoms that are part of a tag
+<span class="nc" id="L104">			Stack&lt;Atom&gt; path = new Stack&lt;Atom&gt;();</span>
+
+<span class="nc" id="L106">			s.seek(0);</span>
+			int atomSize;
+<span class="nc" id="L108">			byte[] atomNameRaw = new byte[4];</span>
+			String atomName;
+<span class="nc" id="L110">			String tagName = null;</span>
+
+			// begin traversing the file
+			// file structure info from http://atomicparsley.sourceforge.net/mpeg-4files.html
+<span class="nc bnc" id="L114" title="All 2 branches missed.">			while (s.getFilePointer() &lt; s.length()) {</span>
+
+				// if we've read/skipped past the end of atoms, remove them from the path stack
+<span class="nc bnc" id="L117" title="All 4 branches missed.">				while (!path.empty() &amp;&amp; s.getFilePointer() &gt;= (path.peek().start + path.peek().length)) {</span>
+					// if we've finished the tag atom [ilst], we can stop parsing.
+					// when tags are read successfully, this should be the exit point for the parser.
+<span class="nc bnc" id="L120" title="All 2 branches missed.">					if (path.peek().name.equals(&quot;ilst&quot;)) {</span>
+						if (PRINT_DEBUG) { System.out.println(); }
+<span class="nc" id="L122">						return tags;</span>
+					}
+<span class="nc" id="L124">					path.pop();</span>
+				}
+
+				// read a new atom's details
+<span class="nc" id="L128">				atomSize = s.readInt();</span>
+
+				// return if we're unable to parse an atom size
+				// (e.g. previous atoms were parsed incorrectly and the
+				// file pointer is misaligned)
+<span class="nc bnc" id="L133" title="All 2 branches missed.">				if (atomSize &lt;= 0) { return tags; }</span>
+
+<span class="nc" id="L135">				s.read(atomNameRaw);</span>
+<span class="nc" id="L136">				atomName = new String(atomNameRaw);</span>
+
+				// determine if we're currently decending through the hierarchy
+				// to a tag atom
+<span class="nc" id="L140">				boolean approachingTagAtom = false;</span>
+<span class="nc" id="L141">				boolean onMetaAtom = false;</span>
+<span class="nc" id="L142">				boolean onTagAtom = false;</span>
+<span class="nc" id="L143">				String fourAtom = null;</span>
+				// compare everything in the current path hierarchy and the new atom as well
+				// this is a bit repetitive as-is, but shouldn't be noticeable
+<span class="nc bnc" id="L146" title="All 2 branches missed.">				for (int i = 0; i &lt;= path.size(); i++) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">					String thisAtomName = (i &lt; path.size()) ? path.get(i).name : atomName;</span>
+<span class="nc bnc" id="L148" title="All 6 branches missed.">					if ((i == 0 &amp;&amp; thisAtomName.equals(&quot;moov&quot;))         ||</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">						(i == 1 &amp;&amp; thisAtomName.equals(&quot;udta&quot;))         ||</span>
+<span class="nc bnc" id="L150" title="All 4 branches missed.">						(i == 2 &amp;&amp; thisAtomName.equals(&quot;meta&quot;))         ||</span>
+<span class="nc bnc" id="L151" title="All 4 branches missed.">						(i == 3 &amp;&amp; thisAtomName.equals(&quot;ilst&quot;))         ||</span>
+<span class="nc bnc" id="L152" title="All 4 branches missed.">						(i == 4 &amp;&amp; thisAtomName.equals(&quot;----&quot;))         ||</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">						(i == 4 &amp;&amp; ATOM_TAGS.containsKey(thisAtomName)) ||</span>
+<span class="nc bnc" id="L154" title="All 4 branches missed.">						(i == 5 &amp;&amp; (thisAtomName.equals(&quot;name&quot;)         || thisAtomName.equals(&quot;data&quot;)))</span>
+					) {
+<span class="nc" id="L156">						approachingTagAtom = true;</span>
+						// if we're at the end of the current hierarchy, mark if it's the [meta] or a tag atom.
+<span class="nc bnc" id="L158" title="All 2 branches missed.">						if (i == path.size()) {</span>
+<span class="nc" id="L159">							onMetaAtom = thisAtomName.equals(&quot;meta&quot;);</span>
+<span class="nc bnc" id="L160" title="All 4 branches missed.">							onTagAtom = (thisAtomName.equals(&quot;name&quot;) || thisAtomName.equals(&quot;data&quot;));</span>
+						}
+						// depth is 4 and this is a known atom: rembemer this!
+<span class="nc bnc" id="L163" title="All 4 branches missed.">						if (i == 4 &amp;&amp; ATOM_TAGS.containsKey(thisAtomName)) {</span>
+<span class="nc" id="L164">							fourAtom = ATOM_TAGS.get(thisAtomName);</span>
+						}
+					}
+					// quit as soon as we know we're not on the road to a tag atom
+					else {
+<span class="nc" id="L169">						approachingTagAtom = false;</span>
+<span class="nc" id="L170">						break;</span>
+					}
+				}
+
+				// add the new atom to the path hierarchy
+<span class="nc" id="L175">				path.push(new Atom(atomName, s.getFilePointer()-ATOM_HEADER_SIZE, atomSize));</span>
+				if (PRINT_DEBUG) { printDebugAtomPath(s, path, atomName, atomSize); }
+
+				// skip all non-pertinent atoms
+<span class="nc bnc" id="L179" title="All 2 branches missed.">				if (!approachingTagAtom) { s.skipBytes(atomSize-ATOM_HEADER_SIZE); }</span>
+				// dive into tag-related ones
+				else {
+					// the meta atom has an extra 4 bytes that need to be skipped
+<span class="nc bnc" id="L183" title="All 2 branches missed.">					if (onMetaAtom) { s.skipBytes(4); }</span>
+
+					// read tag contents when there
+<span class="nc bnc" id="L186" title="All 2 branches missed.">					if (onTagAtom) {</span>
+						// get a tag name
+<span class="nc bnc" id="L188" title="All 2 branches missed.">						if (atomName.equals(&quot;name&quot;)) {</span>
+							// skip null bytes
+<span class="nc" id="L190">							s.skipBytes(4);</span>
+<span class="nc" id="L191">							tagName = new String(readIntoBuffer(s, atomSize-(ATOM_HEADER_SIZE+4)));</span>
+						}
+
+						// get a tag value
+<span class="nc bnc" id="L195" title="All 2 branches missed.">						else if (atomName.equals(&quot;data&quot;)) {</span>
+							// skip flags/null bytes
+<span class="nc" id="L197">							s.skipBytes(8);</span>
+
+							// use the 'fourAtom' value if we did not have a tag name
+<span class="nc bnc" id="L200" title="All 2 branches missed.">							tagName = (tagName == null ? fourAtom : tagName);</span>
+							// read the tag
+<span class="nc" id="L202">							byte[] tagBuffer = readIntoBuffer(s, atomSize-(ATOM_HEADER_SIZE+8));</span>
+
+<span class="nc bnc" id="L204" title="All 2 branches missed.">							if (ALLOWED_TAGS.contains(tagName))</span>
+							{
+<span class="nc bnc" id="L206" title="All 2 branches missed.">								String tagValue = (BINARY_TAGS.contains(tagName) ? String.format(&quot;%d&quot;, b2be32(tagBuffer, 0)) : new String(tagBuffer, &quot;UTF-8&quot;));</span>
+								if (PRINT_DEBUG) {
+									System.out.println(String.format(&quot;parsed tag '%s': '%s'\n&quot;, tagName, tagValue));
+								}
+<span class="nc" id="L210">								addTagEntry(tags, tagName.toUpperCase(), tagValue);</span>
+							}
+							// This is the end of this tree, make sure that we don't re-use tagName in any other tree
+<span class="nc" id="L213">							tagName = null;</span>
+						}
+					}
+				}
+<span class="nc" id="L217">			}</span>
+			// End of while loop, the file has been completely read through.
+			// The parser should only return here if the tags atom [ilst] was missing.
+<span class="nc" id="L220">			return tags;</span>
+		}
+		// if anything goes wrong, just return whatever we already have
+<span class="nc" id="L223">		catch (Exception e) {</span>
+<span class="nc" id="L224">			return tags;</span>
+		}
+	}
+
+	/*
+	* Reads bytes from an atom up to the buffer size limit, currently 512B
+	*/
+	private byte[] readIntoBuffer(RandomAccessFile s, int dataSize) throws IOException {
+		// read tag up to buffer limit
+<span class="nc" id="L233">		int bufferSize = Math.min(dataSize, MAX_BUFFER_SIZE);</span>
+<span class="nc" id="L234">		byte[] buffer = new byte[bufferSize];</span>
+<span class="nc" id="L235">		s.read(buffer, 0, buffer.length);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">		if (dataSize &gt; bufferSize) {</span>
+<span class="nc" id="L237">			s.skipBytes(dataSize - bufferSize);</span>
+		}
+<span class="nc" id="L239">		return buffer;</span>
+	}
+
+	/*
+	* Can be used when traversing the atom hierarchy to print the tree of atoms
+	*/
+	private void printDebugAtomPath(RandomAccessFile s, Stack&lt;Atom&gt; path,
+		String atomName, int atomSize) throws IOException
+	{
+<span class="nc" id="L248">		String treeLines = &quot;&quot;;</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">		for (int i = 0; i &lt; path.size(); i++) { treeLines += &quot;. &quot;; }</span>
+<span class="nc" id="L250">		long atomStart = s.getFilePointer()-ATOM_HEADER_SIZE;</span>
+<span class="nc" id="L251">		System.out.println(String.format(&quot;%-22s %8d to %8d, length %8d&quot;,</span>
+<span class="nc" id="L252">			(treeLines + &quot;[&quot; + atomName + &quot;]&quot;), atomStart, (atomStart+atomSize), atomSize));</span>
+<span class="nc" id="L253">	}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

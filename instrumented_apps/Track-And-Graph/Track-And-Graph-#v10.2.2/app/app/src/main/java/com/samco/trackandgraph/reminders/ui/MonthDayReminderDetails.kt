@@ -1,0 +1,115 @@
+/*
+ * This file is part of Track & Graph
+ *
+ * Track & Graph is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Track & Graph is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+@file:OptIn(ExperimentalFoundationApi::class)
+
+package com.samco.trackandgraph.reminders.ui
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.tooling.preview.Preview
+import com.samco.trackandgraph.R
+import com.samco.trackandgraph.data.database.dto.MonthDayOccurrence
+import com.samco.trackandgraph.data.database.dto.MonthDayType
+import com.samco.trackandgraph.ui.theming.TnGComposeTheme
+import com.samco.trackandgraph.ui.ui.cardPadding
+import org.threeten.bp.LocalDateTime
+
+@Composable
+fun MonthDayReminderDetails(
+    reminderViewData: ReminderViewData.MonthDayReminderViewData,
+    modifier: Modifier = Modifier,
+    chipScale: Float = 0.65f
+) = Column(
+    modifier = modifier.fillMaxWidth(),
+    horizontalAlignment = Alignment.CenterHorizontally,
+) {
+    val occurrenceText = when (reminderViewData.occurrence) {
+        MonthDayOccurrence.FIRST -> stringResource(R.string.occurrence_first)
+        MonthDayOccurrence.SECOND -> stringResource(R.string.occurrence_second)
+        MonthDayOccurrence.THIRD -> stringResource(R.string.occurrence_third)
+        MonthDayOccurrence.FOURTH -> stringResource(R.string.occurrence_fourth)
+        MonthDayOccurrence.LAST -> stringResource(R.string.occurrence_last)
+    }
+
+    val dayTypeText = when (reminderViewData.dayType) {
+        MonthDayType.DAY -> stringResource(R.string.day)
+        MonthDayType.MONDAY -> stringResource(R.string.monday)
+        MonthDayType.TUESDAY -> stringResource(R.string.tuesday)
+        MonthDayType.WEDNESDAY -> stringResource(R.string.wednesday)
+        MonthDayType.THURSDAY -> stringResource(R.string.thursday)
+        MonthDayType.FRIDAY -> stringResource(R.string.friday)
+        MonthDayType.SATURDAY -> stringResource(R.string.saturday)
+        MonthDayType.SUNDAY -> stringResource(R.string.sunday)
+    }
+
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(
+            (cardPadding * chipScale),
+            Alignment.CenterHorizontally
+        ),
+        verticalArrangement = Arrangement.spacedBy(
+            (cardPadding * chipScale),
+            Alignment.CenterVertically
+        ),
+    ) {
+        Text(
+            text = stringResource(R.string.every_colon),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Text(
+            text = occurrenceText,
+            style = MaterialTheme.typography.titleSmall,
+            textDecoration = TextDecoration.Underline,
+        )
+        Text(
+            text = dayTypeText,
+            style = MaterialTheme.typography.titleSmall,
+            textDecoration = TextDecoration.Underline,
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+fun MonthDayReminderDetailsPreview() {
+    TnGComposeTheme {
+        MonthDayReminderDetails(
+            reminderViewData = ReminderViewData.MonthDayReminderViewData(
+                id = 1L,
+                groupItemId = 0L,
+                name = "Monthly Report",
+                enabled = true,
+                nextScheduled = LocalDateTime.of(2025, 1, 6, 9, 0),
+                occurrence = MonthDayOccurrence.FIRST,
+                dayType = MonthDayType.MONDAY,
+                ends = null,
+                reminderDto = null,
+            )
+        )
+    }
+}

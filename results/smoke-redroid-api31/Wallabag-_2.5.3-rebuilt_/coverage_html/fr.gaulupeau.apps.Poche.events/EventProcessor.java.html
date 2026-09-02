@@ -1,0 +1,631 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EventProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Wallabag</a> &gt; <a href="index.source.html" class="el_package">fr.gaulupeau.apps.Poche.events</a> &gt; <span class="el_source">EventProcessor.java</span></div><h1>EventProcessor.java</h1><pre class="source lang-java linenums">package fr.gaulupeau.apps.Poche.events;
+
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.text.TextUtils;
+import android.util.Log;
+import android.webkit.MimeTypeMap;
+import android.widget.Toast;
+
+import androidx.core.app.NotificationCompat;
+
+import org.greenrobot.eventbus.Subscribe;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.EnumSet;
+import java.util.Locale;
+
+import fr.gaulupeau.apps.InThePoche.R;
+import fr.gaulupeau.apps.Poche.App;
+import fr.gaulupeau.apps.Poche.data.Settings;
+import fr.gaulupeau.apps.Poche.network.WallabagConnection;
+import fr.gaulupeau.apps.Poche.service.ActionRequest;
+import fr.gaulupeau.apps.Poche.service.ActionResult;
+import fr.gaulupeau.apps.Poche.service.AlarmHelper;
+import fr.gaulupeau.apps.Poche.service.NotificationActionReceiver;
+import fr.gaulupeau.apps.Poche.service.OperationsHelper;
+import fr.gaulupeau.apps.Poche.service.ServiceHelper;
+import fr.gaulupeau.apps.Poche.service.workers.ArticleUpdater;
+import fr.gaulupeau.apps.Poche.ui.IconUnreadWidget;
+import fr.gaulupeau.apps.Poche.ui.NotificationsHelper;
+import fr.gaulupeau.apps.Poche.ui.preferences.SettingsActivity;
+import fr.gaulupeau.apps.Poche.utils.IntentUtils;
+import fr.gaulupeau.apps.Poche.utils.WallabagFileProvider;
+
+import static fr.gaulupeau.apps.Poche.ui.NotificationsHelper.CHANNEL_ID_DOWNLOADING_ARTICLES;
+import static fr.gaulupeau.apps.Poche.ui.NotificationsHelper.CHANNEL_ID_ERRORS;
+import static fr.gaulupeau.apps.Poche.ui.NotificationsHelper.CHANNEL_ID_SYNC;
+
+// TODO: fix getters sync (AFAIK, not so important yet)
+public class EventProcessor {
+
+<span class="fc" id="L49">    private static final String TAG = EventProcessor.class.getSimpleName();</span>
+
+    private static final int NOTIFICATION_ID_OTHER = 0;
+    private static final int NOTIFICATION_ID_SYNC_QUEUE_ONGOING = 1;
+    private static final int NOTIFICATION_ID_UPDATE_ARTICLES_ONGOING = 2;
+    private static final int NOTIFICATION_ID_SWEEP_DELETED_ARTICLES_ONGOING = 3;
+    private static final int NOTIFICATION_ID_DOWNLOAD_FILE_ONGOING = 4;
+    private static final int NOTIFICATION_ID_FETCH_IMAGES_ONGOING = 5;
+
+<span class="fc" id="L58">    private static final EnumSet&lt;ArticlesChangedEvent.ChangeType&gt; CHANGE_SET_UNREAD_WIDGET = EnumSet.of(</span>
+            ArticlesChangedEvent.ChangeType.UNSPECIFIED,
+            ArticlesChangedEvent.ChangeType.ADDED,
+            ArticlesChangedEvent.ChangeType.DELETED,
+            ArticlesChangedEvent.ChangeType.ARCHIVED,
+            ArticlesChangedEvent.ChangeType.UNARCHIVED);
+
+    private Context context;
+    private Settings settings;
+    private Handler mainHandler;
+    private NotificationManager notificationManager;
+
+    private NotificationCompat.Builder syncQueueNotificationBuilder;
+    private NotificationCompat.Builder updateArticlesNotificationBuilder;
+    private NotificationCompat.Builder sweepDeletedArticlesNotificationBuilder;
+    private NotificationCompat.Builder fetchImagesNotificationBuilder;
+
+<span class="fc" id="L75">    public EventProcessor(Context context) {</span>
+<span class="fc" id="L76">        this.context = context;</span>
+<span class="fc" id="L77">    }</span>
+
+    @Subscribe
+    public void onBootCompletedEvent(BootCompletedEvent event) {
+<span class="nc" id="L81">        Log.d(TAG, &quot;onBootCompletedEvent() started&quot;);</span>
+
+<span class="nc" id="L83">        Settings settings = getSettings();</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if(settings.isAutoSyncEnabled()) {</span>
+<span class="nc" id="L85">            Log.d(TAG, &quot;onBootCompletedEvent() setting an alarm&quot;);</span>
+
+<span class="nc" id="L87">            AlarmHelper.setAlarm(getContext(), settings.getAutoSyncInterval(), false);</span>
+        }
+<span class="nc" id="L89">    }</span>
+
+    @Subscribe
+    public void onAlarmReceivedEvent(AlarmReceivedEvent event) {
+<span class="nc" id="L93">        Log.d(TAG, &quot;onAlarmReceivedEvent() started&quot;);</span>
+
+<span class="nc" id="L95">        Settings settings = getSettings();</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if(!settings.isAutoSyncEnabled()) {</span>
+<span class="nc" id="L97">            Log.w(TAG, &quot;onAlarmReceivedEvent() alarm received even though auto-sync is off&quot;);</span>
+<span class="nc" id="L98">            return;</span>
+        }
+
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if(!settings.isConfigurationOk()) {</span>
+<span class="nc" id="L102">            Log.d(TAG, &quot;onAlarmReceivedEvent() configuration is not ok: skipping&quot;);</span>
+<span class="nc" id="L103">            return;</span>
+        }
+
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if(!WallabagConnection.isNetworkAvailable()) {</span>
+<span class="nc" id="L107">            Log.d(TAG, &quot;alarmReceived() no network, skipping auto-sync&quot;);</span>
+            // TODO: set another closer alarm?
+<span class="nc" id="L109">            return;</span>
+        }
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        ArticleUpdater.UpdateType updateType = settings.getAutoSyncType() == 0</span>
+<span class="nc" id="L113">                ? ArticleUpdater.UpdateType.FAST : ArticleUpdater.UpdateType.FULL;</span>
+
+<span class="nc" id="L115">        OperationsHelper.syncAndUpdate(getContext(), settings, updateType, true);</span>
+<span class="nc" id="L116">    }</span>
+
+    @Subscribe
+    public void onConnectivityChangedEvent(ConnectivityChangedEvent event) {
+<span class="nc" id="L120">        Log.d(TAG, &quot;onConnectivityChangedEvent() started&quot;);</span>
+
+<span class="nc" id="L122">        Settings settings = getSettings();</span>
+<span class="nc bnc" id="L123" title="All 4 branches missed.">        if (settings.isOfflineQueuePending() &amp;&amp; settings.isConfigurationOk()) {</span>
+<span class="nc" id="L124">            Log.d(TAG, &quot;networkChanged() requesting SyncQueue operation&quot;);</span>
+<span class="nc" id="L125">            OperationsHelper.syncQueue(getContext(), true);</span>
+        }
+<span class="nc" id="L127">    }</span>
+
+    @Subscribe
+    public void onOfflineQueueChangedEvent(OfflineQueueChangedEvent event) {
+<span class="nc" id="L131">        Log.d(TAG, &quot;onOfflineQueueChangedEvent() started&quot;);</span>
+
+<span class="nc" id="L133">        Long queueLength = event.getQueueLength();</span>
+
+<span class="nc" id="L135">        Log.d(TAG, &quot;onOfflineQueueChangedEvent() offline queue length: &quot; + queueLength);</span>
+
+<span class="nc bnc" id="L137" title="All 4 branches missed.">        boolean queueIsEmpty = queueLength != null &amp;&amp; queueLength == 0;</span>
+
+<span class="nc" id="L139">        Settings settings = getSettings();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        settings.setOfflineQueuePending(!queueIsEmpty);</span>
+
+<span class="nc bnc" id="L142" title="All 4 branches missed.">        if(event.isTriggeredByOperation() &amp;&amp; WallabagConnection.isNetworkAvailable()) {</span>
+<span class="nc" id="L143">            OperationsHelper.syncQueue(getContext(), false, true);</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        } else if(settings.isAutoSyncQueueEnabled()) {</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            enableConnectivityChangeReceiver(!queueIsEmpty);</span>
+        }
+<span class="nc" id="L147">    }</span>
+
+    @Subscribe
+    public void onFeedsChangedEvent(FeedsChangedEvent event) {
+<span class="nc" id="L151">        Log.d(TAG, &quot;onFeedsChangedEvent() started&quot;);</span>
+
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (FeedsChangedEvent.containsAny(event.getMainFeedChanges(), CHANGE_SET_UNREAD_WIDGET)) {</span>
+<span class="nc" id="L154">            Log.d(TAG, &quot;onFeedsChangedEvent() triggering update for IconUnreadWidget&quot;);</span>
+<span class="nc" id="L155">            IconUnreadWidget.triggerWidgetUpdate(getContext());</span>
+        }
+<span class="nc" id="L157">    }</span>
+
+    @Subscribe(sticky = true)
+    public void onUpdateArticlesStartedEvent(UpdateArticlesStartedEvent event) {
+<span class="nc" id="L161">        Log.d(TAG, &quot;onUpdateArticlesStartedEvent() started&quot;);</span>
+
+<span class="nc" id="L163">        Context context = getContext();</span>
+
+<span class="nc" id="L165">        String detailedMessage = context.getString(</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                event.getRequest().getUpdateType() != ArticleUpdater.UpdateType.FAST</span>
+<span class="nc" id="L167">                        ? R.string.notification_updatingArticles_full</span>
+<span class="nc" id="L168">                        : R.string.notification_updatingArticles_fast);</span>
+
+<span class="nc" id="L170">        detailedMessage = prependAppName(detailedMessage);</span>
+
+<span class="nc" id="L172">        NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID_SYNC)</span>
+<span class="nc" id="L173">                .setSmallIcon(R.drawable.ic_action_refresh)</span>
+<span class="nc" id="L174">                .setContentTitle(context.getString(R.string.notification_updatingArticles))</span>
+<span class="nc" id="L175">                .setContentText(detailedMessage)</span>
+<span class="nc" id="L176">                .setOngoing(true);</span>
+
+<span class="nc" id="L178">        notify(NOTIFICATION_ID_UPDATE_ARTICLES_ONGOING,</span>
+<span class="nc" id="L179">                notificationBuilder.setProgress(0, 0, true).build());</span>
+
+<span class="nc" id="L181">        updateArticlesNotificationBuilder = notificationBuilder;</span>
+<span class="nc" id="L182">    }</span>
+
+    @Subscribe
+    public void onUpdateArticlesProgressEvent(UpdateArticlesProgressEvent event) {
+<span class="nc" id="L186">        Log.d(TAG, &quot;onUpdateArticlesProgressEvent() started&quot;);</span>
+
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if(updateArticlesNotificationBuilder != null</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">                &amp;&amp; event.getCurrent() != 0 /* don't show empty progressbar */) {</span>
+<span class="nc" id="L190">            notify(NOTIFICATION_ID_UPDATE_ARTICLES_ONGOING,</span>
+                    updateArticlesNotificationBuilder
+<span class="nc" id="L192">                            .setProgress(event.getTotal(), event.getCurrent(), false)</span>
+<span class="nc" id="L193">                            .build());</span>
+        }
+<span class="nc" id="L195">    }</span>
+
+    @Subscribe
+    public void onUpdateArticlesFinishedEvent(UpdateArticlesFinishedEvent event) {
+<span class="nc" id="L199">        Log.d(TAG, &quot;onUpdateArticlesFinishedEvent() started&quot;);</span>
+
+<span class="nc" id="L201">        cancelNotification(NOTIFICATION_ID_UPDATE_ARTICLES_ONGOING);</span>
+
+<span class="nc" id="L203">        updateArticlesNotificationBuilder = null;</span>
+<span class="nc" id="L204">    }</span>
+
+    @Subscribe(sticky = true)
+    public void onSweepDeletedArticlesStartedEvent(SweepDeletedArticlesStartedEvent event) {
+<span class="nc" id="L208">        Log.d(TAG, &quot;onSweepDeletedArticlesStartedEvent() started&quot;);</span>
+
+<span class="nc" id="L210">        Context context = getContext();</span>
+
+<span class="nc" id="L212">        NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID_SYNC)</span>
+<span class="nc" id="L213">                .setSmallIcon(R.drawable.ic_action_refresh)</span>
+<span class="nc" id="L214">                .setContentTitle(context.getString(R.string.notification_sweepingDeletedArticles))</span>
+<span class="nc" id="L215">                .setOngoing(true);</span>
+
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if(Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.N) {</span>
+<span class="nc" id="L218">            notificationBuilder.setContentText(context.getString(R.string.app_name));</span>
+        }
+
+<span class="nc" id="L221">        notify(NOTIFICATION_ID_SWEEP_DELETED_ARTICLES_ONGOING,</span>
+<span class="nc" id="L222">                notificationBuilder.setProgress(0, 0, true).build());</span>
+
+<span class="nc" id="L224">        sweepDeletedArticlesNotificationBuilder = notificationBuilder;</span>
+<span class="nc" id="L225">    }</span>
+
+    @Subscribe
+    public void onSweepDeletedArticlesProgressEvent(SweepDeletedArticlesProgressEvent event) {
+<span class="nc" id="L229">        Log.d(TAG, &quot;onSweepDeletedArticlesProgressEvent() started&quot;);</span>
+
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if(sweepDeletedArticlesNotificationBuilder != null</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                &amp;&amp; event.getCurrent() != 0 /* don't show empty progressbar */) {</span>
+<span class="nc" id="L233">            notify(NOTIFICATION_ID_SWEEP_DELETED_ARTICLES_ONGOING,</span>
+                    sweepDeletedArticlesNotificationBuilder
+<span class="nc" id="L235">                            .setProgress(event.getTotal(), event.getCurrent(), false)</span>
+<span class="nc" id="L236">                            .build());</span>
+        }
+<span class="nc" id="L238">    }</span>
+
+    @Subscribe
+    public void onSweepDeletedArticlesFinishedEvent(SweepDeletedArticlesFinishedEvent event) {
+<span class="nc" id="L242">        Log.d(TAG, &quot;onSweepDeletedArticlesFinishedEvent() started&quot;);</span>
+
+<span class="nc" id="L244">        cancelNotification(NOTIFICATION_ID_SWEEP_DELETED_ARTICLES_ONGOING);</span>
+
+<span class="nc" id="L246">        sweepDeletedArticlesNotificationBuilder = null;</span>
+<span class="nc" id="L247">    }</span>
+
+    @Subscribe
+    public void onFetchImagesProgressEvent(FetchImagesProgressEvent event) {
+<span class="nc" id="L251">        Log.d(TAG, &quot;onFetchImagesProgressEvent() started&quot;);</span>
+
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if(fetchImagesNotificationBuilder == null) {</span>
+<span class="nc" id="L254">            Context context = getContext();</span>
+
+<span class="nc" id="L256">            NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID_SYNC)</span>
+<span class="nc" id="L257">                    .setSmallIcon(R.drawable.ic_action_refresh)</span>
+<span class="nc" id="L258">                    .setContentTitle(context.getString(R.string.notification_downloadingImages))</span>
+<span class="nc" id="L259">                    .setOngoing(true);</span>
+
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            if(Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.N) {</span>
+<span class="nc" id="L262">                notificationBuilder.setContentText(context.getString(R.string.app_name));</span>
+            }
+
+<span class="nc" id="L265">            fetchImagesNotificationBuilder = notificationBuilder;</span>
+        }
+
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if(event.getCurrent() == 0) { // show indeterminate progressbar instead of empty one</span>
+<span class="nc" id="L269">            fetchImagesNotificationBuilder.setProgress(0, 0, true);</span>
+        } else {
+<span class="nc" id="L271">            fetchImagesNotificationBuilder.setProgress(event.getTotal(), event.getCurrent(), false);</span>
+        }
+
+<span class="nc" id="L274">        notify(NOTIFICATION_ID_FETCH_IMAGES_ONGOING, fetchImagesNotificationBuilder.build());</span>
+<span class="nc" id="L275">    }</span>
+
+    @Subscribe
+    public void onFetchImagesFinishedEvent(FetchImagesFinishedEvent event) {
+<span class="nc" id="L279">        Log.d(TAG, &quot;onFetchImagesFinishedEvent() started&quot;);</span>
+
+<span class="nc" id="L281">        cancelNotification(NOTIFICATION_ID_FETCH_IMAGES_ONGOING);</span>
+
+<span class="nc" id="L283">        fetchImagesNotificationBuilder = null;</span>
+<span class="nc" id="L284">    }</span>
+
+    @Subscribe
+    public void onSyncQueueProgressEvent(SyncQueueProgressEvent event) {
+<span class="nc" id="L288">        Log.d(TAG, &quot;onSyncQueueProgressEvent() started&quot;);</span>
+
+<span class="nc" id="L290">        boolean showNotification = false;</span>
+
+<span class="nc" id="L292">        ActionRequest request = event.getRequest();</span>
+
+<span class="nc" id="L294">        int total = event.getTotal();</span>
+
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if(total &gt; 1) {</span>
+<span class="nc" id="L297">            showNotification = true;</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">        } else if(total == 1</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                &amp;&amp; request.getRequestType() != ActionRequest.RequestType.MANUAL_BY_OPERATION) {</span>
+<span class="nc" id="L300">            showNotification = true;</span>
+        }
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if(showNotification) {</span>
+<span class="nc" id="L304">            NotificationCompat.Builder notificationBuilder = syncQueueNotificationBuilder;</span>
+
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            if(notificationBuilder == null) {</span>
+<span class="nc" id="L307">                Context context = getContext();</span>
+
+<span class="nc" id="L309">                notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID_SYNC)</span>
+<span class="nc" id="L310">                        .setSmallIcon(R.drawable.ic_action_refresh)</span>
+<span class="nc" id="L311">                        .setContentTitle(getContext().getString(R.string.notification_syncingQueue))</span>
+<span class="nc" id="L312">                        .setOngoing(true);</span>
+
+<span class="nc bnc" id="L314" title="All 2 branches missed.">                if(Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.N) {</span>
+<span class="nc" id="L315">                    notificationBuilder.setContentText(context.getString(R.string.app_name));</span>
+                }
+
+<span class="nc" id="L318">                syncQueueNotificationBuilder = notificationBuilder;</span>
+            }
+
+<span class="nc" id="L321">            notify(NOTIFICATION_ID_SYNC_QUEUE_ONGOING,</span>
+<span class="nc" id="L322">                    notificationBuilder.setProgress(total, event.getCurrent(), false).build());</span>
+        }
+<span class="nc" id="L324">    }</span>
+
+    @Subscribe
+    public void onSyncQueueFinishedEvent(SyncQueueFinishedEvent event) {
+<span class="nc" id="L328">        Log.d(TAG, &quot;onSyncQueueFinishedEvent() started&quot;);</span>
+
+<span class="nc" id="L330">        cancelNotification(NOTIFICATION_ID_SYNC_QUEUE_ONGOING);</span>
+
+<span class="nc" id="L332">        syncQueueNotificationBuilder = null;</span>
+
+<span class="nc" id="L334">        ActionResult result = event.getResult();</span>
+<span class="nc bnc" id="L335" title="All 4 branches missed.">        if((result != null &amp;&amp; !result.isSuccess())</span>
+<span class="nc bnc" id="L336" title="All 4 branches missed.">                || (event.getQueueLength() == null || event.getQueueLength() &gt; 0)) {</span>
+<span class="nc" id="L337">            enableConnectivityChangeReceiver(true);</span>
+        }
+<span class="nc" id="L339">    }</span>
+
+    // TODO: better downloading notification
+    @Subscribe(sticky = true)
+    public void onDownloadFileStartedEvent(DownloadFileStartedEvent event) {
+<span class="nc" id="L344">        Log.d(TAG, &quot;onDownloadFileStartedEvent() started&quot;);</span>
+
+<span class="nc" id="L346">        Context context = getContext();</span>
+
+<span class="nc" id="L348">        String formatString = event.getRequest().getDownloadFormat().toString();</span>
+
+<span class="nc" id="L350">        NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID_DOWNLOADING_ARTICLES)</span>
+<span class="nc" id="L351">                .setContentTitle(context.getString(R.string.downloadAsFilePathStart))</span>
+<span class="nc" id="L352">                .setContentText(context.getString(R.string.downloadAsFileProgress, formatString))</span>
+<span class="nc" id="L353">                .setSmallIcon(R.drawable.ic_file_download_24dp)</span>
+<span class="nc" id="L354">                .setOngoing(true);</span>
+
+<span class="nc" id="L356">        NotificationCompat.InboxStyle inboxStyle = new NotificationCompat.InboxStyle();</span>
+<span class="nc" id="L357">        inboxStyle.setBigContentTitle(</span>
+<span class="nc" id="L358">                context.getString(R.string.downloadAsFileProgressDetail,</span>
+<span class="nc" id="L359">                        event.getArticle().getTitle().replaceAll(&quot;[^a-zA-Z0-9.-]&quot;, &quot; &quot;),</span>
+                        formatString));
+<span class="nc" id="L361">        notificationBuilder.setStyle(inboxStyle);</span>
+
+<span class="nc" id="L363">        notify(NOTIFICATION_ID_DOWNLOAD_FILE_ONGOING,</span>
+<span class="nc" id="L364">                notificationBuilder.setProgress(1, 0, true).build());</span>
+<span class="nc" id="L365">    }</span>
+
+    @Subscribe
+    public void onDownloadFileFinishedEvent(DownloadFileFinishedEvent event) {
+<span class="nc" id="L369">        Log.d(TAG, &quot;onDownloadFileFinishedEvent() started&quot;);</span>
+
+<span class="nc" id="L371">        ActionResult result = event.getResult();</span>
+<span class="nc bnc" id="L372" title="All 4 branches missed.">        if(result == null || result.isSuccess()) {</span>
+<span class="nc" id="L373">            Context context = getContext();</span>
+
+<span class="nc" id="L375">            Intent intent = new Intent();</span>
+<span class="nc" id="L376">            intent.setAction(android.content.Intent.ACTION_VIEW);</span>
+<span class="nc" id="L377">            Uri uri = WallabagFileProvider.getUriForFile(context, event.getFile());</span>
+<span class="nc" id="L378">            String mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(</span>
+<span class="nc" id="L379">                    event.getRequest().getDownloadFormat().toString().toLowerCase(Locale.US));</span>
+<span class="nc" id="L380">            intent.setDataAndType(uri, mimeType);</span>
+<span class="nc" id="L381">            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);</span>
+
+<span class="nc" id="L383">            PendingIntent contentIntent = PendingIntent.getActivity(</span>
+                    context, 0, intent, IntentUtils.FLAG_IMMUTABLE);
+
+<span class="nc" id="L386">            NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID_DOWNLOADING_ARTICLES)</span>
+<span class="nc" id="L387">                    .setContentTitle(context.getString(R.string.downloadAsFileArticleDownloaded))</span>
+<span class="nc" id="L388">                    .setContentText(context.getString(R.string.downloadAsFileTouchToOpen))</span>
+<span class="nc" id="L389">                    .setSmallIcon(R.drawable.ic_file_download_24dp)</span>
+<span class="nc" id="L390">                    .setContentIntent(contentIntent);</span>
+
+<span class="nc" id="L392">            NotificationCompat.InboxStyle inboxStyle = new NotificationCompat.InboxStyle();</span>
+<span class="nc" id="L393">            inboxStyle.setBigContentTitle(</span>
+<span class="nc" id="L394">                    context.getString(R.string.downloadAsFileArticleDownloadedDetail,</span>
+<span class="nc" id="L395">                            event.getArticle().getTitle().replaceAll(&quot;[^a-zA-Z0-9.-]&quot;, &quot; &quot;)));</span>
+<span class="nc" id="L396">            notificationBuilder.setStyle(inboxStyle);</span>
+
+<span class="nc" id="L398">            notify(NOTIFICATION_ID_DOWNLOAD_FILE_ONGOING, notificationBuilder.build());</span>
+<span class="nc" id="L399">        } else {</span>
+<span class="nc" id="L400">            cancelNotification(NOTIFICATION_ID_DOWNLOAD_FILE_ONGOING);</span>
+        }
+<span class="nc" id="L402">    }</span>
+
+    @Subscribe
+    public void onActionResultEvent(ActionResultEvent event) {
+<span class="nc" id="L406">        Log.d(TAG, &quot;onActionResultEvent() started&quot;);</span>
+
+<span class="nc" id="L408">        Notification notification = null;</span>
+
+<span class="nc" id="L410">        ActionRequest request = event.getRequest();</span>
+<span class="nc" id="L411">        String actionString = request.getAction().toString();</span>
+
+<span class="nc" id="L413">        Log.d(TAG, &quot;onActionResultEvent() action: &quot; + actionString);</span>
+
+<span class="nc" id="L415">        ActionResult result = event.getResult();</span>
+
+<span class="nc" id="L417">        boolean success = true;</span>
+
+<span class="nc bnc" id="L419" title="All 2 branches missed.">        if(result != null) {</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">            if(!result.isSuccess()) success = false;</span>
+<span class="nc" id="L421">            Log.d(TAG, &quot;onActionResultEvent() result is success: &quot; + success);</span>
+        } else {
+<span class="nc" id="L423">            Log.d(TAG, &quot;onActionResultEvent() result is null&quot;);</span>
+        }
+
+<span class="nc bnc" id="L426" title="All 2 branches missed.">        if(success) {</span>
+<span class="nc" id="L427">            ActionRequest nextRequest = request.getNextRequest();</span>
+
+<span class="nc bnc" id="L429" title="All 2 branches missed.">            if(nextRequest != null) {</span>
+<span class="nc" id="L430">                Log.d(TAG, &quot;onActionResultEvent() starting nextRequest with action: &quot;</span>
+<span class="nc" id="L431">                        + nextRequest.getAction());</span>
+
+<span class="nc" id="L433">                ServiceHelper.startService(getContext(), nextRequest);</span>
+            }
+<span class="nc" id="L435">        } else {</span>
+<span class="nc" id="L436">            ActionResult.ErrorType errorType = result.getErrorType();</span>
+
+<span class="nc" id="L438">            Log.d(TAG, &quot;onActionResultEvent() result is not success; errorType: &quot; + errorType);</span>
+<span class="nc" id="L439">            Log.d(TAG, &quot;onActionResultEvent() result message: &quot; + result.getMessage());</span>
+
+<span class="nc bnc" id="L441" title="All 6 branches missed.">            switch(errorType) {</span>
+                case TEMPORARY:
+                case NO_NETWORK:
+                    // don't show it to user at all or make it suppressible
+                    // optionally schedule auto-retry
+                    // TODO: not important: implement
+<span class="nc" id="L447">                    break;</span>
+
+                case INCORRECT_CONFIGURATION:
+                case INCORRECT_CREDENTIALS: {
+                    // notify user -- user must fix something before retry
+                    // maybe suppress notification if:
+                    //  - the action was not requested by user (that probably implies the second case), or
+                    //  - notification was already shown in the past
+                    // no auto-retry
+
+<span class="nc" id="L457">                    Settings settings = getSettings();</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                    if(settings.isConfigurationOk()) {</span>
+                        // TODO: we probably want to automatically test connection
+
+<span class="nc" id="L461">                        settings.setConfigurationOk(false);</span>
+                    }
+
+<span class="nc bnc" id="L464" title="All 2 branches missed.">                    if(request.getRequestType() != ActionRequest.RequestType.AUTO</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">                            || !settings.isConfigurationErrorShown()) {</span>
+<span class="nc" id="L466">                        settings.setConfigurationErrorShown(true);</span>
+
+<span class="nc" id="L468">                        Context context = getContext();</span>
+
+<span class="nc" id="L470">                        Intent intent = new Intent(context, SettingsActivity.class);</span>
+<span class="nc" id="L471">                        PendingIntent contentIntent = PendingIntent.getActivity(</span>
+                                context, 0, intent, IntentUtils.FLAG_IMMUTABLE);
+
+<span class="nc" id="L474">                        String detailedText = context.getString(</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                                errorType == ActionResult.ErrorType.INCORRECT_CREDENTIALS</span>
+<span class="nc" id="L476">                                        ? R.string.notification_incorrectCredentials</span>
+<span class="nc" id="L477">                                        : R.string.notification_incorrectConfiguration);</span>
+
+<span class="nc" id="L479">                        detailedText = prependAppName(detailedText);</span>
+
+<span class="nc" id="L481">                        NotificationCompat.Builder notificationBuilder =</span>
+                                new NotificationCompat.Builder(context, CHANNEL_ID_ERRORS)
+<span class="nc" id="L483">                                        .setSmallIcon(R.drawable.ic_warning_24dp)</span>
+<span class="nc" id="L484">                                        .setContentTitle(context.getString(R.string.notification_error))</span>
+<span class="nc" id="L485">                                        .setContentText(detailedText)</span>
+<span class="nc" id="L486">                                        .setContentIntent(contentIntent);</span>
+
+<span class="nc" id="L488">                        notification = notificationBuilder.build();</span>
+<span class="nc" id="L489">                    }</span>
+                    break;
+                }
+
+                case SERVER_ERROR:
+                case UNKNOWN: {
+                    // this is undecided yet
+                    // show notification + schedule auto-retry
+                    // TODO: decide on behavior
+
+<span class="nc bnc" id="L499" title="All 2 branches missed.">                    boolean serverError = errorType == ActionResult.ErrorType.SERVER_ERROR;</span>
+
+<span class="nc" id="L501">                    Context context = getContext();</span>
+
+<span class="nc bnc" id="L503" title="All 2 branches missed.">                    String detailedText = context.getString(serverError</span>
+<span class="nc" id="L504">                            ? R.string.notification_serverError</span>
+<span class="nc" id="L505">                            : R.string.notification_unknownError);</span>
+<span class="nc" id="L506">                    detailedText = prependAppName(detailedText);</span>
+
+<span class="nc" id="L508">                    NotificationCompat.Builder notificationBuilder =</span>
+                            new NotificationCompat.Builder(context, CHANNEL_ID_ERRORS)
+<span class="nc" id="L510">                                    .setSmallIcon(R.drawable.ic_warning_24dp)</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                                    .setContentTitle(context.getString(serverError</span>
+<span class="nc" id="L512">                                            ? R.string.notification_serverError</span>
+<span class="nc" id="L513">                                            : R.string.notification_error))</span>
+<span class="nc" id="L514">                                    .setContentText(detailedText);</span>
+
+<span class="nc" id="L516">                    String extra = &quot;&quot;;</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">                    if(!TextUtils.isEmpty(result.getMessage())) {</span>
+<span class="nc" id="L518">                        extra += result.getMessage() + &quot;\n&quot;;</span>
+                    }
+<span class="nc bnc" id="L520" title="All 2 branches missed.">                    if(result.getException() != null) {</span>
+<span class="nc" id="L521">                        StringWriter sw = new StringWriter();</span>
+
+<span class="nc" id="L523">                        sw.append(context.getString(R.string.notification_stacktrace)).append(&quot;\n&quot;);</span>
+<span class="nc" id="L524">                        result.getException().printStackTrace(new PrintWriter(sw));</span>
+
+<span class="nc" id="L526">                        extra += sw.toString();</span>
+                    }
+<span class="nc bnc" id="L528" title="All 2 branches missed.">                    if(!TextUtils.isEmpty(extra)) {</span>
+<span class="nc" id="L529">                        notificationBuilder.setStyle(new NotificationCompat.BigTextStyle()</span>
+<span class="nc" id="L530">                                .bigText(context.getString(R.string.notification_expandedError, extra)));</span>
+
+<span class="nc" id="L532">                        extra = detailedText + &quot;\n&quot; + extra;</span>
+
+<span class="nc" id="L534">                        PendingIntent copyIntent = NotificationActionReceiver</span>
+<span class="nc" id="L535">                                .getCopyToClipboardPendingIntent(context,</span>
+<span class="nc" id="L536">                                        context.getString(R.string.notification_clipboardLabel), extra);</span>
+<span class="nc" id="L537">                        notificationBuilder.addAction(0,</span>
+<span class="nc" id="L538">                                context.getString(R.string.notification_copyToClipboard), copyIntent);</span>
+                    }
+
+<span class="nc" id="L541">                    notification = notificationBuilder.build();</span>
+<span class="nc" id="L542">                    break;</span>
+                }
+
+                case NOT_FOUND:
+<span class="nc" id="L546">                    Log.w(TAG, &quot;onActionResultEvent() got a NOT_FOUND&quot;);</span>
+<span class="nc" id="L547">                    break;</span>
+
+                case NEGATIVE_RESPONSE:
+                    // server acknowledged the operation but failed/refused to performed it;
+                    // detection of such response is not implemented on client yet
+<span class="nc" id="L552">                    Log.w(TAG, &quot;onActionResultEvent() got a NEGATIVE_RESPONSE; that was not expected&quot;);</span>
+                    break;
+            }
+        }
+
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        if(notification != null) {</span>
+<span class="nc" id="L558">            Log.d(TAG, &quot;onActionResultEvent() notification is not null; showing it&quot;);</span>
+
+<span class="nc" id="L560">            notify(NOTIFICATION_ID_OTHER, notification);</span>
+        }
+<span class="nc" id="L562">    }</span>
+
+    private void enableConnectivityChangeReceiver(boolean enable) {
+<span class="nc bnc" id="L565" title="All 2 branches missed.">        if(getSettings().isAutoSyncQueueEnabled()) {</span>
+<span class="nc" id="L566">            Log.d(TAG, &quot;enableConnectivityChangeReceiver() enable connectivity change receiver: &quot; + enable);</span>
+
+<span class="nc" id="L568">            Settings.enableConnectivityChangeReceiver(getContext(), enable);</span>
+        }
+<span class="nc" id="L570">    }</span>
+
+    private String prependAppName(String s) {
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        if(Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.N) {</span>
+            // notifications in Android before Android Nougat do not contain their source app,
+            // therefore we add it here manually
+<span class="nc" id="L576">            s = getContext().getString(R.string.app_name) + &quot; · &quot; + s;</span>
+        }
+
+<span class="nc" id="L579">        return s;</span>
+    }
+
+    private Context getContext() {
+<span class="nc" id="L583">        return context;</span>
+    }
+
+    private Settings getSettings() {
+<span class="nc bnc" id="L587" title="All 2 branches missed.">        if(settings == null) {</span>
+<span class="nc" id="L588">            settings = App.getSettings();</span>
+        }
+
+<span class="nc" id="L591">        return settings;</span>
+    }
+
+    private Handler getMainHandler() {
+<span class="nc bnc" id="L595" title="All 2 branches missed.">        if(mainHandler == null) {</span>
+<span class="nc" id="L596">            mainHandler = new Handler(getContext().getMainLooper());</span>
+        }
+
+<span class="nc" id="L599">        return mainHandler;</span>
+    }
+
+    private void notify(int id, Notification notification) {
+<span class="nc" id="L603">        NotificationsHelper.initNotificationChannels();</span>
+
+<span class="nc" id="L605">        getNotificationManager().notify(TAG, id, notification);</span>
+<span class="nc" id="L606">    }</span>
+
+    private void cancelNotification(int id) {
+<span class="nc" id="L609">        getNotificationManager().cancel(TAG, id);</span>
+<span class="nc" id="L610">    }</span>
+
+    private NotificationManager getNotificationManager() {
+<span class="nc bnc" id="L613" title="All 2 branches missed.">        if(notificationManager == null) {</span>
+<span class="nc" id="L614">            notificationManager = (NotificationManager)getContext()</span>
+<span class="nc" id="L615">                    .getSystemService(Context.NOTIFICATION_SERVICE);</span>
+        }
+
+<span class="nc" id="L618">        return notificationManager;</span>
+    }
+
+    private void showToast(final String text, final int duration) {
+<span class="nc" id="L622">        getMainHandler().post(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L625">                Toast.makeText(getContext(), text, duration).show();</span>
+<span class="nc" id="L626">            }</span>
+        });
+<span class="nc" id="L628">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExportViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">ExportViewModel.kt</span></div><h1>ExportViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.os.Bundle
+import androidx.core.os.BundleCompat
+import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.liveData
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.db2.checkSealedStatus
+import org.totschnig.myexpenses.db2.loadAccount
+import org.totschnig.myexpenses.db2.markAsExported
+import org.totschnig.myexpenses.export.CsvExporter
+import org.totschnig.myexpenses.export.JSONExporter
+import org.totschnig.myexpenses.export.QifExporter
+import org.totschnig.myexpenses.export.createFileFailure
+import org.totschnig.myexpenses.model.ExportFormat
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.provider.DataBaseAccount
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_EXCLUDE_FROM_TOTALS
+import org.totschnig.myexpenses.provider.KEY_FLAG
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_STATUS
+import org.totschnig.myexpenses.provider.KEY_TYPE
+import org.totschnig.myexpenses.provider.STATUS_EXPORTED
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.filter.KEY_FILTER
+import org.totschnig.myexpenses.provider.getLong
+import org.totschnig.myexpenses.provider.useAndMapToList
+import org.totschnig.myexpenses.util.AppDirHelper
+import org.totschnig.myexpenses.util.Utils
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.io.displayName
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+<span class="nc" id="L49">class ExportViewModel(application: Application) : ContentResolvingAndroidViewModel(application) {</span>
+    companion object {
+        const val KEY_FORMAT = &quot;format&quot;
+        const val KEY_DATE_FORMAT = &quot;dateFormat&quot;
+        const val KEY_TIME_FORMAT = &quot;timeFormat&quot;
+        const val KEY_ENCODING = &quot;encoding&quot;
+        const val KEY_DECIMAL_SEPARATOR = &quot;export_decimal_separator&quot;
+        const val KEY_NOT_YET_EXPORTED_P = &quot;notYetExportedP&quot;
+        const val KEY_DELETE_P = &quot;deleteP&quot;
+        const val KEY_EXPORT_HANDLE_DELETED = &quot;export_handle_deleted&quot;
+        const val KEY_FILE_NAME = &quot;file_name&quot;
+        const val KEY_DELIMITER = &quot;export_delimiter&quot;
+        const val KEY_MERGE_P = &quot;export_merge_accounts&quot;
+
+        const val EXPORT_HANDLE_DELETED_DO_NOTHING = -1
+        const val EXPORT_HANDLE_DELETED_UPDATE_BALANCE = 0
+        const val EXPORT_HANDLE_DELETED_CREATE_HELPER = 1
+
+        const val PRINT_TRANSACTION_LIST = 1
+        const val PRINT_BALANCE_SHEET = 2
+    }
+
+<span class="nc" id="L71">    private val _publishProgress: MutableSharedFlow&lt;String?&gt; = MutableSharedFlow()</span>
+    private val _result: MutableStateFlow&lt;Pair&lt;ExportFormat, List&lt;DocumentFile&gt;&gt;?&gt; =
+<span class="nc" id="L73">        MutableStateFlow(null)</span>
+<span class="nc" id="L74">    val publishProgress: SharedFlow&lt;String?&gt; = _publishProgress</span>
+<span class="nc" id="L75">    val result: StateFlow&lt;Pair&lt;ExportFormat, List&lt;DocumentFile&gt;&gt;?&gt; = _result</span>
+
+    fun startExport(args: Bundle) {
+<span class="nc" id="L78">        viewModelScope.launch(coroutineDispatcher) {</span>
+<span class="nc" id="L79">            val format: ExportFormat = args.getSerializable(KEY_FORMAT) as ExportFormat</span>
+<span class="nc" id="L80">            _result.update {</span>
+<span class="nc" id="L81">                format to buildList {</span>
+
+<span class="nc" id="L83">                    val application = getApplication&lt;MyApplication&gt;()</span>
+<span class="nc" id="L84">                    val deleteP = args.getBoolean(KEY_DELETE_P)</span>
+<span class="nc" id="L85">                    val notYetExportedP = args.getBoolean(KEY_NOT_YET_EXPORTED_P)</span>
+<span class="nc" id="L86">                    val mergeP = args.getBoolean(KEY_MERGE_P)</span>
+<span class="nc" id="L87">                    val dateFormat = args.getString(KEY_DATE_FORMAT)!!</span>
+<span class="nc" id="L88">                    val timeFormat = args.getString(KEY_TIME_FORMAT)</span>
+<span class="nc" id="L89">                    val decimalSeparator: Char = args.getChar(KEY_DECIMAL_SEPARATOR)</span>
+<span class="nc" id="L90">                    val accountId = args.getLong(KEY_ROWID)</span>
+<span class="nc" id="L91">                    val currency = args.getString(KEY_CURRENCY)</span>
+<span class="nc" id="L92">                    val encoding = args.getString(KEY_ENCODING)!!</span>
+<span class="nc" id="L93">                    val handleDelete = args.getInt(KEY_EXPORT_HANDLE_DELETED)</span>
+<span class="nc" id="L94">                    val filter = BundleCompat.getParcelable(args, KEY_FILTER, Criterion::class.java)</span>
+<span class="nc" id="L95">                    val fileName = args.getString(KEY_FILE_NAME)!!</span>
+<span class="nc" id="L96">                    val delimiter = args.getChar(KEY_DELIMITER)</span>
+<span class="nc" id="L97">                    val flag = args.getLong(KEY_FLAG, -1)</span>
+<span class="nc" id="L98">                    val type = args.getLong(KEY_TYPE, -1)</span>
+
+
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                    val accountIds = if (accountId &gt; 0L) {</span>
+<span class="nc" id="L102">                        listOf(accountId)</span>
+                    } else {
+<span class="nc" id="L104">                        var selection = &quot;$KEY_EXCLUDE_FROM_TOTALS = 0&quot;</span>
+<span class="nc" id="L105">                        var selectionArgs: Array&lt;String&gt;? = null</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                        if (currency != null) {</span>
+<span class="nc" id="L107">                            selection += &quot; AND $KEY_CURRENCY = ?&quot;</span>
+<span class="nc" id="L108">                            selectionArgs = arrayOf(currency)</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">                        } else if (flag != -1L) {</span>
+<span class="nc" id="L110">                            selection += &quot; AND $KEY_FLAG = ?&quot;</span>
+<span class="nc" id="L111">                            selectionArgs = arrayOf(flag.toString())</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                        } else if (type != -1L) {</span>
+<span class="nc" id="L113">                            selection += &quot; AND $KEY_TYPE = ?&quot;</span>
+<span class="nc" id="L114">                            selectionArgs = arrayOf(type.toString())</span>
+                        }
+                        //noinspection Recycle
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                        application.contentResolver.query(</span>
+<span class="nc" id="L118">                            TransactionProvider.ACCOUNTS_URI,</span>
+<span class="nc" id="L119">                            arrayOf(KEY_ROWID),</span>
+<span class="nc" id="L120">                            selection,</span>
+<span class="nc" id="L121">                            selectionArgs,</span>
+<span class="nc" id="L122">                            null</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                        )?.useAndMapToList {</span>
+<span class="nc" id="L124">                            it.getLong(KEY_ROWID)</span>
+<span class="nc" id="L125">                        } ?: throw IOException(&quot;Cursor was null&quot;)</span>
+                    }
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                    AppDirHelper.getAppDir(application).onFailure {</span>
+<span class="nc" id="L128">                        publishProgress(localizedContext.getString(R.string.io_error_appdir_null))</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">                    }.onSuccess { appDir -&gt;</span>
+<span class="nc" id="L130">                        var account: Account?</span>
+<span class="nc bnc" id="L131" title="All 4 branches missed.">                        val oneFile = accountIds.size == 1 || mergeP</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                        val destDir = if (oneFile) {</span>
+<span class="nc" id="L133">                            appDir</span>
+                        } else {
+<span class="nc" id="L135">                            AppDirHelper.newDirectory(appDir, fileName)</span>
+                        }
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                        if (destDir != null) {</span>
+<span class="nc" id="L138">                            val successfullyExported = ArrayList&lt;Account&gt;()</span>
+<span class="nc" id="L139">                            val simpleDateFormat = SimpleDateFormat(&quot;yyyMMdd-HHmmss&quot;, Locale.US)</span>
+<span class="nc" id="L140">                            val now = Date()</span>
+<span class="nc" id="L141">                            var append = false</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                            for (i in accountIds.indices) {</span>
+<span class="nc" id="L143">                                account = repository.loadAccount(accountIds[i])</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                                if (account == null) continue</span>
+<span class="nc" id="L145">                                publishProgress(account.label + &quot; ...&quot;)</span>
+<span class="nc" id="L146">                                try {</span>
+<span class="nc" id="L147">                                    val fileNameForAccount =</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                                        if (oneFile) fileName else String.format(</span>
+<span class="nc" id="L149">                                            &quot;%s-%s&quot;, Utils.escapeForFileName(account.label),</span>
+<span class="nc" id="L150">                                            simpleDateFormat.format(now)</span>
+                                        )
+<span class="nc bnc" id="L152" title="All 3 branches missed.">                                    val exporter = when (format) {</span>
+                                        ExportFormat.CSV -&gt; {
+<span class="nc" id="L154">                                            val withOriginalAmountAndEquivalentAmount = prefHandler.getBoolean(</span>
+<span class="nc" id="L155">                                                PrefKey.CSV_EXPORT_ORIGINAL_EQUIVALENT_AMOUNTS,</span>
+<span class="nc" id="L156">                                                false</span>
+                                            )
+<span class="nc" id="L158">                                            val homeCurrencyString = currencyContext.homeCurrencyString</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">                                            val withEquivalentAmountHeader = withOriginalAmountAndEquivalentAmount &amp;&amp;</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                                                    (account.currency != homeCurrencyString</span>
+<span class="nc bnc" id="L161" title="All 6 branches missed.">                                                            || (mergeP &amp;&amp; (currency == null || currency != homeCurrencyString)))</span>
+<span class="nc bnc" id="L162" title="All 4 branches missed.">                                            val withEquivalentAmount = withOriginalAmountAndEquivalentAmount &amp;&amp; account.currency != homeCurrencyString</span>
+<span class="nc" id="L163">                                            CsvExporter(</span>
+<span class="nc" id="L164">                                                account = account,</span>
+<span class="nc" id="L165">                                                currencyContext = currencyContext,</span>
+<span class="nc" id="L166">                                                filter = filter,</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                                                notYetExportedP = notYetExportedP,</span>
+<span class="nc" id="L168">                                                dateFormat = dateFormat,</span>
+<span class="nc" id="L169">                                                decimalSeparator = decimalSeparator,</span>
+<span class="nc" id="L170">                                                encoding = encoding,</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                                                withHeader = !append,</span>
+<span class="nc" id="L172">                                                delimiter = delimiter,</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                                                withAccountColumn = mergeP,</span>
+<span class="nc" id="L174">                                                splitCategoryLevels = prefHandler.getBoolean(</span>
+<span class="nc" id="L175">                                                    PrefKey.CSV_EXPORT_SPLIT_CATEGORIES,</span>
+<span class="nc" id="L176">                                                    false</span>
+                                                ),
+<span class="nc" id="L178">                                                splitAmount = prefHandler.getBoolean(</span>
+<span class="nc" id="L179">                                                    PrefKey.CSV_EXPORT_SPLIT_AMOUNT,</span>
+<span class="nc" id="L180">                                                    true</span>
+                                                ),
+<span class="nc" id="L182">                                                timeFormat = timeFormat,</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                                                withOriginalAmount = withOriginalAmountAndEquivalentAmount,</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                                                withEquivalentAmountHeader = withEquivalentAmountHeader,</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                                                withEquivalentAmount = withEquivalentAmount,</span>
+<span class="nc" id="L186">                                                categoryPathSeparator = prefHandler.requireString(</span>
+<span class="nc" id="L187">                                                    PrefKey.CSV_EXPORT_CATEGORY_SEPARATOR,</span>
+<span class="nc" id="L188">                                                    &quot; &gt; &quot;</span>
+                                                ),
+<span class="nc bnc" id="L190" title="All 4 branches missed.">                                                withCurrencyColumn = accountId == 0L &amp;&amp; currency == null</span>
+                                            )
+                                        }
+
+<span class="nc" id="L194">                                        ExportFormat.QIF -&gt; QifExporter(</span>
+<span class="nc" id="L195">                                            account,</span>
+<span class="nc" id="L196">                                            currencyContext,</span>
+<span class="nc" id="L197">                                            filter,</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                                            notYetExportedP,</span>
+<span class="nc" id="L199">                                            dateFormat,</span>
+<span class="nc" id="L200">                                            decimalSeparator,</span>
+<span class="nc" id="L201">                                            encoding</span>
+                                        )
+
+<span class="nc" id="L204">                                        ExportFormat.JSON -&gt; JSONExporter(</span>
+<span class="nc" id="L205">                                            account,</span>
+<span class="nc" id="L206">                                            currencyContext,</span>
+<span class="nc" id="L207">                                            filter,</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">                                            notYetExportedP,</span>
+<span class="nc" id="L209">                                            dateFormat,</span>
+<span class="nc" id="L210">                                            decimalSeparator,</span>
+<span class="nc" id="L211">                                            encoding,</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">                                            preamble = if (mergeP &amp;&amp; i == 0) &quot;[&quot; else &quot;&quot;,</span>
+<span class="nc bnc" id="L213" title="All 4 branches missed.">                                            appendix = if (mergeP) if (i &lt; accountIds.size - 1) &quot;,&quot; else &quot;]&quot; else &quot;&quot;</span>
+                                        )
+                                    }
+<span class="nc" id="L216">                                    val result = exporter.export(localizedContext, lazy {</span>
+<span class="nc" id="L217">                                        AppDirHelper.buildFile(</span>
+<span class="nc" id="L218">                                            destDir,</span>
+<span class="nc" id="L219">                                            &quot;$fileNameForAccount.${format.extension}&quot;,</span>
+<span class="nc" id="L220">                                            format.mimeType,</span>
+<span class="nc" id="L221">                                            append</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                                        )?.let {</span>
+<span class="nc" id="L223">                                            Result.success(it)</span>
+<span class="nc" id="L224">                                        } ?: Result.failure(</span>
+<span class="nc" id="L225">                                            createFileFailure(</span>
+<span class="nc" id="L226">                                                localizedContext,</span>
+<span class="nc" id="L227">                                                destDir,</span>
+<span class="nc" id="L228">                                                fileName</span>
+                                            )
+<span class="nc" id="L230">                                        )</span>
+<span class="nc" id="L231">                                    }, append)</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                                    result.onSuccess {</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">                                        if (!append) {</span>
+<span class="nc" id="L234">                                            add(it)</span>
+                                        }
+<span class="nc" id="L236">                                        successfullyExported.add(account)</span>
+<span class="nc" id="L237">                                        publishProgress(</span>
+<span class="nc" id="L238">                                            &quot;...&quot; + localizedContext.getString(</span>
+<span class="nc" id="L239">                                                R.string.export_sdcard_success,</span>
+<span class="nc" id="L240">                                                it.displayName</span>
+                                            )
+                                        )
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                                        append = mergeP</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                                    }.onFailure {</span>
+<span class="nc" id="L245">                                        publishProgress(&quot;... &quot; + it.message)</span>
+<span class="nc" id="L246">                                    }</span>
+<span class="nc" id="L247">                                } catch (e: IOException) {</span>
+<span class="nc" id="L248">                                    publishProgress(</span>
+<span class="nc" id="L249">                                        &quot;... &quot; + localizedContext.getString(</span>
+<span class="nc" id="L250">                                            R.string.export_sdcard_failure,</span>
+<span class="nc" id="L251">                                            appDir.name,</span>
+<span class="nc" id="L252">                                            e.message</span>
+                                        )
+                                    )
+                                }
+                            }
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                            for (a in successfullyExported) {</span>
+<span class="nc" id="L258">                                try {</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                                    if (deleteP) {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                                        val cannotResetConditions: List&lt;Int&gt; = if (a.isSealed) {</span>
+<span class="nc" id="L261">                                            listOf(R.string.account_closed)</span>
+                                        } else {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                                            val (sealedTransfer, sealedDebt) = repository.checkSealedStatus(</span>
+<span class="nc" id="L264">                                                a.id</span>
+<span class="nc" id="L265">                                            ).getOrThrow()</span>
+<span class="nc" id="L266">                                            listOfNotNull(</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                                                if (sealedTransfer) R.string.object_sealed else null,</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">                                                if (sealedDebt) R.string.object_sealed_debt else null</span>
+                                            )
+                                        }
+<span class="nc bnc" id="L271" title="All 4 branches missed.">                                        if (cannotResetConditions.isNotEmpty()) {</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                                            publishProgress(cannotResetConditions.joinToString {</span>
+<span class="nc" id="L273">                                                getString(it)</span>
+                                            })
+                                        } else {
+<span class="nc" id="L276">                                            reset(a, filter, handleDelete, fileName)</span>
+                                        }
+                                    } else {
+<span class="nc" id="L279">                                        repository.markAsExported(a.id, filter)</span>
+                                    }
+<span class="nc" id="L281">                                } catch (e: Exception) {</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">                                    publishProgress(&quot;ERROR: &quot; + e.message)</span>
+<span class="nc" id="L283">                                    CrashHandler.report(e)</span>
+                                }
+                            }
+                        } else {
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                            publishProgress(</span>
+<span class="nc" id="L288">                                &quot;ERROR: &quot; + createFileFailure(</span>
+<span class="nc" id="L289">                                    localizedContext,</span>
+<span class="nc" id="L290">                                    appDir,</span>
+<span class="nc" id="L291">                                    fileName</span>
+<span class="nc" id="L292">                                ).message</span>
+                            )
+                        }
+<span class="nc" id="L295">                    }</span>
+<span class="nc" id="L296">                }</span>
+            }
+<span class="nc" id="L298">        }</span>
+<span class="nc" id="L299">    }</span>
+
+    private suspend fun publishProgress(string: String) {
+<span class="nc" id="L302">        _publishProgress.emit(string)</span>
+<span class="nc" id="L303">    }</span>
+
+    fun resultProcessed() {
+<span class="nc" id="L306">        _result.update {</span>
+<span class="nc" id="L307">            null</span>
+        }
+<span class="nc" id="L309">    }</span>
+
+<span class="nc bnc" id="L311" title="All 3 branches missed.">    fun checkAppDir() = liveData(coroutineDispatcher) {</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        emit(AppDirHelper.checkAppDir(getApplication()))</span>
+<span class="nc" id="L313">    }</span>
+
+<span class="nc bnc" id="L315" title="All 3 branches missed.">    fun hasExported(account: DataBaseAccount) = liveData(coroutineDispatcher) {</span>
+<span class="nc" id="L316">        contentResolver.query(</span>
+<span class="nc" id="L317">            account.uriForTransactionList(extended = false),</span>
+<span class="nc" id="L318">            arrayOf(&quot;count(*)&quot;),</span>
+<span class="nc" id="L319">            &quot;$KEY_STATUS = $STATUS_EXPORTED&quot;,</span>
+<span class="nc" id="L320">            null,</span>
+<span class="nc" id="L321">            null</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        )?.use {</span>
+<span class="nc" id="L323">            it.moveToFirst()</span>
+<span class="nc bnc" id="L324" title="All 4 branches missed.">            emit(it.getInt(0) &gt; 0)</span>
+<span class="nc" id="L325">        }</span>
+<span class="nc" id="L326">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

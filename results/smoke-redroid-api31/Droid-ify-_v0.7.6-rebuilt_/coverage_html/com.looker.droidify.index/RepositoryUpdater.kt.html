@@ -1,0 +1,463 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepositoryUpdater.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.index</a> &gt; <span class="el_source">RepositoryUpdater.kt</span></div><h1>RepositoryUpdater.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.index
+
+import android.content.Context
+import androidx.core.net.toUri
+import com.looker.droidify.data.model.fingerprint
+import com.looker.droidify.database.Database
+import com.looker.droidify.model.Product
+import com.looker.droidify.model.Release
+import com.looker.droidify.model.Repository
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.NetworkResponse
+import com.looker.droidify.network.header.authentication
+import com.looker.droidify.network.header.etag
+import com.looker.droidify.network.header.ifModifiedSince
+import com.looker.droidify.utility.common.SdkCheck
+import com.looker.droidify.utility.common.cache.Cache
+import com.looker.droidify.utility.common.extension.toFormattedString
+import com.looker.droidify.utility.common.result.Result
+import com.looker.droidify.utility.extension.android.Android
+import com.looker.droidify.utility.getProgress
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.security.CodeSigner
+import java.security.cert.Certificate
+import java.util.jar.JarEntry
+import java.util.jar.JarFile
+
+object RepositoryUpdater {
+    enum class Stage {
+<span class="fc" id="L36">        DOWNLOAD, PROCESS, MERGE, COMMIT</span>
+    }
+
+    // TODO Add support for Index-V2 and also cleanup everything here
+<span class="fc" id="L40">    enum class IndexType(</span>
+<span class="fc" id="L41">        val jarName: String,</span>
+<span class="fc" id="L42">        val contentName: String,</span>
+    ) {
+<span class="fc" id="L44">        INDEX_V1(&quot;index-v1.jar&quot;, &quot;index-v1.json&quot;),</span>
+    }
+
+    enum class ErrorType {
+<span class="fc" id="L48">        NETWORK, HTTP, VALIDATION, PARSING</span>
+    }
+
+    class UpdateException : Exception {
+<span class="nc" id="L52">        val errorType: ErrorType</span>
+
+<span class="nc" id="L54">        constructor(errorType: ErrorType, message: String) : super(message) {</span>
+<span class="nc" id="L55">            this.errorType = errorType</span>
+<span class="nc" id="L56">        }</span>
+
+<span class="nc" id="L58">        constructor(errorType: ErrorType, message: String, cause: Exception) : super(</span>
+<span class="nc" id="L59">            message,</span>
+<span class="nc" id="L60">            cause,</span>
+        ) {
+<span class="nc" id="L62">            this.errorType = errorType</span>
+<span class="nc" id="L63">        }</span>
+    }
+
+<span class="fc" id="L66">    private val updaterLock = Any()</span>
+<span class="fc" id="L67">    private val cleanupLock = Any()</span>
+
+    private lateinit var downloader: Downloader
+
+    fun init(scope: CoroutineScope, downloader: Downloader) {
+<span class="fc" id="L72">        this.downloader = downloader</span>
+<span class="fc" id="L73">        scope.launch {</span>
+            // No need of mutex because it is in same coroutine scope
+<span class="fc" id="L75">            var lastDisabled = emptyMap&lt;Long, Boolean&gt;()</span>
+<span class="fc" id="L76">            Database.RepositoryAdapter</span>
+<span class="fc" id="L77">                .getAllRemovedStream()</span>
+<span class="fc" id="L78">                .map { deletedRepos -&gt;</span>
+<span class="fc" id="L79">                    deletedRepos</span>
+<span class="fc" id="L80">                        .filterNot { it.key in lastDisabled.keys }</span>
+<span class="fc" id="L81">                        .also { lastDisabled = deletedRepos }</span>
+                }
+                // To not perform complete cleanup on startup
+<span class="fc" id="L84">                .drop(1)</span>
+<span class="fc" id="L85">                .filter { it.isNotEmpty() }</span>
+<span class="pc" id="L86">                .collect(Database.RepositoryAdapter::cleanup)</span>
+<span class="nc" id="L87">        }</span>
+<span class="fc" id="L88">    }</span>
+
+    fun await() {
+<span class="nc" id="L91">        synchronized(updaterLock) { }</span>
+<span class="nc" id="L92">    }</span>
+
+    suspend fun update(
+        context: Context,
+        repository: Repository,
+        unstable: Boolean,
+        callback: (Stage, Long, Long?) -&gt; Unit,
+<span class="fc" id="L99">    ) = update(</span>
+<span class="fc" id="L100">        context = context,</span>
+<span class="fc" id="L101">        repository = repository,</span>
+<span class="fc" id="L102">        unstable = unstable,</span>
+<span class="fc" id="L103">        indexTypes = listOf(IndexType.INDEX_V1),</span>
+<span class="fc" id="L104">        callback = callback,</span>
+<span class="fc" id="L105">    )</span>
+
+    private suspend fun update(
+        context: Context,
+        repository: Repository,
+        unstable: Boolean,
+        indexTypes: List&lt;IndexType&gt;,
+        callback: (Stage, Long, Long?) -&gt; Unit,
+<span class="fc" id="L113">    ): Result&lt;Boolean&gt; = withContext(Dispatchers.IO) {</span>
+<span class="fc" id="L114">        val indexType = indexTypes[0]</span>
+<span class="fc" id="L115">        when (val request = downloadIndex(context, repository, indexType, callback)) {</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">            is Result.Error -&gt; {</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                val result = request.data</span>
+<span class="nc" id="L118">                    ?: return@withContext Result.Error(request.exception, false)</span>
+
+<span class="nc" id="L120">                request.data.file.delete()</span>
+<span class="nc bnc" id="L121" title="All 6 branches missed.">                if (result.statusCode == 404 &amp;&amp; indexTypes.isNotEmpty()) {</span>
+<span class="nc" id="L122">                    update(</span>
+<span class="nc" id="L123">                        context = context,</span>
+<span class="nc" id="L124">                        repository = repository,</span>
+<span class="nc" id="L125">                        indexTypes = indexTypes.subList(1, indexTypes.size),</span>
+<span class="nc" id="L126">                        unstable = unstable,</span>
+<span class="nc" id="L127">                        callback = callback,</span>
+                    )
+                } else {
+<span class="nc" id="L130">                    Result.Error(</span>
+<span class="nc" id="L131">                        UpdateException(</span>
+<span class="nc" id="L132">                            ErrorType.HTTP,</span>
+<span class="nc" id="L133">                            &quot;Invalid response: HTTP ${result.statusCode}&quot;,</span>
+                        ),
+                    )
+                }
+            }
+
+<span class="fc" id="L139">            is Result.Success -&gt; {</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">                if (request.data.isUnmodified) {</span>
+<span class="nc" id="L141">                    request.data.file.delete()</span>
+<span class="nc" id="L142">                    Result.Success(false)</span>
+                } else {
+<span class="fc" id="L144">                    try {</span>
+<span class="pc" id="L145">                        val isFileParsedSuccessfully = processFile(</span>
+<span class="fc" id="L146">                            context = context,</span>
+<span class="fc" id="L147">                            repository = repository,</span>
+<span class="fc" id="L148">                            indexType = indexType,</span>
+<span class="fc" id="L149">                            unstable = unstable,</span>
+<span class="fc" id="L150">                            file = request.data.file,</span>
+<span class="fc" id="L151">                            lastModified = request.data.lastModified,</span>
+<span class="fc" id="L152">                            entityTag = request.data.entityTag,</span>
+<span class="fc" id="L153">                            callback = callback,</span>
+                        )
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                        Result.Success(isFileParsedSuccessfully)</span>
+<span class="nc" id="L156">                    } catch (e: UpdateException) {</span>
+<span class="nc" id="L157">                        Result.Error(e)</span>
+                    }
+                }
+            }
+<span class="nc" id="L161">        }</span>
+<span class="fc" id="L162">    }</span>
+
+    private suspend fun downloadIndex(
+        context: Context,
+        repository: Repository,
+        indexType: IndexType,
+        callback: (Stage, Long, Long?) -&gt; Unit,
+<span class="fc" id="L169">    ): Result&lt;IndexFile&gt; = withContext(Dispatchers.IO) {</span>
+<span class="fc" id="L170">        val file = Cache.getTemporaryFile(context)</span>
+<span class="fc" id="L171">        val result = downloader.downloadToFile(</span>
+<span class="fc" id="L172">            url = repository.address.toUri().buildUpon()</span>
+<span class="fc" id="L173">                .appendPath(indexType.jarName).build().toString(),</span>
+<span class="fc" id="L174">            target = file,</span>
+            headers = {
+<span class="fc" id="L176">                ifModifiedSince(repository.lastModified)</span>
+<span class="fc" id="L177">                etag(repository.entityTag)</span>
+<span class="fc" id="L178">                authentication(repository.authentication)</span>
+<span class="fc" id="L179">            },</span>
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">        ) { read, total -&gt;</span>
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">            callback(Stage.DOWNLOAD, read.value, total?.value)</span>
+<span class="fc" id="L182">        }</span>
+
+<span class="fc" id="L184">        when (result) {</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">            is NetworkResponse.Success -&gt; {</span>
+<span class="fc" id="L186">                Result.Success(</span>
+<span class="fc" id="L187">                    IndexFile(</span>
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">                        isUnmodified = result.statusCode == 304,</span>
+<span class="pc bpc" id="L189" title="2 of 4 branches missed.">                        lastModified = result.lastModified?.toFormattedString() ?: &quot;&quot;,</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">                        entityTag = result.etag ?: &quot;&quot;,</span>
+<span class="fc" id="L191">                        statusCode = result.statusCode,</span>
+<span class="fc" id="L192">                        file = file,</span>
+                    ),
+                )
+            }
+
+<span class="nc" id="L197">            is NetworkResponse.Error -&gt; {</span>
+<span class="nc" id="L198">                file.delete()</span>
+<span class="nc" id="L199">                when (result) {</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                    is NetworkResponse.Error.Http -&gt; {</span>
+<span class="nc bnc" id="L201" title="All 6 branches missed.">                        val errorType = if (result.statusCode in 400..499) {</span>
+<span class="nc" id="L202">                            ErrorType.HTTP</span>
+                        } else {
+<span class="nc" id="L204">                            ErrorType.NETWORK</span>
+                        }
+
+<span class="nc" id="L207">                        Result.Error(</span>
+<span class="nc" id="L208">                            UpdateException(</span>
+<span class="nc" id="L209">                                errorType = errorType,</span>
+<span class="nc" id="L210">                                message = &quot;Failed with Status: ${result.statusCode}&quot;,</span>
+                            ),
+                        )
+                    }
+
+<span class="nc bnc" id="L215" title="All 2 branches missed.">                    is NetworkResponse.Error.ConnectionTimeout -&gt; Result.Error(result.exception)</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                    is NetworkResponse.Error.IO -&gt; Result.Error(result.exception)</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                    is NetworkResponse.Error.SocketTimeout -&gt; Result.Error(result.exception)</span>
+<span class="nc" id="L218">                    is NetworkResponse.Error.Unknown -&gt; Result.Error(result.exception)</span>
+                }
+            }
+<span class="fc" id="L221">        }</span>
+<span class="fc" id="L222">    }</span>
+
+<span class="pc" id="L224">    fun processFile(</span>
+        context: Context,
+        repository: Repository,
+        indexType: IndexType,
+        unstable: Boolean,
+        file: File,
+<span class="fc" id="L230">        mergerFile: File = Cache.getTemporaryFile(context),</span>
+        lastModified: String,
+        entityTag: String,
+        callback: (Stage, Long, Long?) -&gt; Unit,
+    ): Boolean {
+<span class="fc" id="L235">        var rollback = true</span>
+<span class="pc" id="L236">        return synchronized(updaterLock) {</span>
+<span class="fc" id="L237">            try {</span>
+<span class="fc" id="L238">                val jarFile = JarFile(file, true)</span>
+<span class="fc" id="L239">                val indexEntry = jarFile.getEntry(indexType.contentName) as JarEntry</span>
+<span class="fc" id="L240">                val total = indexEntry.size</span>
+<span class="fc" id="L241">                Database.UpdaterAdapter.createTemporaryTable()</span>
+<span class="fc" id="L242">                val features = context.packageManager.systemAvailableFeatures</span>
+<span class="fc" id="L243">                    .asSequence().map { it.name }.toSet() + setOf(&quot;android.hardware.touchscreen&quot;)</span>
+
+<span class="fc" id="L245">                var changedRepository: Repository? = null</span>
+
+<span class="fc" id="L247">                try {</span>
+<span class="fc" id="L248">                    val unmergedProducts = mutableListOf&lt;Product&gt;()</span>
+<span class="fc" id="L249">                    val unmergedReleases = mutableListOf&lt;Pair&lt;String, List&lt;Release&gt;&gt;&gt;()</span>
+<span class="pc" id="L250">                    IndexMerger(mergerFile).use { indexMerger -&gt;</span>
+<span class="fc" id="L251">                        jarFile.getInputStream(indexEntry).getProgress {</span>
+<span class="fc" id="L252">                            callback(Stage.PROCESS, it, total)</span>
+<span class="pc" id="L253">                        }.use { entryStream -&gt;</span>
+<span class="fc" id="L254">                            IndexV1Parser.parse(</span>
+<span class="fc" id="L255">                                repository.id,</span>
+<span class="fc" id="L256">                                entryStream,</span>
+<span class="fc" id="L257">                                object : IndexV1Parser.Callback {</span>
+                                    override fun onRepository(
+                                        mirrors: List&lt;String&gt;,
+                                        name: String,
+                                        description: String,
+                                        version: Int,
+                                        timestamp: Long,
+                                    ) {
+<span class="fc" id="L265">                                        changedRepository = repository.update(</span>
+<span class="fc" id="L266">                                            mirrors,</span>
+<span class="fc" id="L267">                                            name,</span>
+<span class="fc" id="L268">                                            description,</span>
+<span class="fc" id="L269">                                            version,</span>
+<span class="fc" id="L270">                                            lastModified,</span>
+<span class="fc" id="L271">                                            entityTag,</span>
+<span class="fc" id="L272">                                            timestamp,</span>
+                                        )
+<span class="fc" id="L274">                                    }</span>
+
+                                    override fun onProduct(product: Product) {
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">                                        if (Thread.interrupted()) {</span>
+<span class="nc" id="L278">                                            throw InterruptedException()</span>
+                                        }
+<span class="fc" id="L280">                                        unmergedProducts += product</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">                                        if (unmergedProducts.size &gt;= 50) {</span>
+<span class="fc" id="L282">                                            indexMerger.addProducts(unmergedProducts)</span>
+<span class="fc" id="L283">                                            unmergedProducts.clear()</span>
+                                        }
+<span class="fc" id="L285">                                    }</span>
+
+                                    override fun onReleases(
+                                        packageName: String,
+                                        releases: List&lt;Release&gt;,
+                                    ) {
+<span class="pc bpc" id="L291" title="1 of 2 branches missed.">                                        if (Thread.interrupted()) {</span>
+<span class="nc" id="L292">                                            throw InterruptedException()</span>
+                                        }
+<span class="fc" id="L294">                                        unmergedReleases += Pair(packageName, releases)</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">                                        if (unmergedReleases.size &gt;= 50) {</span>
+<span class="fc" id="L296">                                            indexMerger.addReleases(unmergedReleases)</span>
+<span class="fc" id="L297">                                            unmergedReleases.clear()</span>
+                                        }
+<span class="fc" id="L299">                                    }</span>
+                                },
+                            )
+
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">                            if (Thread.interrupted()) {</span>
+<span class="nc" id="L304">                                throw InterruptedException()</span>
+                            }
+<span class="pc bpc" id="L306" title="2 of 4 branches missed.">                            if (unmergedProducts.isNotEmpty()) {</span>
+<span class="fc" id="L307">                                indexMerger.addProducts(unmergedProducts)</span>
+<span class="fc" id="L308">                                unmergedProducts.clear()</span>
+                            }
+<span class="pc bpc" id="L310" title="2 of 4 branches missed.">                            if (unmergedReleases.isNotEmpty()) {</span>
+<span class="fc" id="L311">                                indexMerger.addReleases(unmergedReleases)</span>
+<span class="fc" id="L312">                                unmergedReleases.clear()</span>
+                            }
+<span class="fc" id="L314">                            var progress = 0</span>
+<span class="nc" id="L315">                            indexMerger.forEach(repository.id, 50) { products, totalCount -&gt;</span>
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">                                if (Thread.interrupted()) {</span>
+<span class="nc" id="L317">                                    throw InterruptedException()</span>
+                                }
+<span class="fc" id="L319">                                progress += products.size</span>
+<span class="fc" id="L320">                                callback(</span>
+<span class="fc" id="L321">                                    Stage.MERGE,</span>
+<span class="fc" id="L322">                                    progress.toLong(),</span>
+<span class="fc" id="L323">                                    totalCount.toLong(),</span>
+                                )
+<span class="fc" id="L325">                                Database.UpdaterAdapter.putTemporary(</span>
+<span class="fc" id="L326">                                    products</span>
+<span class="fc" id="L327">                                        .map { transformProduct(it, features, unstable) },</span>
+                                )
+<span class="fc" id="L329">                            }</span>
+<span class="nc" id="L330">                        }</span>
+<span class="nc" id="L331">                    }</span>
+                } finally {
+<span class="nc" id="L333">                    mergerFile.delete()</span>
+                }
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                val workRepository = changedRepository ?: repository</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                if (workRepository.timestamp &lt; repository.timestamp) {</span>
+<span class="nc" id="L338">                    throw UpdateException(</span>
+<span class="nc" id="L339">                        ErrorType.VALIDATION,</span>
+                        &quot;New index is older than current index:&quot; +
+<span class="nc" id="L341">                            &quot; ${workRepository.timestamp} &lt; ${repository.timestamp}&quot;,</span>
+                    )
+                }
+
+<span class="nc bnc" id="L345" title="All 6 branches missed.">                val fingerprint = indexEntry.codeSigner.certificate.fingerprint()?.value?.uppercase()</span>
+<span class="nc" id="L346">                    ?: throw UpdateException(</span>
+<span class="nc" id="L347">                        ErrorType.VALIDATION,</span>
+<span class="nc" id="L348">                        &quot;No or invalid fingerprint found, invalid repo index&quot;,</span>
+                    )
+
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                val commitRepository = if (!workRepository.fingerprint.equals(</span>
+<span class="nc" id="L352">                        fingerprint,</span>
+<span class="nc" id="L353">                        ignoreCase = true,</span>
+                    )
+                ) {
+<span class="nc bnc" id="L356" title="All 4 branches missed.">                    if (workRepository.fingerprint.isNotEmpty()) {</span>
+<span class="nc" id="L357">                        throw UpdateException(</span>
+<span class="nc" id="L358">                            ErrorType.VALIDATION,</span>
+<span class="nc" id="L359">                            &quot;Certificate fingerprints do not match&quot;,</span>
+                        )
+                    }
+
+<span class="nc" id="L363">                    workRepository.copy(fingerprint = fingerprint)</span>
+                } else {
+<span class="nc" id="L365">                    workRepository</span>
+                }
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                if (Thread.interrupted()) {</span>
+<span class="nc" id="L368">                    throw InterruptedException()</span>
+                }
+<span class="nc" id="L370">                callback(Stage.COMMIT, 0, null)</span>
+<span class="nc" id="L371">                synchronized(cleanupLock) {</span>
+<span class="nc" id="L372">                    Database.UpdaterAdapter.finishTemporary(commitRepository, true)</span>
+<span class="nc" id="L373">                }</span>
+<span class="nc" id="L374">                rollback = false</span>
+<span class="nc" id="L375">                true</span>
+<span class="nc" id="L376">            } catch (e: Exception) {</span>
+<span class="nc" id="L377">                throw when (e) {</span>
+<span class="nc bnc" id="L378" title="All 4 branches missed.">                    is UpdateException, is InterruptedException -&gt; e</span>
+<span class="nc" id="L379">                    else -&gt; UpdateException(ErrorType.PARSING, &quot;Error parsing index&quot;, e)</span>
+                }
+            } finally {
+<span class="nc" id="L382">                file.delete()</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">                if (rollback) {</span>
+<span class="nc" id="L384">                    Database.UpdaterAdapter.finishTemporary(repository, false)</span>
+                }
+<span class="nc" id="L386">            }</span>
+        }
+    }
+
+    @get:Throws(UpdateException::class)
+    private val JarEntry.codeSigner: CodeSigner
+<span class="nc bnc" id="L392" title="All 4 branches missed.">        get() = codeSigners?.singleOrNull()</span>
+<span class="nc" id="L393">            ?: throw UpdateException(</span>
+<span class="nc" id="L394">                ErrorType.VALIDATION,</span>
+<span class="nc" id="L395">                &quot;index.jar must be signed by a single code signer&quot;,</span>
+<span class="nc" id="L396">            )</span>
+
+    @get:Throws(UpdateException::class)
+    private val CodeSigner.certificate: Certificate
+<span class="nc bnc" id="L400" title="All 6 branches missed.">        get() = signerCertPath?.certificates?.singleOrNull()</span>
+<span class="nc" id="L401">            ?: throw UpdateException(</span>
+<span class="nc" id="L402">                ErrorType.VALIDATION,</span>
+<span class="nc" id="L403">                &quot;index.jar code signer should have only one certificate&quot;,</span>
+<span class="nc" id="L404">            )</span>
+
+    private fun transformProduct(
+        product: Product,
+        features: Set&lt;String&gt;,
+        unstable: Boolean,
+    ): Product {
+<span class="fc" id="L411">        val releasePairs = product.releases</span>
+<span class="fc" id="L412">            .distinctBy { it.identifier }</span>
+<span class="fc" id="L413">            .sortedByDescending { it.versionCode }</span>
+<span class="fc" id="L414">            .map { release -&gt;</span>
+<span class="fc" id="L415">                val incompatibilities = mutableListOf&lt;Release.Incompatibility&gt;()</span>
+<span class="fc bfc" id="L416" title="All 4 branches covered.">                if (release.minSdkVersion &gt; 0 &amp;&amp; SdkCheck.sdk &lt; release.minSdkVersion) {</span>
+<span class="fc" id="L417">                    incompatibilities += Release.Incompatibility.MinSdk</span>
+                }
+<span class="pc bpc" id="L419" title="1 of 4 branches missed.">                if (release.maxSdkVersion &gt; 0 &amp;&amp; SdkCheck.sdk &gt; release.maxSdkVersion) {</span>
+<span class="nc" id="L420">                    incompatibilities += Release.Incompatibility.MaxSdk</span>
+                }
+<span class="fc bfc" id="L422" title="All 4 branches covered.">                if (release.platforms.isNotEmpty() &amp;&amp;</span>
+<span class="fc bfc" id="L423" title="All 2 branches covered.">                    (release.platforms intersect Android.platforms).isEmpty()</span>
+                ) {
+<span class="fc" id="L425">                    incompatibilities += Release.Incompatibility.Platform</span>
+                }
+<span class="fc" id="L427">                incompatibilities += (release.features - features).sorted()</span>
+<span class="fc" id="L428">                    .map { Release.Incompatibility.Feature(it) }</span>
+<span class="fc" id="L429">                Pair(release, incompatibilities.toList())</span>
+            }
+
+<span class="fc" id="L432">        val predicate: (Release) -&gt; Boolean = {</span>
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">            unstable ||</span>
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">                product.suggestedVersionCode &lt;= 0 ||</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">                it.versionCode &lt;= product.suggestedVersionCode</span>
+        }
+
+<span class="fc" id="L438">        val firstSelected =</span>
+<span class="fc bfc" id="L439" title="All 6 branches covered.">            releasePairs.firstOrNull { it.second.isEmpty() &amp;&amp; predicate(it.first) }</span>
+<span class="fc" id="L440">                ?: releasePairs.firstOrNull { predicate(it.first) }</span>
+
+<span class="fc" id="L442">        val releases = releasePairs</span>
+<span class="fc" id="L443">            .map { (release, incompatibilities) -&gt;</span>
+<span class="fc" id="L444">                release.copy(</span>
+<span class="fc" id="L445">                    incompatibilities = incompatibilities,</span>
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">                    selected = firstSelected?.let {</span>
+<span class="fc bfc" id="L447" title="All 2 branches covered.">                        it.first.versionCode == release.versionCode &amp;&amp;</span>
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">                            it.second == incompatibilities</span>
+<span class="nc" id="L449">                    } ?: false,</span>
+<span class="fc" id="L450">                )</span>
+            }
+<span class="fc" id="L452">        return product.copy(releases = releases)</span>
+    }
+}
+
+<span class="fc" id="L456">data class IndexFile(</span>
+<span class="fc" id="L457">    val isUnmodified: Boolean,</span>
+<span class="fc" id="L458">    val lastModified: String,</span>
+<span class="fc" id="L459">    val entityTag: String,</span>
+<span class="pc" id="L460">    val statusCode: Int,</span>
+<span class="fc" id="L461">    val file: File,</span>
+)
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

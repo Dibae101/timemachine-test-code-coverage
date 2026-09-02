@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BergamotWebTranslator.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.localtranslation</a> &gt; <span class="el_source">BergamotWebTranslator.kt</span></div><h1>BergamotWebTranslator.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.localtranslation
+
+import android.annotation.SuppressLint
+import android.app.Application
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import com.nononsenseapps.feeder.R
+import com.nononsenseapps.feeder.util.logDebug
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+
+<span class="nc" id="L30">class BergamotWebTranslator(</span>
+<span class="nc" id="L31">    override val di: DI,</span>
+) : DIAware {
+<span class="nc" id="L33">    private val application: Application by instance()</span>
+    private val json =
+<span class="nc" id="L35">        Json {</span>
+<span class="nc" id="L36">            explicitNulls = false</span>
+<span class="nc" id="L37">            ignoreUnknownKeys = true</span>
+<span class="nc" id="L38">        }</span>
+<span class="nc" id="L39">    private val bridge = Bridge()</span>
+<span class="nc" id="L40">    private val requestId = AtomicLong(0)</span>
+<span class="nc" id="L41">    private val initMutex = Mutex()</span>
+    private var webView: WebView? = null
+<span class="nc" id="L43">    private var ready = CompletableDeferred&lt;Unit&gt;()</span>
+<span class="nc" id="L44">    private var initializedRegistryJson: String = &quot;&quot;</span>
+
+    suspend fun translate(
+        content: List&lt;String&gt;,
+        sourceLanguage: String,
+        targetLanguage: String,
+        preserveHtml: Boolean,
+        modelRegistry: List&lt;BergamotModelRegistryEntry&gt;,
+    ): BergamotWebTranslationResult =
+        // WebView must be created and called on the UI thread. Translation work runs inside
+        // the Bergamot Web Worker loaded by this page, so this should only schedule JS calls.
+<span class="nc" id="L55">        withContext(Dispatchers.Main.immediate) {</span>
+<span class="nc" id="L56">            initialize(modelRegistry)</span>
+<span class="nc" id="L57">            translateBatch(</span>
+<span class="nc" id="L58">                content = content,</span>
+<span class="nc" id="L59">                sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L60">                targetLanguage = targetLanguage,</span>
+<span class="nc" id="L61">                preserveHtml = preserveHtml,</span>
+<span class="nc" id="L62">            )</span>
+<span class="nc" id="L63">        }</span>
+
+    private suspend fun initialize(modelRegistry: List&lt;BergamotModelRegistryEntry&gt;) {
+<span class="nc" id="L66">        val registryJson = json.encodeToString(modelRegistry)</span>
+<span class="nc" id="L67">        initMutex.withLock {</span>
+<span class="nc" id="L68">            ensureWebView()</span>
+<span class="nc" id="L69">            try {</span>
+<span class="nc" id="L70">                withTimeout(WEBVIEW_INIT_TIMEOUT_MS) { ready.await() }</span>
+<span class="nc" id="L71">            } catch (e: Exception) {</span>
+<span class="nc" id="L72">                destroyWebView()</span>
+<span class="nc" id="L73">                throw e</span>
+            }
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            if (initializedRegistryJson != registryJson) {</span>
+<span class="nc" id="L76">                evaluate(&quot;window.FeederBergamot.initialize($registryJson);&quot;)</span>
+<span class="nc" id="L77">                initializedRegistryJson = registryJson</span>
+            }
+<span class="nc" id="L79">        }</span>
+<span class="nc" id="L80">    }</span>
+
+    private fun destroyWebView() {
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        webView?.destroy()</span>
+<span class="nc" id="L84">        webView = null</span>
+<span class="nc" id="L85">        initializedRegistryJson = &quot;&quot;</span>
+<span class="nc" id="L86">    }</span>
+
+    private suspend fun translateBatch(
+        content: List&lt;String&gt;,
+        sourceLanguage: String,
+        targetLanguage: String,
+        preserveHtml: Boolean,
+    ): BergamotWebTranslationResult {
+<span class="nc" id="L94">        val id = requestId.incrementAndGet()</span>
+<span class="nc" id="L95">        val response = CompletableDeferred&lt;BergamotWebTranslationResult&gt;()</span>
+<span class="nc" id="L96">        bridge.pending[id] = response</span>
+
+<span class="nc" id="L98">        evaluate(</span>
+            &quot;window.FeederBergamot.translateBatch(&quot; +
+<span class="nc" id="L100">                &quot;$id,&quot; +</span>
+<span class="nc" id="L101">                &quot;${json.encodeToString(sourceLanguage)},&quot; +</span>
+<span class="nc" id="L102">                &quot;${json.encodeToString(targetLanguage)},&quot; +</span>
+<span class="nc" id="L103">                &quot;${json.encodeToString(content)},&quot; +</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                &quot;$preserveHtml&quot; +</span>
+                &quot;);&quot;,
+        )
+
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        return withTimeoutOrNull(WEBVIEW_TRANSLATION_TIMEOUT_MS) { response.await() }</span>
+<span class="nc" id="L109">            ?: run {</span>
+<span class="nc" id="L110">                bridge.pending.remove(id)</span>
+<span class="nc" id="L111">                BergamotWebTranslationResult.Error(</span>
+<span class="nc" id="L112">                    application.getString(R.string.bergamot_webview_translation_timed_out),</span>
+<span class="nc" id="L113">                )</span>
+            }
+    }
+
+    @SuppressLint(&quot;SetJavaScriptEnabled&quot;)
+    private fun ensureWebView() {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (webView != null) {</span>
+<span class="nc" id="L120">            return</span>
+        }
+
+<span class="nc" id="L123">        ready = CompletableDeferred()</span>
+<span class="nc" id="L124">        webView =</span>
+<span class="nc" id="L125">            WebView(application).apply {</span>
+<span class="nc" id="L126">                settings.javaScriptEnabled = true</span>
+<span class="nc" id="L127">                settings.domStorageEnabled = false</span>
+<span class="nc" id="L128">                settings.cacheMode = WebSettings.LOAD_NO_CACHE</span>
+<span class="nc" id="L129">                settings.allowFileAccess = true</span>
+<span class="nc" id="L130">                settings.allowFileAccessFromFileURLs = true</span>
+<span class="nc" id="L131">                settings.allowUniversalAccessFromFileURLs = false</span>
+<span class="nc" id="L132">                webChromeClient =</span>
+<span class="nc" id="L133">                    object : WebChromeClient() {</span>
+                        override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage): Boolean {
+<span class="nc" id="L135">                            logDebug(</span>
+<span class="nc" id="L136">                                LOG_TAG,</span>
+<span class="nc" id="L137">                                &quot;WebView console [$consoleMessage]: ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} ${consoleMessage.message()}&quot;,</span>
+                            )
+<span class="nc" id="L139">                            return true</span>
+                        }
+                    }
+<span class="nc" id="L142">                webViewClient =</span>
+<span class="nc" id="L143">                    object : WebViewClient() {</span>
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError,
+                        ) {
+<span class="nc" id="L149">                            logDebug(</span>
+<span class="nc" id="L150">                                LOG_TAG,</span>
+<span class="nc" id="L151">                                &quot;WebView error ${error.errorCode}: ${error.description} for ${request.url}&quot;,</span>
+                            )
+<span class="nc" id="L153">                        }</span>
+                    }
+<span class="nc" id="L155">                addJavascriptInterface(bridge, &quot;AndroidBergamot&quot;)</span>
+<span class="nc" id="L156">                loadUrl(BERGAMOT_PAGE_URL)</span>
+<span class="nc" id="L157">            }</span>
+<span class="nc" id="L158">    }</span>
+
+    private fun evaluate(script: String) {
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        webView?.evaluateJavascript(script, null)</span>
+<span class="nc" id="L162">            ?: throw IllegalStateException(</span>
+<span class="nc" id="L163">                application.getString(R.string.bergamot_webview_not_initialized),</span>
+            )
+<span class="nc" id="L165">    }</span>
+
+<span class="nc" id="L167">    private inner class Bridge {</span>
+<span class="nc" id="L168">        val pending = ConcurrentHashMap&lt;Long, CompletableDeferred&lt;BergamotWebTranslationResult&gt;&gt;()</span>
+
+        @JavascriptInterface
+        fun onReady() {
+<span class="nc" id="L172">            logDebug(LOG_TAG, &quot;BRIDGE onReady() called from JS!&quot;)</span>
+<span class="nc" id="L173">            ready.complete(Unit)</span>
+<span class="nc" id="L174">        }</span>
+
+        @JavascriptInterface
+        fun onTranslationSuccess(
+            id: Long,
+            translatedText: String,
+        ) {
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            pending.remove(id)?.complete(BergamotWebTranslationResult.Success(listOf(translatedText)))</span>
+<span class="nc" id="L182">        }</span>
+
+        @JavascriptInterface
+        fun onTranslationBatchSuccess(
+            id: Long,
+            translatedTextJson: String,
+        ) {
+<span class="nc" id="L189">            logDebug(LOG_TAG, &quot;BRIDGE onTranslationBatchSuccess id=$id jsonLen=${translatedTextJson.length}&quot;)</span>
+<span class="nc" id="L190">            val translatedTexts =</span>
+<span class="nc" id="L191">                runCatching {</span>
+<span class="nc" id="L192">                    json.decodeFromString&lt;List&lt;String&gt;&gt;(translatedTextJson)</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                }.getOrElse {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                    pending.remove(id)?.complete(</span>
+<span class="nc" id="L195">                        BergamotWebTranslationResult.Error(</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                            it.message ?: application.getString(R.string.bergamot_response_parse_failed),</span>
+                        ),
+                    )
+<span class="nc" id="L199">                    return</span>
+                }
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            pending.remove(id)?.complete(BergamotWebTranslationResult.Success(translatedTexts))</span>
+<span class="nc" id="L202">        }</span>
+
+        @JavascriptInterface
+        fun onTranslationError(
+            id: Long,
+            message: String,
+        ) {
+<span class="nc" id="L209">            logDebug(LOG_TAG, &quot;BRIDGE onTranslationError id=$id message=$message&quot;)</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            pending.remove(id)?.complete(BergamotWebTranslationResult.Error(message))</span>
+<span class="nc" id="L211">        }</span>
+
+        @JavascriptInterface
+        fun onLog(message: String) {
+<span class="nc" id="L215">            logDebug(LOG_TAG, &quot;BRIDGE onLog from JS: $message&quot;)</span>
+<span class="nc" id="L216">        }</span>
+    }
+
+    companion object {
+        private const val LOG_TAG = &quot;FEEDER_BERGAMOT&quot;
+        private const val BERGAMOT_PAGE_URL = &quot;file:///android_asset/bergamot/index.html&quot;
+        private const val WEBVIEW_INIT_TIMEOUT_MS = 60_000L
+        private const val WEBVIEW_TRANSLATION_TIMEOUT_MS = 5 * 60_000L
+    }
+}
+
+sealed interface BergamotWebTranslationResult {
+<span class="nc" id="L228">    data class Success(</span>
+<span class="nc" id="L229">        val values: List&lt;String&gt;,</span>
+    ) : BergamotWebTranslationResult
+
+<span class="nc" id="L232">    data class Error(</span>
+<span class="nc" id="L233">        val message: String,</span>
+    ) : BergamotWebTranslationResult
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

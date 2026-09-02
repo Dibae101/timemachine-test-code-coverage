@@ -1,0 +1,516 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DownloadService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.service</a> &gt; <span class="el_source">DownloadService.kt</span></div><h1>DownloadService.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.service
+
+import android.app.PendingIntent
+import android.content.Intent
+import android.graphics.Color
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.net.toUri
+import com.looker.droidify.BuildConfig
+import com.looker.droidify.MainActivity
+import com.looker.droidify.R.string.connection_error_DESC
+import com.looker.droidify.R.string.could_not_download_FORMAT
+import com.looker.droidify.R.string.could_not_validate_FORMAT
+import com.looker.droidify.R.string.http_error_DESC
+import com.looker.droidify.R.string.io_error_DESC
+import com.looker.droidify.R.string.socket_error_DESC
+import com.looker.droidify.R.string.unknown_error_DESC
+import com.looker.droidify.datastore.SettingsRepository
+import com.looker.droidify.datastore.get
+import com.looker.droidify.datastore.model.InstallerType
+import com.looker.droidify.installer.InstallManager
+import com.looker.droidify.installer.model.InstallState
+import com.looker.droidify.installer.model.installFrom
+import com.looker.droidify.model.Release
+import com.looker.droidify.model.Repository
+import com.looker.droidify.network.DataSize
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.NetworkResponse
+import com.looker.droidify.network.header.authentication
+import com.looker.droidify.network.percentBy
+import com.looker.droidify.network.validation.ValidationResult
+import com.looker.droidify.utility.common.Constants
+import com.looker.droidify.utility.common.Constants.NOTIFICATION_CHANNEL_INSTALL
+import com.looker.droidify.utility.common.SdkCheck
+import com.looker.droidify.utility.common.cache.Cache
+import com.looker.droidify.utility.common.createNotificationChannel
+import com.looker.droidify.utility.common.extension.notificationManager
+import com.looker.droidify.utility.common.extension.startForegroundSafe
+import com.looker.droidify.utility.common.extension.startServiceCompat
+import com.looker.droidify.utility.common.extension.stopForegroundCompat
+import com.looker.droidify.utility.common.extension.toPendingIntent
+import com.looker.droidify.utility.common.extension.updateAsMutable
+import com.looker.droidify.utility.common.log
+import com.looker.droidify.utility.notifications.createInstallNotification
+import com.looker.droidify.utility.notifications.installNotification
+import dagger.hilt.android.AndroidEntryPoint
+import java.io.File
+import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.yield
+import com.looker.droidify.R.string as stringRes
+
+<span class="nc" id="L64">@AndroidEntryPoint</span>
+class DownloadService : ConnectionService&lt;DownloadService.Binder&gt;() {
+    companion object {
+        private const val ACTION_CANCEL = &quot;${BuildConfig.APPLICATION_ID}.intent.action.CANCEL&quot;
+    }
+
+    @Inject
+<span class="nc" id="L71">    lateinit var settingsRepository: SettingsRepository</span>
+
+    @Inject
+<span class="nc" id="L74">    lateinit var downloader: Downloader</span>
+
+    private val installerType
+<span class="nc" id="L77">        get() = settingsRepository.get { installerType }</span>
+
+    @Inject
+<span class="nc" id="L80">    lateinit var installer: InstallManager</span>
+
+<span class="pc" id="L82">    sealed class State(val packageName: String) {</span>
+<span class="fc" id="L83">        data object Idle : State(&quot;&quot;)</span>
+<span class="nc" id="L84">        data class Connecting(val name: String) : State(name)</span>
+<span class="nc" id="L85">        data class Downloading(val name: String, val read: DataSize, val total: DataSize?) : State(</span>
+<span class="nc" id="L86">            name,</span>
+        )
+
+<span class="nc" id="L89">        data class Error(val name: String) : State(name)</span>
+<span class="nc" id="L90">        data class Cancel(val name: String) : State(name)</span>
+<span class="nc" id="L91">        data class Success(val name: String, val release: Release) : State(name)</span>
+    }
+
+<span class="fc" id="L94">    data class DownloadState(</span>
+<span class="pc" id="L95">        val currentItem: State = State.Idle,</span>
+<span class="pc" id="L96">        val queue: List&lt;String&gt; = emptyList(),</span>
+<span class="fc" id="L97">    ) {</span>
+        infix fun isDownloading(packageName: String): Boolean =
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            currentItem.packageName == packageName &amp;&amp; (</span>
+<span class="nc bnc" id="L100" title="All 4 branches missed.">                currentItem is State.Connecting || currentItem is State.Downloading</span>
+<span class="nc" id="L101">                )</span>
+
+        infix fun isComplete(packageName: String): Boolean =
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            currentItem.packageName == packageName &amp;&amp; (</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                currentItem is State.Error ||</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                    currentItem is State.Cancel ||</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                    currentItem is State.Success ||</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                    currentItem is State.Idle</span>
+<span class="nc" id="L109">                )</span>
+    }
+
+<span class="nc" id="L112">    private val _downloadState = MutableStateFlow(DownloadState())</span>
+
+<span class="nc" id="L114">    private class Task(</span>
+<span class="nc" id="L115">        val packageName: String,</span>
+<span class="nc" id="L116">        val name: String,</span>
+<span class="nc" id="L117">        val release: Release,</span>
+<span class="nc" id="L118">        val url: String,</span>
+<span class="nc" id="L119">        val authentication: String,</span>
+<span class="nc" id="L120">        val isUpdate: Boolean = false,</span>
+<span class="nc" id="L121">    ) {</span>
+        val notificationTag: String
+<span class="nc" id="L123">            get() = &quot;download-$packageName&quot;</span>
+    }
+
+<span class="nc" id="L126">    private data class CurrentTask(val task: Task, val lastState: State, val job: Job? = null)</span>
+
+    private var started = false
+    private var foregroundFailed = false
+<span class="nc" id="L130">    private val tasks = mutableListOf&lt;Task&gt;()</span>
+    private var currentTask: CurrentTask? = null
+
+<span class="nc" id="L133">    private val lock = Mutex()</span>
+
+<span class="fc" id="L135">    inner class Binder : android.os.Binder() {</span>
+<span class="pc" id="L136">        val downloadState = _downloadState.asStateFlow()</span>
+<span class="nc" id="L137">        fun enqueue(</span>
+            packageName: String,
+            name: String,
+            repository: Repository,
+            release: Release,
+<span class="nc" id="L142">            isUpdate: Boolean = false,</span>
+        ) {
+<span class="nc" id="L144">            val task = Task(</span>
+<span class="nc" id="L145">                packageName = packageName,</span>
+<span class="nc" id="L146">                name = name,</span>
+<span class="nc" id="L147">                release = release,</span>
+<span class="nc" id="L148">                url = release.getDownloadUrl(repository),</span>
+<span class="nc" id="L149">                authentication = repository.authentication,</span>
+<span class="nc" id="L150">                isUpdate = isUpdate,</span>
+            )
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (Cache.getReleaseFile(this@DownloadService, release.cacheFileName).exists()) {</span>
+<span class="nc" id="L153">                lifecycleScope.launch { publishSuccess(task) }</span>
+<span class="nc" id="L154">                return</span>
+            }
+<span class="nc" id="L156">            cancelTasks(packageName)</span>
+<span class="nc" id="L157">            cancelCurrentTask(packageName)</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            notificationManager?.cancel(</span>
+<span class="nc" id="L159">                task.notificationTag,</span>
+<span class="nc" id="L160">                Constants.NOTIFICATION_ID_DOWNLOADING,</span>
+            )
+<span class="nc" id="L162">            tasks += task</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (currentTask == null) {</span>
+<span class="nc" id="L164">                handleDownload()</span>
+            } else {
+<span class="nc" id="L166">                updateCurrentQueue { add(packageName) }</span>
+            }
+<span class="nc" id="L168">        }</span>
+
+        fun cancel(packageName: String) {
+<span class="nc" id="L171">            cancelTasks(packageName)</span>
+<span class="nc" id="L172">            cancelCurrentTask(packageName)</span>
+<span class="nc" id="L173">        }</span>
+    }
+
+<span class="nc" id="L176">    private val binder = Binder()</span>
+<span class="nc" id="L177">    override fun onBind(intent: Intent): Binder = binder</span>
+
+    override fun onCreate() {
+<span class="nc" id="L180">        super.onCreate()</span>
+<span class="nc" id="L181">        createNotificationChannel(</span>
+<span class="nc" id="L182">            id = Constants.NOTIFICATION_CHANNEL_DOWNLOADING,</span>
+<span class="nc" id="L183">            name = getString(stringRes.downloading),</span>
+        )
+<span class="nc" id="L185">        createNotificationChannel(</span>
+<span class="nc" id="L186">            id = NOTIFICATION_CHANNEL_INSTALL,</span>
+<span class="nc" id="L187">            name = getString(stringRes.install),</span>
+        )
+
+<span class="nc" id="L190">        lifecycleScope.launch {</span>
+<span class="fc" id="L191">            _downloadState</span>
+<span class="fc" id="L192">                .filter { currentTask != null }</span>
+<span class="fc" id="L193">                .sample(400)</span>
+<span class="pc bnc" id="L194" title="All 2 branches missed.">                .collectLatest {</span>
+<span class="nc" id="L195">                    publishForegroundState(false, it.currentItem)</span>
+<span class="nc" id="L196">                }</span>
+<span class="nc" id="L197">        }</span>
+<span class="nc" id="L198">    }</span>
+
+    override fun onTimeout(startId: Int) {
+<span class="nc" id="L201">        super.onTimeout(startId)</span>
+<span class="nc" id="L202">        onDestroy()</span>
+<span class="nc" id="L203">        stopSelf()</span>
+<span class="nc" id="L204">    }</span>
+
+    override fun onDestroy() {
+<span class="nc" id="L207">        super.onDestroy()</span>
+<span class="nc" id="L208">        cancelTasks(null)</span>
+<span class="nc" id="L209">        cancelCurrentTask(null)</span>
+<span class="nc" id="L210">    }</span>
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+<span class="nc bnc" id="L213" title="All 4 branches missed.">        if (intent?.action == ACTION_CANCEL) {</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">            currentTask?.let { binder.cancel(it.task.packageName) }</span>
+<span class="nc" id="L215">            stopSelf()</span>
+        } else {
+<span class="nc" id="L217">            val promoted = startForegroundSafe(</span>
+<span class="nc" id="L218">                id = Constants.NOTIFICATION_ID_DOWNLOADING,</span>
+<span class="nc" id="L219">                notification = stateNotificationBuilder</span>
+<span class="nc" id="L220">                    .setContentTitle(getString(stringRes.downloading_FORMAT, &quot;&quot;))</span>
+<span class="nc" id="L221">                    .setContentText(getString(stringRes.connecting))</span>
+<span class="nc" id="L222">                    .setProgress(1, 0, true)</span>
+<span class="nc" id="L223">                    .build(),</span>
+            )
+<span class="nc bnc" id="L225" title="All 2 branches missed.">            if (!promoted) {</span>
+<span class="nc" id="L226">                handleForegroundDenied()</span>
+<span class="nc" id="L227">                return START_NOT_STICKY</span>
+            }
+        }
+<span class="nc" id="L230">        return super.onStartCommand(intent, flags, startId)</span>
+    }
+
+    private fun cancelTasks(packageName: String?) {
+<span class="nc" id="L234">        tasks.removeAll {</span>
+<span class="nc bnc" id="L235" title="All 6 branches missed.">            (packageName == null || it.packageName == packageName) &amp;&amp; run {</span>
+<span class="nc" id="L236">                updateCurrentState(State.Cancel(it.packageName))</span>
+<span class="nc" id="L237">                true</span>
+<span class="nc" id="L238">            }</span>
+        }
+<span class="nc" id="L240">    }</span>
+
+    private fun cancelCurrentTask(packageName: String?) {
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        currentTask?.let {</span>
+<span class="nc bnc" id="L244" title="All 4 branches missed.">            if (packageName == null || it.task.packageName == packageName) {</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                it.job?.cancel()</span>
+<span class="nc" id="L246">                currentTask = null</span>
+<span class="nc" id="L247">                updateCurrentState(State.Cancel(it.task.packageName))</span>
+            }
+<span class="nc" id="L249">        }</span>
+<span class="nc" id="L250">    }</span>
+
+    private fun showErrorNotification(
+        task: Task,
+        titleRes: Int,
+        description: String?,
+    ) {
+<span class="nc" id="L257">        val intent = Intent(this, MainActivity::class.java)</span>
+<span class="nc" id="L258">            .setAction(Intent.ACTION_VIEW)</span>
+<span class="nc" id="L259">            .setData(&quot;package:${task.packageName}&quot;.toUri())</span>
+<span class="nc" id="L260">            .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)</span>
+<span class="nc" id="L261">            .toPendingIntent(this)</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        notificationManager?.notify(</span>
+<span class="nc" id="L263">            task.notificationTag,</span>
+<span class="nc" id="L264">            Constants.NOTIFICATION_ID_DOWNLOADING,</span>
+            NotificationCompat
+<span class="nc" id="L266">                .Builder(this, Constants.NOTIFICATION_CHANNEL_DOWNLOADING)</span>
+<span class="nc" id="L267">                .setAutoCancel(true)</span>
+<span class="nc" id="L268">                .setSmallIcon(android.R.drawable.stat_notify_error)</span>
+<span class="nc" id="L269">                .setColor(Color.GREEN)</span>
+<span class="nc" id="L270">                .setOnlyAlertOnce(true)</span>
+<span class="nc" id="L271">                .setContentIntent(intent)</span>
+<span class="nc" id="L272">                .setContentTitle(getString(titleRes, task.name))</span>
+<span class="nc" id="L273">                .setContentText(description)</span>
+<span class="nc" id="L274">                .build(),</span>
+        )
+<span class="nc" id="L276">    }</span>
+
+    private fun showNotificationInstall(task: Task) {
+<span class="nc" id="L279">        val intent = Intent(this, MainActivity::class.java)</span>
+<span class="nc" id="L280">            .setAction(MainActivity.ACTION_INSTALL)</span>
+<span class="nc" id="L281">            .setData(&quot;package:${task.packageName}&quot;.toUri())</span>
+<span class="nc" id="L282">            .putExtra(MainActivity.EXTRA_CACHE_FILE_NAME, task.release.cacheFileName)</span>
+<span class="nc" id="L283">            .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)</span>
+<span class="nc" id="L284">            .toPendingIntent(this)</span>
+<span class="nc" id="L285">        val notification = createInstallNotification(</span>
+<span class="nc" id="L286">            appName = task.name,</span>
+<span class="nc" id="L287">            state = InstallState.Pending,</span>
+<span class="nc" id="L288">            autoCancel = true,</span>
+        ) {
+<span class="nc" id="L290">            setContentIntent(intent)</span>
+<span class="nc" id="L291">        }</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">        notificationManager?.installNotification(</span>
+<span class="nc" id="L293">            packageName = task.packageName,</span>
+<span class="nc" id="L294">            notification = notification,</span>
+        )
+<span class="nc" id="L296">    }</span>
+
+<span class="nc" id="L298">    private suspend fun publishSuccess(task: Task) {</span>
+<span class="nc" id="L299">        val currentInstaller = installerType.first()</span>
+<span class="nc" id="L300">        updateCurrentQueue { add(&quot;&quot;) }</span>
+<span class="nc" id="L301">        updateCurrentState(State.Success(task.packageName, task.release))</span>
+<span class="nc" id="L302">        val autoInstallWithSessionInstaller =</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">            SdkCheck.canAutoInstall(task.release.targetSdkVersion) &amp;&amp;</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">                currentInstaller == InstallerType.SESSION &amp;&amp;</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                task.isUpdate</span>
+
+<span class="nc" id="L307">        showNotificationInstall(task)</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (currentInstaller == InstallerType.ROOT ||</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">            currentInstaller == InstallerType.SHIZUKU ||</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            autoInstallWithSessionInstaller</span>
+        ) {
+<span class="nc" id="L312">            val installItem = task.packageName installFrom task.release.cacheFileName</span>
+<span class="nc" id="L313">            installer install installItem</span>
+        }
+<span class="nc" id="L315">    }</span>
+
+<span class="nc" id="L317">    private val stateNotificationBuilder by lazy {</span>
+        NotificationCompat
+<span class="nc" id="L319">            .Builder(this, Constants.NOTIFICATION_CHANNEL_DOWNLOADING)</span>
+<span class="nc" id="L320">            .setSmallIcon(android.R.drawable.stat_sys_download)</span>
+<span class="nc" id="L321">            .setColor(Color.GREEN)</span>
+<span class="nc" id="L322">            .addAction(</span>
+<span class="nc" id="L323">                0,</span>
+<span class="nc" id="L324">                getString(stringRes.cancel),</span>
+<span class="nc" id="L325">                PendingIntent.getService(</span>
+<span class="nc" id="L326">                    this,</span>
+<span class="nc" id="L327">                    0,</span>
+<span class="nc" id="L328">                    Intent(this, this::class.java).setAction(ACTION_CANCEL),</span>
+<span class="nc" id="L329">                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,</span>
+                ),
+<span class="nc" id="L331">            )</span>
+    }
+
+    private fun publishForegroundState(force: Boolean, state: State) {
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (foregroundFailed) return</span>
+<span class="nc bnc" id="L336" title="All 4 branches missed.">        if (!force &amp;&amp; currentTask == null) return</span>
+<span class="nc" id="L337">        currentTask = currentTask!!.copy(lastState = state)</span>
+<span class="nc" id="L338">        val notification = stateNotificationBuilder.downloadingNotificationContent(state)</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (notification == null) {</span>
+<span class="nc" id="L340">            log(&quot;Invalid Download State: $state&quot;, &quot;DownloadService&quot;, Log.ERROR)</span>
+<span class="nc" id="L341">            return</span>
+        }
+
+<span class="nc" id="L344">        val promoted = startForegroundSafe(</span>
+<span class="nc" id="L345">            id = Constants.NOTIFICATION_ID_DOWNLOADING,</span>
+<span class="nc" id="L346">            notification = notification.build(),</span>
+        )
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        if (!promoted) handleForegroundDenied()</span>
+<span class="nc" id="L349">    }</span>
+
+    private fun handleForegroundDenied() {
+<span class="nc bnc" id="L352" title="All 2 branches missed.">        if (foregroundFailed) return</span>
+<span class="nc" id="L353">        foregroundFailed = true</span>
+<span class="nc" id="L354">        notifyUpdatesPending()</span>
+<span class="nc" id="L355">        cancelTasks(null)</span>
+<span class="nc" id="L356">        cancelCurrentTask(null)</span>
+<span class="nc" id="L357">        stopForegroundCompat()</span>
+<span class="nc" id="L358">    }</span>
+
+    private fun notifyUpdatesPending() {
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        notificationManager?.notify(</span>
+<span class="nc" id="L362">            Constants.NOTIFICATION_ID_DOWNLOADING,</span>
+            NotificationCompat
+<span class="nc" id="L364">                .Builder(this, Constants.NOTIFICATION_CHANNEL_DOWNLOADING)</span>
+<span class="nc" id="L365">                .setSmallIcon(android.R.drawable.stat_sys_download)</span>
+<span class="nc" id="L366">                .setColor(Color.GREEN)</span>
+<span class="nc" id="L367">                .setAutoCancel(true)</span>
+<span class="nc" id="L368">                .setContentTitle(getString(stringRes.updates))</span>
+<span class="nc" id="L369">                .setContentText(getString(stringRes.tap_to_resume_updates))</span>
+<span class="nc" id="L370">                .setContentIntent(</span>
+<span class="nc" id="L371">                    Intent(this, MainActivity::class.java)</span>
+<span class="nc" id="L372">                        .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)</span>
+<span class="nc" id="L373">                        .toPendingIntent(this),</span>
+                )
+<span class="nc" id="L375">                .build(),</span>
+        )
+<span class="nc" id="L377">    }</span>
+
+    private fun NotificationCompat.Builder.downloadingNotificationContent(
+        state: State,
+    ): NotificationCompat.Builder? {
+<span class="nc" id="L382">        return when (state) {</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">            is State.Connecting -&gt; {</span>
+<span class="nc" id="L384">                setContentTitle(getString(stringRes.downloading_FORMAT, currentTask!!.task.name))</span>
+<span class="nc" id="L385">                setContentText(getString(stringRes.connecting))</span>
+<span class="nc" id="L386">                setProgress(1, 0, true)</span>
+            }
+
+<span class="nc bnc" id="L389" title="All 2 branches missed.">            is State.Downloading -&gt; {</span>
+<span class="nc" id="L390">                setContentTitle(getString(stringRes.downloading_FORMAT, currentTask!!.task.name))</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">                if (state.total != null) {</span>
+<span class="nc" id="L392">                    setContentText(&quot;${state.read} / ${state.total}&quot;)</span>
+<span class="nc" id="L393">                    setProgress(100, state.read.value percentBy state.total.value, false)</span>
+                } else {
+<span class="nc" id="L395">                    setContentText(state.read.toString())</span>
+<span class="nc" id="L396">                    setProgress(0, 0, true)</span>
+                }
+            }
+
+<span class="nc" id="L400">            else -&gt; null</span>
+        }
+    }
+
+    private fun handleDownload() {
+<span class="nc bnc" id="L405" title="All 2 branches missed.">        if (currentTask != null) return</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (!started) {</span>
+<span class="nc" id="L407">            started = true</span>
+<span class="nc" id="L408">            startServiceCompat()</span>
+        }
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (tasks.isEmpty()) {</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            if (started) started = false</span>
+<span class="nc" id="L412">            stopForegroundCompat()</span>
+<span class="nc" id="L413">            return</span>
+        }
+<span class="nc" id="L415">        val task = tasks.removeAt(0)</span>
+<span class="nc" id="L416">        val connectionState = State.Connecting(task.packageName)</span>
+<span class="nc" id="L417">        currentTask = CurrentTask(task, connectionState)</span>
+<span class="nc" id="L418">        with(stateNotificationBuilder) {</span>
+<span class="nc" id="L419">            setWhen(System.currentTimeMillis())</span>
+<span class="nc" id="L420">            setContentIntent(createNotificationIntent(task.packageName))</span>
+        }
+<span class="nc" id="L422">        publishForegroundState(true, connectionState)</span>
+<span class="nc" id="L423">        val partialReleaseFile = Cache.getPartialReleaseFile(this, task.release.cacheFileName)</span>
+<span class="nc" id="L424">        val job = lifecycleScope.downloadFile(task, partialReleaseFile)</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        currentTask = currentTask?.copy(job = job)</span>
+<span class="nc" id="L426">        updateCurrentState(State.Connecting(task.packageName))</span>
+<span class="nc" id="L427">    }</span>
+
+    private fun createNotificationIntent(packageName: String): PendingIntent? =
+<span class="nc" id="L430">        Intent(this, MainActivity::class.java)</span>
+<span class="nc" id="L431">            .setAction(Intent.ACTION_VIEW)</span>
+<span class="nc" id="L432">            .setData(&quot;package:$packageName&quot;.toUri())</span>
+<span class="nc" id="L433">            .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)</span>
+<span class="nc" id="L434">            .toPendingIntent(this)</span>
+
+    private fun CoroutineScope.downloadFile(
+        task: Task,
+        target: File,
+<span class="nc" id="L439">    ) = launch {</span>
+<span class="nc" id="L440">        try {</span>
+<span class="nc" id="L441">            val response = downloader.downloadToFile(</span>
+<span class="nc" id="L442">                url = task.url,</span>
+<span class="nc" id="L443">                target = target,</span>
+<span class="nc bnc" id="L444" title="All 4 branches missed.">                headers = { if (task.authentication.isNotEmpty()) authentication(task.authentication) },</span>
+<span class="nc bnc" id="L445" title="All 3 branches missed.">            ) { read, total -&gt;</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">                yield()</span>
+<span class="nc" id="L447">                updateCurrentState(State.Downloading(task.packageName, read, total))</span>
+<span class="nc" id="L448">            }</span>
+
+<span class="nc" id="L450">            when (response) {</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                is NetworkResponse.Success -&gt; {</span>
+<span class="nc" id="L452">                    val releaseValidator = ReleaseFileValidator(</span>
+<span class="nc" id="L453">                        context = this@DownloadService,</span>
+<span class="nc" id="L454">                        packageName = task.packageName,</span>
+<span class="nc" id="L455">                        release = task.release,</span>
+                    )
+<span class="nc" id="L457">                    val result = releaseValidator.validate(target)</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                    if (result is ValidationResult.Invalid) {</span>
+<span class="nc" id="L459">                        target.delete()</span>
+<span class="nc" id="L460">                        updateCurrentState(State.Error(task.packageName))</span>
+<span class="nc" id="L461">                        showErrorNotification(task, could_not_validate_FORMAT, result.message)</span>
+<span class="nc" id="L462">                        return@launch</span>
+                    }
+<span class="nc" id="L464">                    val releaseFile = Cache.getReleaseFile(</span>
+<span class="nc" id="L465">                        this@DownloadService,</span>
+<span class="nc" id="L466">                        task.release.cacheFileName,</span>
+                    )
+<span class="nc" id="L468">                    target.renameTo(releaseFile)</span>
+<span class="nc" id="L469">                    publishSuccess(task)</span>
+                }
+
+<span class="nc" id="L472">                is NetworkResponse.Error -&gt; {</span>
+<span class="nc" id="L473">                    updateCurrentState(State.Error(task.packageName))</span>
+<span class="nc" id="L474">                    val description = when (response) {</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                        is NetworkResponse.Error.ConnectionTimeout -&gt; getString(connection_error_DESC)</span>
+
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                        is NetworkResponse.Error.Http -&gt; {</span>
+<span class="nc" id="L478">                            target.delete()</span>
+<span class="nc" id="L479">                            getString(http_error_DESC, &quot;HTTP ${response.statusCode}&quot;)</span>
+                        }
+
+<span class="nc bnc" id="L482" title="All 2 branches missed.">                        is NetworkResponse.Error.IO -&gt; getString(io_error_DESC)</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">                        is NetworkResponse.Error.SocketTimeout -&gt; getString(socket_error_DESC)</span>
+<span class="nc" id="L484">                        is NetworkResponse.Error.Unknown -&gt; getString(unknown_error_DESC)</span>
+                    }
+<span class="nc" id="L486">                    showErrorNotification(task, could_not_download_FORMAT, description)</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L490">            lock.withLock { currentTask = null }</span>
+<span class="nc" id="L491">            handleDownload()</span>
+<span class="nc" id="L492">        }</span>
+<span class="nc" id="L493">    }</span>
+
+    private fun updateCurrentState(state: State) {
+<span class="nc" id="L496">        _downloadState.update {</span>
+<span class="nc" id="L497">            val newQueue =</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">                if (state.packageName in it.queue) {</span>
+<span class="nc" id="L499">                    it.queue.updateAsMutable {</span>
+<span class="nc" id="L500">                        removeAll { name -&gt; name == &quot;&quot; }</span>
+<span class="nc" id="L501">                        remove(state.packageName)</span>
+<span class="nc" id="L502">                    }</span>
+                } else {
+<span class="nc" id="L504">                    it.queue</span>
+                }
+<span class="nc" id="L506">            it.copy(currentItem = state, queue = newQueue)</span>
+        }
+<span class="nc" id="L508">    }</span>
+
+    private fun updateCurrentQueue(block: MutableList&lt;String&gt;.() -&gt; Unit) {
+<span class="nc" id="L511">        _downloadState.update { state -&gt;</span>
+<span class="nc" id="L512">            state.copy(queue = state.queue.updateAsMutable(block))</span>
+        }
+<span class="nc" id="L514">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

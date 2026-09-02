@@ -1,0 +1,1033 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseRecipientAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.chips</a> &gt; <span class="el_source">BaseRecipientAdapter.java</span></div><h1>BaseRecipientAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.chips;
+
+import android.accounts.Account;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Message;
+import android.provider.ContactsContract;
+import android.provider.ContactsContract.Directory;
+import androidx.annotation.Nullable;
+import android.text.TextUtils;
+import android.text.util.Rfc822Token;
+import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.AutoCompleteTextView;
+import android.widget.BaseAdapter;
+import android.widget.Filter;
+import android.widget.Filterable;
+
+import com.android.calendar.chips.ChipsUtil.PermissionsCheckListener;
+import com.android.calendar.chips.DropdownChipLayouter.AdapterType;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Adapter for showing a recipient list.
+ *
+ * &lt;p&gt;It checks whether all permissions are granted before doing
+ * query. If not all permissions in {@link ChipsUtil#REQUIRED_PERMISSIONS} are granted and
+ * {@link #mShowRequestPermissionsItem} is true it will return single entry that asks user to grant
+ * permissions to the app. Any app that uses this library should set this when it wants us to
+ * display that entry but then it should set
+ * {@link RecipientEditTextView.PermissionsRequestItemClickedListener} on
+ * {@link RecipientEditTextView} as well.
+ */
+public class BaseRecipientAdapter extends BaseAdapter implements Filterable, AccountSpecifier,
+        PhotoManager.PhotoManagerCallback {
+    private static final String TAG = &quot;BaseRecipientAdapter&quot;;
+
+    private static final boolean DEBUG = false;
+
+    /**
+     * The preferred number of results to be retrieved. This number may be
+     * exceeded if there are several directories configured, because we will use
+     * the same limit for all directories.
+     */
+    private static final int DEFAULT_PREFERRED_MAX_RESULT_COUNT = 10;
+
+    /**
+     * The number of extra entries requested to allow for duplicates. Duplicates
+     * are removed from the overall result.
+     */
+    static final int ALLOWANCE_FOR_DUPLICATES = 5;
+
+    // This is ContactsContract.PRIMARY_ACCOUNT_NAME. Available from ICS as hidden
+    static final String PRIMARY_ACCOUNT_NAME = &quot;name_for_primary_account&quot;;
+    // This is ContactsContract.PRIMARY_ACCOUNT_TYPE. Available from ICS as hidden
+    static final String PRIMARY_ACCOUNT_TYPE = &quot;type_for_primary_account&quot;;
+
+    /**
+     * The &quot;Waiting for more contacts&quot; message will be displayed if search is not complete
+     * within this many milliseconds.
+     */
+    private static final int MESSAGE_SEARCH_PENDING_DELAY = 1000;
+    /** Used to prepare &quot;Waiting for more contacts&quot; message. */
+    private static final int MESSAGE_SEARCH_PENDING = 1;
+
+    public static final int QUERY_TYPE_EMAIL = 0;
+    public static final int QUERY_TYPE_PHONE = 1;
+
+    private final Queries.Query mQueryMode;
+    private final int mQueryType;
+
+    /**
+     * Model object for a {@link Directory} row.
+     */
+<span class="nc" id="L105">    public final static class DirectorySearchParams {</span>
+        public long directoryId;
+        public String directoryType;
+        public String displayName;
+        public String accountName;
+        public String accountType;
+        public CharSequence constraint;
+        public DirectoryFilter filter;
+    }
+
+<span class="nc" id="L115">    protected static class DirectoryListQuery {</span>
+
+<span class="nc" id="L117">        public static final Uri URI =</span>
+<span class="nc" id="L118">                Uri.withAppendedPath(ContactsContract.AUTHORITY_URI, &quot;directories&quot;);</span>
+<span class="nc" id="L119">        public static final String[] PROJECTION = {</span>
+            Directory._ID,              // 0
+            Directory.ACCOUNT_NAME,     // 1
+            Directory.ACCOUNT_TYPE,     // 2
+            Directory.DISPLAY_NAME,     // 3
+            Directory.PACKAGE_NAME,     // 4
+            Directory.TYPE_RESOURCE_ID, // 5
+        };
+
+        public static final int ID = 0;
+        public static final int ACCOUNT_NAME = 1;
+        public static final int ACCOUNT_TYPE = 2;
+        public static final int DISPLAY_NAME = 3;
+        public static final int PACKAGE_NAME = 4;
+        public static final int TYPE_RESOURCE_ID = 5;
+    }
+
+    /** Used to temporarily hold results in Cursor objects. */
+    protected static class TemporaryEntry {
+        public final String displayName;
+        public final String destination;
+        public final int destinationType;
+        public final String destinationLabel;
+        public final long contactId;
+        public final Long directoryId;
+        public final long dataId;
+        public final String thumbnailUriString;
+        public final int displayNameSource;
+        public final String lookupKey;
+
+        public TemporaryEntry(
+                String displayName,
+                String destination,
+                int destinationType,
+                String destinationLabel,
+                long contactId,
+                Long directoryId,
+                long dataId,
+                String thumbnailUriString,
+                int displayNameSource,
+<span class="nc" id="L159">                String lookupKey) {</span>
+<span class="nc" id="L160">            this.displayName = displayName;</span>
+<span class="nc" id="L161">            this.destination = destination;</span>
+<span class="nc" id="L162">            this.destinationType = destinationType;</span>
+<span class="nc" id="L163">            this.destinationLabel = destinationLabel;</span>
+<span class="nc" id="L164">            this.contactId = contactId;</span>
+<span class="nc" id="L165">            this.directoryId = directoryId;</span>
+<span class="nc" id="L166">            this.dataId = dataId;</span>
+<span class="nc" id="L167">            this.thumbnailUriString = thumbnailUriString;</span>
+<span class="nc" id="L168">            this.displayNameSource = displayNameSource;</span>
+<span class="nc" id="L169">            this.lookupKey = lookupKey;</span>
+<span class="nc" id="L170">        }</span>
+
+<span class="nc" id="L172">        public TemporaryEntry(Cursor cursor, Long directoryId) {</span>
+<span class="nc" id="L173">            this.displayName = cursor.getString(Queries.Query.NAME);</span>
+<span class="nc" id="L174">            this.destination = cursor.getString(Queries.Query.DESTINATION);</span>
+<span class="nc" id="L175">            this.destinationType = cursor.getInt(Queries.Query.DESTINATION_TYPE);</span>
+<span class="nc" id="L176">            this.destinationLabel = cursor.getString(Queries.Query.DESTINATION_LABEL);</span>
+<span class="nc" id="L177">            this.contactId = cursor.getLong(Queries.Query.CONTACT_ID);</span>
+<span class="nc" id="L178">            this.directoryId = directoryId;</span>
+<span class="nc" id="L179">            this.dataId = cursor.getLong(Queries.Query.DATA_ID);</span>
+<span class="nc" id="L180">            this.thumbnailUriString = cursor.getString(Queries.Query.PHOTO_THUMBNAIL_URI);</span>
+<span class="nc" id="L181">            this.displayNameSource = cursor.getInt(Queries.Query.DISPLAY_NAME_SOURCE);</span>
+<span class="nc" id="L182">            this.lookupKey = cursor.getString(Queries.Query.LOOKUP_KEY);</span>
+<span class="nc" id="L183">        }</span>
+    }
+
+    /**
+     * Used to pass results from {@link DefaultFilter#performFiltering(CharSequence)} to
+     * {@link DefaultFilter#publishResults(CharSequence, android.widget.Filter.FilterResults)}
+     */
+    private static class DefaultFilterResult {
+        public final List&lt;RecipientEntry&gt; entries;
+        public final LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt; entryMap;
+        public final List&lt;RecipientEntry&gt; nonAggregatedEntries;
+        public final Set&lt;String&gt; existingDestinations;
+        public final List&lt;DirectorySearchParams&gt; paramsList;
+
+        public DefaultFilterResult(List&lt;RecipientEntry&gt; entries,
+                LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt; entryMap,
+                List&lt;RecipientEntry&gt; nonAggregatedEntries,
+                Set&lt;String&gt; existingDestinations,
+<span class="nc" id="L201">                List&lt;DirectorySearchParams&gt; paramsList) {</span>
+<span class="nc" id="L202">            this.entries = entries;</span>
+<span class="nc" id="L203">            this.entryMap = entryMap;</span>
+<span class="nc" id="L204">            this.nonAggregatedEntries = nonAggregatedEntries;</span>
+<span class="nc" id="L205">            this.existingDestinations = existingDestinations;</span>
+<span class="nc" id="L206">            this.paramsList = paramsList;</span>
+<span class="nc" id="L207">        }</span>
+
+        private static DefaultFilterResult createResultWithNonAggregatedEntry(
+                RecipientEntry entry) {
+<span class="nc" id="L211">            return new DefaultFilterResult(</span>
+<span class="nc" id="L212">                    Collections.singletonList(entry),</span>
+                    new LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt;() /* entryMap */,
+<span class="nc" id="L214">                    Collections.singletonList(entry) /* nonAggregatedEntries */,</span>
+<span class="nc" id="L215">                    Collections.&lt;String&gt;emptySet() /* existingDestinations */,</span>
+                    null /* paramsList */);
+        }
+    }
+
+    /**
+     * An asynchronous filter used for loading two data sets: email rows from the local
+     * contact provider and the list of {@link Directory}'s.
+     */
+<span class="nc" id="L224">    private final class DefaultFilter extends Filter {</span>
+
+        @Override
+        protected FilterResults performFiltering(CharSequence constraint) {
+            if (DEBUG) {
+                Log.d(TAG, &quot;start filtering. constraint: &quot; + constraint + &quot;, thread:&quot;
+                        + Thread.currentThread());
+            }
+
+<span class="nc" id="L233">            final FilterResults results = new FilterResults();</span>
+
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            if (TextUtils.isEmpty(constraint)) {</span>
+<span class="nc" id="L236">                clearTempEntries();</span>
+                // Return empty results.
+<span class="nc" id="L238">                return results;</span>
+            }
+
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (!ChipsUtil.hasPermissions(mContext, mPermissionsCheckListener)) {</span>
+                if (DEBUG) {
+                    Log.d(TAG, &quot;No Contacts permission. mShowRequestPermissionsItem: &quot;
+                            + mShowRequestPermissionsItem);
+                }
+<span class="nc" id="L246">                clearTempEntries();</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">                if (!mShowRequestPermissionsItem) {</span>
+                    // App doesn't want to show request permission entry. Returning empty results.
+<span class="nc" id="L249">                    return results;</span>
+                }
+
+                // Return result with only permission request entry.
+<span class="nc" id="L253">                results.values = DefaultFilterResult.createResultWithNonAggregatedEntry(</span>
+<span class="nc" id="L254">                        RecipientEntry.constructPermissionEntry(ChipsUtil.REQUIRED_PERMISSIONS));</span>
+<span class="nc" id="L255">                results.count = 1;</span>
+<span class="nc" id="L256">                return results;</span>
+            }
+
+<span class="nc" id="L259">            Cursor defaultDirectoryCursor = null;</span>
+
+            try {
+<span class="nc" id="L262">                defaultDirectoryCursor = doQuery(constraint, mPreferredMaxResultCount,</span>
+                        null /* directoryId */);
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                if (defaultDirectoryCursor == null) {</span>
+                    if (DEBUG) {
+                        Log.w(TAG, &quot;null cursor returned for default Email filter query.&quot;);
+                    }
+                } else {
+                    // These variables will become mEntries, mEntryMap, mNonAggregatedEntries, and
+                    // mExistingDestinations. Here we shouldn't use those member variables directly
+                    // since this method is run outside the UI thread.
+<span class="nc" id="L273">                    final LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt; entryMap =</span>
+                            new LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt;();
+<span class="nc" id="L275">                    final List&lt;RecipientEntry&gt; nonAggregatedEntries =</span>
+                            new ArrayList&lt;RecipientEntry&gt;();
+<span class="nc" id="L277">                    final Set&lt;String&gt; existingDestinations = new HashSet&lt;String&gt;();</span>
+
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                    while (defaultDirectoryCursor.moveToNext()) {</span>
+                        // Note: At this point each entry doesn't contain any photo
+                        // (thus getPhotoBytes() returns null).
+<span class="nc" id="L282">                        putOneEntry(new TemporaryEntry(defaultDirectoryCursor,</span>
+                                null /* directoryId */),
+                                true, entryMap, nonAggregatedEntries, existingDestinations);
+                    }
+
+                    // We'll copy this result to mEntry in publicResults() (run in the UX thread).
+<span class="nc" id="L288">                    final List&lt;RecipientEntry&gt; entries = constructEntryList(</span>
+                            entryMap, nonAggregatedEntries);
+
+<span class="nc" id="L291">                    final List&lt;DirectorySearchParams&gt; paramsList =</span>
+<span class="nc" id="L292">                            searchOtherDirectories(existingDestinations);</span>
+
+<span class="nc" id="L294">                    results.values = new DefaultFilterResult(</span>
+                            entries, entryMap, nonAggregatedEntries,
+                            existingDestinations, paramsList);
+<span class="nc" id="L297">                    results.count = entries.size();</span>
+                }
+            } finally {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                if (defaultDirectoryCursor != null) {</span>
+<span class="nc" id="L301">                    defaultDirectoryCursor.close();</span>
+                }
+            }
+<span class="nc" id="L304">            return results;</span>
+        }
+
+        @Override
+        protected void publishResults(final CharSequence constraint, FilterResults results) {
+<span class="nc" id="L309">            mCurrentConstraint = constraint;</span>
+
+<span class="nc" id="L311">            clearTempEntries();</span>
+
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            if (results.values != null) {</span>
+<span class="nc" id="L314">                DefaultFilterResult defaultFilterResult = (DefaultFilterResult) results.values;</span>
+<span class="nc" id="L315">                mEntryMap = defaultFilterResult.entryMap;</span>
+<span class="nc" id="L316">                mNonAggregatedEntries = defaultFilterResult.nonAggregatedEntries;</span>
+<span class="nc" id="L317">                mExistingDestinations = defaultFilterResult.existingDestinations;</span>
+
+<span class="nc" id="L319">                cacheCurrentEntriesIfNeeded(defaultFilterResult.entries.size(),</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                        defaultFilterResult.paramsList == null ? 0 :</span>
+<span class="nc" id="L321">                                defaultFilterResult.paramsList.size());</span>
+
+<span class="nc" id="L323">                updateEntries(defaultFilterResult.entries);</span>
+
+                // We need to search other remote directories, doing other Filter requests.
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                if (defaultFilterResult.paramsList != null) {</span>
+<span class="nc" id="L327">                    final int limit = mPreferredMaxResultCount -</span>
+<span class="nc" id="L328">                            defaultFilterResult.existingDestinations.size();</span>
+<span class="nc" id="L329">                    startSearchOtherDirectories(constraint, defaultFilterResult.paramsList, limit);</span>
+                }
+<span class="nc" id="L331">            } else {</span>
+<span class="nc" id="L332">                updateEntries(Collections.&lt;RecipientEntry&gt;emptyList());</span>
+            }
+<span class="nc" id="L334">        }</span>
+
+        @Override
+        public CharSequence convertResultToString(Object resultValue) {
+<span class="nc" id="L338">            final RecipientEntry entry = (RecipientEntry)resultValue;</span>
+<span class="nc" id="L339">            final String displayName = entry.getDisplayName();</span>
+<span class="nc" id="L340">            final String emailAddress = entry.getDestination();</span>
+<span class="nc bnc" id="L341" title="All 4 branches missed.">            if (TextUtils.isEmpty(displayName) || TextUtils.equals(displayName, emailAddress)) {</span>
+<span class="nc" id="L342">                 return emailAddress;</span>
+            } else {
+<span class="nc" id="L344">                return new Rfc822Token(displayName, emailAddress, null).toString();</span>
+            }
+        }
+    }
+
+    /**
+     * Returns the list of models for directory search  (using {@link DirectoryFilter}) or
+     * {@code null} when we don't need or can't search other directories.
+     */
+    protected List&lt;DirectorySearchParams&gt; searchOtherDirectories(Set&lt;String&gt; existingDestinations) {
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        if (!ChipsUtil.hasPermissions(mContext, mPermissionsCheckListener)) {</span>
+            // If we don't have permissions we can't search other directories.
+            if (DEBUG) {
+                Log.d(TAG, &quot;Not searching other directories because we don't have required &quot;
+                        + &quot;permissions.&quot;);
+            }
+<span class="nc" id="L360">            return null;</span>
+        }
+
+        // After having local results, check the size of results. If the results are
+        // not enough, we search remote directories, which will take longer time.
+<span class="nc" id="L365">        final int limit = mPreferredMaxResultCount - existingDestinations.size();</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        if (limit &gt; 0) {</span>
+            if (DEBUG) {
+                Log.d(TAG, &quot;More entries should be needed (current: &quot;
+                        + existingDestinations.size()
+                        + &quot;, remaining limit: &quot; + limit + &quot;) &quot;);
+            }
+<span class="nc" id="L372">            Cursor directoryCursor = null;</span>
+            try {
+<span class="nc" id="L374">                directoryCursor = mContentResolver.query(</span>
+                        DirectoryListQuery.URI, DirectoryListQuery.PROJECTION,
+                        null, null, null);
+<span class="nc" id="L377">                return setupOtherDirectories(mContext, directoryCursor, mAccount);</span>
+            } finally {
+<span class="nc bnc" id="L379" title="All 2 branches missed.">                if (directoryCursor != null) {</span>
+<span class="nc" id="L380">                    directoryCursor.close();</span>
+                }
+            }
+        } else {
+            // We don't need to search other directories.
+<span class="nc" id="L385">            return null;</span>
+        }
+    }
+
+    /**
+     * An asynchronous filter that performs search in a particular directory.
+     */
+    protected class DirectoryFilter extends Filter {
+        private final DirectorySearchParams mParams;
+        private int mLimit;
+
+<span class="nc" id="L396">        public DirectoryFilter(DirectorySearchParams params) {</span>
+<span class="nc" id="L397">            mParams = params;</span>
+<span class="nc" id="L398">        }</span>
+
+        public synchronized void setLimit(int limit) {
+<span class="nc" id="L401">            this.mLimit = limit;</span>
+<span class="nc" id="L402">        }</span>
+
+        public synchronized int getLimit() {
+<span class="nc" id="L405">            return this.mLimit;</span>
+        }
+
+        @Override
+        protected FilterResults performFiltering(CharSequence constraint) {
+            if (DEBUG) {
+                Log.d(TAG, &quot;DirectoryFilter#performFiltering. directoryId: &quot; + mParams.directoryId
+                        + &quot;, constraint: &quot; + constraint + &quot;, thread: &quot; + Thread.currentThread());
+            }
+<span class="nc" id="L414">            final FilterResults results = new FilterResults();</span>
+<span class="nc" id="L415">            results.values = null;</span>
+<span class="nc" id="L416">            results.count = 0;</span>
+
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            if (!TextUtils.isEmpty(constraint)) {</span>
+<span class="nc" id="L419">                final ArrayList&lt;TemporaryEntry&gt; tempEntries = new ArrayList&lt;TemporaryEntry&gt;();</span>
+
+<span class="nc" id="L421">                Cursor cursor = null;</span>
+                try {
+                    // We don't want to pass this Cursor object to UI thread (b/5017608).
+                    // Assuming the result should contain fairly small results (at most ~10),
+                    // We just copy everything to local structure.
+<span class="nc" id="L426">                    cursor = doQuery(constraint, getLimit(), mParams.directoryId);</span>
+
+<span class="nc bnc" id="L428" title="All 2 branches missed.">                    if (cursor != null) {</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">                        while (cursor.moveToNext()) {</span>
+<span class="nc" id="L430">                            tempEntries.add(new TemporaryEntry(cursor, mParams.directoryId));</span>
+                        }
+                    }
+                } finally {
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                    if (cursor != null) {</span>
+<span class="nc" id="L435">                        cursor.close();</span>
+                    }
+                }
+<span class="nc bnc" id="L438" title="All 2 branches missed.">                if (!tempEntries.isEmpty()) {</span>
+<span class="nc" id="L439">                    results.values = tempEntries;</span>
+<span class="nc" id="L440">                    results.count = tempEntries.size();</span>
+                }
+            }
+
+            if (DEBUG) {
+                Log.v(TAG, &quot;finished loading directory \&quot;&quot; + mParams.displayName + &quot;\&quot;&quot; +
+                        &quot; with query &quot; + constraint);
+            }
+
+<span class="nc" id="L449">            return results;</span>
+        }
+
+        @Override
+        protected void publishResults(final CharSequence constraint, FilterResults results) {
+            if (DEBUG) {
+                Log.d(TAG, &quot;DirectoryFilter#publishResult. constraint: &quot; + constraint
+                        + &quot;, mCurrentConstraint: &quot; + mCurrentConstraint);
+            }
+<span class="nc" id="L458">            mDelayedMessageHandler.removeDelayedLoadMessage();</span>
+            // Check if the received result matches the current constraint
+            // If not - the user must have continued typing after the request was issued, which
+            // means several member variables (like mRemainingDirectoryLoad) are already
+            // overwritten so shouldn't be touched here anymore.
+<span class="nc bnc" id="L463" title="All 2 branches missed.">            if (TextUtils.equals(constraint, mCurrentConstraint)) {</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">                if (results.count &gt; 0) {</span>
+                    @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L466">                    final ArrayList&lt;TemporaryEntry&gt; tempEntries =</span>
+                            (ArrayList&lt;TemporaryEntry&gt;) results.values;
+
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                    for (TemporaryEntry tempEntry : tempEntries) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">                        putOneEntry(tempEntry, mParams.directoryId == Directory.DEFAULT);</span>
+<span class="nc" id="L471">                    }</span>
+                }
+
+                // If there are remaining directories, set up delayed message again.
+<span class="nc" id="L475">                mRemainingDirectoryCount--;</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">                if (mRemainingDirectoryCount &gt; 0) {</span>
+                    if (DEBUG) {
+                        Log.d(TAG, &quot;Resend delayed load message. Current mRemainingDirectoryLoad: &quot;
+                                + mRemainingDirectoryCount);
+                    }
+<span class="nc" id="L481">                    mDelayedMessageHandler.sendDelayedLoadMessage();</span>
+                }
+
+                // If this directory result has some items, or there are no more directories that
+                // we are waiting for, clear the temp results
+<span class="nc bnc" id="L486" title="All 4 branches missed.">                if (results.count &gt; 0 || mRemainingDirectoryCount == 0) {</span>
+                    // Clear the temp entries
+<span class="nc" id="L488">                    clearTempEntries();</span>
+                }
+            }
+
+            // Show the list again without &quot;waiting&quot; message.
+<span class="nc" id="L493">            updateEntries(constructEntryList());</span>
+<span class="nc" id="L494">        }</span>
+    }
+
+    private final Context mContext;
+    private final ContentResolver mContentResolver;
+    private Account mAccount;
+    protected final int mPreferredMaxResultCount;
+    private DropdownChipLayouter mDropdownChipLayouter;
+
+    /**
+     * {@link #mEntries} is responsible for showing every result for this Adapter. To
+     * construct it, we use {@link #mEntryMap}, {@link #mNonAggregatedEntries}, and
+     * {@link #mExistingDestinations}.
+     *
+     * First, each destination (an email address or a phone number) with a valid contactId is
+     * inserted into {@link #mEntryMap} and grouped by the contactId. Destinations without valid
+     * contactId (possible if they aren't in local storage) are stored in
+     * {@link #mNonAggregatedEntries}.
+     * Duplicates are removed using {@link #mExistingDestinations}.
+     *
+     * After having all results from Cursor objects, all destinations in mEntryMap are copied to
+     * {@link #mEntries}. If the number of destinations is not enough (i.e. less than
+     * {@link #mPreferredMaxResultCount}), destinations in mNonAggregatedEntries are also used.
+     *
+     * These variables are only used in UI thread, thus should not be touched in
+     * performFiltering() methods.
+     */
+    private LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt; mEntryMap;
+    private List&lt;RecipientEntry&gt; mNonAggregatedEntries;
+    private Set&lt;String&gt; mExistingDestinations;
+    /** Note: use {@link #updateEntries(List)} to update this variable. */
+    private List&lt;RecipientEntry&gt; mEntries;
+    private List&lt;RecipientEntry&gt; mTempEntries;
+
+    /** The number of directories this adapter is waiting for results. */
+    private int mRemainingDirectoryCount;
+
+    /**
+     * Used to ignore asynchronous queries with a different constraint, which may happen when
+     * users type characters quickly.
+     */
+    protected CharSequence mCurrentConstraint;
+
+    /**
+     * Performs all photo querying as well as caching for repeated lookups.
+     */
+    private PhotoManager mPhotoManager;
+
+    protected boolean mShowRequestPermissionsItem;
+
+    private PermissionsCheckListener mPermissionsCheckListener;
+
+    /**
+     * Handler specific for maintaining &quot;Waiting for more contacts&quot; message, which will be shown
+     * when:
+     * - there are directories to be searched
+     * - results from directories are slow to come
+     */
+<span class="nc" id="L552">    private final class DelayedMessageHandler extends Handler {</span>
+        @Override
+        public void handleMessage(Message msg) {
+<span class="nc bnc" id="L555" title="All 2 branches missed.">            if (mRemainingDirectoryCount &gt; 0) {</span>
+<span class="nc" id="L556">                updateEntries(constructEntryList());</span>
+            }
+<span class="nc" id="L558">        }</span>
+
+        public void sendDelayedLoadMessage() {
+<span class="nc" id="L561">            sendMessageDelayed(obtainMessage(MESSAGE_SEARCH_PENDING, 0, 0, null),</span>
+                    MESSAGE_SEARCH_PENDING_DELAY);
+<span class="nc" id="L563">        }</span>
+
+        public void removeDelayedLoadMessage() {
+<span class="nc" id="L566">            removeMessages(MESSAGE_SEARCH_PENDING);</span>
+<span class="nc" id="L567">        }</span>
+    }
+
+<span class="nc" id="L570">    private final DelayedMessageHandler mDelayedMessageHandler = new DelayedMessageHandler();</span>
+
+    private EntriesUpdatedObserver mEntriesUpdatedObserver;
+
+    /**
+     * Constructor for email queries.
+     */
+    public BaseRecipientAdapter(Context context) {
+<span class="nc" id="L578">        this(context, DEFAULT_PREFERRED_MAX_RESULT_COUNT, QUERY_TYPE_EMAIL);</span>
+<span class="nc" id="L579">    }</span>
+
+    public BaseRecipientAdapter(Context context, int preferredMaxResultCount) {
+<span class="nc" id="L582">        this(context, preferredMaxResultCount, QUERY_TYPE_EMAIL);</span>
+<span class="nc" id="L583">    }</span>
+
+    public BaseRecipientAdapter(int queryMode, Context context) {
+<span class="nc" id="L586">        this(context, DEFAULT_PREFERRED_MAX_RESULT_COUNT, queryMode);</span>
+<span class="nc" id="L587">    }</span>
+
+    public BaseRecipientAdapter(int queryMode, Context context, int preferredMaxResultCount) {
+<span class="nc" id="L590">        this(context, preferredMaxResultCount, queryMode);</span>
+<span class="nc" id="L591">    }</span>
+
+<span class="nc" id="L593">    public BaseRecipientAdapter(Context context, int preferredMaxResultCount, int queryMode) {</span>
+<span class="nc" id="L594">        mContext = context;</span>
+<span class="nc" id="L595">        mContentResolver = context.getContentResolver();</span>
+<span class="nc" id="L596">        mPreferredMaxResultCount = preferredMaxResultCount;</span>
+<span class="nc" id="L597">        mPhotoManager = new DefaultPhotoManager(mContentResolver);</span>
+<span class="nc" id="L598">        mQueryType = queryMode;</span>
+
+<span class="nc bnc" id="L600" title="All 2 branches missed.">        if (queryMode == QUERY_TYPE_EMAIL) {</span>
+<span class="nc" id="L601">            mQueryMode = Queries.EMAIL;</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">        } else if (queryMode == QUERY_TYPE_PHONE) {</span>
+<span class="nc" id="L603">            mQueryMode = Queries.PHONE;</span>
+        } else {
+<span class="nc" id="L605">            mQueryMode = Queries.EMAIL;</span>
+<span class="nc" id="L606">            Log.e(TAG, &quot;Unsupported query type: &quot; + queryMode);</span>
+        }
+<span class="nc" id="L608">    }</span>
+
+    public Context getContext() {
+<span class="nc" id="L611">        return mContext;</span>
+    }
+
+    public int getQueryType() {
+<span class="nc" id="L615">        return mQueryType;</span>
+    }
+
+    public void setDropdownChipLayouter(DropdownChipLayouter dropdownChipLayouter) {
+<span class="nc" id="L619">        mDropdownChipLayouter = dropdownChipLayouter;</span>
+<span class="nc" id="L620">        mDropdownChipLayouter.setQuery(mQueryMode);</span>
+<span class="nc" id="L621">    }</span>
+
+    public DropdownChipLayouter getDropdownChipLayouter() {
+<span class="nc" id="L624">        return mDropdownChipLayouter;</span>
+    }
+
+    public void setPermissionsCheckListener(PermissionsCheckListener permissionsCheckListener) {
+<span class="nc" id="L628">        mPermissionsCheckListener = permissionsCheckListener;</span>
+<span class="nc" id="L629">    }</span>
+
+    @Nullable
+    public PermissionsCheckListener getPermissionsCheckListener() {
+<span class="nc" id="L633">        return mPermissionsCheckListener;</span>
+    }
+
+    /**
+     * Enables overriding the default photo manager that is used.
+     */
+    public void setPhotoManager(PhotoManager photoManager) {
+<span class="nc" id="L640">        mPhotoManager = photoManager;</span>
+<span class="nc" id="L641">    }</span>
+
+    public PhotoManager getPhotoManager() {
+<span class="nc" id="L644">        return mPhotoManager;</span>
+    }
+
+    /**
+     * If true, forces using the {@link com.android.calendar.chips.SingleRecipientArrayAdapter}
+     * instead of {@link com.android.calendar.chips.RecipientAlternatesAdapter} when
+     * clicking on a chip. Default implementation returns {@code false}.
+     */
+    public boolean forceShowAddress() {
+<span class="nc" id="L653">        return false;</span>
+    }
+
+    /**
+     * Used to replace email addresses with chips. Default behavior
+     * queries the ContactsProvider for contact information about the contact.
+     * Derived classes should override this method if they wish to use a
+     * new data source.
+     * @param inAddresses addresses to query
+     * @param callback callback to return results in case of success or failure
+     */
+    public void getMatchingRecipients(ArrayList&lt;String&gt; inAddresses,
+            RecipientAlternatesAdapter.RecipientMatchCallback callback) {
+<span class="nc" id="L666">        RecipientAlternatesAdapter.getMatchingRecipients(</span>
+<span class="nc" id="L667">                getContext(), this, inAddresses, getAccount(), callback, mPermissionsCheckListener);</span>
+<span class="nc" id="L668">    }</span>
+
+    /**
+     * Set the account when known. Causes the search to prioritize contacts from that account.
+     */
+    @Override
+    public void setAccount(Account account) {
+<span class="nc" id="L675">        mAccount = account;</span>
+<span class="nc" id="L676">    }</span>
+
+    /**
+     * Returns permissions that this adapter needs in order to provide results.
+     */
+    public String[] getRequiredPermissions() {
+<span class="nc" id="L682">        return ChipsUtil.REQUIRED_PERMISSIONS;</span>
+    }
+
+    /**
+     * Sets whether to ask user to grant permission if they are missing.
+     */
+    public void setShowRequestPermissionsItem(boolean show) {
+<span class="nc" id="L689">        mShowRequestPermissionsItem = show;</span>
+<span class="nc" id="L690">    }</span>
+
+    /** Will be called from {@link AutoCompleteTextView} to prepare auto-complete list. */
+    @Override
+    public Filter getFilter() {
+<span class="nc" id="L695">        return new DefaultFilter();</span>
+    }
+
+    /**
+     * An extension to {@link RecipientAlternatesAdapter#getMatchingRecipients} that allows
+     * additional sources of contacts to be considered as matching recipients.
+     * @param addresses A set of addresses to be matched
+     * @return A list of matches or null if none found
+     */
+    public Map&lt;String, RecipientEntry&gt; getMatchingRecipients(Set&lt;String&gt; addresses) {
+<span class="nc" id="L705">        return null;</span>
+    }
+
+    public static List&lt;DirectorySearchParams&gt; setupOtherDirectories(Context context,
+            Cursor directoryCursor, Account account) {
+<span class="nc" id="L710">        final PackageManager packageManager = context.getPackageManager();</span>
+<span class="nc" id="L711">        final List&lt;DirectorySearchParams&gt; paramsList = new ArrayList&lt;DirectorySearchParams&gt;();</span>
+<span class="nc" id="L712">        DirectorySearchParams preferredDirectory = null;</span>
+<span class="nc bnc" id="L713" title="All 2 branches missed.">        while (directoryCursor.moveToNext()) {</span>
+<span class="nc" id="L714">            final long id = directoryCursor.getLong(DirectoryListQuery.ID);</span>
+
+            // Skip the local invisible directory, because the default directory already includes
+            // all local results.
+<span class="nc bnc" id="L718" title="All 2 branches missed.">            if (id == Directory.LOCAL_INVISIBLE) {</span>
+<span class="nc" id="L719">                continue;</span>
+            }
+
+<span class="nc" id="L722">            final DirectorySearchParams params = new DirectorySearchParams();</span>
+<span class="nc" id="L723">            final String packageName = directoryCursor.getString(DirectoryListQuery.PACKAGE_NAME);</span>
+<span class="nc" id="L724">            final int resourceId = directoryCursor.getInt(DirectoryListQuery.TYPE_RESOURCE_ID);</span>
+<span class="nc" id="L725">            params.directoryId = id;</span>
+<span class="nc" id="L726">            params.displayName = directoryCursor.getString(DirectoryListQuery.DISPLAY_NAME);</span>
+<span class="nc" id="L727">            params.accountName = directoryCursor.getString(DirectoryListQuery.ACCOUNT_NAME);</span>
+<span class="nc" id="L728">            params.accountType = directoryCursor.getString(DirectoryListQuery.ACCOUNT_TYPE);</span>
+<span class="nc bnc" id="L729" title="All 4 branches missed.">            if (packageName != null &amp;&amp; resourceId != 0) {</span>
+                try {
+<span class="nc" id="L731">                    final Resources resources =</span>
+<span class="nc" id="L732">                            packageManager.getResourcesForApplication(packageName);</span>
+<span class="nc" id="L733">                    params.directoryType = resources.getString(resourceId);</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">                    if (params.directoryType == null) {</span>
+<span class="nc" id="L735">                        Log.e(TAG, &quot;Cannot resolve directory name: &quot;</span>
+                                + resourceId + &quot;@&quot; + packageName);
+                    }
+<span class="nc" id="L738">                } catch (NameNotFoundException e) {</span>
+<span class="nc" id="L739">                    Log.e(TAG, &quot;Cannot resolve directory name: &quot;</span>
+                            + resourceId + &quot;@&quot; + packageName, e);
+<span class="nc" id="L741">                }</span>
+            }
+
+            // If an account has been provided and we found a directory that
+            // corresponds to that account, place that directory second, directly
+            // underneath the local contacts.
+<span class="nc bnc" id="L747" title="All 4 branches missed.">            if (preferredDirectory == null &amp;&amp; account != null</span>
+<span class="nc bnc" id="L748" title="All 2 branches missed.">                    &amp;&amp; account.name.equals(params.accountName)</span>
+<span class="nc bnc" id="L749" title="All 2 branches missed.">                    &amp;&amp; account.type.equals(params.accountType)) {</span>
+<span class="nc" id="L750">                preferredDirectory = params;</span>
+            } else {
+<span class="nc" id="L752">                paramsList.add(params);</span>
+            }
+<span class="nc" id="L754">        }</span>
+
+<span class="nc bnc" id="L756" title="All 2 branches missed.">        if (preferredDirectory != null) {</span>
+<span class="nc" id="L757">            paramsList.add(1, preferredDirectory);</span>
+        }
+
+<span class="nc" id="L760">        return paramsList;</span>
+    }
+
+    /**
+     * Starts search in other directories using {@link Filter}. Results will be handled in
+     * {@link DirectoryFilter}.
+     */
+    protected void startSearchOtherDirectories(
+            CharSequence constraint, List&lt;DirectorySearchParams&gt; paramsList, int limit) {
+<span class="nc" id="L769">        final int count = paramsList.size();</span>
+        // Note: skipping the default partition (index 0), which has already been loaded
+<span class="nc bnc" id="L771" title="All 2 branches missed.">        for (int i = 1; i &lt; count; i++) {</span>
+<span class="nc" id="L772">            final DirectorySearchParams params = paramsList.get(i);</span>
+<span class="nc" id="L773">            params.constraint = constraint;</span>
+<span class="nc bnc" id="L774" title="All 2 branches missed.">            if (params.filter == null) {</span>
+<span class="nc" id="L775">                params.filter = new DirectoryFilter(params);</span>
+            }
+<span class="nc" id="L777">            params.filter.setLimit(limit);</span>
+<span class="nc" id="L778">            params.filter.filter(constraint);</span>
+        }
+
+        // Directory search started. We may show &quot;waiting&quot; message if directory results are slow
+        // enough.
+<span class="nc" id="L783">        mRemainingDirectoryCount = count - 1;</span>
+<span class="nc" id="L784">        mDelayedMessageHandler.sendDelayedLoadMessage();</span>
+<span class="nc" id="L785">    }</span>
+
+    /**
+     * Called whenever {@link com.android.calendar.chips.BaseRecipientAdapter.DirectoryFilter}
+     * wants to add an additional entry to the results. Derived classes should override
+     * this method if they are not using the default data structures provided by
+     * {@link com.android.calendar.chips.BaseRecipientAdapter} and are instead using their
+     * own data structures to store and collate data.
+     * @param entry the entry being added
+     * @param isAggregatedEntry
+     */
+    protected void putOneEntry(TemporaryEntry entry, boolean isAggregatedEntry) {
+<span class="nc" id="L797">        putOneEntry(entry, isAggregatedEntry,</span>
+                mEntryMap, mNonAggregatedEntries, mExistingDestinations);
+<span class="nc" id="L799">    }</span>
+
+    private static void putOneEntry(TemporaryEntry entry, boolean isAggregatedEntry,
+            LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt; entryMap,
+            List&lt;RecipientEntry&gt; nonAggregatedEntries,
+            Set&lt;String&gt; existingDestinations) {
+<span class="nc bnc" id="L805" title="All 2 branches missed.">        if (existingDestinations.contains(entry.destination)) {</span>
+<span class="nc" id="L806">            return;</span>
+        }
+
+<span class="nc" id="L809">        existingDestinations.add(entry.destination);</span>
+
+<span class="nc bnc" id="L811" title="All 2 branches missed.">        if (!isAggregatedEntry) {</span>
+<span class="nc" id="L812">            nonAggregatedEntries.add(RecipientEntry.constructTopLevelEntry(</span>
+                    entry.displayName,
+                    entry.displayNameSource,
+                    entry.destination, entry.destinationType, entry.destinationLabel,
+                    entry.contactId, entry.directoryId, entry.dataId, entry.thumbnailUriString,
+                    true, entry.lookupKey));
+<span class="nc bnc" id="L818" title="All 2 branches missed.">        } else if (entryMap.containsKey(entry.contactId)) {</span>
+            // We already have a section for the person.
+<span class="nc" id="L820">            final List&lt;RecipientEntry&gt; entryList = entryMap.get(entry.contactId);</span>
+<span class="nc" id="L821">            entryList.add(RecipientEntry.constructSecondLevelEntry(</span>
+                    entry.displayName,
+                    entry.displayNameSource,
+                    entry.destination, entry.destinationType, entry.destinationLabel,
+                    entry.contactId, entry.directoryId, entry.dataId, entry.thumbnailUriString,
+                    true, entry.lookupKey));
+<span class="nc" id="L827">        } else {</span>
+<span class="nc" id="L828">            final List&lt;RecipientEntry&gt; entryList = new ArrayList&lt;RecipientEntry&gt;();</span>
+<span class="nc" id="L829">            entryList.add(RecipientEntry.constructTopLevelEntry(</span>
+                    entry.displayName,
+                    entry.displayNameSource,
+                    entry.destination, entry.destinationType, entry.destinationLabel,
+                    entry.contactId, entry.directoryId, entry.dataId, entry.thumbnailUriString,
+                    true, entry.lookupKey));
+<span class="nc" id="L835">            entryMap.put(entry.contactId, entryList);</span>
+        }
+<span class="nc" id="L837">    }</span>
+
+    /**
+     * Returns the actual list to use for this Adapter. Derived classes
+     * should override this method if overriding how the adapter stores and collates
+     * data.
+     */
+    protected List&lt;RecipientEntry&gt; constructEntryList() {
+<span class="nc" id="L845">        return constructEntryList(mEntryMap, mNonAggregatedEntries);</span>
+    }
+
+    /**
+     * Constructs an actual list for this Adapter using {@link #mEntryMap}. Also tries to
+     * fetch a cached photo for each contact entry (other than separators), or request another
+     * thread to get one from directories.
+     */
+    private List&lt;RecipientEntry&gt; constructEntryList(
+            LinkedHashMap&lt;Long, List&lt;RecipientEntry&gt;&gt; entryMap,
+            List&lt;RecipientEntry&gt; nonAggregatedEntries) {
+<span class="nc" id="L856">        final List&lt;RecipientEntry&gt; entries = new ArrayList&lt;RecipientEntry&gt;();</span>
+<span class="nc" id="L857">        int validEntryCount = 0;</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">        for (Map.Entry&lt;Long, List&lt;RecipientEntry&gt;&gt; mapEntry : entryMap.entrySet()) {</span>
+<span class="nc" id="L859">            final List&lt;RecipientEntry&gt; entryList = mapEntry.getValue();</span>
+<span class="nc" id="L860">            final int size = entryList.size();</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L862">                RecipientEntry entry = entryList.get(i);</span>
+<span class="nc" id="L863">                entries.add(entry);</span>
+<span class="nc" id="L864">                mPhotoManager.populatePhotoBytesAsync(entry, this);</span>
+<span class="nc" id="L865">                validEntryCount++;</span>
+            }
+<span class="nc bnc" id="L867" title="All 2 branches missed.">            if (validEntryCount &gt; mPreferredMaxResultCount) {</span>
+<span class="nc" id="L868">                break;</span>
+            }
+<span class="nc" id="L870">        }</span>
+<span class="nc bnc" id="L871" title="All 2 branches missed.">        if (validEntryCount &lt;= mPreferredMaxResultCount) {</span>
+<span class="nc bnc" id="L872" title="All 2 branches missed.">            for (RecipientEntry entry : nonAggregatedEntries) {</span>
+<span class="nc bnc" id="L873" title="All 2 branches missed.">                if (validEntryCount &gt; mPreferredMaxResultCount) {</span>
+<span class="nc" id="L874">                    break;</span>
+                }
+<span class="nc" id="L876">                entries.add(entry);</span>
+<span class="nc" id="L877">                mPhotoManager.populatePhotoBytesAsync(entry, this);</span>
+<span class="nc" id="L878">                validEntryCount++;</span>
+<span class="nc" id="L879">            }</span>
+        }
+
+<span class="nc" id="L882">        return entries;</span>
+    }
+
+
+    public interface EntriesUpdatedObserver {
+        public void onChanged(List&lt;RecipientEntry&gt; entries);
+    }
+
+    public void registerUpdateObserver(EntriesUpdatedObserver observer) {
+<span class="nc" id="L891">        mEntriesUpdatedObserver = observer;</span>
+<span class="nc" id="L892">    }</span>
+
+    /** Resets {@link #mEntries} and notify the event to its parent ListView. */
+    protected void updateEntries(List&lt;RecipientEntry&gt; newEntries) {
+<span class="nc" id="L896">        mEntries = newEntries;</span>
+<span class="nc" id="L897">        mEntriesUpdatedObserver.onChanged(newEntries);</span>
+<span class="nc" id="L898">        notifyDataSetChanged();</span>
+<span class="nc" id="L899">    }</span>
+
+    /**
+     * If there are no local results and we are searching alternate results,
+     * in the new result set, cache off what had been shown to the user for use until
+     * the first directory result is returned
+     * @param newEntryCount number of newly loaded entries
+     * @param paramListCount number of alternate filters it will search (including the current one).
+     */
+    protected void cacheCurrentEntriesIfNeeded(int newEntryCount, int paramListCount) {
+<span class="nc bnc" id="L909" title="All 4 branches missed.">        if (newEntryCount == 0 &amp;&amp; paramListCount &gt; 1) {</span>
+<span class="nc" id="L910">            cacheCurrentEntries();</span>
+        }
+<span class="nc" id="L912">    }</span>
+
+    protected void cacheCurrentEntries() {
+<span class="nc" id="L915">        mTempEntries = mEntries;</span>
+<span class="nc" id="L916">    }</span>
+
+    protected void clearTempEntries() {
+<span class="nc" id="L919">        mTempEntries = null;</span>
+<span class="nc" id="L920">    }</span>
+
+    protected List&lt;RecipientEntry&gt; getEntries() {
+<span class="nc bnc" id="L923" title="All 2 branches missed.">        return mTempEntries != null ? mTempEntries : mEntries;</span>
+    }
+
+    protected void fetchPhoto(final RecipientEntry entry, PhotoManager.PhotoManagerCallback cb) {
+<span class="nc" id="L927">        mPhotoManager.populatePhotoBytesAsync(entry, cb);</span>
+<span class="nc" id="L928">    }</span>
+
+    private Cursor doQuery(CharSequence constraint, int limit, Long directoryId) {
+<span class="nc bnc" id="L931" title="All 2 branches missed.">        if (!ChipsUtil.hasPermissions(mContext, mPermissionsCheckListener)) {</span>
+            if (DEBUG) {
+                Log.d(TAG, &quot;Not doing query because we don't have required permissions.&quot;);
+            }
+<span class="nc" id="L935">            return null;</span>
+        }
+
+<span class="nc" id="L938">        final Uri.Builder builder = mQueryMode.getContentFilterUri().buildUpon()</span>
+<span class="nc" id="L939">                .appendPath(constraint.toString())</span>
+<span class="nc" id="L940">                .appendQueryParameter(ContactsContract.LIMIT_PARAM_KEY,</span>
+<span class="nc" id="L941">                        String.valueOf(limit + ALLOWANCE_FOR_DUPLICATES));</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">        if (directoryId != null) {</span>
+<span class="nc" id="L943">            builder.appendQueryParameter(ContactsContract.DIRECTORY_PARAM_KEY,</span>
+<span class="nc" id="L944">                    String.valueOf(directoryId));</span>
+        }
+<span class="nc bnc" id="L946" title="All 2 branches missed.">        if (mAccount != null) {</span>
+<span class="nc" id="L947">            builder.appendQueryParameter(PRIMARY_ACCOUNT_NAME, mAccount.name);</span>
+<span class="nc" id="L948">            builder.appendQueryParameter(PRIMARY_ACCOUNT_TYPE, mAccount.type);</span>
+        }
+<span class="nc" id="L950">        final long start = System.currentTimeMillis();</span>
+<span class="nc" id="L951">        final Cursor cursor = mContentResolver.query(</span>
+<span class="nc" id="L952">                builder.build(), mQueryMode.getProjection(), null, null, null);</span>
+<span class="nc" id="L953">        final long end = System.currentTimeMillis();</span>
+        if (DEBUG) {
+            Log.d(TAG, &quot;Time for autocomplete (query: &quot; + constraint
+                    + &quot;, directoryId: &quot; + directoryId + &quot;, num_of_results: &quot;
+                    + (cursor != null ? cursor.getCount() : &quot;null&quot;) + &quot;): &quot;
+                    + (end - start) + &quot; ms&quot;);
+        }
+<span class="nc" id="L960">        return cursor;</span>
+    }
+
+    // TODO: This won't be used at all. We should find better way to quit the thread..
+    /*public void close() {
+        mEntries = null;
+        mPhotoCacheMap.evictAll();
+        if (!sPhotoHandlerThread.quit()) {
+            Log.w(TAG, &quot;Failed to quit photo handler thread, ignoring it.&quot;);
+        }
+    }*/
+
+    @Override
+    public int getCount() {
+<span class="nc" id="L974">        final List&lt;RecipientEntry&gt; entries = getEntries();</span>
+<span class="nc bnc" id="L975" title="All 2 branches missed.">        return entries != null ? entries.size() : 0;</span>
+    }
+
+    @Override
+    public RecipientEntry getItem(int position) {
+<span class="nc" id="L980">        return getEntries().get(position);</span>
+    }
+
+    @Override
+    public long getItemId(int position) {
+<span class="nc" id="L985">        return position;</span>
+    }
+
+    @Override
+    public int getViewTypeCount() {
+<span class="nc" id="L990">        return RecipientEntry.ENTRY_TYPE_SIZE;</span>
+    }
+
+    @Override
+    public int getItemViewType(int position) {
+<span class="nc" id="L995">        return getEntries().get(position).getEntryType();</span>
+    }
+
+    @Override
+    public boolean isEnabled(int position) {
+<span class="nc" id="L1000">        return getEntries().get(position).isSelectable();</span>
+    }
+
+    @Override
+    public View getView(int position, View convertView, ViewGroup parent) {
+<span class="nc" id="L1005">        final RecipientEntry entry = getEntries().get(position);</span>
+
+<span class="nc bnc" id="L1007" title="All 2 branches missed.">        final String constraint = mCurrentConstraint == null ? null :</span>
+<span class="nc" id="L1008">                mCurrentConstraint.toString();</span>
+
+<span class="nc" id="L1010">        return mDropdownChipLayouter.bindView(convertView, parent, entry, position,</span>
+                AdapterType.BASE_RECIPIENT, constraint);
+    }
+
+    public Account getAccount() {
+<span class="nc" id="L1015">        return mAccount;</span>
+    }
+
+    @Override
+    public void onPhotoBytesPopulated() {
+        // Default implementation does nothing
+<span class="nc" id="L1021">    }</span>
+
+    @Override
+    public void onPhotoBytesAsynchronouslyPopulated() {
+<span class="nc" id="L1025">        notifyDataSetChanged();</span>
+<span class="nc" id="L1026">    }</span>
+
+    @Override
+    public void onPhotoBytesAsyncLoadFailed() {
+        // Default implementation does nothing
+<span class="nc" id="L1031">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

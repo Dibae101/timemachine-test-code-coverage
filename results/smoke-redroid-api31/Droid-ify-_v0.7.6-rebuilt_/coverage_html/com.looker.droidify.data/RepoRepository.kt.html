@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepoRepository.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.data</a> &gt; <span class="el_source">RepoRepository.kt</span></div><h1>RepoRepository.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.data
+
+import android.content.Context
+import com.looker.droidify.data.encryption.EncryptionStorage
+import com.looker.droidify.data.local.dao.AppDao
+import com.looker.droidify.data.local.dao.AuthDao
+import com.looker.droidify.data.local.dao.IndexDao
+import com.looker.droidify.data.local.dao.RepoDao
+import com.looker.droidify.data.local.model.AuthenticationEntity
+import com.looker.droidify.data.local.model.LocalizedRepoDescriptionEntity
+import com.looker.droidify.data.local.model.LocalizedRepoNameEntity
+import com.looker.droidify.data.local.model.RepoEntity
+import com.looker.droidify.data.local.model.toAuthentication
+import com.looker.droidify.data.local.model.toRepo
+import com.looker.droidify.data.model.Fingerprint
+import com.looker.droidify.data.model.Repo
+import com.looker.droidify.datastore.SettingsRepository
+import com.looker.droidify.datastore.get
+import com.looker.droidify.di.IoDispatcher
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.sync.LocalSyncable
+import com.looker.droidify.sync.SyncState
+import com.looker.droidify.sync.v1.V1Syncable
+import com.looker.droidify.sync.v2.EntrySyncable
+import com.looker.droidify.sync.v2.model.IndexV2
+import com.looker.droidify.work.SyncWorker
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import java.io.File
+import javax.inject.Inject
+
+<span class="nc" id="L38">class RepoRepository @Inject constructor(</span>
+    encryptionStorage: EncryptionStorage,
+    downloader: Downloader,
+<span class="nc" id="L41">    @param:ApplicationContext private val context: Context,</span>
+    @IoDispatcher syncDispatcher: CoroutineDispatcher,
+<span class="nc" id="L43">    private val repoDao: RepoDao,</span>
+<span class="nc" id="L44">    private val authDao: AuthDao,</span>
+<span class="nc" id="L45">    private val indexDao: IndexDao,</span>
+<span class="nc" id="L46">    private val settingsRepository: SettingsRepository,</span>
+<span class="nc" id="L47">    private val appDao: AppDao,</span>
+) {
+
+<span class="nc" id="L50">    private val localSyncable = LocalSyncable(context = context)</span>
+
+<span class="nc" id="L52">    private val v2Syncable = EntrySyncable(</span>
+<span class="nc" id="L53">        context = context,</span>
+<span class="nc" id="L54">        downloader = downloader,</span>
+<span class="nc" id="L55">        dispatcher = syncDispatcher,</span>
+    )
+
+<span class="nc" id="L58">    private val v1Syncable = V1Syncable(</span>
+<span class="nc" id="L59">        context = context,</span>
+<span class="nc" id="L60">        downloader = downloader,</span>
+<span class="nc" id="L61">        dispatcher = syncDispatcher,</span>
+    )
+
+<span class="nc" id="L64">    private val settings = settingsRepository.data</span>
+<span class="nc" id="L65">    private val keyStream = encryptionStorage.key</span>
+<span class="nc" id="L66">    private val locale = settings.map { it.language }</span>
+
+<span class="nc" id="L68">    suspend fun getRepo(id: Int): Repo? {</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        val repoEntity = repoDao.getRepo(id) ?: return null</span>
+<span class="nc" id="L70">        val key = keyStream.first()</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        val auth = authDao.authFor(id)?.toAuthentication(key)</span>
+<span class="nc" id="L72">        val currentLocale = locale.first()</span>
+<span class="nc" id="L73">        val enabled = id in settings.first().enabledRepoIds</span>
+<span class="nc" id="L74">        val mirrors = getMirrors(id)</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        val name = repoDao.name(id, currentLocale) ?: repoEntity.address</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        val description = repoDao.description(id, currentLocale) ?: &quot;&quot;</span>
+<span class="nc bnc" id="L77" title="All 4 branches missed.">        val icon = repoDao.icon(id, currentLocale)?.icon?.name</span>
+<span class="nc" id="L78">        return repoEntity.toRepo(</span>
+<span class="nc" id="L79">            mirrors = mirrors,</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            enabled = enabled,</span>
+<span class="nc" id="L81">            authentication = auth,</span>
+<span class="nc" id="L82">            name = name,</span>
+<span class="nc" id="L83">            description = description,</span>
+<span class="nc" id="L84">            icon = icon,</span>
+        )
+    }
+
+<span class="nc" id="L88">    fun repo(id: Int): Flow&lt;Repo?&gt; = combine(</span>
+<span class="nc" id="L89">        repoDao.repo(id),</span>
+<span class="nc" id="L90">        settings.map { it.enabledRepoIds },</span>
+<span class="nc" id="L91">        keyStream,</span>
+<span class="nc bnc" id="L92" title="All 8 branches missed.">    ) { repo, enabled, key -&gt;</span>
+<span class="nc bnc" id="L93" title="All 4 branches missed.">        val auth = authDao.authFor(id)?.toAuthentication(key)</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        val mirrors = getMirrors(id)</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        val currentLocale = locale.first()</span>
+<span class="nc bnc" id="L96" title="All 8 branches missed.">        val name = repoDao.name(id, currentLocale) ?: repo?.address ?: &quot;Unknown&quot;</span>
+<span class="nc bnc" id="L97" title="All 4 branches missed.">        val description = repoDao.description(id, currentLocale) ?: &quot;&quot;</span>
+<span class="nc bnc" id="L98" title="All 6 branches missed.">        val icon = repoDao.icon(id, currentLocale)?.icon?.name</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        repo?.toRepo(</span>
+<span class="nc" id="L100">            mirrors = mirrors,</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">            enabled = repo.id in enabled,</span>
+<span class="nc" id="L102">            authentication = auth,</span>
+<span class="nc" id="L103">            name = name,</span>
+<span class="nc" id="L104">            description = description,</span>
+<span class="nc" id="L105">            icon = icon,</span>
+<span class="nc" id="L106">        )</span>
+<span class="nc" id="L107">    }</span>
+
+    suspend fun deleteRepo(id: Int) {
+<span class="nc" id="L110">        repoDao.delete(id)</span>
+<span class="nc" id="L111">    }</span>
+
+<span class="nc" id="L113">    val repos: Flow&lt;List&lt;Repo&gt;&gt; = combine(</span>
+<span class="nc" id="L114">        repoDao.stream(),</span>
+<span class="nc" id="L115">        settings.map { it.enabledRepoIds },</span>
+<span class="nc bnc" id="L116" title="All 6 branches missed.">    ) { repos, enabledIds -&gt;</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        val currentLocale = locale.first()</span>
+<span class="nc" id="L118">        repos.map { repoEntity -&gt;</span>
+<span class="nc bnc" id="L119" title="All 4 branches missed.">            val name = repoDao.name(repoEntity.id, currentLocale) ?: repoEntity.address</span>
+<span class="nc bnc" id="L120" title="All 4 branches missed.">            val description = repoDao.description(repoEntity.id, currentLocale) ?: &quot;&quot;</span>
+<span class="nc bnc" id="L121" title="All 6 branches missed.">            val icon = repoDao.icon(repoEntity.id, currentLocale)?.icon?.name</span>
+<span class="nc" id="L122">            repoEntity.toRepo(</span>
+<span class="nc" id="L123">                mirrors = emptyList(),</span>
+<span class="nc" id="L124">                authentication = null,</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                enabled = repoEntity.id in enabledIds,</span>
+<span class="nc" id="L126">                name = name,</span>
+<span class="nc" id="L127">                description = description,</span>
+<span class="nc" id="L128">                icon = icon,</span>
+<span class="nc" id="L129">            )</span>
+<span class="nc" id="L130">        }</span>
+    }
+
+    val addresses: Flow&lt;Set&lt;String&gt;&gt;
+<span class="nc" id="L134">        get() = combine(</span>
+<span class="nc" id="L135">            repoDao.stream(),</span>
+<span class="nc" id="L136">            repoDao.mirrors(),</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        ) { repos, mirrors -&gt;</span>
+<span class="nc" id="L138">            repos.map { it.address }.toSet() + mirrors.map { it.url }</span>
+<span class="nc" id="L139">        }</span>
+
+<span class="nc" id="L141">    fun getEnabledRepos(): Flow&lt;List&lt;Repo&gt;&gt; = settingsRepository</span>
+<span class="nc" id="L142">        .get { enabledRepoIds }</span>
+<span class="nc" id="L143">        .map { ids -&gt; ids.mapNotNull { repoId -&gt; getRepo(repoId) } }</span>
+
+<span class="nc" id="L145">    suspend fun insertRepo(</span>
+        address: String,
+        fingerprint: String?,
+        username: String?,
+        password: String?,
+<span class="nc" id="L150">        name: String? = null,</span>
+<span class="nc" id="L151">        description: String? = null,</span>
+    ) {
+<span class="nc" id="L153">        val id = indexDao.insertRepo(</span>
+<span class="nc" id="L154">            RepoEntity(</span>
+<span class="nc" id="L155">                address = address,</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                fingerprint = Fingerprint(fingerprint.orEmpty()),</span>
+<span class="nc" id="L157">                timestamp = null,</span>
+<span class="nc" id="L158">                webBaseUrl = address,</span>
+            ),
+        )
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (name != null) {</span>
+<span class="nc" id="L162">            indexDao.insertLocalizedRepoNames(</span>
+<span class="nc" id="L163">                listOf(LocalizedRepoNameEntity(id.toInt(), &quot;en-US&quot;, name)),</span>
+            )
+        }
+
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (description != null) {</span>
+<span class="nc" id="L168">            indexDao.insertLocalizedRepoDescription(</span>
+<span class="nc" id="L169">                listOf(LocalizedRepoDescriptionEntity(id.toInt(), &quot;en-US&quot;, description)),</span>
+            )
+        }
+<span class="nc bnc" id="L172" title="All 4 branches missed.">        if (password != null &amp;&amp; username != null) {</span>
+<span class="nc" id="L173">            val key = keyStream.first()</span>
+<span class="nc" id="L174">            val (encrypted, iv) = key.encrypt(password)</span>
+<span class="nc" id="L175">            val authEntity = AuthenticationEntity(</span>
+<span class="nc" id="L176">                password = encrypted,</span>
+<span class="nc" id="L177">                username = username,</span>
+<span class="nc" id="L178">                initializationVector = iv,</span>
+<span class="nc" id="L179">                repoId = id.toInt(),</span>
+            )
+<span class="nc" id="L181">            authDao.insert(authEntity)</span>
+        }
+<span class="nc" id="L183">    }</span>
+
+    suspend fun enableRepository(repo: Repo, enable: Boolean) {
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        settingsRepository.setRepoEnabled(repo.id, enable)</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        if (enable) {</span>
+<span class="nc" id="L188">            SyncWorker.syncRepo(context, repo.id)</span>
+        } else {
+<span class="nc" id="L190">            repoDao.resetTimestamp(repo.id)</span>
+<span class="nc" id="L191">            runCatching {</span>
+<span class="nc" id="L192">                val indexDir = File(context.cacheDir, &quot;index&quot;)</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                if (indexDir.exists()) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                    indexDir.listFiles()?.forEach { file -&gt;</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                        if (file.name.startsWith(&quot;repo_${repo.id}_&quot;)) {</span>
+<span class="nc" id="L196">                            file.delete()</span>
+                        }
+<span class="nc" id="L198">                    }</span>
+                }
+<span class="nc" id="L200">            }</span>
+<span class="nc" id="L201">            appDao.deleteByRepoId(repo.id)</span>
+        }
+<span class="nc" id="L203">    }</span>
+
+<span class="nc" id="L205">    suspend fun sync(repo: Repo, onState: ((SyncState) -&gt; Unit)? = null): Boolean {</span>
+<span class="nc" id="L206">        var success = false</span>
+<span class="nc" id="L207">        var parsedFingerprint: Fingerprint? = null</span>
+<span class="nc" id="L208">        var parsedIndex: IndexV2? = null</span>
+<span class="nc" id="L209">        v2Syncable.sync(repo) { state -&gt;</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            onState?.invoke(state)</span>
+<span class="nc" id="L211">            when (state) {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                is SyncState.JsonParsing.Success -&gt; {</span>
+<span class="nc" id="L213">                    parsedFingerprint = state.fingerprint</span>
+<span class="nc" id="L214">                    parsedIndex = state.index</span>
+<span class="nc" id="L215">                    success = true</span>
+                }
+
+<span class="nc" id="L218">                else -&gt; Unit</span>
+            }
+<span class="nc" id="L220">        }</span>
+<span class="nc bnc" id="L221" title="All 4 branches missed.">        if (parsedIndex != null &amp;&amp; parsedFingerprint != null) {</span>
+<span class="nc" id="L222">            indexDao.insertIndex(</span>
+<span class="nc" id="L223">                fingerprint = parsedFingerprint,</span>
+<span class="nc" id="L224">                index = parsedIndex!!,</span>
+<span class="nc" id="L225">                expectedRepoId = repo.id,</span>
+            )
+        }
+<span class="nc" id="L228">        return success</span>
+    }
+
+<span class="nc bnc" id="L231" title="All 3 branches missed.">    suspend fun syncAll(): Boolean = supervisorScope {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        val repos = getEnabledRepos().first()</span>
+<span class="nc" id="L233">        repos.forEach { repo -&gt; launch { sync(repo) } }</span>
+<span class="nc" id="L234">        true</span>
+<span class="nc" id="L235">    }</span>
+
+<span class="nc" id="L237">    private suspend fun getMirrors(repoId: Int): List&lt;String&gt; =</span>
+<span class="nc" id="L238">        repoDao.mirrors(repoId).map { it.url }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

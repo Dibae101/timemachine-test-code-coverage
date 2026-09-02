@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UnarchiveWorker.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.work</a> &gt; <span class="el_source">UnarchiveWorker.kt</span></div><h1>UnarchiveWorker.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.work
+
+import android.content.Context
+import android.content.pm.PackageInstaller.EXTRA_UNARCHIVE_ALL_USERS
+import android.content.pm.PackageInstaller.EXTRA_UNARCHIVE_ID
+import android.content.pm.PackageInstaller.EXTRA_UNARCHIVE_PACKAGE_NAME
+import android.content.pm.PackageManager
+import android.content.pm.PackageManager.MATCH_ARCHIVED_PACKAGES
+import android.os.Build
+import android.util.Log
+import androidx.annotation.RequiresApi
+import androidx.hilt.work.HiltWorker
+import androidx.work.CoroutineWorker
+import androidx.work.Data
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import com.looker.droidify.data.model.PackageName
+import com.looker.droidify.database.Database
+import com.looker.droidify.installer.InstallManager
+import com.looker.droidify.installer.model.InstallItem
+import com.looker.droidify.model.Product
+import com.looker.droidify.model.Repository
+import com.looker.droidify.service.Connection
+import com.looker.droidify.service.DownloadService
+import com.looker.droidify.utility.common.extension.calculateHash
+import com.looker.droidify.utility.common.extension.singleSignature
+import dagger.assisted.Assisted
+import dagger.assisted.AssistedInject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.last
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+
+<span class="nc" id="L36">@HiltWorker</span>
+@RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+<span class="nc" id="L38">class UnarchiveWorker @AssistedInject constructor(</span>
+    @Assisted context: Context,
+    @Assisted workerParams: WorkerParameters,
+<span class="nc" id="L41">    private val installManager: InstallManager,</span>
+<span class="nc" id="L42">) : CoroutineWorker(context, workerParams) {</span>
+    companion object {
+        private const val TAG = &quot;UnarchiveWorker&quot;
+
+        fun updateNow(context: Context, packageName: String, unarchiveId: Int, allUsers: Boolean) {
+<span class="nc" id="L47">            val data = Data.Builder()</span>
+<span class="nc" id="L48">                .putString(EXTRA_UNARCHIVE_PACKAGE_NAME, packageName)</span>
+<span class="nc" id="L49">                .putInt(EXTRA_UNARCHIVE_ID, unarchiveId)</span>
+<span class="nc" id="L50">                .putBoolean(EXTRA_UNARCHIVE_ALL_USERS, allUsers)</span>
+<span class="nc" id="L51">                .build()</span>
+<span class="nc" id="L52">            val workRequest = OneTimeWorkRequestBuilder&lt;UnarchiveWorker&gt;()</span>
+<span class="nc" id="L53">                .setInputData(data)</span>
+<span class="nc" id="L54">                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)</span>
+<span class="nc" id="L55">                .build()</span>
+<span class="nc" id="L56">            WorkManager.getInstance(context).enqueue(workRequest)</span>
+<span class="nc" id="L57">        }</span>
+    }
+
+<span class="nc" id="L60">    suspend fun downloadProductAndWait(</span>
+        context: Context,
+        packageName: String,
+        product: Product,
+        repository: Repository,
+    ): DownloadService.DownloadState {
+<span class="nc" id="L66">        lateinit var connection: Connection&lt;DownloadService.Binder, DownloadService&gt;</span>
+<span class="nc" id="L67">        val binder = suspendCancellableCoroutine { cont -&gt;</span>
+<span class="nc" id="L68">            val c = Connection(</span>
+<span class="nc" id="L69">                serviceClass = DownloadService::class.java,</span>
+                onBind = { _, binder -&gt;
+<span class="nc" id="L71">                    cont.resume(binder) { cause, _, _ -&gt; connection.unbind(context) }</span>
+<span class="nc" id="L72">                },</span>
+            )
+<span class="nc" id="L74">            connection = c</span>
+<span class="nc" id="L75">            c.bind(context)</span>
+<span class="nc" id="L76">        }</span>
+
+<span class="nc" id="L78">        binder.enqueue(</span>
+<span class="nc" id="L79">            packageName,</span>
+<span class="nc" id="L80">            product.name,</span>
+<span class="nc" id="L81">            repository,</span>
+<span class="nc" id="L82">            product.releases.first(),</span>
+        )
+
+        // Wait until the download completes
+<span class="nc" id="L86">        val downloadResult = binder.downloadState.last()</span>
+<span class="nc" id="L87">        connection.unbind(context)</span>
+<span class="nc" id="L88">        return downloadResult</span>
+    }
+
+<span class="nc" id="L91">    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        val packageName = inputData.getString(EXTRA_UNARCHIVE_PACKAGE_NAME) ?: return@withContext Result.failure()</span>
+<span class="nc" id="L93">        val unarchiveId = inputData.getInt(EXTRA_UNARCHIVE_ID, -1)</span>
+
+<span class="nc" id="L95">        val packageManger = applicationContext.packageManager</span>
+<span class="nc" id="L96">        val packageInfo = packageManger.getPackageInfo(</span>
+<span class="nc" id="L97">            packageName,</span>
+<span class="nc" id="L98">            PackageManager.PackageInfoFlags.of(MATCH_ARCHIVED_PACKAGES),</span>
+        )
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        val sig = packageInfo.singleSignature?.calculateHash()</span>
+
+<span class="nc" id="L102">        val product = Database.ProductAdapter.getArchivedApp(packageName)</span>
+<span class="nc bnc" id="L103" title="All 6 branches missed.">            .filter { it.compatible &amp;&amp; (sig == null || it.signatures.contains(sig)) }</span>
+<span class="nc" id="L104">            .maxByOrNull { it.versionCode }</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (product == null) {</span>
+<span class="nc" id="L106">            Log.e(TAG, &quot;doWork: failed to find a matching app for $packageName&quot;)</span>
+<span class="nc" id="L107">            return@withContext Result.failure()</span>
+        }
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        val repository = Database.RepositoryAdapter.get(product.repositoryId)</span>
+<span class="nc" id="L110">            ?: return@withContext Result.failure()</span>
+
+<span class="nc" id="L112">        val result = downloadProductAndWait(</span>
+<span class="nc" id="L113">            applicationContext,</span>
+<span class="nc" id="L114">            packageName,</span>
+<span class="nc" id="L115">            product,</span>
+<span class="nc" id="L116">            repository,</span>
+        )
+
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (result.currentItem !is DownloadService.State.Success) {</span>
+<span class="nc" id="L120">            Log.e(TAG, &quot;doWork: failed to download &quot;)</span>
+<span class="nc" id="L121">            return@withContext Result.failure()</span>
+        }
+
+<span class="nc" id="L124">        installManager.install(</span>
+<span class="nc" id="L125">            InstallItem(</span>
+<span class="nc" id="L126">                PackageName(packageName),</span>
+<span class="nc" id="L127">                result.currentItem.release.cacheFileName,</span>
+<span class="nc" id="L128">                unarchiveId,</span>
+            ),
+        )
+<span class="nc" id="L131">        Result.success()</span>
+<span class="nc" id="L132">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

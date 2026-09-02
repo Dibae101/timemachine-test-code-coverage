@@ -1,0 +1,833 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MediaScanner.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vanilla-Music</a> &gt; <a href="index.source.html" class="el_package">ch.blinkenlights.android.medialibrary</a> &gt; <span class="el_source">MediaScanner.java</span></div><h1>MediaScanner.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2016-2018 Adrian Ulrich &lt;adrian@blinkenlights.ch&gt;
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package ch.blinkenlights.android.medialibrary;
+
+import ch.blinkenlights.android.vanilla.R;
+import ch.blinkenlights.android.vanilla.NotificationHelper;
+
+import android.app.Notification;
+import android.content.Context;
+import android.content.ContentValues;
+import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.database.ContentObserver;
+import android.util.Log;
+import android.provider.MediaStore;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Message;
+import android.os.PowerManager;
+import android.os.Process;
+import android.os.SystemClock;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.regex.Pattern;
+
+public class MediaScanner implements Handler.Callback {
+	/**
+	 * Our scan plan
+	 */
+	private MediaScanPlan mScanPlan;
+	/**
+	 * Our message handler
+	 */
+	private Handler mHandler;
+	/**
+	 * The context to use for native library queries
+	 */
+	private Context mContext;
+	/**
+	 * The wake lock we hold during the scan
+	 */
+	private PowerManager.WakeLock mWakeLock;
+	/**
+	 * Instance of a media backend
+	 */
+	private MediaLibraryBackend mBackend;
+	/**
+	 * True if this is a from-scratch import
+	 * Set by KICKSTART rpc
+	 */
+	private boolean mIsInitialScan;
+	/**
+	 * True if we are currently in a scan phase
+	 */
+	private boolean mScanIsRunning;
+	/**
+	 * True if we must do a full cleanup of orphaned entries after the scan finished.
+	 */
+	private boolean mPendingCleanup;
+	/**
+	 * Our NotificationHelper instance.
+	 */
+	private NotificationHelper mNotificationHelper;
+	/**
+	 * uptimeMillis ts at which we will dispatch the next scan update report
+	 */
+	private long mNextProgressReportAt;
+	/**
+	 * The id we are using for the scan notification
+	 */
+	private static final int NOTIFICATION_ID = 56162;
+	/**
+	 * The notification channel to use
+	 */
+	private static final String NOTIFICATION_CHANNEL = &quot;Scanner&quot;;
+	/**
+	 * Relax mtime check while searching for native modifications by this many seconds
+	 */
+	private static final int NATIVE_VRFY_MTIME_SLACK = 100;
+	/**
+	 * Delay native scans by this many ms to coalesce multiple modifications
+	 */
+	private static final int NATIVE_VRFY_COALESCE_DELAY = 3500;
+
+<span class="fc" id="L101">	MediaScanner(Context context, MediaLibraryBackend backend) {</span>
+<span class="fc" id="L102">		mContext = context;</span>
+<span class="fc" id="L103">		mBackend = backend;</span>
+<span class="fc" id="L104">		mScanPlan = new MediaScanPlan();</span>
+<span class="fc" id="L105">		HandlerThread handlerThread = new HandlerThread(&quot;MediaScannerThread&quot;, Process.THREAD_PRIORITY_LOWEST);</span>
+<span class="fc" id="L106">		handlerThread.start();</span>
+<span class="fc" id="L107">		mHandler = new Handler(handlerThread.getLooper(), this);</span>
+<span class="fc" id="L108">		mWakeLock = ((PowerManager)context.getSystemService(Context.POWER_SERVICE)).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, &quot;VanillaMusic:Indexer&quot;);</span>
+<span class="fc" id="L109">		mNotificationHelper = new NotificationHelper(context, NOTIFICATION_CHANNEL, context.getString(R.string.media_stats_progress));</span>
+
+		// the content observer to use
+<span class="fc" id="L112">		ContentObserver mObserver = new ContentObserver(null) {</span>
+			@Override
+			public void onChange(boolean self) {
+<span class="nc" id="L115">				startQuickScan(NATIVE_VRFY_COALESCE_DELAY);</span>
+<span class="nc" id="L116">			}</span>
+		};
+<span class="fc" id="L118">		context.getContentResolver().registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, mObserver);</span>
+<span class="fc" id="L119">	}</span>
+
+	/**
+	 * Performs a 'fast' scan by checking the native and our own
+	 * library for new and changed files
+	 */
+	public void startNormalScan() {
+<span class="nc" id="L126">		setNativeLastMtime(MTIME_DIRTY);</span>
+<span class="nc" id="L127">		mScanPlan.addNextStep(RPC_NATIVE_VRFY, null)</span>
+<span class="nc" id="L128">			.addNextStep(RPC_LIBRARY_VRFY, null);</span>
+<span class="nc" id="L129">		mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_KICKSTART, 0));</span>
+<span class="nc" id="L130">	}</span>
+
+	/**
+	 * Performs a 'slow' scan by inspecting all files on the device
+	 */
+	public void startFullScan() {
+<span class="nc" id="L136">		MediaLibrary.Preferences prefs = MediaLibrary.getPreferences(mContext);</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">		for (String path : prefs.mediaFolders) {</span>
+<span class="nc" id="L138">			mScanPlan.addNextStep(RPC_READ_DIR, new File(path));</span>
+<span class="nc" id="L139">		}</span>
+<span class="nc" id="L140">		mScanPlan.addNextStep(RPC_LIBRARY_VRFY, null);</span>
+<span class="nc" id="L141">		mScanPlan.addNextStep(RPC_NATIVE_VRFY, null);</span>
+<span class="nc" id="L142">		mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_KICKSTART, 0));</span>
+<span class="nc" id="L143">	}</span>
+
+	/**
+	 * Called by the content observer if a change in the media library
+	 * has been detected
+	 *
+	 * @param delay how many ms we should wait (used to coalesce multiple calls)
+	 */
+	public void startQuickScan(int delay) {
+<span class="pc bpc" id="L152" title="2 of 4 branches missed.">		if (!mHandler.hasMessages(MSG_GUESS_QUICKSCAN) &amp;&amp; !mHandler.hasMessages(MSG_SCAN_RPC)) {</span>
+<span class="fc" id="L153">			mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_GUESS_QUICKSCAN, 0, 0), delay);</span>
+		}
+<span class="fc" id="L155">	}</span>
+
+	/**
+	 * Stops a running scan
+	 */
+	public void abortScan() {
+<span class="nc" id="L161">		mHandler.removeMessages(MSG_SCAN_RPC);</span>
+<span class="nc" id="L162">		mScanPlan.clear();</span>
+<span class="nc" id="L163">		mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_KICKSTART, 0));</span>
+<span class="nc" id="L164">	}</span>
+
+	/**
+	 * Prepares a flush of the databse.
+	 */
+	public void flushDatabase() {
+<span class="nc" id="L170">		mBackend.setPendingDeletion();</span>
+<span class="nc" id="L171">		mPendingCleanup = true;</span>
+<span class="nc" id="L172">		setNativeLastMtime(MTIME_PRISTINE);</span>
+<span class="nc" id="L173">	}</span>
+
+	/**
+	 * Returns some scan statistics
+	 *
+	 * @return a MediaLibrary.ScanProgress object
+	 */
+	public MediaLibrary.ScanProgress describeScanProgress() {
+<span class="fc" id="L181">		MediaLibrary.ScanProgress progress = new MediaLibrary.ScanProgress();</span>
+<span class="fc" id="L182">		MediaLibrary.Preferences prefs = MediaLibrary.getPreferences(mContext);</span>
+<span class="fc" id="L183">		MediaScanPlan.Statistics stats = mScanPlan.getStatistics();</span>
+
+<span class="fc" id="L185">		progress.isRunning = mScanIsRunning;</span>
+<span class="fc" id="L186">		progress.lastFile = stats.lastFile;</span>
+<span class="fc" id="L187">		progress.seen = stats.seen;</span>
+<span class="fc" id="L188">		progress.changed = stats.changed;</span>
+<span class="fc" id="L189">		progress.total = prefs._nativeLibraryCount;</span>
+
+<span class="fc" id="L191">		return progress;</span>
+	}
+
+	private static final int MSG_SCAN_RPC         = 0;
+	private static final int MSG_SCAN_FINISHED    = 1;
+	private static final int MSG_NOTIFY_CHANGE    = 2;
+	private static final int MSG_GUESS_QUICKSCAN  = 3;
+	private static final int RPC_KICKSTART        = 100;
+	private static final int RPC_READ_DIR         = 101;
+	private static final int RPC_INSPECT_FILE     = 102;
+	private static final int RPC_LIBRARY_VRFY     = 103;
+	private static final int RPC_NATIVE_VRFY      = 104;
+
+	@Override
+	public boolean handleMessage(Message message) {
+<span class="fc bfc" id="L206" title="All 2 branches covered.">		int rpc = (message.what == MSG_SCAN_RPC ? message.arg1 : message.what);</span>
+
+<span class="pc bpc" id="L208" title="5 of 9 branches missed.">		switch (rpc) {</span>
+			case MSG_NOTIFY_CHANGE: {
+<span class="nc" id="L210">				MediaLibrary.notifyObserver(LibraryObserver.Type.SONG, LibraryObserver.Value.UNKNOWN, true);</span>
+<span class="nc" id="L211">				break;</span>
+			}
+			case MSG_SCAN_FINISHED: {
+<span class="fc" id="L214">				mScanIsRunning = false;</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">				if (mIsInitialScan) {</span>
+<span class="fc" id="L216">					mIsInitialScan = false;</span>
+<span class="fc" id="L217">					MediaLibrary.notifyObserver(LibraryObserver.Type.PLAYLIST, LibraryObserver.Value.OUTDATED, false);</span>
+				}
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">				if (mPendingCleanup) {</span>
+<span class="nc" id="L220">					mPendingCleanup = false;</span>
+<span class="nc" id="L221">					mBackend.cleanOrphanedEntries(true);</span>
+					// scan run possibly deleted file which may affect playlists:
+<span class="nc" id="L223">					MediaLibrary.notifyObserver(LibraryObserver.Type.PLAYLIST, LibraryObserver.Value.UNKNOWN, false);</span>
+				}
+
+				// Send a last change notification to all observers.
+				// This lets all consumers know about (possible)
+				// cleanups of orphaned files. The `false' value
+				// also signals that this will be our last update
+				// for this scan.
+<span class="fc" id="L231">				mHandler.removeMessages(MSG_NOTIFY_CHANGE);</span>
+<span class="fc" id="L232">				MediaLibrary.notifyObserver(LibraryObserver.Type.SONG, LibraryObserver.Value.UNKNOWN, false);</span>
+<span class="fc" id="L233">				MediaLibrary.notifyObserver(LibraryObserver.Type.SCAN_PROGRESS, LibraryObserver.Value.UNKNOWN, false);</span>
+
+<span class="fc" id="L235">				updateNotification(false);</span>
+<span class="fc" id="L236">				break;</span>
+			}
+			case MSG_GUESS_QUICKSCAN: {
+<span class="fc" id="L239">				guessQuickScanPlan();</span>
+<span class="fc" id="L240">				break;</span>
+			}
+			case RPC_KICKSTART: {
+				// a new scan was triggered: check if this is a 'initial / from scratch' scan
+<span class="pc bpc" id="L244" title="2 of 4 branches missed.">				if (!mIsInitialScan &amp;&amp; MediaLibrary.getPreferences(mContext)._nativeLastMtime == 0) {</span>
+<span class="fc" id="L245">					mIsInitialScan = true;</span>
+				}
+				break;
+			}
+			case RPC_INSPECT_FILE: {
+<span class="nc" id="L250">				final File file = (File)message.obj;</span>
+<span class="nc" id="L251">				boolean changed = rpcInspectFile(file);</span>
+<span class="nc" id="L252">				mScanPlan.registerProgress(file.toString(), changed);</span>
+<span class="nc bnc" id="L253" title="All 4 branches missed.">				if (changed &amp;&amp; !mHandler.hasMessages(MSG_NOTIFY_CHANGE)) {</span>
+<span class="nc" id="L254">					mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_NOTIFY_CHANGE), 500);</span>
+				}
+
+				// Unlike MSG_NOTIFY_CHANGE, we don't want the progress report to lag behind, but we also don't want
+				// to call it on EVERY file inspection; so we add our own delay which will not be influenced by
+				// the message queue size.
+<span class="nc" id="L260">				long now = SystemClock.uptimeMillis();</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">				if (now &gt;= mNextProgressReportAt) {</span>
+<span class="nc" id="L262">					mNextProgressReportAt = now + 80;</span>
+<span class="nc" id="L263">					MediaLibrary.notifyObserver(LibraryObserver.Type.SCAN_PROGRESS, LibraryObserver.Value.UNKNOWN, true);</span>
+<span class="nc" id="L264">					updateNotification(true);</span>
+				}
+				break;
+			}
+			case RPC_READ_DIR: {
+<span class="nc" id="L269">				rpcReadDirectory((File)message.obj);</span>
+<span class="nc" id="L270">				break;</span>
+			}
+			case RPC_LIBRARY_VRFY: {
+<span class="nc" id="L273">				rpcLibraryVerify((Cursor)message.obj);</span>
+<span class="nc" id="L274">				break;</span>
+			}
+			case RPC_NATIVE_VRFY: {
+<span class="fc" id="L277">				rpcNativeVerify((Cursor)message.obj, message.arg2);</span>
+<span class="fc" id="L278">				break;</span>
+			}
+			default: {
+<span class="nc" id="L281">				throw new IllegalArgumentException();</span>
+			}
+		}
+
+<span class="pc bpc" id="L285" title="1 of 4 branches missed.">		if (message.what == MSG_SCAN_RPC &amp;&amp; !mHandler.hasMessages(MSG_SCAN_RPC)) {</span>
+<span class="fc" id="L286">			mScanIsRunning = true;</span>
+<span class="fc" id="L287">			MediaScanPlan.Step step = mScanPlan.getNextStep();</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">			if (step == null) {</span>
+<span class="fc" id="L289">				mHandler.sendEmptyMessage(MSG_SCAN_FINISHED);</span>
+			} else {
+<span class="fc" id="L291">				Log.v(&quot;VanillaMusic&quot;, &quot;xxx --- starting scan of type &quot;+step.msg);</span>
+<span class="fc" id="L292">				mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, step.msg, 0, step.arg));</span>
+			}
+		}
+
+<span class="fc" id="L296">		return true;</span>
+	}
+
+	private static final int MTIME_PRISTINE = 0;
+	private static final int MTIME_DIRTY = 1;
+	/**
+	 * Updates the _nativeLastMtime value in the media scanner storage
+	 *
+	 * @param mtime or one of MTIME_*
+	 */
+	private void setNativeLastMtime(int mtime) {
+<span class="fc" id="L307">		MediaLibrary.Preferences prefs = MediaLibrary.getPreferences(mContext);</span>
+<span class="fc" id="L308">		prefs._nativeLastMtime = mtime;</span>
+<span class="fc" id="L309">		MediaLibrary.setPreferences(mContext, prefs);</span>
+<span class="fc" id="L310">	}</span>
+
+	/**
+	 * Triggers an update to the scan progress notification
+	 *
+	 * @param visible if true, the notification is visible (and will get updated)
+	 */
+	private void updateNotification(boolean visible) {
+<span class="fc" id="L318">		MediaLibrary.ScanProgress progress = describeScanProgress();</span>
+
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">		if (visible) {</span>
+			// We there are 5 drawables, pick one based on the 'uptime-seconds'.
+<span class="nc" id="L322">			int tick = (int)(SystemClock.uptimeMillis() / 1000) % 5;</span>
+<span class="nc" id="L323">			int icon = R.drawable.status_scan_0 + tick;</span>
+<span class="nc" id="L324">			String title = mContext.getResources().getString(R.string.media_library_scan_running);</span>
+<span class="nc" id="L325">			String content = progress.lastFile;</span>
+<span class="nc" id="L326">			Notification notification = mNotificationHelper.getNewBuilder(mContext)</span>
+<span class="nc" id="L327">				.setProgress(progress.total, progress.seen, false)</span>
+<span class="nc" id="L328">				.setContentTitle(title)</span>
+<span class="nc" id="L329">				.setContentText(content)</span>
+<span class="nc" id="L330">				.setSmallIcon(icon)</span>
+<span class="nc" id="L331">				.setOngoing(true)</span>
+<span class="nc" id="L332">				.getNotification(); // build() is API 16 :-/</span>
+<span class="nc" id="L333">			mNotificationHelper.notify(NOTIFICATION_ID, notification);</span>
+
+<span class="nc bnc" id="L335" title="All 2 branches missed.">			if (!mWakeLock.isHeld())</span>
+<span class="nc" id="L336">				mWakeLock.acquire();</span>
+<span class="nc" id="L337">		} else {</span>
+<span class="fc" id="L338">			mNotificationHelper.cancel(NOTIFICATION_ID);</span>
+
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">			if (mWakeLock.isHeld())</span>
+<span class="nc" id="L341">				mWakeLock.release();</span>
+		}
+<span class="fc" id="L343">	}</span>
+
+	/**
+	 * Checks the state of the native media db to deceide if we are going to
+	 * check for deleted or new/modified items
+	 */
+	private void guessQuickScanPlan() {
+<span class="fc" id="L350">		int lastSeenDbSize = MediaLibrary.getPreferences(mContext)._nativeLibraryCount;</span>
+<span class="fc" id="L351">		String selection = MediaStore.Audio.Media.IS_MUSIC + &quot;!= 0&quot;;</span>
+<span class="fc" id="L352">		String[] projection = { &quot;COUNT(&quot;+MediaStore.Audio.Media.IS_MUSIC+&quot;)&quot; };</span>
+<span class="fc" id="L353">		Cursor cursor = null;</span>
+		try {
+<span class="fc" id="L355">			cursor = mContext.getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection, selection, null, null);</span>
+<span class="nc" id="L356">		} catch (SecurityException e) {</span>
+<span class="nc" id="L357">			Log.e(&quot;VanillaMusic&quot;, &quot;rpcObserveRemoval query failed: &quot;+e);</span>
+<span class="fc" id="L358">		}</span>
+
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">		if (cursor == null)</span>
+<span class="nc" id="L361">			return;</span>
+
+<span class="fc" id="L363">		cursor.moveToFirst();</span>
+<span class="fc" id="L364">		int currentDbSize = cursor.getInt(0);</span>
+<span class="fc" id="L365">		cursor.close();</span>
+
+		// Store new db size
+<span class="fc" id="L368">		MediaLibrary.Preferences prefs = MediaLibrary.getPreferences(mContext);</span>
+<span class="fc" id="L369">		prefs._nativeLibraryCount = currentDbSize;</span>
+<span class="fc" id="L370">		MediaLibrary.setPreferences(mContext, prefs);</span>
+
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">		if (currentDbSize &lt; lastSeenDbSize) {</span>
+			// db is smaller! check for deleted files
+<span class="nc" id="L374">			mScanPlan.addNextStep(RPC_LIBRARY_VRFY, null);</span>
+		} else {
+			// same size or more entries -&gt; check only for modifications
+<span class="fc" id="L377">			mScanPlan.addNextStep(RPC_NATIVE_VRFY, null);</span>
+		}
+
+<span class="fc" id="L380">		mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_KICKSTART, 0));</span>
+<span class="fc" id="L381">	}</span>
+
+	/**
+	 * Scans the android library, inspecting every found file
+	 *
+	 * @param cursor the cursor we are using
+	 * @param mtime the mtime to carry over, ignored if cursor is null
+	 */
+	private void rpcNativeVerify(Cursor cursor, int mtime) {
+<span class="pc bpc" id="L390" title="1 of 2 branches missed.">		if (cursor == null) {</span>
+<span class="fc" id="L391">			mtime = MediaLibrary.getPreferences(mContext)._nativeLastMtime; // starting a new scan -&gt; read stored mtime from preferences</span>
+<span class="fc" id="L392">			String selection = MediaStore.Audio.Media.IS_MUSIC + &quot;!= 0 AND &quot;+ MediaStore.MediaColumns.DATE_MODIFIED +&quot; &gt; &quot; + (mtime - NATIVE_VRFY_MTIME_SLACK);</span>
+<span class="fc" id="L393">			String sort = MediaStore.MediaColumns.DATE_MODIFIED;</span>
+<span class="fc" id="L394">			String[] projection = { MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DATE_MODIFIED };</span>
+			try {
+<span class="fc" id="L396">				cursor = mContext.getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection, selection, null, sort);</span>
+<span class="nc" id="L397">			} catch(SecurityException e) {</span>
+<span class="nc" id="L398">				Log.e(&quot;VanillaMusic&quot;, &quot;rpcNativeVerify failed: &quot;+e);</span>
+<span class="fc" id="L399">			}</span>
+		}
+
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">		if (cursor == null)</span>
+<span class="nc" id="L403">			return; // still null.. fixme: handle me better</span>
+
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">		if (cursor.moveToNext()) {</span>
+<span class="nc" id="L406">			String path = cursor.getString(0);</span>
+<span class="nc" id="L407">			mtime = cursor.getInt(1);</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">			if (path != null) { // this seems to be a thing...</span>
+<span class="nc" id="L409">				File entry = new File(path);</span>
+<span class="nc" id="L410">				mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_INSPECT_FILE, 0, entry));</span>
+<span class="nc" id="L411">				mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_NATIVE_VRFY, mtime, cursor));</span>
+			}
+<span class="nc" id="L413">		} else {</span>
+<span class="fc" id="L414">			cursor.close();</span>
+<span class="fc" id="L415">			setNativeLastMtime(mtime);</span>
+<span class="fc" id="L416">			Log.v(&quot;VanillaMusic&quot;, &quot;NativeLibraryScanner finished, mtime mark is now at &quot;+mtime);</span>
+		}
+<span class="fc" id="L418">	}</span>
+
+	/**
+	 * Scans every file in our own library and checks for changes
+	 *
+	 * @param cursor the cursor we are using
+	 */
+	private void rpcLibraryVerify(Cursor cursor) {
+<span class="nc bnc" id="L426" title="All 2 branches missed.">		if (cursor == null)</span>
+<span class="nc" id="L427">			cursor = mBackend.query(false, MediaLibrary.TABLE_SONGS, new String[]{MediaLibrary.SongColumns.PATH}, null, null, null, null, null, null);</span>
+
+<span class="nc bnc" id="L429" title="All 2 branches missed.">		if (cursor.moveToNext()) {</span>
+<span class="nc" id="L430">			File entry = new File(cursor.getString(0));</span>
+<span class="nc" id="L431">			mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_INSPECT_FILE, 0, entry));</span>
+<span class="nc" id="L432">			mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, RPC_LIBRARY_VRFY, 0, cursor));</span>
+<span class="nc" id="L433">		} else {</span>
+<span class="nc" id="L434">			cursor.close();</span>
+		}
+<span class="nc" id="L436">	}</span>
+
+	/**
+	 * Loops trough given directory and adds all found
+	 * files to the scan queue
+	 *
+	 * @param dir the directory to scan
+	 */
+	private void rpcReadDirectory(File dir) {
+<span class="nc bnc" id="L445" title="All 2 branches missed.">		if (!dir.isDirectory())</span>
+<span class="nc" id="L446">			return;</span>
+
+<span class="nc bnc" id="L448" title="All 2 branches missed.">		if (new File(dir, &quot;.nomedia&quot;).exists())</span>
+<span class="nc" id="L449">			return;</span>
+
+<span class="nc bnc" id="L451" title="All 2 branches missed.">		if (isDotfile(dir))</span>
+<span class="nc" id="L452">			return;</span>
+
+<span class="nc" id="L454">		File[] dirents = dir.listFiles();</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">		if (dirents == null)</span>
+<span class="nc" id="L456">			return;</span>
+
+<span class="nc bnc" id="L458" title="All 2 branches missed.">		for (File file : dirents) {</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">			int rpc = (file.isFile() ? RPC_INSPECT_FILE : RPC_READ_DIR);</span>
+<span class="nc" id="L460">			mHandler.sendMessage(mHandler.obtainMessage(MSG_SCAN_RPC, rpc, 0, file));</span>
+		}
+<span class="nc" id="L462">	}</span>
+
+	/**
+	 * Checks if a string is null, empty or whitespace.
+	 *
+	 * @param s the string to check
+	 * @return true if null, empty or whitespace
+	 */
+	private static boolean isUnset(String s) {
+<span class="nc bnc" id="L471" title="All 4 branches missed.">		return s == null || s.trim().isEmpty();</span>
+	}
+
+
+	/**
+	 * Inspects a single file and adds it to the database or removes it. maybe.
+	 *
+	 * @param file the file to add
+	 * @return true if we modified the database
+	 */
+	private boolean rpcInspectFile(File file) {
+<span class="nc" id="L482">		MediaLibrary.Preferences prefs = MediaLibrary.getPreferences(mContext);</span>
+<span class="nc" id="L483">		String path  = file.getAbsolutePath();</span>
+<span class="nc" id="L484">		long songId  = MediaLibrary.hash63(path);</span>
+
+<span class="nc bnc" id="L486" title="All 2 branches missed.">		if (isBlacklisted(file))</span>
+<span class="nc" id="L487">			return false;</span>
+
+<span class="nc bnc" id="L489" title="All 2 branches missed.">		if (isDotfile(file))</span>
+<span class="nc" id="L490">			return false;</span>
+
+<span class="nc" id="L492">		long dbEntryMtime = mBackend.getColumnFromSongId(MediaLibrary.SongColumns.MTIME, songId) * 1000; // this is in unixtime -&gt; convert to 'ms'</span>
+<span class="nc" id="L493">		long songFlags = mBackend.getColumnFromSongId(MediaLibrary.SongColumns.FLAGS, songId);</span>
+<span class="nc" id="L494">		long fileMtime = file.lastModified();</span>
+<span class="nc" id="L495">		long playCount = 0;</span>
+<span class="nc" id="L496">		long skipCount = 0;</span>
+<span class="nc" id="L497">		boolean hasChanged = false;</span>
+<span class="nc" id="L498">		boolean mustInsert = false;</span>
+
+<span class="nc bnc" id="L500" title="All 6 branches missed.">		if (fileMtime &gt; 0 &amp;&amp; dbEntryMtime &gt;= fileMtime &amp;&amp; (songFlags &amp; MediaLibrary.SONG_FLAG_OUTDATED) == 0) {</span>
+<span class="nc" id="L501">			return false; // on-disk mtime is older than db mtime and it still exists -&gt; nothing to do</span>
+		}
+
+<span class="nc bnc" id="L504" title="All 2 branches missed.">		if (dbEntryMtime != 0) {</span>
+			// DB entry exists but is outdated - drop current entry and maybe re-insert it
+			// this tries to preserve play and skipcounts of the song
+<span class="nc" id="L507">			playCount = mBackend.getColumnFromSongId(MediaLibrary.SongColumns.PLAYCOUNT, songId);</span>
+<span class="nc" id="L508">			skipCount = mBackend.getColumnFromSongId(MediaLibrary.SongColumns.SKIPCOUNT, songId);</span>
+			// Remove the song from the database for now but do not delete any
+			// playlist references to it.
+<span class="nc" id="L511">			mBackend.delete(MediaLibrary.TABLE_SONGS, MediaLibrary.SongColumns._ID+&quot;=&quot;+songId, null);</span>
+<span class="nc" id="L512">			mBackend.cleanOrphanedEntries(false);</span>
+<span class="nc" id="L513">			mPendingCleanup = true; // Ensure that we run a full cleanup after all scans finished, to get rid of orphaned playlist entries.</span>
+<span class="nc" id="L514">			hasChanged = true; // notify caller about change even if we are not going to re-insert this file.</span>
+		}
+
+		// Check if we are willing to insert this file
+		// This is the case if we consider it to be playable on this device.
+<span class="nc" id="L519">		MediaMetadataExtractor tags = new MediaMetadataExtractor(path, prefs.forceBastp);</span>
+<span class="nc" id="L520">		mustInsert = tags.isMediaFile();</span>
+
+<span class="nc bnc" id="L522" title="All 2 branches missed.">		if (mustInsert) {</span>
+<span class="nc" id="L523">			hasChanged = true;</span>
+
+			// Clear old flags of this song:
+<span class="nc" id="L526">			songFlags &amp;= ~MediaLibrary.SONG_FLAG_OUTDATED;   // This file is not outdated anymore</span>
+<span class="nc" id="L527">			songFlags &amp;= ~MediaLibrary.SONG_FLAG_NO_ARTIST;  // May find an artist now.</span>
+<span class="nc" id="L528">			songFlags &amp;= ~MediaLibrary.SONG_FLAG_NO_ALBUM;   // May find an album now.</span>
+
+			// Get tags which always must be set
+<span class="nc" id="L531">			String title = tags.getFirst(MediaMetadataExtractor.TITLE);</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">			if (isUnset(title))</span>
+<span class="nc" id="L533">				title = file.getName();</span>
+
+<span class="nc" id="L535">			String album = tags.getFirst(MediaMetadataExtractor.ALBUM);</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">			if (isUnset(album)) {</span>
+<span class="nc" id="L537">				album = &quot;&lt;No Album&gt;&quot;;</span>
+<span class="nc" id="L538">				songFlags |= MediaLibrary.SONG_FLAG_NO_ALBUM;</span>
+			}
+
+<span class="nc" id="L541">			String artist = tags.getFirst(MediaMetadataExtractor.ARTIST);</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">			if (isUnset(artist)) {</span>
+<span class="nc" id="L543">				artist = &quot;&lt;No Artist&gt;&quot;;</span>
+<span class="nc" id="L544">				songFlags |= MediaLibrary.SONG_FLAG_NO_ARTIST;</span>
+			}
+
+<span class="nc" id="L547">			String discNumber = tags.getFirst(MediaMetadataExtractor.DISC_NUMBER);</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">			if (isUnset(discNumber))</span>
+<span class="nc" id="L549">				discNumber = &quot;1&quot;; // untagged, but most likely '1' - this prevents annoying sorting issues with partially tagged files</span>
+
+<span class="nc" id="L551">			long artistId = MediaLibrary.hash63(artist);</span>
+<span class="nc" id="L552">			long albumId = MediaLibrary.hash63(album);</span>
+
+			// Overwrite albumId with a hash that included the parent dir if set in preferences
+<span class="nc bnc" id="L555" title="All 2 branches missed.">			if (prefs.groupAlbumsByFolder) {</span>
+<span class="nc" id="L556">				albumId = MediaLibrary.hash63(album + &quot;\n&quot; + file.getParent());</span>
+			}
+
+<span class="nc" id="L559">			ContentValues v = new ContentValues();</span>
+<span class="nc" id="L560">			v.put(MediaLibrary.SongColumns._ID,         songId);</span>
+<span class="nc" id="L561">			v.put(MediaLibrary.SongColumns.TITLE,       title);</span>
+<span class="nc" id="L562">			v.put(MediaLibrary.SongColumns.TITLE_SORT,  MediaLibrary.keyFor(title));</span>
+<span class="nc" id="L563">			v.put(MediaLibrary.SongColumns.ALBUM_ID,    albumId);</span>
+<span class="nc" id="L564">			v.put(MediaLibrary.SongColumns.DURATION,    tags.getFirst(MediaMetadataExtractor.DURATION));</span>
+<span class="nc" id="L565">			v.put(MediaLibrary.SongColumns.SONG_NUMBER, tags.getFirst(MediaMetadataExtractor.TRACK_NUMBER));</span>
+<span class="nc" id="L566">			v.put(MediaLibrary.SongColumns.DISC_NUMBER, discNumber);</span>
+<span class="nc" id="L567">			v.put(MediaLibrary.SongColumns.YEAR,        tags.getFirst(MediaMetadataExtractor.YEAR));</span>
+<span class="nc" id="L568">			v.put(MediaLibrary.SongColumns.PLAYCOUNT,   playCount);</span>
+<span class="nc" id="L569">			v.put(MediaLibrary.SongColumns.SKIPCOUNT,   skipCount);</span>
+<span class="nc" id="L570">			v.put(MediaLibrary.SongColumns.PATH,        path);</span>
+<span class="nc" id="L571">			v.put(MediaLibrary.SongColumns.FLAGS,       songFlags);</span>
+<span class="nc" id="L572">			mBackend.insert(MediaLibrary.TABLE_SONGS, null, v);</span>
+
+<span class="nc" id="L574">			v.clear();</span>
+<span class="nc" id="L575">			v.put(MediaLibrary.AlbumColumns._ID,               albumId);</span>
+<span class="nc" id="L576">			v.put(MediaLibrary.AlbumColumns.ALBUM,             album);</span>
+<span class="nc" id="L577">			v.put(MediaLibrary.AlbumColumns.ALBUM_SORT,        MediaLibrary.keyFor(album));</span>
+<span class="nc" id="L578">			v.put(MediaLibrary.AlbumColumns.PRIMARY_ARTIST_ID, artistId);</span>
+<span class="nc" id="L579">			v.put(MediaLibrary.AlbumColumns.PRIMARY_ALBUM_YEAR,tags.getFirst(MediaMetadataExtractor.YEAR));</span>
+<span class="nc" id="L580">			long albumInsert = mBackend.insert(MediaLibrary.TABLE_ALBUMS, null, v);</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">			if (albumInsert == -1) {</span>
+				// Insert failed, so the column probably already existed.
+				// We need to ensure that the album table is up-to-date as it contains
+				// some 'cached' (PRIMARY_*) values.
+				// Failure to do so would mean that we never update the year or may point to an
+				// orphaned artist id.
+<span class="nc" id="L587">				v.clear();</span>
+<span class="nc" id="L588">				v.put(MediaLibrary.AlbumColumns.PRIMARY_ARTIST_ID, artistId);</span>
+<span class="nc" id="L589">				v.put(MediaLibrary.AlbumColumns.PRIMARY_ALBUM_YEAR,tags.getFirst(MediaMetadataExtractor.YEAR));</span>
+<span class="nc" id="L590">				mBackend.update(MediaLibrary.TABLE_ALBUMS, v, MediaLibrary.AlbumColumns._ID+&quot;=?&quot;, new String[]{ Long.toString(albumId) });</span>
+			}
+
+<span class="nc" id="L593">			v.clear();</span>
+<span class="nc" id="L594">			v.put(MediaLibrary.ContributorColumns._ID,               artistId);</span>
+<span class="nc" id="L595">			v.put(MediaLibrary.ContributorColumns._CONTRIBUTOR,      artist);</span>
+<span class="nc" id="L596">			v.put(MediaLibrary.ContributorColumns._CONTRIBUTOR_SORT, MediaLibrary.keyFor(artist));</span>
+<span class="nc" id="L597">			mBackend.insert(MediaLibrary.TABLE_CONTRIBUTORS, null, v);</span>
+
+<span class="nc" id="L599">			v.clear();</span>
+<span class="nc" id="L600">			v.put(MediaLibrary.ContributorSongColumns._CONTRIBUTOR_ID, artistId);</span>
+<span class="nc" id="L601">			v.put(MediaLibrary.ContributorSongColumns.SONG_ID,         songId);</span>
+<span class="nc" id="L602">			v.put(MediaLibrary.ContributorSongColumns.ROLE,            MediaLibrary.ROLE_ARTIST);</span>
+<span class="nc" id="L603">			mBackend.insert(MediaLibrary.TABLE_CONTRIBUTORS_SONGS, null, v);</span>
+
+			// Composers are optional: only add if we found it
+<span class="nc" id="L606">			String composer = tags.getFirst(MediaMetadataExtractor.COMPOSER);</span>
+<span class="nc bnc" id="L607" title="All 2 branches missed.">			if (composer != null) {</span>
+<span class="nc" id="L608">				long composerId = MediaLibrary.hash63(composer);</span>
+<span class="nc" id="L609">				v.clear();</span>
+<span class="nc" id="L610">				v.put(MediaLibrary.ContributorColumns._ID,               composerId);</span>
+<span class="nc" id="L611">				v.put(MediaLibrary.ContributorColumns._CONTRIBUTOR,      composer);</span>
+<span class="nc" id="L612">				v.put(MediaLibrary.ContributorColumns._CONTRIBUTOR_SORT, MediaLibrary.keyFor(composer));</span>
+<span class="nc" id="L613">				mBackend.insert(MediaLibrary.TABLE_CONTRIBUTORS, null, v);</span>
+
+<span class="nc" id="L615">				v.clear();</span>
+<span class="nc" id="L616">				v.put(MediaLibrary.ContributorSongColumns._CONTRIBUTOR_ID, composerId);</span>
+<span class="nc" id="L617">				v.put(MediaLibrary.ContributorSongColumns.SONG_ID,         songId);</span>
+<span class="nc" id="L618">				v.put(MediaLibrary.ContributorSongColumns.ROLE,            MediaLibrary.ROLE_COMPOSER);</span>
+<span class="nc" id="L619">				mBackend.insert(MediaLibrary.TABLE_CONTRIBUTORS_SONGS, null, v);</span>
+			}
+
+			// Same as with composer: albumartist is an optional tag
+<span class="nc" id="L623">			String albumartist = tags.getFirst(MediaMetadataExtractor.ALBUMARTIST);</span>
+<span class="nc bnc" id="L624" title="All 2 branches missed.">			if (albumartist != null) {</span>
+<span class="nc" id="L625">				long albumartistId = MediaLibrary.hash63(albumartist);</span>
+<span class="nc" id="L626">				v.clear();</span>
+<span class="nc" id="L627">				v.put(MediaLibrary.ContributorColumns._ID,               albumartistId);</span>
+<span class="nc" id="L628">				v.put(MediaLibrary.ContributorColumns._CONTRIBUTOR,      albumartist);</span>
+<span class="nc" id="L629">				v.put(MediaLibrary.ContributorColumns._CONTRIBUTOR_SORT, MediaLibrary.keyFor(albumartist));</span>
+<span class="nc" id="L630">				mBackend.insert(MediaLibrary.TABLE_CONTRIBUTORS, null, v);</span>
+
+<span class="nc" id="L632">				v.clear();</span>
+<span class="nc" id="L633">				v.put(MediaLibrary.ContributorSongColumns._CONTRIBUTOR_ID, albumartistId);</span>
+<span class="nc" id="L634">				v.put(MediaLibrary.ContributorSongColumns.SONG_ID,         songId);</span>
+<span class="nc" id="L635">				v.put(MediaLibrary.ContributorSongColumns.ROLE,            MediaLibrary.ROLE_ALBUMARTIST);</span>
+<span class="nc" id="L636">				mBackend.insert(MediaLibrary.TABLE_CONTRIBUTORS_SONGS, null, v);</span>
+			}
+
+			// A song might be in multiple genres
+<span class="nc bnc" id="L640" title="All 2 branches missed.">			if (tags.containsKey(MediaMetadataExtractor.GENRE)) {</span>
+<span class="nc" id="L641">				ArrayList&lt;String&gt; genres = tags.get(MediaMetadataExtractor.GENRE);</span>
+<span class="nc bnc" id="L642" title="All 2 branches missed.">				for (String genre : genres) {</span>
+<span class="nc" id="L643">					long genreId = MediaLibrary.hash63(genre);</span>
+<span class="nc" id="L644">					v.clear();</span>
+<span class="nc" id="L645">					v.put(MediaLibrary.GenreColumns._ID,         genreId);</span>
+<span class="nc" id="L646">					v.put(MediaLibrary.GenreColumns._GENRE,      genre);</span>
+<span class="nc" id="L647">					v.put(MediaLibrary.GenreColumns._GENRE_SORT, MediaLibrary.keyFor(genre));</span>
+<span class="nc" id="L648">					mBackend.insert(MediaLibrary.TABLE_GENRES, null, v);</span>
+
+<span class="nc" id="L650">					v.clear();</span>
+<span class="nc" id="L651">					v.put(MediaLibrary.GenreSongColumns._GENRE_ID, genreId);</span>
+<span class="nc" id="L652">					v.put(MediaLibrary.GenreSongColumns.SONG_ID, songId);</span>
+<span class="nc" id="L653">					mBackend.insert(MediaLibrary.TABLE_GENRES_SONGS, null, v);</span>
+<span class="nc" id="L654">				}</span>
+			}
+		} // end if (mustInsert)
+
+<span class="nc" id="L658">		Log.v(&quot;VanillaMusic&quot;, &quot;MediaScanner: inserted &quot;+path);</span>
+<span class="nc" id="L659">		return hasChanged;</span>
+	}
+
+<span class="fc" id="L662">	private static final Pattern sIgnoredFilenames = Pattern.compile(&quot;^([^\\.]+|.+\\.(jpe?g|gif|png|bmp|webm|txt|pdf|avi|mp4|mkv|zip|tgz|xml|tmp|bin))$&quot;, Pattern.CASE_INSENSITIVE);</span>
+	/**
+	 * Returns true if the file should not be scanned
+	 *
+	 * @param file the file to inspect
+	 * @return boolean
+	 */
+	private boolean isBlacklisted(File file) {
+<span class="nc bnc" id="L670" title="All 2 branches missed.">		if (sIgnoredFilenames.matcher(file.getName()).matches())</span>
+<span class="nc" id="L671">			return true;</span>
+
+<span class="nc" id="L673">		int wlPoints = -1;</span>
+<span class="nc" id="L674">		int blPoints = -1;</span>
+
+<span class="nc bnc" id="L676" title="All 2 branches missed.">		for (String path : MediaLibrary.getPreferences(mContext).mediaFolders) {</span>
+<span class="nc bnc" id="L677" title="All 2 branches missed.">			if (path.length() &gt; wlPoints &amp;&amp;</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">			    file.getPath().toLowerCase().startsWith(path.toLowerCase())) {</span>
+<span class="nc" id="L679">				wlPoints = path.length();</span>
+			}
+<span class="nc" id="L681">		}</span>
+
+<span class="nc bnc" id="L683" title="All 2 branches missed.">		for (String path : MediaLibrary.getPreferences(mContext).blacklistedFolders) {</span>
+<span class="nc bnc" id="L684" title="All 2 branches missed.">			if (path.length() &gt; blPoints &amp;&amp;</span>
+<span class="nc bnc" id="L685" title="All 2 branches missed.">			    file.getPath().toLowerCase().startsWith(path.toLowerCase())) {</span>
+<span class="nc" id="L686">				blPoints = path.length();</span>
+			}
+<span class="nc" id="L688">		}</span>
+
+		// Consider a file to be blacklisted if it is not
+		// present in any whitelisted dir OR if we found
+		// a blacklist entry with a longer prefix.
+<span class="nc bnc" id="L693" title="All 4 branches missed.">		return (wlPoints &lt; 0 || blPoints &gt; wlPoints);</span>
+	}
+
+
+<span class="fc" id="L697">	private static final Pattern sDotfilePattern = Pattern.compile(&quot;^\\..*$&quot;, Pattern.CASE_INSENSITIVE);</span>
+	/**
+	 * Returns true if the file is a hidden dotfile.
+	 *
+	 * @param file to inspect
+	 * @return boolean
+	 */
+	private boolean isDotfile(File file) {
+<span class="nc" id="L705">		return sDotfilePattern.matcher(file.getName()).matches();</span>
+	}
+
+	// MediaScanPlan describes how we are going to perform the media scan
+	class MediaScanPlan {
+		class Step {
+			private static final int MODE_NORMAL   = 1; // this step is always run
+			private static final int MODE_OPTIONAL = 2; // only run if previous step found NO changes
+			private static final int MODE_CHAINED  = 3; // only run if previous step DID find changes
+			int msg;
+			Object arg;
+			int mode;
+<span class="fc" id="L717">			Step (int msg, Object arg, int mode) {</span>
+<span class="fc" id="L718">				this.msg = msg;</span>
+<span class="fc" id="L719">				this.arg = arg;</span>
+<span class="fc" id="L720">				this.mode = mode;</span>
+<span class="fc" id="L721">			}</span>
+		}
+
+<span class="fc" id="L724">		class Statistics {</span>
+			String lastFile;
+<span class="fc" id="L726">			int seen = 0;</span>
+<span class="fc" id="L727">			int changed = 0;</span>
+			void reset() {
+<span class="fc" id="L729">				this.seen = 0;</span>
+<span class="fc" id="L730">				this.changed = 0;</span>
+<span class="fc" id="L731">				this.lastFile = null;</span>
+<span class="fc" id="L732">			}</span>
+		}
+
+		/**
+		 * All steps in this plan
+		 */
+		private ArrayList&lt;Step&gt; mSteps;
+		/**
+		 * Statistics of the currently running step
+		 */
+		private Statistics mStats;
+
+<span class="fc" id="L744">		MediaScanPlan() {</span>
+<span class="fc" id="L745">			mSteps = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L746">			mStats = new Statistics();</span>
+<span class="fc" id="L747">		}</span>
+
+		Statistics getStatistics() {
+<span class="fc" id="L750">			return mStats;</span>
+		}
+
+		/**
+		 * Called by the scanner to signal that a file was handled
+		 *
+		 * @param path the file we scanned
+		 * @param changed true if this triggered a database update
+		 */
+		void registerProgress(String path, boolean changed) {
+<span class="nc" id="L760">			mStats.lastFile = path;</span>
+<span class="nc" id="L761">			mStats.seen++;</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">			if (changed) {</span>
+<span class="nc" id="L763">				mStats.changed++;</span>
+			}
+<span class="nc" id="L765">		}</span>
+
+		/**
+		 * Flushes all progress, turning the object into a fresh state
+		 */
+		void clear() {
+<span class="nc" id="L771">			mSteps.clear();</span>
+<span class="nc" id="L772">			mStats.reset();</span>
+<span class="nc" id="L773">		}</span>
+
+		/**
+		 * Adds the next step in our plan
+		 *
+		 * @param msg the message to add
+		 * @param arg the argument to msg
+		 */
+		MediaScanPlan addNextStep(int msg, Object arg) {
+<span class="fc" id="L782">			mSteps.add(new Step(msg, arg, Step.MODE_NORMAL));</span>
+<span class="fc" id="L783">			return this;</span>
+		}
+
+		/**
+		 * Adds an optional step to our plan. This will NOT
+		 * run if the previous step caused database changes
+		 *
+		 * @param msg the message to add
+		 * @param arg the argument to msg
+		 */
+		MediaScanPlan addOptionalStep(int msg, Object arg) {
+<span class="nc" id="L794">			mSteps.add(new Step(msg, arg, Step.MODE_OPTIONAL));</span>
+<span class="nc" id="L795">			return this;</span>
+		}
+
+		/**
+		 * Adds a chained step to our plan. This will ONLY
+		 * run if the previous step caused database changes
+		 *
+		 * @param msg the message to add
+		 * @param arg the argument to msg
+		 */
+		MediaScanPlan addChainedStep(int msg, Object arg) {
+<span class="nc" id="L806">			mSteps.add(new Step(msg, arg, Step.MODE_CHAINED));</span>
+<span class="nc" id="L807">			return this;</span>
+		}
+
+		/**
+		 * Returns the next step of our scan plan
+		 *
+		 * @return a new step object, null if we hit the end
+		 */
+		Step getNextStep() {
+<span class="fc bfc" id="L816" title="All 2 branches covered.">			Step next = (mSteps.size() != 0 ? mSteps.remove(0) : null);</span>
+<span class="fc bfc" id="L817" title="All 2 branches covered.">			if (next != null) {</span>
+<span class="pc bpc" id="L818" title="3 of 4 branches missed.">				if (next.mode == Step.MODE_OPTIONAL &amp;&amp; mStats.changed != 0) {</span>
+<span class="nc" id="L819">					next = null;</span>
+<span class="nc" id="L820">					mSteps.clear();</span>
+				}
+<span class="pc bpc" id="L822" title="3 of 4 branches missed.">				if (next.mode == Step.MODE_CHAINED &amp;&amp; mStats.changed == 0) {</span>
+<span class="nc" id="L823">					next = null;</span>
+<span class="nc" id="L824">					mSteps.clear();</span>
+				}
+			}
+<span class="fc" id="L827">			mStats.reset();</span>
+<span class="fc" id="L828">			return next;</span>
+		}
+	}
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

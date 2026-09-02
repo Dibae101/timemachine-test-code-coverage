@@ -1,0 +1,440 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlayerFragment.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Fossify-Voice-Recorder</a> &gt; <a href="index.source.html" class="el_package">org.fossify.voicerecorder.fragments</a> &gt; <span class="el_source">PlayerFragment.kt</span></div><h1>PlayerFragment.kt</h1><pre class="source lang-java linenums">package org.fossify.voicerecorder.fragments
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Context.RECEIVER_NOT_EXPORTED
+import android.content.IntentFilter
+import android.graphics.drawable.Drawable
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.util.AttributeSet
+import android.widget.SeekBar
+import androidx.core.net.toUri
+import org.fossify.commons.extensions.applyColorFilter
+import org.fossify.commons.extensions.areSystemAnimationsEnabled
+import org.fossify.commons.extensions.beVisibleIf
+import org.fossify.commons.extensions.copyToClipboard
+import org.fossify.commons.extensions.getColoredDrawableWithColor
+import org.fossify.commons.extensions.getContrastColor
+import org.fossify.commons.extensions.getFormattedDuration
+import org.fossify.commons.extensions.getProperPrimaryColor
+import org.fossify.commons.extensions.getProperTextColor
+import org.fossify.commons.extensions.showErrorToast
+import org.fossify.commons.extensions.updateTextColors
+import org.fossify.commons.extensions.value
+import org.fossify.commons.helpers.isQPlus
+import org.fossify.commons.helpers.isTiramisuPlus
+import org.fossify.voicerecorder.R
+import org.fossify.voicerecorder.activities.SimpleActivity
+import org.fossify.voicerecorder.adapters.RecordingsAdapter
+import org.fossify.voicerecorder.databinding.FragmentPlayerBinding
+import org.fossify.voicerecorder.extensions.config
+import org.fossify.voicerecorder.interfaces.RefreshRecordingsListener
+import org.fossify.voicerecorder.models.Events
+import org.fossify.voicerecorder.models.Recording
+import org.fossify.voicerecorder.receivers.BecomingNoisyReceiver
+import org.greenrobot.eventbus.EventBus
+import org.greenrobot.eventbus.Subscribe
+import org.greenrobot.eventbus.ThreadMode
+import java.util.Stack
+import java.util.Timer
+import java.util.TimerTask
+
+<span class="fc" id="L47">class PlayerFragment(</span>
+    context: Context,
+    attributeSet: AttributeSet
+<span class="fc" id="L50">) : MyViewPagerFragment(context, attributeSet), RefreshRecordingsListener {</span>
+
+    companion object {
+        private const val FAST_FORWARD_SKIP_MS = 10000
+    }
+
+    private var player: MediaPlayer? = null
+<span class="fc" id="L57">    private var progressTimer = Timer()</span>
+<span class="fc" id="L58">    private var playedRecordingIDs = Stack&lt;Int&gt;()</span>
+<span class="fc" id="L59">    private var itemsIgnoringSearch = ArrayList&lt;Recording&gt;()</span>
+<span class="fc" id="L60">    private var lastSearchQuery = &quot;&quot;</span>
+    private var bus: EventBus? = null
+<span class="fc" id="L62">    private var prevSavePath = &quot;&quot;</span>
+<span class="fc" id="L63">    private var prevRecycleBinState = context.config.useRecycleBin</span>
+<span class="fc" id="L64">    private var playOnPreparation = true</span>
+    private lateinit var binding: FragmentPlayerBinding
+
+    private var becomingNoisyReceiver: BecomingNoisyReceiver? = null
+    private var isReceiverRegistered = false
+
+    override fun onFinishInflate() {
+<span class="fc" id="L71">        super.onFinishInflate()</span>
+<span class="fc" id="L72">        binding = FragmentPlayerBinding.bind(this)</span>
+<span class="fc" id="L73">    }</span>
+
+    override fun onResume() {
+<span class="nc" id="L76">        setupColors()</span>
+<span class="nc bnc" id="L77" title="All 8 branches missed.">        if (prevSavePath.isNotEmpty() &amp;&amp; context!!.config.saveRecordingsFolder != prevSavePath || context.config.useRecycleBin != prevRecycleBinState) {</span>
+<span class="nc" id="L78">            loadRecordings()</span>
+        } else {
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            getRecordingsAdapter()?.updateTextColor(context.getProperTextColor())</span>
+        }
+
+<span class="nc" id="L83">        storePrevState()</span>
+<span class="nc" id="L84">    }</span>
+
+    override fun onDestroy() {
+<span class="nc" id="L87">        unregisterNoisyAudioReceiver()</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        player?.stop()</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        player?.release()</span>
+<span class="nc" id="L90">        player = null</span>
+
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        bus?.unregister(this)</span>
+<span class="nc" id="L93">        progressTimer.cancel()</span>
+<span class="nc" id="L94">    }</span>
+
+    override fun onAttachedToWindow() {
+<span class="fc" id="L97">        super.onAttachedToWindow()</span>
+
+<span class="fc" id="L99">        bus = EventBus.getDefault()</span>
+<span class="fc" id="L100">        bus!!.register(this)</span>
+<span class="fc" id="L101">        setupColors()</span>
+<span class="fc" id="L102">        loadRecordings()</span>
+<span class="fc" id="L103">        initMediaPlayer()</span>
+<span class="fc" id="L104">        setupViews()</span>
+<span class="fc" id="L105">        storePrevState()</span>
+<span class="fc" id="L106">    }</span>
+
+    override fun onLoadingStart() {
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">        if (itemsIgnoringSearch.isEmpty()) {</span>
+<span class="fc" id="L110">            binding.loadingIndicator.show()</span>
+        } else {
+<span class="nc" id="L112">            binding.loadingIndicator.hide()</span>
+        }
+<span class="fc" id="L114">    }</span>
+
+    override fun onLoadingEnd(recordings: ArrayList&lt;Recording&gt;) {
+<span class="fc" id="L117">        binding.loadingIndicator.hide()</span>
+<span class="fc" id="L118">        binding.recordingsPlaceholder.beVisibleIf(recordings.isEmpty())</span>
+<span class="fc" id="L119">        itemsIgnoringSearch = recordings</span>
+<span class="fc" id="L120">        setupAdapter(itemsIgnoringSearch)</span>
+<span class="fc" id="L121">    }</span>
+
+    private fun setupViews() {
+<span class="fc" id="L124">        binding.playPauseBtn.setOnClickListener {</span>
+<span class="nc bnc" id="L125" title="All 4 branches missed.">            if (playedRecordingIDs.empty() || binding.playerProgressbar.max == 0) {</span>
+<span class="nc" id="L126">                binding.nextBtn.callOnClick()</span>
+            } else {
+<span class="nc" id="L128">                togglePlayPause()</span>
+            }
+<span class="nc" id="L130">        }</span>
+
+<span class="fc" id="L132">        binding.playerProgressCurrent.setOnClickListener {</span>
+<span class="nc" id="L133">            skip(false)</span>
+<span class="nc" id="L134">        }</span>
+
+<span class="fc" id="L136">        binding.playerProgressMax.setOnClickListener {</span>
+<span class="nc" id="L137">            skip(true)</span>
+<span class="nc" id="L138">        }</span>
+
+<span class="fc" id="L140">        binding.previousBtn.setOnClickListener {</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (playedRecordingIDs.isEmpty()) {</span>
+<span class="nc" id="L142">                return@setOnClickListener</span>
+            }
+
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            val adapter = getRecordingsAdapter() ?: return@setOnClickListener</span>
+<span class="nc" id="L146">            var wantedRecordingID = playedRecordingIDs.pop()</span>
+<span class="nc bnc" id="L147" title="All 6 branches missed.">            if (wantedRecordingID == adapter.currRecordingId &amp;&amp; !playedRecordingIDs.isEmpty()) {</span>
+<span class="nc" id="L148">                wantedRecordingID = playedRecordingIDs.pop()</span>
+            }
+
+<span class="nc bnc" id="L151" title="All 4 branches missed.">            val prevRecordingIndex = adapter.recordings.indexOfFirst { it.id == wantedRecordingID }</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            val prevRecording = adapter.recordings</span>
+<span class="nc" id="L153">                .getOrNull(prevRecordingIndex) ?: return@setOnClickListener</span>
+<span class="nc" id="L154">            playRecording(prevRecording, true)</span>
+<span class="nc" id="L155">        }</span>
+
+<span class="fc" id="L157">        binding.playerTitle.setOnLongClickListener {</span>
+<span class="nc bnc" id="L158" title="All 4 branches missed.">            if (binding.playerTitle.value.isNotEmpty()) {</span>
+<span class="nc" id="L159">                context.copyToClipboard(binding.playerTitle.value)</span>
+            }
+<span class="nc" id="L161">            true</span>
+        }
+
+<span class="fc" id="L164">        binding.nextBtn.setOnClickListener {</span>
+<span class="nc" id="L165">            val adapter = getRecordingsAdapter()</span>
+<span class="nc bnc" id="L166" title="All 4 branches missed.">            if (adapter == null || adapter.recordings.isEmpty()) {</span>
+<span class="nc" id="L167">                return@setOnClickListener</span>
+            }
+
+<span class="nc" id="L170">            val oldRecordingIndex =</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                adapter.recordings.indexOfFirst { it.id == adapter.currRecordingId }</span>
+<span class="nc" id="L172">            val newRecordingIndex = (oldRecordingIndex + 1) % adapter.recordings.size</span>
+<span class="nc" id="L173">            val newRecording =</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                adapter.recordings.getOrNull(newRecordingIndex) ?: return@setOnClickListener</span>
+<span class="nc" id="L175">            playRecording(newRecording, true)</span>
+<span class="nc" id="L176">            playedRecordingIDs.push(newRecording.id)</span>
+<span class="nc" id="L177">        }</span>
+<span class="fc" id="L178">    }</span>
+
+<span class="nc" id="L180">    override fun refreshRecordings() = loadRecordings()</span>
+
+    private fun setupAdapter(recordings: ArrayList&lt;Recording&gt;) {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">        binding.recordingsFastscroller.beVisibleIf(recordings.isNotEmpty())</span>
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">        if (recordings.isEmpty()) {</span>
+<span class="pc bpc" id="L185" title="2 of 4 branches missed.">            val stringId = if (lastSearchQuery.isEmpty()) {</span>
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">                if (isQPlus()) {</span>
+<span class="fc" id="L187">                    R.string.no_recordings_found</span>
+                } else {
+<span class="nc" id="L189">                    R.string.no_recordings_in_folder_found</span>
+                }
+            } else {
+<span class="nc" id="L192">                org.fossify.commons.R.string.no_items_found</span>
+            }
+
+<span class="fc" id="L195">            binding.recordingsPlaceholder.text = context.getString(stringId)</span>
+<span class="fc" id="L196">            resetProgress(null)</span>
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">            player?.stop()</span>
+        }
+
+<span class="fc" id="L200">        val adapter = getRecordingsAdapter()</span>
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">        if (adapter == null) {</span>
+<span class="fc" id="L202">            RecordingsAdapter(context as SimpleActivity, recordings, this, binding.recordingsList) {</span>
+<span class="nc" id="L203">                playRecording(it as Recording, true)</span>
+<span class="nc bnc" id="L204" title="All 6 branches missed.">                if (playedRecordingIDs.isEmpty() || playedRecordingIDs.peek() != it.id) {</span>
+<span class="nc" id="L205">                    playedRecordingIDs.push(it.id)</span>
+                }
+<span class="pc" id="L207">            }.apply {</span>
+<span class="fc" id="L208">                binding.recordingsList.adapter = this</span>
+<span class="fc" id="L209">            }</span>
+
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">            if (context.areSystemAnimationsEnabled) {</span>
+<span class="nc" id="L212">                binding.recordingsList.scheduleLayoutAnimation()</span>
+            }
+        } else {
+<span class="nc" id="L215">            adapter.updateItems(recordings)</span>
+        }
+<span class="fc" id="L217">    }</span>
+
+    private fun initMediaPlayer() {
+<span class="fc" id="L220">        player = MediaPlayer().apply {</span>
+<span class="fc" id="L221">            setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK)</span>
+<span class="fc" id="L222">            setAudioAttributes(</span>
+<span class="fc" id="L223">                AudioAttributes.Builder()</span>
+<span class="fc" id="L224">                    .setUsage(AudioAttributes.USAGE_MEDIA)</span>
+<span class="fc" id="L225">                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)</span>
+<span class="fc" id="L226">                    .build()</span>
+            )
+
+<span class="fc" id="L229">            setOnCompletionListener {</span>
+<span class="fc" id="L230">                progressTimer.cancel()</span>
+<span class="fc" id="L231">                unregisterNoisyAudioReceiver()</span>
+<span class="fc" id="L232">                binding.playerProgressbar.progress = binding.playerProgressbar.max</span>
+<span class="fc" id="L233">                binding.playerProgressCurrent.text = binding.playerProgressMax.text</span>
+<span class="fc" id="L234">                binding.playPauseBtn.setImageDrawable(getToggleButtonIcon(false))</span>
+<span class="fc" id="L235">            }</span>
+
+<span class="fc" id="L237">            setOnPreparedListener {</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                if (playOnPreparation) {</span>
+<span class="nc" id="L239">                    resumePlayback()</span>
+                }
+
+<span class="nc" id="L242">                playOnPreparation = true</span>
+<span class="nc" id="L243">            }</span>
+<span class="fc" id="L244">        }</span>
+<span class="fc" id="L245">    }</span>
+
+    override fun playRecording(recording: Recording, playOnPrepared: Boolean) {
+<span class="nc" id="L248">        resetProgress(recording)</span>
+<span class="nc" id="L249">        (binding.recordingsList.adapter as RecordingsAdapter).updateCurrentRecording(recording.id)</span>
+<span class="nc" id="L250">        playOnPreparation = playOnPrepared</span>
+
+<span class="nc" id="L252">        player!!.apply {</span>
+<span class="nc" id="L253">            reset()</span>
+
+<span class="nc" id="L255">            try {</span>
+<span class="nc" id="L256">                setDataSource(context, recording.path.toUri())</span>
+<span class="nc" id="L257">            } catch (e: Exception) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                context?.showErrorToast(e)</span>
+<span class="nc" id="L259">                return</span>
+            }
+
+<span class="nc" id="L262">            try {</span>
+<span class="nc" id="L263">                prepareAsync()</span>
+<span class="nc" id="L264">            } catch (e: Exception) {</span>
+<span class="nc" id="L265">                context.showErrorToast(e)</span>
+<span class="nc" id="L266">                return</span>
+            }
+<span class="nc" id="L268">        }</span>
+
+<span class="nc" id="L270">        binding.playPauseBtn.setImageDrawable(getToggleButtonIcon(playOnPreparation))</span>
+<span class="nc" id="L271">        binding.playerProgressbar.setOnSeekBarChangeListener(object :</span>
+            SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+<span class="nc bnc" id="L274" title="All 4 branches missed.">                if (fromUser &amp;&amp; !playedRecordingIDs.isEmpty()) {</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                    player?.seekTo(progress * 1000)</span>
+<span class="nc" id="L276">                    binding.playerProgressCurrent.text = progress.getFormattedDuration()</span>
+<span class="nc" id="L277">                    resumePlayback()</span>
+                }
+<span class="nc" id="L279">            }</span>
+
+<span class="nc" id="L281">            override fun onStartTrackingTouch(seekBar: SeekBar) {}</span>
+
+<span class="nc" id="L283">            override fun onStopTrackingTouch(seekBar: SeekBar) {}</span>
+        })
+<span class="nc" id="L285">    }</span>
+
+    @SuppressLint(&quot;DiscouragedApi&quot;)
+    private fun setupProgressTimer() {
+<span class="nc" id="L289">        progressTimer.cancel()</span>
+<span class="nc" id="L290">        progressTimer = Timer()</span>
+<span class="nc" id="L291">        progressTimer.scheduleAtFixedRate(getProgressUpdateTask(), 1000, 1000)</span>
+<span class="nc" id="L292">    }</span>
+
+<span class="nc" id="L294">    private fun getProgressUpdateTask() = object : TimerTask() {</span>
+        override fun run() {
+<span class="nc" id="L296">            Handler(Looper.getMainLooper()).post {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">                if (player != null) {</span>
+<span class="nc" id="L298">                    val progress = Math.round(player!!.currentPosition / 1000.toDouble()).toInt()</span>
+<span class="nc" id="L299">                    updateCurrentProgress(progress)</span>
+<span class="nc" id="L300">                    binding.playerProgressbar.progress = progress</span>
+                }
+<span class="nc" id="L302">            }</span>
+<span class="nc" id="L303">        }</span>
+<span class="nc" id="L304">    }</span>
+
+    private fun updateCurrentProgress(seconds: Int) {
+<span class="fc" id="L307">        binding.playerProgressCurrent.text = seconds.getFormattedDuration()</span>
+<span class="fc" id="L308">    }</span>
+
+    private fun resetProgress(recording: Recording?) {
+<span class="fc" id="L311">        updateCurrentProgress(0)</span>
+<span class="fc" id="L312">        binding.playerProgressbar.progress = 0</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">        binding.playerProgressbar.max = recording?.duration ?: 0</span>
+<span class="pc bpc" id="L314" title="2 of 4 branches missed.">        binding.playerTitle.text = recording?.title ?: &quot;&quot;</span>
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">        binding.playerProgressMax.text = (recording?.duration ?: 0).getFormattedDuration()</span>
+<span class="fc" id="L316">    }</span>
+
+    fun onSearchTextChanged(text: String) {
+<span class="nc" id="L319">        lastSearchQuery = text</span>
+<span class="nc" id="L320">        val filtered = itemsIgnoringSearch</span>
+<span class="nc" id="L321">            .filter { it.title.contains(text, true) }</span>
+<span class="nc" id="L322">            .toMutableList() as ArrayList&lt;Recording&gt;</span>
+<span class="nc" id="L323">        setupAdapter(filtered)</span>
+<span class="nc" id="L324">    }</span>
+
+    private fun togglePlayPause() {
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (getIsPlaying()) {</span>
+<span class="nc" id="L328">            pausePlayback()</span>
+        } else {
+<span class="nc" id="L330">            resumePlayback()</span>
+        }
+<span class="nc" id="L332">    }</span>
+
+    private fun pausePlayback() {
+<span class="nc" id="L335">        unregisterNoisyAudioReceiver()</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        player?.pause()</span>
+<span class="nc" id="L337">        binding.playPauseBtn.setImageDrawable(getToggleButtonIcon(false))</span>
+<span class="nc" id="L338">        progressTimer.cancel()</span>
+<span class="nc" id="L339">    }</span>
+
+    private fun resumePlayback() {
+<span class="nc" id="L342">        registerNoisyAudioReceiver()</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">        player?.start()</span>
+<span class="nc" id="L344">        binding.playPauseBtn.setImageDrawable(getToggleButtonIcon(true))</span>
+<span class="nc" id="L345">        setupProgressTimer()</span>
+<span class="nc" id="L346">    }</span>
+
+    private fun getToggleButtonIcon(isPlaying: Boolean): Drawable {
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        val drawable = if (isPlaying) {</span>
+<span class="nc" id="L350">            org.fossify.commons.R.drawable.ic_pause_vector</span>
+        } else {
+<span class="fc" id="L352">            org.fossify.commons.R.drawable.ic_play_vector</span>
+        }
+
+<span class="fc" id="L355">        return resources.getColoredDrawableWithColor(</span>
+<span class="fc" id="L356">            drawableId = drawable,</span>
+<span class="fc" id="L357">            color = context.getProperPrimaryColor().getContrastColor()</span>
+        )
+    }
+
+    private fun skip(forward: Boolean) {
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (playedRecordingIDs.empty()) {</span>
+<span class="nc" id="L363">            return</span>
+        }
+
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        val curr = player?.currentPosition ?: return</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        var newProgress = if (forward) curr + FAST_FORWARD_SKIP_MS else curr - FAST_FORWARD_SKIP_MS</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (newProgress &gt; player!!.duration) {</span>
+<span class="nc" id="L369">            newProgress = player!!.duration</span>
+        }
+
+<span class="nc" id="L372">        player!!.seekTo(newProgress)</span>
+<span class="nc" id="L373">        resumePlayback()</span>
+<span class="nc" id="L374">    }</span>
+
+<span class="pc bpc" id="L376" title="3 of 4 branches missed.">    private fun getIsPlaying() = player?.isPlaying == true</span>
+
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">    private fun getRecordingsAdapter() = binding.recordingsList.adapter as? RecordingsAdapter</span>
+
+    private fun storePrevState() {
+<span class="fc" id="L381">        prevSavePath = context!!.config.saveRecordingsFolder</span>
+<span class="fc" id="L382">        prevRecycleBinState = context.config.useRecycleBin</span>
+<span class="fc" id="L383">    }</span>
+
+    private fun setupColors() {
+<span class="fc" id="L386">        val properPrimaryColor = context.getProperPrimaryColor()</span>
+<span class="fc" id="L387">        binding.recordingsFastscroller.updateColors(properPrimaryColor)</span>
+<span class="fc" id="L388">        context.updateTextColors(binding.playerHolder)</span>
+
+<span class="fc" id="L390">        val textColor = context.getProperTextColor()</span>
+<span class="fc" id="L391">        arrayListOf(binding.previousBtn, binding.nextBtn).forEach {</span>
+<span class="fc" id="L392">            it.applyColorFilter(textColor)</span>
+<span class="fc" id="L393">        }</span>
+
+<span class="fc" id="L395">        binding.playPauseBtn.background.applyColorFilter(properPrimaryColor)</span>
+<span class="fc" id="L396">        binding.playPauseBtn.setImageDrawable(getToggleButtonIcon(getIsPlaying()))</span>
+
+<span class="fc" id="L398">        binding.loadingIndicator.setIndicatorColor(properPrimaryColor)</span>
+<span class="fc" id="L399">    }</span>
+
+<span class="nc bnc" id="L401" title="All 2 branches missed.">    fun finishActMode() = getRecordingsAdapter()?.finishActMode()</span>
+
+    @Suppress(&quot;unused&quot;)
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    fun recordingCompleted(@Suppress(&quot;UNUSED_PARAMETER&quot;) event: Events.RecordingCompleted) {
+<span class="nc" id="L406">        refreshRecordings()</span>
+<span class="nc" id="L407">    }</span>
+
+    @Suppress(&quot;unused&quot;)
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    fun recordingMovedToRecycleBin(@Suppress(&quot;UNUSED_PARAMETER&quot;) event: Events.RecordingTrashUpdated) {
+<span class="nc" id="L412">        refreshRecordings()</span>
+<span class="nc" id="L413">    }</span>
+
+    private fun registerNoisyAudioReceiver() {
+<span class="nc bnc" id="L416" title="All 2 branches missed.">        if (isReceiverRegistered) return</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        if (becomingNoisyReceiver == null) {</span>
+<span class="nc" id="L418">            becomingNoisyReceiver = BecomingNoisyReceiver(onBecomingNoisy = ::pausePlayback)</span>
+        }
+
+<span class="nc" id="L421">        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">        if (isTiramisuPlus()) {</span>
+<span class="nc" id="L423">            context.registerReceiver(becomingNoisyReceiver, filter, RECEIVER_NOT_EXPORTED)</span>
+        } else {
+<span class="nc" id="L425">            context.registerReceiver(becomingNoisyReceiver, filter)</span>
+        }
+
+<span class="nc" id="L428">        isReceiverRegistered = true</span>
+<span class="nc" id="L429">    }</span>
+
+    private fun unregisterNoisyAudioReceiver() {
+<span class="pc bpc" id="L432" title="3 of 4 branches missed.">        if (!isReceiverRegistered || becomingNoisyReceiver == null) return</span>
+<span class="nc" id="L433">        try {</span>
+<span class="nc" id="L434">            isReceiverRegistered = false</span>
+<span class="nc" id="L435">            context.unregisterReceiver(becomingNoisyReceiver)</span>
+<span class="nc" id="L436">        } catch (ignored: IllegalArgumentException) {</span>
+        }
+<span class="nc" id="L438">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

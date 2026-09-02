@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FullTextParser.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.model</a> &gt; <span class="el_source">FullTextParser.kt</span></div><h1>FullTextParser.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.model
+
+import android.util.Log
+import com.ibm.icu.text.CharsetDetector
+import com.ibm.icu.text.CharsetMatch
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.blob.blobFullFile
+import com.nononsenseapps.feeder.blob.blobFullOutputStream
+import com.nononsenseapps.feeder.db.room.FeedItemForFetching
+import com.nononsenseapps.feeder.db.room.estimateWordCount
+import com.nononsenseapps.feeder.ui.text.HtmlToPlainTextConverter
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.FilePathProvider
+import com.nononsenseapps.feeder.util.flatten
+import com.nononsenseapps.feeder.util.left
+import com.nononsenseapps.feeder.util.logDebug
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.withContext
+import net.dankito.readability4j.extended.Readability4JExtended
+import okhttp3.OkHttpClient
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.net.URL
+import java.nio.charset.Charset
+
+<span class="nc" id="L28">class FullTextParser(</span>
+<span class="nc" id="L29">    override val di: DI,</span>
+) : DIAware {
+<span class="nc" id="L31">    private val repository: Repository by instance()</span>
+<span class="nc" id="L32">    private val okHttpClient: OkHttpClient by instance()</span>
+<span class="nc" id="L33">    private val filePathProvider: FilePathProvider by instance()</span>
+
+<span class="nc" id="L35">    suspend fun parseFullArticlesForMissing(): Boolean {</span>
+<span class="nc" id="L36">        logDebug(LOG_TAG, &quot;Parsing full texts for missing&quot;)</span>
+<span class="nc" id="L37">        val itemsToSync: List&lt;FeedItemForFetching&gt; =</span>
+<span class="nc bnc" id="L38" title="All 2 branches missed.">            repository</span>
+<span class="nc" id="L39">                .getFeedsItemsWithDefaultFullTextNeedingDownload()</span>
+<span class="nc" id="L40">                .firstOrNull()</span>
+<span class="nc" id="L41">                ?: emptyList()</span>
+
+<span class="nc" id="L43">        return itemsToSync</span>
+<span class="nc" id="L44">            .map { feedItem -&gt;</span>
+<span class="nc" id="L45">                parseFullArticleIfMissing(</span>
+<span class="nc" id="L46">                    feedItem = feedItem,</span>
+<span class="nc" id="L47">                ).isRight()</span>
+<span class="nc" id="L48">            }.fold(true) { acc, value -&gt;</span>
+<span class="nc bnc" id="L49" title="All 4 branches missed.">                acc &amp;&amp; value</span>
+            }
+    }
+
+<span class="nc" id="L53">    suspend fun parseFullArticleIfMissing(feedItem: FeedItemForFetching): Either&lt;FeedParserError, Unit&gt; {</span>
+<span class="nc" id="L54">        val fullArticleFile =</span>
+<span class="nc" id="L55">            blobFullFile(itemId = feedItem.id, filesDir = filePathProvider.fullArticleDir)</span>
+
+<span class="nc" id="L57">        return try {</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">            if (fullArticleFile.isFile) {</span>
+<span class="nc" id="L59">                Either.Right(Unit)</span>
+            } else {
+<span class="nc" id="L61">                parseFullArticle(feedItem = feedItem)</span>
+            }
+<span class="nc" id="L63">        } catch (t: Throwable) {</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">            FullTextDecodingFailure(feedItem.link ?: &quot;&quot;, t).left()</span>
+        } finally {
+<span class="nc" id="L66">            repository.markAsFullTextDownloaded(feedItem.id)</span>
+<span class="nc" id="L67">        }.onLeft {</span>
+<span class="nc" id="L68">            Log.w(LOG_TAG, &quot;Failed to parse missing full article: $it&quot;, it.throwable)</span>
+<span class="nc" id="L69">        }</span>
+    }
+
+    private suspend fun parseFullArticle(feedItem: FeedItemForFetching): Either&lt;FeedParserError, Unit&gt; =
+<span class="nc" id="L73">        withContext(Dispatchers.Default) {</span>
+<span class="nc" id="L74">            logDebug(LOG_TAG, &quot;Fetching full page ${feedItem.link}, ${feedItem.id}&quot;)</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            val url = feedItem.link ?: return@withContext Either.Left(NoUrl())</span>
+
+<span class="nc" id="L77">            okHttpClient</span>
+<span class="nc bnc" id="L78" title="All 3 branches missed.">                .curlAndOnResponse(URL(url)) { response -&gt;</span>
+<span class="nc" id="L79">                    Either.catching(</span>
+                        onCatch = { t -&gt;
+<span class="nc" id="L81">                            FullTextDecodingFailure(url, t)</span>
+                        },
+                    ) {
+<span class="nc" id="L84">                        val body = response.body</span>
+
+<span class="nc" id="L86">                        val contentLength = body.contentLength()</span>
+<span class="nc" id="L87">                        logDebug(LOG_TAG, &quot;contentLength: $contentLength&quot;)</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                        if (contentLength &gt; MAX_FULL_TEXT_BYTES) {</span>
+<span class="nc" id="L89">                            Log.i(LOG_TAG, &quot;contentLength exceeds MAX LIMIT ($MAX_FULL_TEXT_BYTES) bytes&quot;)</span>
+<span class="nc" id="L90">                            return@catching FullTextTooLarge(url = url, maxBytes = MAX_FULL_TEXT_BYTES).left()</span>
+                        }
+
+<span class="nc" id="L93">                        val maxBytes = MAX_FULL_TEXT_BYTES.toLong()</span>
+<span class="nc" id="L94">                        val buffer = okio.Buffer()</span>
+
+<span class="nc" id="L96">                        body.use {</span>
+<span class="nc" id="L97">                            val source = body.source()</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">                            while (buffer.size &lt;= maxBytes) {</span>
+<span class="nc" id="L99">                                val read = source.read(buffer, 8_192)</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">                                if (read == -1L) break</span>
+                            }
+<span class="nc" id="L102">                        }</span>
+
+<span class="nc" id="L104">                        logDebug(LOG_TAG, &quot;buffer size: ${buffer.size}&quot;)</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                        if (buffer.size &gt; maxBytes) {</span>
+<span class="nc" id="L106">                            Log.i(LOG_TAG, &quot;buffer exceeds MAX LIMIT ($MAX_FULL_TEXT_BYTES) bytes&quot;)</span>
+<span class="nc" id="L107">                            return@catching FullTextTooLarge(url = url, maxBytes = MAX_FULL_TEXT_BYTES).left()</span>
+                        }
+
+<span class="nc" id="L110">                        val bytes = buffer.readByteArray()</span>
+
+<span class="nc" id="L112">                        val contentType =</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                            body.contentType()</span>
+<span class="nc" id="L114">                                ?: return@catching UnsupportedContentType(</span>
+<span class="nc" id="L115">                                    url = url,</span>
+<span class="nc" id="L116">                                    mimeType = &quot;null&quot;,</span>
+<span class="nc" id="L117">                                ).left()</span>
+
+<span class="nc bnc" id="L119" title="All 4 branches missed.">                        if (contentType.type != &quot;text&quot; || contentType.subtype != &quot;html&quot;) {</span>
+<span class="nc" id="L120">                            return@catching UnsupportedContentType(</span>
+<span class="nc" id="L121">                                url = url,</span>
+<span class="nc" id="L122">                                mimeType = contentType.toString(),</span>
+<span class="nc" id="L123">                            ).left()</span>
+                        }
+
+<span class="nc" id="L126">                        var charset: Charset? = contentType.charset()</span>
+
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                        if (charset == null) {</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">                            charset = findMetaCharset(bytes)?.let { toJavaCharset(it) }</span>
+<span class="nc" id="L130">                            logDebug(LOG_TAG, &quot;No charset in content type, meta charset: $charset&quot;)</span>
+                        }
+
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                        if (charset == null) {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                            charset = detectCharset(bytes)?.let { toJavaCharset(it) }</span>
+<span class="nc" id="L135">                            logDebug(LOG_TAG, &quot;No charset in content type, guessing charset: $charset&quot;)</span>
+                        }
+
+<span class="nc" id="L138">                        logDebug(LOG_TAG, &quot;Full article charset: $charset&quot;)</span>
+
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                        val html = String(bytes, charset ?: java.nio.charset.StandardCharsets.UTF_8)</span>
+<span class="nc" id="L141">                        logDebug(LOG_TAG, &quot;Parsing article ${feedItem.link}&quot;)</span>
+<span class="nc" id="L142">                        val article = parseFullArticle(url, html)</span>
+
+<span class="nc" id="L144">                        logDebug(LOG_TAG, &quot;Writing article ${feedItem.link}&quot;)</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                        withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                            article?.let { articleContent -&gt;</span>
+<span class="nc" id="L147">                                filePathProvider.fullArticleDir.mkdirs()</span>
+<span class="nc" id="L148">                                blobFullOutputStream(feedItem.id, filePathProvider.fullArticleDir)</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">                                    .bufferedWriter()</span>
+<span class="nc" id="L150">                                    .use { writer -&gt;</span>
+<span class="nc" id="L151">                                        writer.write(articleContent)</span>
+<span class="nc" id="L152">                                    }</span>
+
+                                // Update word count on item
+<span class="nc" id="L155">                                val converter = HtmlToPlainTextConverter()</span>
+<span class="nc" id="L156">                                val plainText = converter.convert(articleContent)</span>
+<span class="nc" id="L157">                                val wordCount = estimateWordCount(plainText)</span>
+
+<span class="nc" id="L159">                                repository.updateWordCountFull(feedItem.id, wordCount)</span>
+<span class="nc" id="L160">                            }</span>
+                        }
+
+<span class="nc" id="L163">                        Either.Right(Unit)</span>
+<span class="nc" id="L164">                    }</span>
+<span class="nc" id="L165">                }.flatten()</span>
+<span class="nc" id="L166">        }</span>
+
+    companion object {
+        internal const val LOG_TAG = &quot;FEEDER_FULLTEXT&quot;
+
+        // giving a bit of leeway to allow for inline images and junk like inline CSS and javscript
+        // but this is way higher than is possible to render if actual HTML.
+        // It will be truncated by HtmlLinearizer in that case.
+        const val MAX_FULL_TEXT_BYTES = 3 * 1024 * 1024
+    }
+}
+
+fun parseFullArticle(
+    uri: String,
+    html: String,
+): String? {
+<span class="nc" id="L182">    val article = Readability4JExtended(uri, html).parse()</span>
+
+<span class="nc" id="L184">    val dir = article.dir</span>
+
+    // Ensure dir is set on the outermost element
+<span class="nc bnc" id="L187" title="All 2 branches missed.">    return article.contentWithUtf8Encoding?.let { fullHtml -&gt;</span>
+<span class="nc bnc" id="L188" title="All 8 branches missed.">        if (dir?.isNotBlank() == true) {</span>
+<span class="nc" id="L189">            fullHtml.replaceFirst(&quot;&lt;html&quot;.toRegex(), &quot;&lt;html dir=\&quot;$dir\&quot;&quot;)</span>
+        } else {
+<span class="nc" id="L191">            fullHtml</span>
+<span class="nc" id="L192">        }</span>
+    }
+}
+
+/**
+ * For sites which don't use UTF-8 like http://www.muhasebetr.com/rss/
+ */
+fun findMetaCharset(html: ByteArray): String? {
+<span class="nc" id="L200">    var state = HtmlParserState.INIT</span>
+<span class="nc" id="L201">    var tagName = StringBuilder()</span>
+<span class="nc" id="L202">    var attrName = StringBuilder()</span>
+<span class="nc" id="L203">    val attrValue = StringBuilder()</span>
+
+<span class="nc" id="L205">    html.forEach { b -&gt;</span>
+<span class="nc" id="L206">        val char = b.toInt().toChar()</span>
+<span class="nc" id="L207">        state = nextHtmlParseState(char, state)</span>
+
+<span class="nc bnc" id="L209" title="All 6 branches missed.">        when (state) {</span>
+<span class="nc" id="L210">            HtmlParserState.TAG_NAME -&gt; tagName.append(char)</span>
+<span class="nc" id="L211">            HtmlParserState.TAG_ATTR_NAME -&gt; attrName.append(char)</span>
+<span class="nc" id="L212">            HtmlParserState.TAG_ATTR_VALUE -&gt; attrValue.append(char)</span>
+            HtmlParserState.TAG_START -&gt; {
+<span class="nc" id="L214">                tagName.clear()</span>
+<span class="nc" id="L215">                attrName.clear()</span>
+<span class="nc" id="L216">                attrValue.clear()</span>
+            }
+
+            HtmlParserState.TAG_NAME_POST -&gt; {
+                // This is the state after a attribute has been parsed (but also before)
+
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                if (tagName.toString().equals(&quot;meta&quot;, ignoreCase = true)) {</span>
+<span class="nc" id="L223">                    val name = attrName.toString()</span>
+<span class="nc" id="L224">                    val value = attrValue.toString()</span>
+<span class="nc" id="L225">                    when {</span>
+<span class="nc bnc" id="L226" title="All 4 branches missed.">                        name.equals(&quot;content&quot;, ignoreCase = true) &amp;&amp; value.contains(&quot;charset=&quot;) -&gt; {</span>
+<span class="nc" id="L227">                            return attrValue.toString().substringAfter(&quot;charset=&quot;).substringBefore(';')</span>
+                        }
+
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                        name.equals(&quot;charset&quot;, ignoreCase = true) -&gt; {</span>
+<span class="nc" id="L231">                            return value</span>
+                        }
+                    }
+                }
+
+<span class="nc" id="L236">                attrName.clear()</span>
+<span class="nc" id="L237">                attrValue.clear()</span>
+            }
+
+            else -&gt; {
+                // Nothing to do
+            }
+        }
+<span class="nc" id="L244">    }</span>
+<span class="nc" id="L245">    return null</span>
+}
+
+private fun nextHtmlParseState(
+    char: Char,
+    currentState: HtmlParserState,
+): HtmlParserState =
+<span class="nc bnc" id="L252" title="All 8 branches missed.">    when (currentState) {</span>
+        HtmlParserState.INIT -&gt;
+<span class="nc" id="L254">            when (char) {</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                '&lt;' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L256">                else -&gt; HtmlParserState.INIT</span>
+            }
+
+        HtmlParserState.TAG_START -&gt;
+<span class="nc bnc" id="L260" title="All 4 branches missed.">            when (char) {</span>
+<span class="nc" id="L261">                ' ' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L262">                '/' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L263">                '&gt;' -&gt; HtmlParserState.INIT</span>
+<span class="nc" id="L264">                else -&gt; HtmlParserState.TAG_NAME</span>
+            }
+
+        HtmlParserState.TAG_NAME -&gt;
+<span class="nc bnc" id="L268" title="All 4 branches missed.">            when (char) {</span>
+<span class="nc" id="L269">                ' ' -&gt; HtmlParserState.TAG_NAME_POST</span>
+<span class="nc" id="L270">                '/' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L271">                '&gt;' -&gt; HtmlParserState.INIT</span>
+<span class="nc" id="L272">                else -&gt; HtmlParserState.TAG_NAME</span>
+            }
+
+        HtmlParserState.TAG_NAME_POST -&gt;
+<span class="nc bnc" id="L276" title="All 4 branches missed.">            when (char) {</span>
+<span class="nc" id="L277">                ' ' -&gt; HtmlParserState.TAG_NAME_POST</span>
+<span class="nc" id="L278">                '/' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L279">                '&gt;' -&gt; HtmlParserState.INIT</span>
+<span class="nc" id="L280">                else -&gt; HtmlParserState.TAG_ATTR_NAME</span>
+            }
+
+        HtmlParserState.TAG_ATTR_NAME -&gt;
+<span class="nc bnc" id="L284" title="All 5 branches missed.">            when (char) {</span>
+<span class="nc" id="L285">                ' ' -&gt; HtmlParserState.TAG_NAME_POST</span>
+<span class="nc" id="L286">                '/' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L287">                '&gt;' -&gt; HtmlParserState.INIT</span>
+<span class="nc" id="L288">                '=' -&gt; HtmlParserState.TAG_ATTR_EQUALS</span>
+<span class="nc" id="L289">                else -&gt; HtmlParserState.TAG_ATTR_NAME</span>
+            }
+
+        HtmlParserState.TAG_ATTR_EQUALS -&gt;
+<span class="nc bnc" id="L293" title="All 5 branches missed.">            when (char) {</span>
+<span class="nc" id="L294">                ' ' -&gt; HtmlParserState.TAG_ATTR_EQUALS</span>
+<span class="nc" id="L295">                '/' -&gt; HtmlParserState.TAG_START</span>
+<span class="nc" id="L296">                '&gt;' -&gt; HtmlParserState.INIT</span>
+<span class="nc" id="L297">                '&quot;' -&gt; HtmlParserState.TAG_ATTR_QUOTE_START</span>
+<span class="nc" id="L298">                else -&gt; HtmlParserState.TAG_START</span>
+            }
+
+        HtmlParserState.TAG_ATTR_QUOTE_START -&gt;
+<span class="nc" id="L302">            when (char) {</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                '&quot;' -&gt; HtmlParserState.TAG_NAME_POST</span>
+<span class="nc" id="L304">                else -&gt; HtmlParserState.TAG_ATTR_VALUE</span>
+            }
+
+        HtmlParserState.TAG_ATTR_VALUE -&gt;
+<span class="nc" id="L308">            when (char) {</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                '&quot;' -&gt; HtmlParserState.TAG_NAME_POST</span>
+<span class="nc" id="L310">                else -&gt; HtmlParserState.TAG_ATTR_VALUE</span>
+            }
+<span class="nc" id="L312">    }</span>
+
+enum class HtmlParserState {
+<span class="nc" id="L315">    INIT,</span>
+<span class="nc" id="L316">    TAG_START,</span>
+<span class="nc" id="L317">    TAG_NAME,</span>
+<span class="nc" id="L318">    TAG_NAME_POST,</span>
+<span class="nc" id="L319">    TAG_ATTR_NAME,</span>
+<span class="nc" id="L320">    TAG_ATTR_EQUALS,</span>
+<span class="nc" id="L321">    TAG_ATTR_QUOTE_START,</span>
+<span class="nc" id="L322">    TAG_ATTR_VALUE,</span>
+}
+
+/**
+ * For sites which don't use UTF-8 like http://www.muhasebetr.com/rss/
+ */
+fun detectCharset(html: ByteArray): String? {
+<span class="nc" id="L329">    val detector = CharsetDetector()</span>
+<span class="nc" id="L330">    detector.setText(html)</span>
+<span class="nc" id="L331">    val matches: Array&lt;CharsetMatch&gt; = detector.detectAll()</span>
+
+<span class="nc bnc" id="L333" title="All 4 branches missed.">    return matches.firstOrNull { it.confidence &gt; 50 }?.name</span>
+}
+
+private fun toJavaCharset(icuName: String): Charset {
+    // Handle ICU's charset name variations
+<span class="nc bnc" id="L338" title="All 4 branches missed.">    return when (icuName.uppercase()) {</span>
+<span class="nc" id="L339">        &quot;GB2312&quot; -&gt; Charset.forName(&quot;GBK&quot;) // Android maps GB2312 to GBK</span>
+<span class="nc" id="L340">        &quot;BIG5-HKSCS&quot; -&gt; Charset.forName(&quot;Big5_HKSCS&quot;)</span>
+<span class="nc" id="L341">        &quot;Shift-JIS&quot; -&gt; Charset.forName(&quot;Shift_JIS&quot;)</span>
+<span class="nc" id="L342">        else -&gt; Charset.forName(icuName)</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

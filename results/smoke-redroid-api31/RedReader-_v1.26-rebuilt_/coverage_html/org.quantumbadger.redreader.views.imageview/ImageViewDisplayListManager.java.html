@@ -1,0 +1,636 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ImageViewDisplayListManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE RedReader</a> &gt; <a href="index.source.html" class="el_package">org.quantumbadger.redreader.views.imageview</a> &gt; <span class="el_source">ImageViewDisplayListManager.java</span></div><h1>ImageViewDisplayListManager.java</h1><pre class="source lang-java linenums">/*******************************************************************************
+ * This file is part of RedReader.
+ *
+ * RedReader is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * RedReader is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with RedReader.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ ******************************************************************************/
+
+package org.quantumbadger.redreader.views.imageview;
+
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.util.Log;
+import org.quantumbadger.redreader.common.MutableFloatPoint2D;
+import org.quantumbadger.redreader.common.UIThreadRepeatingTimer;
+import org.quantumbadger.redreader.common.collections.Stack;
+import org.quantumbadger.redreader.views.glview.Refreshable;
+import org.quantumbadger.redreader.views.glview.displaylist.RRGLDisplayList;
+import org.quantumbadger.redreader.views.glview.displaylist.RRGLDisplayListRenderer;
+import org.quantumbadger.redreader.views.glview.displaylist.RRGLRenderableGroup;
+import org.quantumbadger.redreader.views.glview.displaylist.RRGLRenderableScale;
+import org.quantumbadger.redreader.views.glview.displaylist.RRGLRenderableTexturedQuad;
+import org.quantumbadger.redreader.views.glview.displaylist.RRGLRenderableTranslation;
+import org.quantumbadger.redreader.views.glview.program.RRGLContext;
+import org.quantumbadger.redreader.views.glview.program.RRGLTexture;
+
+import java.util.Arrays;
+
+public class ImageViewDisplayListManager implements
+		RRGLDisplayListRenderer.DisplayListManager,
+		UIThreadRepeatingTimer.Listener,
+		ImageViewTileLoader.Listener {
+
+	public interface Listener extends BasicGestureHandler.Listener {
+		void onImageViewDLMOutOfMemory();
+
+		void onImageViewDLMException(Throwable t);
+	}
+
+	private static final long TAP_MAX_DURATION_MS = 225;
+	private static final long DOUBLE_TAP_MAX_GAP_DURATION_MS = 275;
+
+	private static final Bitmap NOT_LOADED_BITMAP;
+
+	static {
+<span class="nc" id="L55">		NOT_LOADED_BITMAP = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);</span>
+
+<span class="nc" id="L57">		final Canvas notLoadedCanvas = new Canvas(NOT_LOADED_BITMAP);</span>
+<span class="nc" id="L58">		notLoadedCanvas.drawRGB(70, 70, 70);</span>
+<span class="nc" id="L59">	}</span>
+
+	private final Listener mListener;
+
+	private RRGLRenderableTranslation mOverallTranslation;
+	private RRGLRenderableScale mOverallScale;
+
+	private final ImageTileSource mImageTileSource;
+	private final int mHTileCount;
+	private final int mVTileCount;
+	private final int mTileSize;
+
+	private RRGLTexture mNotLoadedTexture;
+
+	private int mResolutionX;
+	private int mResolutionY;
+
+	private final MultiScaleTileManager[][] mTileLoaders;
+	private final RRGLRenderableTexturedQuad[][] mTiles;
+	private boolean[][] mTileVisibility;
+	private boolean[][] mTileLoaded;
+<span class="nc" id="L80">	private int mLastSampleSize = 1;</span>
+
+	private Refreshable mRefreshable;
+
+<span class="nc" id="L84">	private enum TouchState {</span>
+<span class="nc" id="L85">		ONE_FINGER_DOWN,</span>
+<span class="nc" id="L86">		ONE_FINGER_DRAG,</span>
+<span class="nc" id="L87">		TWO_FINGER_PINCH,</span>
+<span class="nc" id="L88">		DOUBLE_TAP_WAIT_NO_FINGERS_DOWN,</span>
+<span class="nc" id="L89">		DOUBLE_TAP_ONE_FINGER_DOWN,</span>
+<span class="nc" id="L90">		DOUBLE_TAP_ONE_FINGER_DRAG</span>
+	}
+
+<span class="nc" id="L93">	private final CoordinateHelper mCoordinateHelper = new CoordinateHelper();</span>
+<span class="nc" id="L94">	private BoundsHelper mBoundsHelper = null;</span>
+
+<span class="nc" id="L96">	private TouchState mCurrentTouchState = null;</span>
+
+	private FingerTracker.Finger mDragFinger;
+	private FingerTracker.Finger mPinchFinger1;
+	private FingerTracker.Finger mPinchFinger2;
+<span class="nc" id="L101">	private final Stack&lt;FingerTracker.Finger&gt; mSpareFingers = new Stack&lt;&gt;(8);</span>
+
+<span class="nc" id="L103">	private final UIThreadRepeatingTimer mDoubleTapGapTimer =</span>
+			new UIThreadRepeatingTimer(50, this);
+
+<span class="nc" id="L106">	private long mFirstTapReleaseTime = -1;</span>
+
+<span class="nc" id="L108">	private ImageViewScaleAnimation mScaleAnimation = null;</span>
+
+	private ImageViewScrollbars mScrollbars;
+
+<span class="nc" id="L112">	private float mScreenDensity = 1;</span>
+
+	public ImageViewDisplayListManager(
+			final ImageTileSource imageTileSource,
+<span class="nc" id="L116">			final Listener listener) {</span>
+
+<span class="nc" id="L118">		mImageTileSource = imageTileSource;</span>
+<span class="nc" id="L119">		mListener = listener;</span>
+<span class="nc" id="L120">		mHTileCount = mImageTileSource.getHTileCount();</span>
+<span class="nc" id="L121">		mVTileCount = mImageTileSource.getVTileCount();</span>
+<span class="nc" id="L122">		mTileSize = mImageTileSource.getTileSize();</span>
+<span class="nc" id="L123">		mTiles = new RRGLRenderableTexturedQuad[mHTileCount][mVTileCount];</span>
+
+<span class="nc" id="L125">		mTileLoaders = new MultiScaleTileManager[mHTileCount][mVTileCount];</span>
+<span class="nc" id="L126">		final ImageViewTileLoaderThread thread = new ImageViewTileLoaderThread();</span>
+
+<span class="nc bnc" id="L128" title="All 2 branches missed.">		for(int x = 0; x &lt; mHTileCount; x++) {</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">			for(int y = 0; y &lt; mVTileCount; y++) {</span>
+<span class="nc" id="L130">				mTileLoaders[x][y] =</span>
+						new MultiScaleTileManager(imageTileSource, thread, x, y, this);
+			}
+		}
+<span class="nc" id="L134">	}</span>
+
+	@Override
+	public synchronized void onGLSceneCreate(
+			final RRGLDisplayList scene,
+			final RRGLContext glContext,
+			final Refreshable refreshable) {
+
+<span class="nc" id="L142">		mTileVisibility = new boolean[mHTileCount][mVTileCount];</span>
+<span class="nc" id="L143">		mTileLoaded = new boolean[mHTileCount][mVTileCount];</span>
+<span class="nc" id="L144">		mRefreshable = refreshable;</span>
+<span class="nc" id="L145">		mScreenDensity = glContext.getScreenDensity();</span>
+
+<span class="nc" id="L147">		mNotLoadedTexture = new RRGLTexture(glContext, NOT_LOADED_BITMAP, false);</span>
+
+<span class="nc" id="L149">		final RRGLRenderableGroup group = new RRGLRenderableGroup();</span>
+
+<span class="nc" id="L151">		mOverallScale = new RRGLRenderableScale(group);</span>
+<span class="nc" id="L152">		mOverallTranslation = new RRGLRenderableTranslation(mOverallScale);</span>
+<span class="nc" id="L153">		scene.add(mOverallTranslation);</span>
+
+<span class="nc bnc" id="L155" title="All 2 branches missed.">		for(int x = 0; x &lt; mHTileCount; x++) {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">			for(int y = 0; y &lt; mVTileCount; y++) {</span>
+
+<span class="nc" id="L158">				final RRGLRenderableTexturedQuad quad =</span>
+						new RRGLRenderableTexturedQuad(glContext, mNotLoadedTexture);
+<span class="nc" id="L160">				mTiles[x][y] = quad;</span>
+
+<span class="nc" id="L162">				final RRGLRenderableScale scale = new RRGLRenderableScale(quad);</span>
+
+<span class="nc" id="L164">				int tileWidth = mTileSize;</span>
+<span class="nc" id="L165">				int tileHeight = mTileSize;</span>
+
+<span class="nc" id="L167">				final int imageWidth = mImageTileSource.getWidth();</span>
+<span class="nc" id="L168">				final int imageHeight = mImageTileSource.getHeight();</span>
+
+<span class="nc bnc" id="L170" title="All 4 branches missed.">				if(x == mHTileCount - 1 &amp;&amp; imageWidth % mTileSize != 0) {</span>
+<span class="nc" id="L171">					tileWidth = imageWidth % mTileSize;</span>
+				}
+
+<span class="nc bnc" id="L174" title="All 4 branches missed.">				if(y == mVTileCount - 1 &amp;&amp; imageHeight % mTileSize != 0) {</span>
+<span class="nc" id="L175">					tileHeight = imageHeight % mTileSize;</span>
+				}
+
+<span class="nc" id="L178">				scale.setScale(tileWidth, tileHeight);</span>
+
+<span class="nc" id="L180">				final RRGLRenderableTranslation translation =</span>
+						new RRGLRenderableTranslation(scale);
+<span class="nc" id="L182">				translation.setPosition(x * mTileSize, y * mTileSize);</span>
+
+<span class="nc" id="L184">				group.add(translation);</span>
+			}
+		}
+
+<span class="nc" id="L188">		mScrollbars = new ImageViewScrollbars(</span>
+				glContext,
+				mCoordinateHelper,
+<span class="nc" id="L191">				mImageTileSource.getWidth(),</span>
+<span class="nc" id="L192">				mImageTileSource.getHeight()</span>
+		);
+
+<span class="nc" id="L195">		scene.add(mScrollbars);</span>
+<span class="nc" id="L196">	}</span>
+
+	@Override
+	public synchronized void onGLSceneResolutionChange(
+			final RRGLDisplayList scene,
+			final RRGLContext context,
+			final int width,
+			final int height) {
+
+<span class="nc" id="L205">		mResolutionX = width;</span>
+<span class="nc" id="L206">		mResolutionY = height;</span>
+
+<span class="nc bnc" id="L208" title="All 2 branches missed.">		final boolean setInitialScale = (mBoundsHelper == null);</span>
+
+<span class="nc" id="L210">		mBoundsHelper = new BoundsHelper(</span>
+				width, height,
+<span class="nc" id="L212">				mImageTileSource.getWidth(), mImageTileSource.getHeight(),</span>
+				mCoordinateHelper);
+
+<span class="nc bnc" id="L215" title="All 2 branches missed.">		if(setInitialScale) {</span>
+<span class="nc" id="L216">			mBoundsHelper.applyMinScale();</span>
+		}
+
+<span class="nc" id="L219">		mScrollbars.setResolution(width, height);</span>
+<span class="nc" id="L220">		mScrollbars.showBars();</span>
+<span class="nc" id="L221">	}</span>
+
+	@Override
+	public synchronized boolean onGLSceneUpdate(
+			final RRGLDisplayList scene,
+			final RRGLContext context) {
+
+<span class="nc bnc" id="L228" title="All 2 branches missed.">		if(mScaleAnimation != null) {</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">			if(!mScaleAnimation.onStep()) {</span>
+<span class="nc" id="L230">				mScaleAnimation = null;</span>
+			}
+		}
+
+<span class="nc bnc" id="L234" title="All 2 branches missed.">		if(mBoundsHelper != null) {</span>
+<span class="nc" id="L235">			mBoundsHelper.applyBounds();</span>
+		}
+
+<span class="nc" id="L238">		final MutableFloatPoint2D positionOffset = mCoordinateHelper.getPositionOffset();</span>
+<span class="nc" id="L239">		final float scale = mCoordinateHelper.getScale();</span>
+
+<span class="nc" id="L241">		mOverallTranslation.setPosition(positionOffset);</span>
+<span class="nc" id="L242">		mOverallScale.setScale(scale, scale);</span>
+
+<span class="nc" id="L244">		mScrollbars.update();</span>
+
+<span class="nc" id="L246">		final int sampleSize = pickSampleSize();</span>
+
+<span class="nc bnc" id="L248" title="All 2 branches missed.">		if(mLastSampleSize != sampleSize) {</span>
+
+<span class="nc bnc" id="L250" title="All 2 branches missed.">			for(final boolean[] arr : mTileLoaded) {</span>
+<span class="nc" id="L251">				Arrays.fill(arr, false);</span>
+			}
+
+<span class="nc" id="L254">			mLastSampleSize = sampleSize;</span>
+		}
+
+<span class="nc" id="L257">		final float firstVisiblePixelX = -positionOffset.x / scale;</span>
+<span class="nc" id="L258">		final float firstVisiblePixelY = -positionOffset.y / scale;</span>
+
+<span class="nc" id="L260">		final int firstVisibleTileX = (int)Math.floor(firstVisiblePixelX / mTileSize);</span>
+<span class="nc" id="L261">		final int firstVisibleTileY = (int)Math.floor(firstVisiblePixelY / mTileSize);</span>
+
+<span class="nc" id="L263">		final float lastVisiblePixelX = firstVisiblePixelX + (float)mResolutionX / scale;</span>
+<span class="nc" id="L264">		final float lastVisiblePixelY = firstVisiblePixelY + (float)mResolutionY / scale;</span>
+
+<span class="nc" id="L266">		final int lastVisibleTileX = (int)Math.ceil(lastVisiblePixelX / mTileSize);</span>
+<span class="nc" id="L267">		final int lastVisibleTileY = (int)Math.ceil(lastVisiblePixelY / mTileSize);</span>
+
+<span class="nc" id="L269">		final int desiredScaleIndex =</span>
+<span class="nc" id="L270">				MultiScaleTileManager.sampleSizeToScaleIndex(sampleSize);</span>
+
+<span class="nc bnc" id="L272" title="All 2 branches missed.">		for(int x = 0; x &lt; mHTileCount; x++) {</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">			for(int y = 0; y &lt; mVTileCount; y++) {</span>
+
+<span class="nc bnc" id="L275" title="All 8 branches missed.">				final boolean isTileVisible =</span>
+						x &gt;= firstVisibleTileX
+								&amp;&amp; y &gt;= firstVisibleTileY
+								&amp;&amp; x &lt;= lastVisibleTileX
+								&amp;&amp; y &lt;= lastVisibleTileY;
+
+<span class="nc bnc" id="L281" title="All 8 branches missed.">				final boolean isTileWanted =</span>
+						x &gt;= firstVisibleTileX - 1
+								&amp;&amp; y &gt;= firstVisibleTileY - 1
+								&amp;&amp; x &lt;= lastVisibleTileX + 1
+								&amp;&amp; y &lt;= lastVisibleTileY + 1;
+
+<span class="nc bnc" id="L287" title="All 4 branches missed.">				if(isTileWanted &amp;&amp; !mTileLoaded[x][y]) {</span>
+<span class="nc" id="L288">					mTileLoaders[x][y].markAsWanted(desiredScaleIndex);</span>
+
+				} else {
+<span class="nc" id="L291">					mTileLoaders[x][y].markAsUnwanted();</span>
+				}
+
+<span class="nc bnc" id="L294" title="All 4 branches missed.">				if(isTileVisible != mTileVisibility[x][y] || !mTileLoaded[x][y]) {</span>
+
+<span class="nc bnc" id="L296" title="All 4 branches missed.">					if(isTileVisible &amp;&amp; !mTileLoaded[x][y]) {</span>
+
+<span class="nc" id="L298">						final Bitmap tile = mTileLoaders[x][y].getAtDesiredScale();</span>
+
+<span class="nc bnc" id="L300" title="All 2 branches missed.">						if(tile != null) {</span>
+
+							try {
+<span class="nc" id="L303">								final RRGLTexture texture =</span>
+										new RRGLTexture(context, tile, true);
+<span class="nc" id="L305">								mTiles[x][y].setTexture(texture);</span>
+<span class="nc" id="L306">								texture.releaseReference();</span>
+<span class="nc" id="L307">								mTileLoaded[x][y] = true;</span>
+<span class="nc" id="L308">								tile.recycle();</span>
+
+<span class="nc" id="L310">							} catch(final Exception e) {</span>
+<span class="nc" id="L311">								Log.e(</span>
+										&quot;ImageViewDisplayListMan&quot;,
+										&quot;Exception when creating texture&quot;,
+										e);
+<span class="nc" id="L315">							}</span>
+						}
+
+<span class="nc bnc" id="L318" title="All 2 branches missed.">					} else if(!isTileWanted) {</span>
+<span class="nc" id="L319">						mTiles[x][y].setTexture(mNotLoadedTexture);</span>
+					}
+
+<span class="nc" id="L322">					mTileVisibility[x][y] = isTileVisible;</span>
+				}
+			}
+		}
+
+<span class="nc bnc" id="L327" title="All 2 branches missed.">		if(mScaleAnimation != null) {</span>
+<span class="nc" id="L328">			mScrollbars.showBars();</span>
+		}
+
+<span class="nc bnc" id="L331" title="All 2 branches missed.">		return mScaleAnimation != null;</span>
+	}
+
+	@Override
+	public void onUIAttach() {
+<span class="nc" id="L336">	}</span>
+
+	@Override
+	public void onUIDetach() {
+<span class="nc" id="L340">		mImageTileSource.dispose();</span>
+<span class="nc" id="L341">	}</span>
+
+	@Override
+	public synchronized void onFingerDown(final FingerTracker.Finger finger) {
+
+<span class="nc bnc" id="L346" title="All 2 branches missed.">		if(mScrollbars == null) {</span>
+<span class="nc" id="L347">			return;</span>
+		}
+
+<span class="nc" id="L350">		mScaleAnimation = null;</span>
+<span class="nc" id="L351">		mScrollbars.showBars();</span>
+
+<span class="nc bnc" id="L353" title="All 2 branches missed.">		if(mCurrentTouchState == null) {</span>
+<span class="nc" id="L354">			mCurrentTouchState = TouchState.ONE_FINGER_DOWN;</span>
+<span class="nc" id="L355">			mDragFinger = finger;</span>
+
+		} else {
+<span class="nc bnc" id="L358" title="All 4 branches missed.">			switch(mCurrentTouchState) {</span>
+
+				case DOUBLE_TAP_WAIT_NO_FINGERS_DOWN:
+<span class="nc" id="L361">					mCurrentTouchState = TouchState.DOUBLE_TAP_ONE_FINGER_DOWN;</span>
+<span class="nc" id="L362">					mDragFinger = finger;</span>
+<span class="nc" id="L363">					mDoubleTapGapTimer.stopTimer();</span>
+<span class="nc" id="L364">					break;</span>
+
+				case ONE_FINGER_DRAG:
+<span class="nc" id="L367">					mListener.onHorizontalSwipeEnd();</span>
+
+					// Deliberate fallthrough
+
+				case ONE_FINGER_DOWN:
+				case DOUBLE_TAP_ONE_FINGER_DOWN:
+				case DOUBLE_TAP_ONE_FINGER_DRAG:
+
+<span class="nc" id="L375">					mCurrentTouchState = TouchState.TWO_FINGER_PINCH;</span>
+<span class="nc" id="L376">					mPinchFinger1 = mDragFinger;</span>
+<span class="nc" id="L377">					mPinchFinger2 = finger;</span>
+<span class="nc" id="L378">					mDragFinger = null;</span>
+<span class="nc" id="L379">					break;</span>
+
+				default:
+<span class="nc" id="L382">					mSpareFingers.push(finger);</span>
+					break;
+			}
+		}
+<span class="nc" id="L386">	}</span>
+
+<span class="nc" id="L388">	private final MutableFloatPoint2D mTmpPoint1_onFingersMoved =</span>
+			new MutableFloatPoint2D();
+<span class="nc" id="L390">	private final MutableFloatPoint2D mTmpPoint2_onFingersMoved =</span>
+			new MutableFloatPoint2D();
+
+	@Override
+	public synchronized void onFingersMoved() {
+
+<span class="nc bnc" id="L396" title="All 2 branches missed.">		if(mCurrentTouchState == null) {</span>
+<span class="nc" id="L397">			return;</span>
+		}
+
+<span class="nc bnc" id="L400" title="All 2 branches missed.">		if(mScrollbars == null) {</span>
+<span class="nc" id="L401">			return;</span>
+		}
+
+<span class="nc" id="L404">		mScaleAnimation = null;</span>
+<span class="nc" id="L405">		mScrollbars.showBars();</span>
+
+<span class="nc bnc" id="L407" title="All 6 branches missed.">		switch(mCurrentTouchState) {</span>
+
+			case DOUBLE_TAP_ONE_FINGER_DOWN: {
+
+<span class="nc bnc" id="L411" title="All 2 branches missed.">				if(mDragFinger.mTotalPosDifference.distanceSquared()</span>
+						&gt;= 400f * mScreenDensity * mScreenDensity) {
+<span class="nc" id="L413">					mCurrentTouchState = TouchState.DOUBLE_TAP_ONE_FINGER_DRAG;</span>
+				}
+
+				break;
+			}
+
+			case DOUBLE_TAP_ONE_FINGER_DRAG: {
+
+<span class="nc" id="L421">				final MutableFloatPoint2D screenCentre = mTmpPoint1_onFingersMoved;</span>
+<span class="nc" id="L422">				screenCentre.set(mResolutionX / 2, mResolutionY / 2);</span>
+
+<span class="nc" id="L424">				mCoordinateHelper.scaleAboutScreenPoint(</span>
+						screenCentre,
+<span class="nc" id="L426">						(float)Math.pow(</span>
+								1.01,
+								mDragFinger.mPosDifference.y / mScreenDensity)
+				);
+
+<span class="nc" id="L431">				break;</span>
+			}
+
+			case ONE_FINGER_DOWN: {
+
+<span class="nc bnc" id="L436" title="All 2 branches missed.">				if(mDragFinger.mTotalPosDifference.distanceSquared()</span>
+						&gt;= 100f * mScreenDensity * mScreenDensity) {
+<span class="nc" id="L438">					mCurrentTouchState = TouchState.ONE_FINGER_DRAG;</span>
+				}
+
+				// Deliberate fall-through
+			}
+
+			case ONE_FINGER_DRAG:
+<span class="nc bnc" id="L445" title="All 2 branches missed.">				if(mBoundsHelper.isMinScale()) {</span>
+<span class="nc" id="L446">					mListener.onHorizontalSwipe(mDragFinger.mTotalPosDifference.x);</span>
+				} else {
+<span class="nc" id="L448">					mCoordinateHelper.translateScreen(</span>
+							mDragFinger.mLastPos,
+							mDragFinger.mCurrentPos);
+				}
+<span class="nc" id="L452">				break;</span>
+
+			case TWO_FINGER_PINCH: {
+
+<span class="nc" id="L456">				final double oldDistance =</span>
+<span class="nc" id="L457">						mPinchFinger1.mLastPos.euclideanDistanceTo(mPinchFinger2.mLastPos);</span>
+<span class="nc" id="L458">				final double newDistance =</span>
+<span class="nc" id="L459">						mPinchFinger1.mCurrentPos.euclideanDistanceTo(mPinchFinger2.mCurrentPos);</span>
+
+<span class="nc" id="L461">				final MutableFloatPoint2D oldCentre = mTmpPoint1_onFingersMoved;</span>
+<span class="nc" id="L462">				mPinchFinger1.mLastPos.add(mPinchFinger2.mLastPos, oldCentre);</span>
+<span class="nc" id="L463">				oldCentre.scale(0.5);</span>
+
+<span class="nc" id="L465">				final MutableFloatPoint2D newCentre = mTmpPoint2_onFingersMoved;</span>
+<span class="nc" id="L466">				mPinchFinger1.mCurrentPos.add(mPinchFinger2.mCurrentPos, newCentre);</span>
+<span class="nc" id="L467">				newCentre.scale(0.5);</span>
+
+<span class="nc" id="L469">				final float scaleDifference = (float)(newDistance / oldDistance);</span>
+
+<span class="nc" id="L471">				mCoordinateHelper.scaleAboutScreenPoint(newCentre, scaleDifference);</span>
+<span class="nc" id="L472">				mCoordinateHelper.translateScreen(oldCentre, newCentre);</span>
+
+<span class="nc" id="L474">				break;</span>
+			}
+		}
+<span class="nc" id="L477">	}</span>
+
+	@Override
+	public synchronized void onFingerUp(final FingerTracker.Finger finger) {
+
+<span class="nc bnc" id="L482" title="All 2 branches missed.">		if(mScrollbars == null) {</span>
+<span class="nc" id="L483">			return;</span>
+		}
+
+<span class="nc" id="L486">		mScaleAnimation = null;</span>
+<span class="nc" id="L487">		mScrollbars.showBars();</span>
+
+<span class="nc bnc" id="L489" title="All 2 branches missed.">		if(mSpareFingers.remove(finger)) {</span>
+<span class="nc" id="L490">			return;</span>
+		}
+
+<span class="nc bnc" id="L493" title="All 2 branches missed.">		if(mCurrentTouchState == null) {</span>
+<span class="nc" id="L494">			return;</span>
+		}
+
+<span class="nc bnc" id="L497" title="All 6 branches missed.">		switch(mCurrentTouchState) {</span>
+
+			case DOUBLE_TAP_ONE_FINGER_DOWN:
+
+<span class="nc bnc" id="L501" title="All 2 branches missed.">				if(finger.mDownDuration &lt; TAP_MAX_DURATION_MS) {</span>
+<span class="nc" id="L502">					onDoubleTap(finger.mCurrentPos);</span>
+				}
+
+<span class="nc" id="L505">				mCurrentTouchState = null;</span>
+<span class="nc" id="L506">				mDragFinger = null;</span>
+<span class="nc" id="L507">				break;</span>
+
+			case ONE_FINGER_DOWN:
+
+<span class="nc bnc" id="L511" title="All 2 branches missed.">				if(finger.mDownDuration &lt; TAP_MAX_DURATION_MS) {</span>
+
+					// Maybe a single tap
+<span class="nc" id="L514">					mDoubleTapGapTimer.startTimer();</span>
+
+<span class="nc" id="L516">					mCurrentTouchState = TouchState.DOUBLE_TAP_WAIT_NO_FINGERS_DOWN;</span>
+<span class="nc" id="L517">					mFirstTapReleaseTime = System.currentTimeMillis();</span>
+
+				} else {
+<span class="nc" id="L520">					mCurrentTouchState = null;</span>
+				}
+
+<span class="nc" id="L523">				mDragFinger = null;</span>
+<span class="nc" id="L524">				break;</span>
+
+			case ONE_FINGER_DRAG:
+
+<span class="nc" id="L528">				mListener.onHorizontalSwipeEnd();</span>
+
+				// Deliberate fallthrough
+
+			case DOUBLE_TAP_ONE_FINGER_DRAG:
+
+<span class="nc bnc" id="L534" title="All 2 branches missed.">				if(mSpareFingers.isEmpty()) {</span>
+<span class="nc" id="L535">					mCurrentTouchState = null;</span>
+<span class="nc" id="L536">					mDragFinger = null;</span>
+				} else {
+<span class="nc" id="L538">					mDragFinger = mSpareFingers.pop();</span>
+				}
+
+<span class="nc" id="L541">				break;</span>
+
+			case TWO_FINGER_PINCH:
+
+<span class="nc bnc" id="L545" title="All 2 branches missed.">				if(mSpareFingers.isEmpty()) {</span>
+<span class="nc" id="L546">					mCurrentTouchState = TouchState.ONE_FINGER_DRAG;</span>
+<span class="nc" id="L547">					mDragFinger =</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">							(mPinchFinger1 == finger) ? mPinchFinger2 : mPinchFinger1;</span>
+<span class="nc" id="L549">					mPinchFinger1 = null;</span>
+<span class="nc" id="L550">					mPinchFinger2 = null;</span>
+
+				} else {
+<span class="nc bnc" id="L553" title="All 2 branches missed.">					if(mPinchFinger1 == finger) {</span>
+<span class="nc" id="L554">						mPinchFinger1 = mSpareFingers.pop();</span>
+					} else {
+<span class="nc" id="L556">						mPinchFinger2 = mSpareFingers.pop();</span>
+					}
+				}
+				break;
+		}
+<span class="nc" id="L561">	}</span>
+
+	private void onDoubleTap(final MutableFloatPoint2D position) {
+
+<span class="nc" id="L565">		final float minScale = mBoundsHelper.getMinScale();</span>
+<span class="nc" id="L566">		final float currentScale = mCoordinateHelper.getScale();</span>
+
+		float targetScale;
+
+<span class="nc bnc" id="L570" title="All 2 branches missed.">		if(currentScale &gt; minScale * 1.01) {</span>
+<span class="nc" id="L571">			targetScale = minScale;</span>
+
+		} else {
+<span class="nc" id="L574">			targetScale = Math.max(</span>
+<span class="nc" id="L575">					(float)mResolutionX / (float)mImageTileSource.getWidth(),</span>
+<span class="nc" id="L576">					(float)mResolutionY / (float)mImageTileSource.getHeight()</span>
+			);
+
+<span class="nc bnc" id="L579" title="All 2 branches missed.">			if(Math.abs((targetScale / currentScale) - 1.0) &lt; 0.05) {</span>
+<span class="nc" id="L580">				targetScale = currentScale * 3;</span>
+			}
+		}
+
+<span class="nc" id="L584">		mScaleAnimation =</span>
+				new ImageViewScaleAnimation(targetScale, mCoordinateHelper, 15, position);
+<span class="nc" id="L586">	}</span>
+
+	@Override
+	public void onUIThreadRepeatingTimer(final UIThreadRepeatingTimer timer) {
+
+<span class="nc bnc" id="L591" title="All 2 branches missed.">		if(mCurrentTouchState == TouchState.DOUBLE_TAP_WAIT_NO_FINGERS_DOWN) {</span>
+
+<span class="nc bnc" id="L593" title="All 2 branches missed.">			if(System.currentTimeMillis() - mFirstTapReleaseTime</span>
+					&gt; DOUBLE_TAP_MAX_GAP_DURATION_MS) {
+<span class="nc" id="L595">				mListener.onSingleTap();</span>
+<span class="nc" id="L596">				mCurrentTouchState = null;</span>
+<span class="nc" id="L597">				mDoubleTapGapTimer.stopTimer();</span>
+			}
+
+		} else {
+<span class="nc" id="L601">			mDoubleTapGapTimer.stopTimer();</span>
+		}
+<span class="nc" id="L603">	}</span>
+
+	private int pickSampleSize() {
+
+<span class="nc" id="L607">		int result = 1;</span>
+
+<span class="nc bnc" id="L609" title="All 2 branches missed.">		while(result &lt;= MultiScaleTileManager.MAX_SAMPLE_SIZE</span>
+<span class="nc bnc" id="L610" title="All 2 branches missed.">				&amp;&amp; (1.0 / (result * 2)) &gt; mCoordinateHelper.getScale()) {</span>
+<span class="nc" id="L611">			result *= 2;</span>
+		}
+
+<span class="nc" id="L614">		return result;</span>
+	}
+
+	@Override
+	public void onTileLoaded(final int x, final int y, final int sampleSize) {
+<span class="nc" id="L619">		mRefreshable.refresh();</span>
+<span class="nc" id="L620">	}</span>
+
+	@Override
+	public void onTileLoaderOutOfMemory() {
+<span class="nc" id="L624">		mListener.onImageViewDLMOutOfMemory();</span>
+<span class="nc" id="L625">	}</span>
+
+	@Override
+	public void onTileLoaderException(final Throwable t) {
+<span class="nc" id="L629">		mListener.onImageViewDLMException(t);</span>
+<span class="nc" id="L630">	}</span>
+
+	public void resetTouchState() {
+<span class="nc" id="L633">		mCurrentTouchState = null;</span>
+<span class="nc" id="L634">	}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

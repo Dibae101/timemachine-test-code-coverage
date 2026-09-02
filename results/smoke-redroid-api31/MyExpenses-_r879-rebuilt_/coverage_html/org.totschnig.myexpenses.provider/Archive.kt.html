@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Archive.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.provider</a> &gt; <span class="el_source">Archive.kt</span></div><h1>Archive.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.provider
+
+import android.content.ContentValues
+import android.database.Cursor
+import android.os.Bundle
+import androidx.core.os.BundleCompat
+import androidx.sqlite.db.SupportSQLiteDatabase
+import org.totschnig.myexpenses.dialog.ArchiveInfo
+import org.totschnig.myexpenses.model.AccountType
+import org.totschnig.myexpenses.model.CrStatus
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.sync.json.TransactionChange
+import org.totschnig.myexpenses.util.toEndOfDayEpoch
+import org.totschnig.myexpenses.util.toStartOfDayEpoch
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.util.Locale
+
+private fun subSelectTemplate(colum: String) =
+<span class="nc" id="L21">    &quot;(SELECT %1\$s FROM $TABLE_TRANSACTIONS WHERE $KEY_UUID = ?)&quot;.format(Locale.ROOT, colum)</span>
+
+fun SupportSQLiteDatabase.unarchive(
+    values: ContentValues,
+    callerIsNotSyncAdapter: Boolean,
+): Int {
+<span class="nc" id="L27">    val uuid =</span>
+<span class="nc bnc" id="L28" title="All 2 branches missed.">        values.getAsString(KEY_UUID) ?: uuidForTransaction(values.getAsLong(KEY_ROWID))</span>
+<span class="nc" id="L29">    val rowIdSubSelect = subSelectTemplate(KEY_ROWID)</span>
+<span class="nc" id="L30">    val accountIdSubSelect = subSelectTemplate(KEY_ACCOUNTID)</span>
+
+<span class="nc" id="L32">    return safeUpdateWithSealed {</span>
+<span class="nc" id="L33">        TransactionProvider.pauseChangeTrigger(this)</span>
+        //parts are promoted to independence
+<span class="nc" id="L35">        execSQL(</span>
+<span class="nc" id="L36">            &quot;UPDATE $TABLE_TRANSACTIONS SET $KEY_PARENTID = null, $KEY_STATUS = $STATUS_NONE WHERE $KEY_PARENTID = $rowIdSubSelect &quot;,</span>
+<span class="nc" id="L37">            arrayOf(uuid)</span>
+        )
+        //Change is recorded
+<span class="nc bnc" id="L40" title="All 2 branches missed.">        if (callerIsNotSyncAdapter) {</span>
+<span class="nc" id="L41">            execSQL(</span>
+                &quot;&quot;&quot;INSERT INTO $TABLE_CHANGES
+                            | ($KEY_TYPE, $KEY_ACCOUNTID, $KEY_SYNC_SEQUENCE_LOCAL, $KEY_UUID)
+                            | SELECT '${TransactionChange.Type.unarchive.name}', $KEY_ROWID, $KEY_SYNC_SEQUENCE_LOCAL, ?
+                            | FROM $TABLE_ACCOUNTS
+<span class="nc" id="L46">                            | WHERE $KEY_ROWID = $accountIdSubSelect AND $KEY_SYNC_ACCOUNT_NAME IS NOT NULL&quot;&quot;&quot;.trimMargin(),</span>
+<span class="nc" id="L47">                arrayOf(uuid, uuid)</span>
+            )
+        }
+        //parent is deleted
+<span class="nc" id="L51">        val count = delete(TABLE_TRANSACTIONS, &quot;$KEY_UUID = ?&quot;, arrayOf(uuid))</span>
+<span class="nc" id="L52">        TransactionProvider.resumeChangeTrigger(this)</span>
+<span class="nc" id="L53">        count</span>
+    }
+}
+
+private const val ARCHIVE_SELECTION =
+    &quot;$KEY_ACCOUNTID = ? AND $KEY_PARENTID is null AND $KEY_STATUS != $STATUS_UNCOMMITTED AND $KEY_DATE &gt;= ? AND $KEY_DATE &lt;= ?&quot;
+
+/**
+ * @return Cursor of statistics for archive grouped by type:
+ * if @param onlyCheck == true: 0 - status, 1 - number of nested archives, 2 - number of transactions
+ * if @param onlyCheck == false: 0 - status, 1 - number of nested archives, 2 - amount sum, 3 - date of last transaction
+ */
+private fun SupportSQLiteDatabase.archiveInfo(
+    accountId: Long,
+    start: LocalDate,
+    end: LocalDate,
+    onlyCheck: Boolean,
+<span class="nc" id="L70">) = query(</span>
+<span class="nc" id="L71">    table = TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L72">    columns = arrayOf(</span>
+<span class="nc" id="L73">        KEY_CR_STATUS,</span>
+<span class="nc" id="L74">        &quot;sum($KEY_STATUS = $STATUS_ARCHIVE)&quot;,</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">    ) + if (onlyCheck) arrayOf(&quot;count(*)&quot;) else arrayOf(</span>
+<span class="nc" id="L76">        &quot;sum($KEY_AMOUNT)&quot;,</span>
+<span class="nc" id="L77">        &quot;max($KEY_DATE)&quot;</span>
+    ),
+<span class="nc" id="L79">    selection = ARCHIVE_SELECTION,</span>
+    selectionArgs = arrayOf(
+<span class="nc" id="L81">        accountId,</span>
+<span class="nc" id="L82">        start.toStartOfDayEpoch(),</span>
+<span class="nc" id="L83">        end.toEndOfDayEpoch()</span>
+    ),
+<span class="nc" id="L85">    groupBy = KEY_CR_STATUS</span>
+<span class="nc" id="L86">)</span>
+
+<span class="nc bnc" id="L88" title="All 2 branches missed.">private fun Cursor.hasNested() = getInt(1) &gt; 0</span>
+
+<span class="nc" id="L90">private fun Bundle.parseArchiveArguments() = Triple(</span>
+<span class="nc" id="L91">    getLong(KEY_ACCOUNTID),</span>
+<span class="nc" id="L92">    BundleCompat.getSerializable(this, KEY_START, LocalDate::class.java)!!,</span>
+<span class="nc" id="L93">    BundleCompat.getSerializable(this, KEY_END, LocalDate::class.java)!!</span>
+<span class="nc" id="L94">)</span>
+
+private fun SupportSQLiteDatabase.accountType(accountId: Long) =
+<span class="nc" id="L97">    query(TABLE_ACCOUNT_TYPES, null, &quot;$KEY_ROWID = (SELECT $KEY_TYPE FROM $TABLE_ACCOUNTS WHERE $KEY_ROWID = ?)&quot;, arrayOf(accountId)).use {</span>
+<span class="nc" id="L98">        it.moveToFirst()</span>
+<span class="nc" id="L99">        AccountType.fromCursor(it)</span>
+<span class="nc" id="L100">    }</span>
+
+fun SupportSQLiteDatabase.archive(extras: Bundle): Long {
+<span class="nc" id="L103">    val (accountId, start, end) = extras.parseArchiveArguments()</span>
+
+<span class="nc" id="L105">    val (crStatus, archiveSum, archiveDate) = archiveInfo(</span>
+<span class="nc" id="L106">        accountId,</span>
+<span class="nc" id="L107">        start,</span>
+<span class="nc" id="L108">        end,</span>
+<span class="nc" id="L109">        false</span>
+<span class="nc" id="L110">    ).use { cursor -&gt;</span>
+<span class="nc bnc" id="L111" title="All 3 branches missed.">        when (cursor.count) {</span>
+<span class="nc" id="L112">            0 -&gt; throw IllegalStateException(&quot;No transactions to archive.&quot;)</span>
+            1 -&gt; {
+<span class="nc" id="L114">                cursor.moveToFirst()</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                if (cursor.hasNested()) throw IllegalStateException(&quot;Nested archive is not supported.&quot;)</span>
+<span class="nc" id="L116">                Triple(cursor.getString(0), cursor.getLong(2), cursor.getLong(3))</span>
+            }
+
+            else -&gt; {
+<span class="nc" id="L120">                val states = cursor.useAndMapToMap {</span>
+<span class="nc" id="L121">                    it.getString(0) to Triple(</span>
+<span class="nc" id="L122">                        it.hasNested(),</span>
+<span class="nc" id="L123">                        it.getLong(2),</span>
+<span class="nc" id="L124">                        it.getLong(3)</span>
+<span class="nc" id="L125">                    )</span>
+                }
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                if (states.any { it.value.first }) {</span>
+<span class="nc" id="L128">                    throw IllegalStateException(&quot;Nested archive is not supported.&quot;)</span>
+                }
+
+<span class="nc bnc" id="L131" title="All 4 branches missed.">                if (states.keys.filter { it != CrStatus.VOID.name }.size &gt; 1 &amp;&amp;</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                    accountType(accountId).supportsReconciliation</span>
+                ) {
+<span class="nc" id="L134">                    throw IllegalStateException(&quot;Transactions in archive have different states.&quot;)</span>
+                }
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                val nonVoidStates = states.filter { it.key != CrStatus.VOID.name }.values</span>
+                //If we archive a cash account, where we find multiple states (which can happen when user updates account type),
+                // we create an unreconciled transaction, since this is the expected state for cash accounts
+<span class="nc" id="L139">                Triple(</span>
+<span class="nc" id="L140">                    CrStatus.UNRECONCILED.name,</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                    nonVoidStates.sumOf { it.second },</span>
+<span class="nc bnc" id="L142" title="All 6 branches missed.">                    nonVoidStates.maxOf { it.third })</span>
+            }
+<span class="nc" id="L144">        }</span>
+    }
+
+<span class="nc" id="L147">    return safeUpdateWithSealed {</span>
+<span class="nc" id="L148">        val archiveId = insert(TABLE_TRANSACTIONS, ContentValues().apply {</span>
+<span class="nc" id="L149">            put(KEY_ACCOUNTID, accountId)</span>
+<span class="nc" id="L150">            put(KEY_DATE, archiveDate)</span>
+<span class="nc" id="L151">            put(KEY_VALUE_DATE, archiveDate)</span>
+<span class="nc" id="L152">            put(KEY_AMOUNT, archiveSum)</span>
+<span class="nc" id="L153">            val formatter = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)</span>
+<span class="nc" id="L154">            put(KEY_COMMENT, start.format(formatter) + &quot; - &quot; + end.format(formatter))</span>
+<span class="nc" id="L155">            put(KEY_STATUS, STATUS_ARCHIVE)</span>
+<span class="nc" id="L156">            put(KEY_CR_STATUS, crStatus)</span>
+<span class="nc" id="L157">            put(KEY_UUID, generateUuid())</span>
+<span class="nc" id="L158">        })</span>
+<span class="nc" id="L159">        update(</span>
+<span class="nc" id="L160">            table = TABLE_TRANSACTIONS,</span>
+<span class="nc" id="L161">            values = ContentValues().apply {</span>
+<span class="nc" id="L162">                put(KEY_PARENTID, archiveId)</span>
+<span class="nc" id="L163">                put(KEY_STATUS, STATUS_ARCHIVED)</span>
+<span class="nc" id="L164">            },</span>
+<span class="nc" id="L165">            whereClause = &quot;$ARCHIVE_SELECTION AND $KEY_ROWID != ?&quot;,</span>
+            whereArgs = arrayOf(
+<span class="nc" id="L167">                accountId,</span>
+<span class="nc" id="L168">                start.toStartOfDayEpoch(),</span>
+<span class="nc" id="L169">                end.toEndOfDayEpoch(),</span>
+<span class="nc" id="L170">                archiveId</span>
+            )
+        )
+<span class="nc" id="L173">        archiveId</span>
+    }
+}
+
+fun SupportSQLiteDatabase.canBeArchived(extras: Bundle): ArchiveInfo {
+<span class="nc" id="L178">    val (accountId, start, end) = extras.parseArchiveArguments()</span>
+<span class="nc" id="L179">    val accountType = accountType(accountId)</span>
+<span class="nc" id="L180">    val empty = ArchiveInfo(</span>
+<span class="nc" id="L181">        count = 0,</span>
+<span class="nc" id="L182">        hasNested = false,</span>
+<span class="nc" id="L183">        statuses = emptyList(),</span>
+<span class="nc" id="L184">        accountType = accountType</span>
+    )
+<span class="nc" id="L186">    return archiveInfo(accountId, start, end, true).useAndReduce(empty) { acc, cursor -&gt;</span>
+<span class="nc" id="L187">        ArchiveInfo(</span>
+<span class="nc" id="L188">            count = acc.count + cursor.getInt(2),</span>
+<span class="nc bnc" id="L189" title="All 4 branches missed.">            hasNested = acc.hasNested || cursor.hasNested(),</span>
+<span class="nc" id="L190">            statuses = acc.statuses + enumValueOf&lt;CrStatus&gt;(cursor.getString(0)),</span>
+<span class="nc" id="L191">            accountType = accountType</span>
+<span class="nc" id="L192">        )</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,976 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Media.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AnkiDroid</a> &gt; <a href="index.source.html" class="el_package">com.ichi2.libanki</a> &gt; <span class="el_source">Media.java</span></div><h1>Media.java</h1><pre class="source lang-java linenums">/****************************************************************************************
+ * Copyright (c) 2011 Kostas Spyropoulos &lt;inigo.aldana@gmail.com&gt;                       *
+ * Copyright (c) 2014 Houssam Salem &lt;houssam.salem.au@gmail.com&gt;                        *
+ *                                                                                      *
+ * This program is free software; you can redistribute it and/or modify it under        *
+ * the terms of the GNU General Public License as published by the Free Software        *
+ * Foundation; either version 3 of the License, or (at your option) any later           *
+ * version.                                                                             *
+ *                                                                                      *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY      *
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A      *
+ * PARTICULAR PURPOSE. See the GNU General Public License for more details.             *
+ *                                                                                      *
+ * You should have received a copy of the GNU General Public License along with         *
+ * this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.                           *
+ ****************************************************************************************/
+
+package com.ichi2.libanki;
+
+import android.database.Cursor;
+import android.database.SQLException;
+import android.net.Uri;
+import android.text.TextUtils;
+
+import android.util.Pair;
+
+import com.ichi2.libanki.template.Template;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
+
+import timber.log.Timber;
+
+/**
+ * Media manager - handles the addition and removal of media files from the media directory (collection.media) and
+ * maintains the media database (collection.media.ad.db2) which is used to determine the state of files for syncing.
+ * Note that the media database has an additional prefix for AnkiDroid (.ad) to avoid any potential issues caused by
+ * users copying the file to the desktop client and vice versa.
+ * &lt;p&gt;
+ * Unlike the python version of this module, we do not (and cannot) modify the current working directory (CWD) before
+ * performing operations on media files. In python, the CWD is changed to the media directory, allowing it to easily
+ * refer to the files in the media directory by name only. In Java, we must be cautious about when to specify the full
+ * path to the file and when we need to use the filename only. In general, when we refer to a file on disk (i.e.,
+ * creating a new File() object), we must include the full path. Use the dir() method to make this step easier.&lt;br&gt;
+ * E.g: new File(dir(), &quot;filename.jpg&quot;)
+ */
+public class Media {
+
+<span class="fc" id="L75">    private static final Pattern fIllegalCharReg = Pattern.compile(&quot;[&gt;&lt;:\&quot;/?*^\\\\|\\x00\\r\\n]&quot;);</span>
+<span class="fc" id="L76">    private static final Pattern fRemotePattern  = Pattern.compile(&quot;(https?|ftp)://&quot;);</span>
+
+    /*
+     * A note about the regular expressions below: the python code uses named groups for the image and sound patterns.
+     * Our version of Java doesn't support named groups, so we must use indexes instead. In the expressions below, the
+     * group names (e.g., ?P&lt;fname&gt;) have been stripped and a comment placed above indicating the index of the group
+     * name in the original. Refer to these indexes whenever the python code makes use of a named group.
+     */
+
+    /**
+     * Group 1 = Contents of [sound:] tag &lt;br&gt;
+     * Group 2 = &quot;fname&quot;
+     */
+<span class="fc" id="L89">    private static final Pattern fSoundRegexps = Pattern.compile(&quot;(?i)(\\[sound:([^]]+)\\])&quot;);</span>
+
+    // src element quoted case
+    /**
+     * Group 1 = Contents of &lt;img&gt; tag &lt;br&gt;
+     * Group 2 = &quot;str&quot; &lt;br&gt;
+     * Group 3 = &quot;fname&quot; &lt;br&gt;
+     * Group 4 = Backreference to &quot;str&quot; (i.e., same type of quote character)
+     */
+<span class="fc" id="L98">    private static final Pattern fImgRegExpQ = Pattern.compile(&quot;(?i)(&lt;img[^&gt;]* src=([\\\&quot;'])([^&gt;]+?)(\\2)[^&gt;]*&gt;)&quot;);</span>
+
+    // unquoted case
+    /**
+     * Group 1 = Contents of &lt;img&gt; tag &lt;br&gt;
+     * Group 2 = &quot;fname&quot;
+     */
+<span class="fc" id="L105">    private static final Pattern fImgRegExpU = Pattern.compile(&quot;(?i)(&lt;img[^&gt;]* src=(?!['\\\&quot;])([^ &gt;]+)[^&gt;]*?&gt;)&quot;);</span>
+
+<span class="fc" id="L107">    public static List&lt;Pattern&gt; mRegexps =  Arrays.asList(fSoundRegexps, fImgRegExpQ, fImgRegExpU);</span>
+
+    private Collection mCol;
+    private String mDir;
+    private DB mDb;
+
+
+<span class="fc" id="L114">    public Media(Collection col, boolean server) {</span>
+<span class="fc" id="L115">        mCol = col;</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">        if (server) {</span>
+<span class="nc" id="L117">            mDir = null;</span>
+<span class="nc" id="L118">            return;</span>
+        }
+        // media directory
+<span class="fc" id="L121">        mDir = col.getPath().replaceFirst(&quot;\\.anki2$&quot;, &quot;.media&quot;);</span>
+<span class="fc" id="L122">        File fd = new File(mDir);</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">        if (!fd.exists()) {</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">            if (!fd.mkdir()) {</span>
+<span class="nc" id="L125">                Timber.e(&quot;Cannot create media directory: &quot; + mDir);</span>
+            }
+        }
+        // change database
+<span class="fc" id="L129">        connect();</span>
+<span class="fc" id="L130">    }</span>
+
+
+    public void connect() {
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">        if (mCol.getServer()) {</span>
+<span class="nc" id="L135">            return;</span>
+        }
+        // NOTE: We use a custom prefix for AnkiDroid to avoid issues caused by copying
+        // the db to the desktop or vice versa.
+<span class="fc" id="L139">        String path = dir() + &quot;.ad.db2&quot;;</span>
+<span class="fc" id="L140">        File dbFile = new File(path);</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">        boolean create = !(dbFile.exists());</span>
+<span class="fc" id="L142">        mDb = new DB(path);</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">        if (create) {</span>
+<span class="fc" id="L144">            _initDB();</span>
+        }
+<span class="fc" id="L146">        maybeUpgrade();</span>
+<span class="fc" id="L147">    }</span>
+
+
+    public void _initDB() {
+<span class="fc" id="L151">        String sql = &quot;create table media (\n&quot; +</span>
+                     &quot; fname text not null primary key,\n&quot; +
+                     &quot; csum text,           -- null indicates deleted file\n&quot; +
+                     &quot; mtime int not null,  -- zero if deleted\n&quot; +
+                     &quot; dirty int not null\n&quot; +
+                     &quot;);\n&quot; +
+                     &quot;create index idx_media_dirty on media (dirty);\n&quot; +
+                     &quot;create table meta (dirMod int, lastUsn int); insert into meta values (0, 0);&quot;;
+<span class="fc" id="L159">        mDb.executeScript(sql);</span>
+<span class="fc" id="L160">    }</span>
+
+
+    public void maybeUpgrade() {
+<span class="fc" id="L164">        String oldpath = dir() + &quot;.db&quot;;</span>
+<span class="fc" id="L165">        File oldDbFile = new File(oldpath);</span>
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">        if (oldDbFile.exists()) {</span>
+<span class="nc" id="L167">            mDb.execute(String.format(Locale.US, &quot;attach \&quot;%s\&quot; as old&quot;, oldpath));</span>
+            try {
+<span class="nc" id="L169">                String sql = &quot;insert into media\n&quot; +</span>
+                             &quot; select m.fname, csum, mod, ifnull((select 1 from log l2 where l2.fname=m.fname), 0) as dirty\n&quot; +
+                             &quot; from old.media m\n&quot; +
+                             &quot; left outer join old.log l using (fname)\n&quot; +
+                             &quot; union\n&quot; +
+                             &quot; select fname, null, 0, 1 from old.log where type=1;&quot;;
+<span class="nc" id="L175">                mDb.execute(sql);</span>
+<span class="nc" id="L176">                mDb.execute(&quot;delete from meta&quot;);</span>
+<span class="nc" id="L177">                mDb.execute(&quot;insert into meta select dirMod, usn from old.meta&quot;);</span>
+<span class="nc" id="L178">                mDb.commit();</span>
+<span class="nc" id="L179">            } catch (Exception e) {</span>
+                // if we couldn't import the old db for some reason, just start anew
+<span class="nc" id="L181">                StringWriter sw = new StringWriter();</span>
+<span class="nc" id="L182">                e.printStackTrace(new PrintWriter(sw));</span>
+<span class="nc" id="L183">                mCol.log(&quot;failed to import old media db:&quot; + sw.toString());</span>
+<span class="nc" id="L184">            }</span>
+<span class="nc" id="L185">            mDb.execute(&quot;detach old&quot;);</span>
+<span class="nc" id="L186">            File newDbFile = new File(oldpath + &quot;.old&quot;);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (newDbFile.exists()) {</span>
+<span class="nc" id="L188">                newDbFile.delete();</span>
+            }
+<span class="nc" id="L190">            oldDbFile.renameTo(newDbFile);</span>
+        }
+<span class="fc" id="L192">    }</span>
+
+
+    public void close() {
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (mCol.getServer()) {</span>
+<span class="nc" id="L197">            return;</span>
+        }
+<span class="nc" id="L199">        mDb.close();</span>
+<span class="nc" id="L200">        mDb = null;</span>
+<span class="nc" id="L201">    }</span>
+
+
+    public String dir() {
+<span class="fc" id="L205">        return mDir;</span>
+    }
+
+
+    /**
+     * Adding media
+     * ***********************************************************
+     */
+
+    /**
+     * In AnkiDroid, adding a media file will not only copy it to the media directory, but will also insert an entry
+     * into the media database marking it as a new addition.
+     */
+    public String addFile(File ofile) throws IOException {
+<span class="nc" id="L219">        String fname = writeData(ofile);</span>
+<span class="nc" id="L220">        markFileAdd(fname);</span>
+<span class="nc" id="L221">        return fname;</span>
+    }
+
+
+    /**
+     * Copy a file to the media directory and return the filename it was stored as.
+     * &lt;p&gt;
+     * Unlike the python version of this method, we don't read the file into memory as a string. All our operations are
+     * done on streams opened on the file, so there is no second parameter for the string object here.
+     */
+    private String writeData(File ofile) throws IOException {
+        // get the file name
+<span class="nc" id="L233">        String fname = ofile.getName();</span>
+        // make sure we write it in NFC form and return an NFC-encoded reference
+<span class="nc" id="L235">        fname = Utils.nfcNormalized(fname);</span>
+        // remove any dangerous characters
+<span class="nc" id="L237">        String base = stripIllegal(fname);</span>
+<span class="nc" id="L238">        String[] split = Utils.splitFilename(base);</span>
+<span class="nc" id="L239">        String root = split[0];</span>
+<span class="nc" id="L240">        String ext = split[1];</span>
+        // find the first available name
+<span class="nc" id="L242">        String csum = Utils.fileChecksum(ofile);</span>
+        while (true) {
+<span class="nc" id="L244">            fname = root + ext;</span>
+<span class="nc" id="L245">            File path = new File(dir(), fname);</span>
+            // if it doesn't exist, copy it directly
+<span class="nc bnc" id="L247" title="All 2 branches missed.">            if (!path.exists()) {</span>
+<span class="nc" id="L248">                Utils.copyFile(ofile, path);</span>
+<span class="nc" id="L249">                return fname;</span>
+            }
+            // if it's identical, reuse
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            if (Utils.fileChecksum(path).equals(csum)) {</span>
+<span class="nc" id="L253">                return fname;</span>
+            }
+            // otherwise, increment the index in the filename
+<span class="nc" id="L256">            Pattern reg = Pattern.compile(&quot; \\((\\d+)\\)$&quot;);</span>
+<span class="nc" id="L257">            Matcher m = reg.matcher(root);</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            if (!m.find()) {</span>
+<span class="nc" id="L259">                root = root + &quot; (1)&quot;;</span>
+            } else {
+<span class="nc" id="L261">                int n = Integer.parseInt(m.group(1));</span>
+<span class="nc" id="L262">                root = String.format(Locale.US, &quot; (%d)&quot;, n + 1);</span>
+            }
+<span class="nc" id="L264">        }</span>
+    }
+
+
+    /**
+     * String manipulation
+     * ***********************************************************
+     */
+
+    public List&lt;String&gt; filesInStr(Long mid, String string) {
+<span class="nc" id="L274">        return filesInStr(mid, string, false);</span>
+    }
+
+
+    /**
+     * Extract media filenames from an HTML string.
+     *
+     * @param string The string to scan for media filenames ([sound:...] or &lt;img...&gt;).
+     * @param includeRemote If true will also include external http/https/ftp urls.
+     * @return A list containing all the sound and image filenames found in the input string.
+     */
+    public List&lt;String&gt; filesInStr(Long mid, String string, boolean includeRemote) {
+<span class="nc" id="L286">        List&lt;String&gt; l = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L287">        JSONObject model = mCol.getModels().get(mid);</span>
+<span class="nc" id="L288">        List&lt;String&gt; strings = new ArrayList&lt;&gt;();</span>
+        try {
+<span class="nc bnc" id="L290" title="All 4 branches missed.">            if (model.getInt(&quot;type&quot;) == Consts.MODEL_CLOZE &amp;&amp; string.contains(&quot;{{c&quot;)) {</span>
+                // if the field has clozes in it, we'll need to expand the
+                // possibilities so we can render latex
+<span class="nc" id="L293">                strings = _expandClozes(string);</span>
+            } else {
+<span class="nc" id="L295">                strings.add(string);</span>
+            }
+<span class="nc" id="L297">        } catch (JSONException e) {</span>
+<span class="nc" id="L298">            throw new RuntimeException(e);</span>
+<span class="nc" id="L299">        }</span>
+
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        for (String s : strings) {</span>
+            // handle latex
+<span class="nc" id="L303">            s =  LaTeX.mungeQA(s, mCol);</span>
+            // extract filenames
+            Matcher m;
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            for (Pattern p : mRegexps) {</span>
+                // NOTE: python uses the named group 'fname'. Java doesn't have named groups, so we have to determine
+                // the index based on which pattern we are using
+<span class="nc bnc" id="L309" title="All 4 branches missed.">                int fnameIdx = p == fSoundRegexps ? 2 : p == fImgRegExpU ? 2 : 3;</span>
+<span class="nc" id="L310">                m = p.matcher(s);</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                while (m.find()) {</span>
+<span class="nc" id="L312">                    String fname = m.group(fnameIdx);</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                    boolean isLocal = !fRemotePattern.matcher(fname.toLowerCase(Locale.US)).find();</span>
+<span class="nc bnc" id="L314" title="All 4 branches missed.">                    if (isLocal || includeRemote) {</span>
+<span class="nc" id="L315">                        l.add(fname);</span>
+                    }
+<span class="nc" id="L317">                }</span>
+<span class="nc" id="L318">            }</span>
+<span class="nc" id="L319">        }</span>
+<span class="nc" id="L320">        return l;</span>
+    }
+
+
+    private List&lt;String&gt; _expandClozes(String string) {
+<span class="nc" id="L325">        Set&lt;String&gt; ords = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L326">        Matcher m = Pattern.compile(&quot;\\{\\{c(\\d+)::.+?\\}\\}&quot;).matcher(string);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        while (m.find()) {</span>
+<span class="nc" id="L328">            ords.add(m.group(1));</span>
+        }
+<span class="nc" id="L330">        ArrayList&lt;String&gt; strings = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L331">        String clozeReg = Template.clozeReg;</span>
+        
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        for (String ord : ords) {</span>
+<span class="nc" id="L334">            StringBuffer buf = new StringBuffer();</span>
+<span class="nc" id="L335">            m = Pattern.compile(String.format(Locale.US, clozeReg, ord)).matcher(string);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            while (m.find()) {</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                if (!TextUtils.isEmpty(m.group(3))) {</span>
+<span class="nc" id="L338">                    m.appendReplacement(buf, &quot;[$3]&quot;);</span>
+                } else {
+<span class="nc" id="L340">                    m.appendReplacement(buf, &quot;[...]&quot;);</span>
+                }
+            }
+<span class="nc" id="L343">            m.appendTail(buf);</span>
+<span class="nc" id="L344">            String s = buf.toString().replaceAll(String.format(Locale.US, clozeReg, &quot;.+?&quot;), &quot;$1&quot;);</span>
+<span class="nc" id="L345">            strings.add(s);</span>
+<span class="nc" id="L346">        }</span>
+<span class="nc" id="L347">        strings.add(string.replaceAll(String.format(Locale.US, clozeReg, &quot;.+?&quot;), &quot;$1&quot;));</span>
+<span class="nc" id="L348">        return strings;</span>
+    }
+
+
+    /**
+     * Strips a string from media references.
+     *
+     * @param txt The string to be cleared of media references.
+     * @return The media-free string.
+     */
+    public String strip(String txt) {
+<span class="nc bnc" id="L359" title="All 2 branches missed.">        for (Pattern p : mRegexps) {</span>
+<span class="nc" id="L360">            txt = p.matcher(txt).replaceAll(&quot;&quot;);</span>
+<span class="nc" id="L361">        }</span>
+<span class="nc" id="L362">        return txt;</span>
+    }
+
+
+    public String escapeImages(String string) {
+<span class="nc" id="L367">        return escapeImages(string, false);</span>
+    }
+
+
+    /**
+     * Percent-escape UTF-8 characters in local image filenames.
+     * @param string The string to search for image references and escape the filenames.
+     * @return The string with the filenames of any local images percent-escaped as UTF-8.
+     */
+    public String escapeImages(String string, boolean unescape) {
+<span class="nc bnc" id="L377" title="All 2 branches missed.">        for (Pattern p : Arrays.asList(fImgRegExpQ, fImgRegExpU)) {</span>
+<span class="nc" id="L378">            Matcher m = p.matcher(string);</span>
+            // NOTE: python uses the named group 'fname'. Java doesn't have named groups, so we have to determine
+            // the index based on which pattern we are using
+<span class="nc bnc" id="L381" title="All 2 branches missed.">            int fnameIdx = p == fImgRegExpU ? 2 : 3;</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">            while (m.find()) {</span>
+<span class="nc" id="L383">                String tag = m.group(0);</span>
+<span class="nc" id="L384">                String fname = m.group(fnameIdx);</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">                if (fRemotePattern.matcher(fname).find()) {</span>
+                    //dont't do any escaping if remote image
+                } else {
+<span class="nc bnc" id="L388" title="All 2 branches missed.">                    if (unescape) {</span>
+<span class="nc" id="L389">                        string = string.replace(tag,tag.replace(fname, Uri.decode(fname)));</span>
+                    } else {
+<span class="nc" id="L391">                        string = string.replace(tag,tag.replace(fname, Uri.encode(fname)));</span>
+                    }
+                }
+<span class="nc" id="L394">            }</span>
+<span class="nc" id="L395">        }</span>
+<span class="nc" id="L396">        return string;</span>
+    }
+
+
+    /**
+     * Rebuilding DB
+     * ***********************************************************
+     */
+
+    /**
+     * Finds missing, unused and invalid media files
+     *
+     * @return A list containing three lists of files (missingFiles, unusedFiles, invalidFiles)
+     */
+    public List&lt;List&lt;String&gt;&gt; check() {
+<span class="nc" id="L411">        return check(null);</span>
+    }
+
+
+    private List&lt;List&lt;String&gt;&gt; check(File[] local) {
+<span class="nc" id="L416">        File mdir = new File(dir());</span>
+        // gather all media references in NFC form
+<span class="nc" id="L418">        Set&lt;String&gt; allRefs = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L419">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L421">            cur = mCol.getDb().getDatabase().rawQuery(&quot;select id, mid, flds from notes&quot;, null);</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L423">                long nid = cur.getLong(0);</span>
+<span class="nc" id="L424">                long mid = cur.getLong(1);</span>
+<span class="nc" id="L425">                String flds = cur.getString(2);</span>
+<span class="nc" id="L426">                List&lt;String&gt; noteRefs = filesInStr(mid, flds);</span>
+                // check the refs are in NFC
+<span class="nc bnc" id="L428" title="All 2 branches missed.">                for (String f : noteRefs) {</span>
+                    // if they're not, we'll need to fix them first
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                    if (!f.equals(Utils.nfcNormalized(f))) {</span>
+<span class="nc" id="L431">                        _normalizeNoteRefs(nid);</span>
+<span class="nc" id="L432">                        noteRefs = filesInStr(mid, flds);</span>
+<span class="nc" id="L433">                        break;</span>
+                    }
+<span class="nc" id="L435">                }</span>
+<span class="nc" id="L436">                allRefs.addAll(noteRefs);</span>
+<span class="nc" id="L437">            }</span>
+        } finally {
+<span class="nc bnc" id="L439" title="All 2 branches missed.">            if (cur != null) {</span>
+<span class="nc" id="L440">                cur.close();</span>
+            }
+        }
+        // loop through media folder
+<span class="nc" id="L444">        List&lt;String&gt; unused = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L445">        List&lt;String&gt; invalid = new ArrayList&lt;&gt;();</span>
+        File[] files;
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (local == null) {</span>
+<span class="nc" id="L448">            files = mdir.listFiles();</span>
+        } else {
+<span class="nc" id="L450">            files = local;</span>
+        }
+<span class="nc" id="L452">        boolean renamedFiles = false;</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        for (File file : files) {</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">            if (local == null) {</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                if (file.isDirectory()) {</span>
+                    // ignore directories
+<span class="nc" id="L457">                    continue;</span>
+                }
+            }
+<span class="nc bnc" id="L460" title="All 2 branches missed.">            if (file.getName().startsWith(&quot;_&quot;)) {</span>
+                // leading _ says to ignore file
+<span class="nc" id="L462">                continue;</span>
+            }
+<span class="nc" id="L464">            File nfcFile = new File(dir(), Utils.nfcNormalized(file.getName()));</span>
+            // we enforce NFC fs encoding
+<span class="nc bnc" id="L466" title="All 2 branches missed.">            if (local == null) {</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">                if (!file.getName().equals(nfcFile.getName())) {</span>
+                    // delete if we already have the NFC form, otherwise rename
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                    if (nfcFile.exists()) {</span>
+<span class="nc" id="L470">                        file.delete();</span>
+<span class="nc" id="L471">                        renamedFiles = true;</span>
+                    } else {
+<span class="nc" id="L473">                        file.renameTo(nfcFile);</span>
+<span class="nc" id="L474">                        renamedFiles = true;</span>
+                    }
+<span class="nc" id="L476">                    file = nfcFile;</span>
+                }
+            }
+            // compare
+<span class="nc bnc" id="L480" title="All 2 branches missed.">            if (!allRefs.contains(nfcFile.getName())) {</span>
+<span class="nc" id="L481">                unused.add(file.getName());</span>
+            } else {
+<span class="nc" id="L483">                allRefs.remove(nfcFile.getName());</span>
+            }
+        }
+        // if we renamed any files to nfc format, we must rerun the check
+        // to make sure the renamed files are not marked as unused
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if (renamedFiles) {</span>
+<span class="nc" id="L489">            return check(local);</span>
+        }
+<span class="nc" id="L491">        List&lt;String&gt; nohave = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        for (String x : allRefs) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">            if (!x.startsWith(&quot;_&quot;)) {</span>
+<span class="nc" id="L494">                nohave.add(x);</span>
+            }
+<span class="nc" id="L496">        }</span>
+<span class="nc" id="L497">        List&lt;List&lt;String&gt;&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L498">        result.add(nohave);</span>
+<span class="nc" id="L499">        result.add(unused);</span>
+<span class="nc" id="L500">        result.add(invalid);</span>
+<span class="nc" id="L501">        return result;</span>
+    }
+
+
+    private void _normalizeNoteRefs(long nid) {
+<span class="nc" id="L506">        Note note = mCol.getNote(nid);</span>
+<span class="nc" id="L507">        String[] flds = note.getFields();</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">        for (int c = 0; c &lt; flds.length; c++) {</span>
+<span class="nc" id="L509">            String fld = flds[c];</span>
+<span class="nc" id="L510">            String nfc = Utils.nfcNormalized(fld);</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">            if (!nfc.equals(fld)) {</span>
+<span class="nc" id="L512">                note.setField(c, nfc);</span>
+            }
+        }
+<span class="nc" id="L515">        note.flush();</span>
+<span class="nc" id="L516">    }</span>
+
+
+    /**
+     * Copying on import
+     * ***********************************************************
+     */
+
+    public boolean have(String fname) {
+<span class="nc" id="L525">        return new File(dir(), fname).exists();</span>
+    }
+
+    /**
+     * Illegal characters
+     * ***********************************************************
+     */
+
+    public String stripIllegal(String str) {
+<span class="nc" id="L534">        Matcher m = fIllegalCharReg.matcher(str);</span>
+<span class="nc" id="L535">        return m.replaceAll(&quot;&quot;);</span>
+    }
+
+
+    public boolean hasIllegal(String str) {
+<span class="nc" id="L540">        Matcher m = fIllegalCharReg.matcher(str);</span>
+<span class="nc" id="L541">        return m.find();</span>
+    }
+
+
+    /**
+     * Tracking changes
+     * ***********************************************************
+     */
+
+    /**
+     * Scan the media folder if it's changed, and note any changes.
+     */
+    public void findChanges() {
+<span class="nc" id="L554">        findChanges(false);</span>
+<span class="nc" id="L555">    }</span>
+
+
+    /**
+     * @param force Unconditionally scan the media folder for changes (i.e., ignore differences in recorded and current
+     *            directory mod times). Use this when rebuilding the media database.
+     */
+    public void findChanges(boolean force) {
+<span class="nc bnc" id="L563" title="All 4 branches missed.">        if (force || _changed() != null) {</span>
+<span class="nc" id="L564">            _logChanges();</span>
+        }
+<span class="nc" id="L566">    }</span>
+
+
+    public boolean haveDirty() {
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        return mDb.queryScalar(&quot;select 1 from media where dirty=1 limit 1&quot;) &gt; 0;</span>
+    }
+
+
+    /**
+     * Returns the number of seconds from epoch since the last modification to the file in path. Important: this method
+     * does not automatically append the root media directory to the path; the FULL path of the file must be specified.
+     *
+     * @param path The path to the file we are checking. path can be a file or a directory.
+     * @return The number of seconds (rounded down).
+     */
+    private long _mtime(String path) {
+<span class="nc" id="L582">        File f = new File(path);</span>
+<span class="nc" id="L583">        return f.lastModified() / 1000;</span>
+    }
+
+
+    private String _checksum(String path) {
+<span class="nc" id="L588">        return Utils.fileChecksum(path);</span>
+    }
+
+
+    /**
+     * Return dir mtime if it has changed since the last findChanges()
+     * Doesn't track edits, but user can add or remove a file to update
+     * 
+     * @return The modification time of the media directory if it has changed since the last call of findChanges(). If
+     *         it hasn't, it returns null.
+     */
+    public Long _changed() {
+<span class="nc" id="L600">        long mod = mDb.queryLongScalar(&quot;select dirMod from meta&quot;);</span>
+<span class="nc" id="L601">        long mtime = _mtime(dir());</span>
+<span class="nc bnc" id="L602" title="All 4 branches missed.">        if (mod != 0 &amp;&amp; mod == mtime) {</span>
+<span class="nc" id="L603">            return null;</span>
+        }
+<span class="nc" id="L605">        return mtime;</span>
+    }
+
+
+    private void _logChanges()  {
+<span class="nc" id="L610">        Pair&lt;List&lt;String&gt;, List&lt;String&gt;&gt; result = _changes();</span>
+<span class="nc" id="L611">        List&lt;String&gt; added = result.first;</span>
+<span class="nc" id="L612">        List&lt;String&gt; removed = result.second;</span>
+<span class="nc" id="L613">        ArrayList&lt;Object[]&gt; media = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">        for (String f : added) {</span>
+<span class="nc" id="L615">            String path = new File(dir(), f).getAbsolutePath();</span>
+<span class="nc" id="L616">            long mt = _mtime(path);</span>
+<span class="nc" id="L617">            media.add(new Object[] { f, _checksum(path), mt, 1 });</span>
+<span class="nc" id="L618">        }</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">        for (String f : removed) {</span>
+<span class="nc" id="L620">            media.add(new Object[] { f, null, 0, 1});</span>
+<span class="nc" id="L621">        }</span>
+        // update media db
+<span class="nc" id="L623">        mDb.executeMany(&quot;insert or replace into media values (?,?,?,?)&quot;, media);</span>
+<span class="nc" id="L624">        mDb.execute(&quot;update meta set dirMod = ?&quot;, new Object[] { _mtime(dir()) });</span>
+<span class="nc" id="L625">        mDb.commit();</span>
+<span class="nc" id="L626">    }</span>
+
+
+    private Pair&lt;List&lt;String&gt;, List&lt;String&gt;&gt; _changes() {
+<span class="nc" id="L630">        Map&lt;String, Object[]&gt; cache = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L631">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L633">            cur = mDb.getDatabase().rawQuery(&quot;select fname, csum, mtime from media where csum is not null&quot;, null);</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">            while (cur.moveToNext()) {</span>
+<span class="nc" id="L635">                String name = cur.getString(0);</span>
+<span class="nc" id="L636">                String csum = cur.getString(1);</span>
+<span class="nc" id="L637">                Long mod = cur.getLong(2);</span>
+<span class="nc" id="L638">                cache.put(name, new Object[] { csum, mod, false });</span>
+<span class="nc" id="L639">            }</span>
+<span class="nc" id="L640">        } catch (SQLException e) {</span>
+<span class="nc" id="L641">            throw new RuntimeException(e);</span>
+        } finally {
+<span class="nc bnc" id="L643" title="All 2 branches missed.">            if (cur != null) {</span>
+<span class="nc" id="L644">                cur.close();</span>
+            }
+        }
+<span class="nc" id="L647">        List&lt;String&gt; added = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L648">        List&lt;String&gt; removed = new ArrayList&lt;&gt;();</span>
+        // loop through on-disk files
+<span class="nc bnc" id="L650" title="All 2 branches missed.">        for (File f : new File(dir()).listFiles()) {</span>
+            // ignore folders and thumbs.db
+<span class="nc bnc" id="L652" title="All 2 branches missed.">            if (f.isDirectory()) {</span>
+<span class="nc" id="L653">                continue;</span>
+            }
+<span class="nc" id="L655">            String fname = f.getName();</span>
+<span class="nc bnc" id="L656" title="All 2 branches missed.">            if (fname.equalsIgnoreCase(&quot;thumbs.db&quot;)) {</span>
+<span class="nc" id="L657">                continue;</span>
+            }
+            // and files with invalid chars
+<span class="nc bnc" id="L660" title="All 2 branches missed.">            if (hasIllegal(fname)) {</span>
+<span class="nc" id="L661">                continue;</span>
+            }
+            // empty files are invalid; clean them up and continue
+<span class="nc" id="L664">            long sz = f.length();</span>
+<span class="nc bnc" id="L665" title="All 2 branches missed.">            if (sz == 0) {</span>
+<span class="nc" id="L666">                f.delete();</span>
+<span class="nc" id="L667">                continue;</span>
+            }
+<span class="nc bnc" id="L669" title="All 2 branches missed.">            if (sz &gt; 100*1024*1024) {</span>
+<span class="nc" id="L670">                mCol.log(&quot;ignoring file over 100MB&quot;, f);</span>
+<span class="nc" id="L671">                continue;</span>
+            }
+            // check encoding
+<span class="nc" id="L674">            String normf = Utils.nfcNormalized(fname);</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">            if (!fname.equals(normf)) {</span>
+                // wrong filename encoding which will cause sync errors
+<span class="nc" id="L677">                File nf = new File(dir(), normf);</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">                if (nf.exists()) {</span>
+<span class="nc" id="L679">                    f.delete();</span>
+                } else {
+<span class="nc" id="L681">                    f.renameTo(nf);</span>
+                }
+            }
+            // newly added?
+<span class="nc bnc" id="L685" title="All 2 branches missed.">            if (!cache.containsKey(fname)) {</span>
+<span class="nc" id="L686">                added.add(fname);</span>
+            } else {
+                // modified since last time?
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                if (_mtime(f.getAbsolutePath()) != (Long) cache.get(fname)[1]) {</span>
+                    // and has different checksum?
+<span class="nc bnc" id="L691" title="All 2 branches missed.">                    if (!_checksum(f.getAbsolutePath()).equals(cache.get(fname)[0])) {</span>
+<span class="nc" id="L692">                        added.add(fname);</span>
+                    }
+                }
+                // mark as used
+<span class="nc" id="L696">                cache.get(fname)[2] = true;</span>
+            }
+        }
+        // look for any entries in the cache that no longer exist on disk
+<span class="nc bnc" id="L700" title="All 2 branches missed.">        for (String fname : cache.keySet()) {</span>
+<span class="nc bnc" id="L701" title="All 2 branches missed.">            if (!((Boolean)cache.get(fname)[2])) {</span>
+<span class="nc" id="L702">                removed.add(fname);</span>
+            }
+<span class="nc" id="L704">        }</span>
+<span class="nc" id="L705">        return new Pair&lt;&gt;(added, removed);</span>
+    }
+
+
+    /**
+     * Syncing related
+     * ***********************************************************
+     */
+
+    public int lastUsn() {
+<span class="nc" id="L715">        return mDb.queryScalar(&quot;select lastUsn from meta&quot;);</span>
+    }
+
+
+    public void setLastUsn(int usn) {
+<span class="nc" id="L720">        mDb.execute(&quot;update meta set lastUsn = ?&quot;, new Object[] { usn });</span>
+<span class="nc" id="L721">        mDb.commit();</span>
+<span class="nc" id="L722">    }</span>
+
+
+    public Pair&lt;String, Integer&gt; syncInfo(String fname) {
+<span class="nc" id="L726">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L728">            cur = mDb.getDatabase().rawQuery(&quot;select csum, dirty from media where fname=?&quot;, new String[] { fname });</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">            if (cur.moveToNext()) {</span>
+<span class="nc" id="L730">                String csum = cur.getString(0);</span>
+<span class="nc" id="L731">                int dirty = cur.getInt(1);</span>
+<span class="nc" id="L732">                return new Pair&lt;&gt;(csum, dirty);</span>
+            } else {
+<span class="nc" id="L734">                return new Pair&lt;&gt;(null, 0);</span>
+            }
+        } finally {
+<span class="nc bnc" id="L737" title="All 2 branches missed.">            if (cur != null) {</span>
+<span class="nc" id="L738">                cur.close();</span>
+            }
+        }
+    }
+
+
+    public void markClean(List&lt;String&gt; fnames) {
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        for (String fname : fnames) {</span>
+<span class="nc" id="L746">            mDb.execute(&quot;update media set dirty=0 where fname=?&quot;, new Object[] { fname });</span>
+<span class="nc" id="L747">        }</span>
+<span class="nc" id="L748">    }</span>
+
+
+    public void syncDelete(String fname) {
+<span class="nc" id="L752">        File f = new File(dir(), fname);</span>
+<span class="nc bnc" id="L753" title="All 2 branches missed.">        if (f.exists()) {</span>
+<span class="nc" id="L754">            f.delete();</span>
+        }
+<span class="nc" id="L756">        mDb.execute(&quot;delete from media where fname=?&quot;, new Object[] { fname });</span>
+<span class="nc" id="L757">    }</span>
+
+
+    public int mediacount() {
+<span class="nc" id="L761">        return mDb.queryScalar(&quot;select count() from media where csum is not null&quot;);</span>
+    }
+
+
+    public int dirtyCount() {
+<span class="nc" id="L766">        return mDb.queryScalar(&quot;select count() from media where dirty=1&quot;);</span>
+    }
+
+
+    public void forceResync() {
+<span class="nc" id="L771">        mDb.execute(&quot;delete from media&quot;);</span>
+<span class="nc" id="L772">        mDb.execute(&quot;update meta set lastUsn=0,dirMod=0&quot;);</span>
+<span class="nc" id="L773">        mDb.execute(&quot;vacuum analyze&quot;);</span>
+<span class="nc" id="L774">        mDb.commit();</span>
+<span class="nc" id="L775">    }</span>
+
+
+    /**
+     * Media syncing: zips
+     * ***********************************************************
+     */
+
+    /**
+     * Unlike python, our temp zip file will be on disk instead of in memory. This avoids storing
+     * potentially large files in memory which is not feasible with Android's limited heap space.
+     * &lt;p&gt;
+     * Notes:
+     * &lt;p&gt;
+     * - The maximum size of the changes zip is decided by the constant SYNC_ZIP_SIZE. If a media file exceeds this
+     * limit, only that file (in full) will be zipped to be sent to the server.
+     * &lt;p&gt;
+     * - This method will be repeatedly called from MediaSyncer until there are no more files (marked &quot;dirty&quot; in the DB)
+     * to send.
+     * &lt;p&gt;
+     * - Since AnkiDroid avoids scanning the media folder on every sync, it is possible for a file to be marked as a
+     * new addition but actually have been deleted (e.g., with a file manager). In this case we skip over the file
+     * and mark it as removed in the database. (This behaviour differs from the desktop client).
+     * &lt;p&gt;
+     */
+    public Pair&lt;File, List&lt;String&gt;&gt; mediaChangesZip() {
+<span class="nc" id="L801">        File f = new File(mCol.getPath().replaceFirst(&quot;collection\\.anki2$&quot;, &quot;tmpSyncToServer.zip&quot;));</span>
+<span class="nc" id="L802">        Cursor cur = null;</span>
+        try {
+<span class="nc" id="L804">            ZipOutputStream z = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(f)));</span>
+<span class="nc" id="L805">            z.setMethod(ZipOutputStream.DEFLATED);</span>
+
+<span class="nc" id="L807">            List&lt;String&gt; fnames = new ArrayList&lt;&gt;();</span>
+            // meta is a list of (fname, zipname), where zipname of null is a deleted file
+            // NOTE: In python, meta is a list of tuples that then gets serialized into json and added
+            // to the zip as a string. In our version, we use JSON objects from the start to avoid the
+            // serialization step. Instead of a list of tuples, we use JSONArrays of JSONArrays.
+<span class="nc" id="L812">            JSONArray meta = new JSONArray();</span>
+<span class="nc" id="L813">            int sz = 0;</span>
+<span class="nc" id="L814">            byte buffer[] = new byte[2048];</span>
+<span class="nc" id="L815">            cur = mDb.getDatabase().rawQuery(</span>
+                    &quot;select fname, csum from media where dirty=1 limit &quot; + Consts.SYNC_ZIP_COUNT, null);
+
+<span class="nc bnc" id="L818" title="All 2 branches missed.">            for (int c = 0; cur.moveToNext(); c++) {</span>
+<span class="nc" id="L819">                String fname = cur.getString(0);</span>
+<span class="nc" id="L820">                String csum = cur.getString(1);</span>
+<span class="nc" id="L821">                fnames.add(fname);</span>
+<span class="nc" id="L822">                String normname = Utils.nfcNormalized(fname);</span>
+
+<span class="nc bnc" id="L824" title="All 2 branches missed.">                if (!TextUtils.isEmpty(csum)) {</span>
+                    try {
+<span class="nc" id="L826">                        mCol.log(&quot;+media zip &quot; + fname);</span>
+<span class="nc" id="L827">                        File file = new File(dir(), fname);</span>
+<span class="nc" id="L828">                        BufferedInputStream bis = new BufferedInputStream(new FileInputStream(file), 2048);</span>
+<span class="nc" id="L829">                        z.putNextEntry(new ZipEntry(Integer.toString(c)));</span>
+<span class="nc" id="L830">                        int count = 0;</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">                        while ((count = bis.read(buffer, 0, 2048)) != -1) {</span>
+<span class="nc" id="L832">                            z.write(buffer, 0, count);</span>
+                        }
+<span class="nc" id="L834">                        z.closeEntry();</span>
+<span class="nc" id="L835">                        bis.close();</span>
+<span class="nc" id="L836">                        meta.put(new JSONArray().put(normname).put(Integer.toString(c)));</span>
+<span class="nc" id="L837">                        sz += file.length();</span>
+<span class="nc" id="L838">                    } catch (FileNotFoundException e) {</span>
+                        // A file has been marked as added but no longer exists in the media directory.
+                        // Skip over it and mark it as removed in the db.
+<span class="nc" id="L841">                        removeFile(fname);</span>
+<span class="nc" id="L842">                    }</span>
+                } else {
+<span class="nc" id="L844">                    mCol.log(&quot;-media zip &quot; + fname);</span>
+<span class="nc" id="L845">                    meta.put(new JSONArray().put(normname).put(&quot;&quot;));</span>
+                }
+<span class="nc bnc" id="L847" title="All 2 branches missed.">                if (sz &gt;= Consts.SYNC_ZIP_SIZE) {</span>
+<span class="nc" id="L848">                    break;</span>
+                }
+            }
+
+<span class="nc" id="L852">            z.putNextEntry(new ZipEntry(&quot;_meta&quot;));</span>
+<span class="nc" id="L853">            z.write(Utils.jsonToString(meta).getBytes());</span>
+<span class="nc" id="L854">            z.closeEntry();</span>
+<span class="nc" id="L855">            z.close();</span>
+            // Don't leave lingering temp files if the VM terminates.
+<span class="nc" id="L857">            f.deleteOnExit();</span>
+<span class="nc" id="L858">            return new Pair&lt;&gt;(f, fnames);</span>
+<span class="nc" id="L859">        } catch (IOException e) {</span>
+<span class="nc" id="L860">            Timber.e(&quot;Failed to create media changes zip&quot;, e);</span>
+<span class="nc" id="L861">            throw new RuntimeException(e);</span>
+        } finally {
+<span class="nc bnc" id="L863" title="All 2 branches missed.">            if (cur != null) {</span>
+<span class="nc" id="L864">                cur.close();</span>
+            }
+        }
+    }
+
+
+    /**
+     * Extract zip data; return the number of files extracted. Unlike the python version, this method consumes a
+     * ZipFile stored on disk instead of a String buffer. Holding the entire downloaded data in memory is not feasible
+     * since some devices can have very limited heap space.
+     *
+     * This method closes the file before it returns.
+     */
+    public int addFilesFromZip(ZipFile z) throws IOException {
+        try {
+<span class="nc" id="L879">            List&lt;Object[]&gt; media = new ArrayList&lt;&gt;();</span>
+            // get meta info first
+<span class="nc" id="L881">            JSONObject meta = new JSONObject(Utils.convertStreamToString(z.getInputStream(z.getEntry(&quot;_meta&quot;))));</span>
+            // then loop through all files
+<span class="nc" id="L883">            int cnt = 0;</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">            for (ZipEntry i : Collections.list(z.entries())) {</span>
+<span class="nc bnc" id="L885" title="All 2 branches missed.">                if (i.getName().equals(&quot;_meta&quot;)) {</span>
+                    // ignore previously-retrieved meta
+<span class="nc" id="L887">                    continue;</span>
+                } else {
+<span class="nc" id="L889">                    String name = meta.getString(i.getName());</span>
+                    // normalize name for platform
+<span class="nc" id="L891">                    name = Utils.nfcNormalized(name);</span>
+                    // save file
+<span class="nc" id="L893">                    String destPath = dir().concat(File.separator).concat(name);</span>
+<span class="nc" id="L894">                    Utils.writeToFile(z.getInputStream(i), destPath);</span>
+<span class="nc" id="L895">                    String csum = Utils.fileChecksum(destPath);</span>
+                    // update db
+<span class="nc" id="L897">                    media.add(new Object[] {name, csum, _mtime(destPath), 0});</span>
+<span class="nc" id="L898">                    cnt += 1;</span>
+                }
+<span class="nc" id="L900">            }</span>
+<span class="nc bnc" id="L901" title="All 2 branches missed.">            if (media.size() &gt; 0) {</span>
+<span class="nc" id="L902">                mDb.executeMany(&quot;insert or replace into media values (?,?,?,?)&quot;, media);</span>
+            }
+<span class="nc" id="L904">            return cnt;</span>
+<span class="nc" id="L905">        } catch (JSONException e) {</span>
+<span class="nc" id="L906">            throw new RuntimeException(e);</span>
+        } finally {
+<span class="nc" id="L908">            z.close();</span>
+        }
+    }
+
+
+    /*
+     * ***********************************************************
+     * The methods below are not in LibAnki.
+     * ***********************************************************
+     */
+
+    /**
+     * Used by unit tests only.
+     */
+    public DB getDb() {
+<span class="nc" id="L923">        return mDb;</span>
+    }
+
+
+    /**
+     * Used by other classes to determine the index of a regular expression group named &quot;fname&quot;
+     * (Anki2Importer needs this). This is needed because we didn't implement the &quot;transformNames&quot;
+     * function and have delegated its job to the caller of this class.
+     */
+    public static int indexOfFname(Pattern p) {
+<span class="nc bnc" id="L933" title="All 4 branches missed.">        int fnameIdx = p == fSoundRegexps ? 2 : p == fImgRegExpU ? 2 : 3;</span>
+<span class="nc" id="L934">        return fnameIdx;</span>
+    }
+
+
+    /**
+     * Add an entry into the media database for file named fname, or update it
+     * if it already exists.
+     */
+    public void markFileAdd(String fname) {
+<span class="nc" id="L943">        Timber.d(&quot;Marking media file addition in media db: %s&quot;, fname);</span>
+<span class="nc" id="L944">        String path = new File(dir(), fname).getAbsolutePath();</span>
+<span class="nc" id="L945">        mDb.execute(&quot;insert or replace into media values (?,?,?,?)&quot;,</span>
+<span class="nc" id="L946">                new Object[] { fname, _checksum(path), _mtime(path), 1 });</span>
+<span class="nc" id="L947">    }</span>
+
+
+    /**
+     * Remove a file from the media directory if it exists and mark it as removed in the media database.
+     */
+    public void removeFile(String fname) {
+<span class="nc" id="L954">        File f = new File(dir(), fname);</span>
+<span class="nc bnc" id="L955" title="All 2 branches missed.">        if (f.exists()) {</span>
+<span class="nc" id="L956">            f.delete();</span>
+        }
+<span class="nc" id="L958">        Timber.d(&quot;Marking media file removal in media db: %s&quot;, fname);</span>
+<span class="nc" id="L959">        mDb.execute(&quot;insert or replace into media values (?,?,?,?)&quot;,</span>
+<span class="nc" id="L960">                new Object[] { fname, null, 0, 1 });</span>
+<span class="nc" id="L961">    }</span>
+
+
+    /**
+     * @return True if the media db has not been populated yet.
+     */
+    public boolean needScan() {
+<span class="nc" id="L968">        long mod = mDb.queryLongScalar(&quot;select dirMod from meta&quot;);</span>
+<span class="nc bnc" id="L969" title="All 2 branches missed.">        if (mod == 0) {</span>
+<span class="nc" id="L970">            return true;</span>
+        } else {
+<span class="nc" id="L972">            return false;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

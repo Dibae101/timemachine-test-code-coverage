@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlertServiceWrapper.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE AlarmClock</a> &gt; <a href="index.source.html" class="el_package">com.better.alarm.background</a> &gt; <span class="el_source">AlertServiceWrapper.kt</span></div><h1>AlertServiceWrapper.kt</h1><pre class="source lang-java linenums">package com.better.alarm.background
+
+import android.app.Notification
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.content.res.Resources
+import android.os.Build
+import android.os.Vibrator
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
+import androidx.annotation.RequiresApi
+import com.better.alarm.CHANNEL_ID
+import com.better.alarm.R
+import com.better.alarm.configuration.AlarmApplication
+import com.better.alarm.configuration.Prefs
+import com.better.alarm.configuration.globalGet
+import com.better.alarm.configuration.globalInject
+import com.better.alarm.configuration.logger
+import com.better.alarm.interfaces.IAlarmsManager
+import com.better.alarm.interfaces.Intents
+import com.better.alarm.logger.LoggerFactory
+import com.better.alarm.notificationBuilder
+import com.better.alarm.oreo
+import com.better.alarm.util.Service
+import com.better.alarm.wakelock.WakeLockManager
+import com.better.alarm.wakelock.Wakelocks
+import io.reactivex.Observable
+import io.reactivex.Scheduler
+import java.util.concurrent.Executor
+import org.koin.core.module.Module
+import org.koin.core.qualifier.named
+import org.koin.dsl.koinApplication
+import org.koin.dsl.module
+
+/**
+ * This wraps [AlertService], does dependency injection and delegates everything to it. This way we
+ * can unit-test [AlertService], [KlaxonPlugin], [VibrationPlugin] and [NotificationsPlugin].
+ */
+<span class="nc" id="L41">class AlertServiceWrapper : Service() {</span>
+  companion object {
+<span class="nc" id="L43">    fun module(): Module = module {</span>
+<span class="nc" id="L44">      factory(named(&quot;inCall&quot;)) {</span>
+<span class="nc" id="L45">        val telephonyManager: TelephonyManager = get()</span>
+<span class="nc" id="L46">        when {</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">              Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.S -&gt;</span>
+<span class="nc" id="L48">                  telephonyManager.observeCallState(get&lt;Context&gt;().mainExecutor)</span>
+<span class="nc" id="L49">              else -&gt; telephonyManager.observePhoneState()</span>
+            }
+<span class="nc" id="L51">            .distinctUntilChanged()</span>
+<span class="nc" id="L52">            .onErrorReturn { e -&gt;</span>
+<span class="nc" id="L53">              logger(&quot;inCall&quot;).error { &quot;Failed to subscribe with PhoneStateListener: $e&quot; }</span>
+<span class="nc" id="L54">              false</span>
+            }
+<span class="nc" id="L56">            .replay(1)</span>
+<span class="nc" id="L57">            .refCount()</span>
+      }
+
+<span class="nc" id="L60">      factory&lt;AlertPlugin&gt;(named(&quot;KlaxonPlugin&quot;)) {</span>
+<span class="nc" id="L61">        KlaxonPlugin(</span>
+<span class="nc" id="L62">            log = logger(&quot;AlertService&quot;),</span>
+<span class="nc" id="L63">            playerFactory = { PlayerWrapper(get(), get(), logger(&quot;AlertService&quot;)) },</span>
+<span class="nc" id="L64">            prealarmVolume = get&lt;Prefs&gt;().preAlarmVolume.observe(),</span>
+<span class="nc" id="L65">            fadeInTimeInMillis = get&lt;Prefs&gt;().fadeInTimeInSeconds.observe().map { it * 1000 },</span>
+<span class="nc" id="L66">            inCall = get(named(&quot;inCall&quot;)),</span>
+<span class="nc" id="L67">            scheduler = get(),</span>
+        )
+      }
+
+<span class="nc" id="L71">      factory&lt;AlertPlugin&gt;(named(&quot;VibrationPlugin&quot;)) {</span>
+<span class="nc" id="L72">        VibrationPlugin(</span>
+<span class="nc" id="L73">            log = logger(&quot;AlertService&quot;),</span>
+<span class="nc" id="L74">            vibrator = get(),</span>
+<span class="nc" id="L75">            fadeInTimeInMillis = get&lt;Prefs&gt;().fadeInTimeInSeconds.observe().map { it * 1000 },</span>
+<span class="nc" id="L76">            scheduler = get(),</span>
+<span class="nc" id="L77">            vibratePreference = get&lt;Prefs&gt;().vibrate.observe())</span>
+      }
+
+<span class="nc" id="L80">      single&lt;NotificationsPlugin&gt; {</span>
+<span class="nc" id="L81">        NotificationsPlugin(</span>
+<span class="nc" id="L82">            logger = logger(&quot;AlertService&quot;), mContext = get(), nm = get(), enclosingService = get())</span>
+      }
+
+<span class="nc" id="L85">      single {</span>
+<span class="nc" id="L86">        AlertService(</span>
+<span class="nc" id="L87">            log = logger(&quot;AlertService&quot;),</span>
+<span class="nc" id="L88">            wakelocks = get(),</span>
+<span class="nc" id="L89">            alarms = get(),</span>
+<span class="nc" id="L90">            inCall = get(named(&quot;inCall&quot;)),</span>
+<span class="nc" id="L91">            plugins = getAll(),</span>
+<span class="nc" id="L92">            notifications = get(),</span>
+<span class="nc" id="L93">            enclosing = get(),</span>
+<span class="nc" id="L94">            prefs = get(),</span>
+        )
+      }
+<span class="nc" id="L97">    }</span>
+
+    @Suppress(&quot;DEPRECATION&quot;)
+    private fun TelephonyManager.observePhoneState() =
+<span class="nc" id="L101">        Observable.create&lt;Boolean&gt; { emitter -&gt;</span>
+<span class="nc" id="L102">          val listener =</span>
+<span class="nc" id="L103">              object : PhoneStateListener() {</span>
+                @Deprecated(
+                    &quot;Deprecated in Java&quot;, ReplaceWith(&quot;TelephonyCallback.CallStateListener&quot;))
+                override fun onCallStateChanged(state: Int, ignored: String) {
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                  emitter.onNext(state != TelephonyManager.CALL_STATE_IDLE)</span>
+<span class="nc" id="L108">                }</span>
+              }
+
+<span class="nc bnc" id="L111" title="All 2 branches missed.">          emitter.onNext(callState != TelephonyManager.CALL_STATE_IDLE)</span>
+
+<span class="nc" id="L113">          emitter.setCancellable { listen(listener, PhoneStateListener.LISTEN_NONE) }</span>
+
+<span class="nc" id="L115">          listen(listener, PhoneStateListener.LISTEN_CALL_STATE)</span>
+<span class="nc" id="L116">        }</span>
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun TelephonyManager.observeCallState(
+        executor: Executor,
+    ): Observable&lt;Boolean&gt; {
+<span class="nc" id="L122">      return Observable.create { emitter -&gt;</span>
+<span class="nc" id="L123">        val cb =</span>
+<span class="nc" id="L124">            object : TelephonyCallback(), TelephonyCallback.CallStateListener {</span>
+              override fun onCallStateChanged(state: Int) {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                emitter.onNext(state != TelephonyManager.CALL_STATE_IDLE)</span>
+<span class="nc" id="L127">              }</span>
+            }
+
+<span class="nc" id="L130">        emitter.setCancellable { unregisterTelephonyCallback(cb) }</span>
+<span class="nc" id="L131">        registerTelephonyCallback(executor, cb)</span>
+<span class="nc" id="L132">      }</span>
+    }
+  }
+
+<span class="nc" id="L136">  private val wakelocks: WakeLockManager by globalInject()</span>
+  private lateinit var alertService: AlertService
+
+  override fun onCreate() {
+<span class="nc" id="L140">    AlarmApplication.startOnce(application)</span>
+<span class="nc" id="L141">    alertService =</span>
+<span class="nc" id="L142">        koinApplication {</span>
+<span class="nc" id="L143">              modules(module())</span>
+<span class="nc" id="L144">              modules(</span>
+<span class="nc" id="L145">                  module {</span>
+<span class="nc" id="L146">                    factory { globalGet&lt;LoggerFactory&gt;() }</span>
+<span class="nc" id="L147">                    factory { globalGet&lt;Wakelocks&gt;() }</span>
+<span class="nc" id="L148">                    factory { globalGet&lt;IAlarmsManager&gt;() }</span>
+<span class="nc" id="L149">                    factory { globalGet&lt;TelephonyManager&gt;() }</span>
+<span class="nc" id="L150">                    factory&lt;Context&gt; { this@AlertServiceWrapper }</span>
+<span class="nc" id="L151">                    factory { globalGet&lt;NotificationManager&gt;() }</span>
+<span class="nc" id="L152">                    factory { globalGet&lt;Prefs&gt;() }</span>
+<span class="nc" id="L153">                    factory { globalGet&lt;Scheduler&gt;() }</span>
+<span class="nc" id="L154">                    factory { globalGet&lt;Vibrator&gt;() }</span>
+<span class="nc" id="L155">                    factory { globalGet&lt;Resources&gt;() }</span>
+<span class="nc" id="L156">                  })</span>
+<span class="nc" id="L157">              modules(</span>
+<span class="nc" id="L158">                  module {</span>
+<span class="nc" id="L159">                    factory&lt;EnclosingService&gt; {</span>
+<span class="nc" id="L160">                      class EnclosingServiceIR : EnclosingService {</span>
+                        override fun handleUnwantedEvent() {
+<span class="nc" id="L162">                          logger(&quot;SERVICE&quot;).warning { &quot;handleUnwantedEvent()&quot; }</span>
+<span class="nc" id="L163">                          oreo {</span>
+<span class="nc" id="L164">                            val notification =</span>
+<span class="nc" id="L165">                                notificationBuilder(CHANNEL_ID) {</span>
+<span class="nc" id="L166">                                  setContentTitle(&quot;Background&quot;)</span>
+<span class="nc" id="L167">                                  setContentText(&quot;Background&quot;)</span>
+<span class="nc" id="L168">                                  setSmallIcon(R.drawable.stat_notify_alarm)</span>
+<span class="nc" id="L169">                                  setOngoing(true)</span>
+<span class="nc" id="L170">                                }</span>
+<span class="nc" id="L171">                            this@AlertServiceWrapper.startForeground(42, notification)</span>
+<span class="nc" id="L172">                          }</span>
+<span class="nc" id="L173">                          this@AlertServiceWrapper.stopSelf()</span>
+<span class="nc" id="L174">                        }</span>
+
+                        override fun startForeground(id: Int, notification: Notification) {
+<span class="nc" id="L177">                          logger(&quot;SERVICE&quot;).debug { &quot;startForeground!!! $id, $notification&quot; }</span>
+<span class="nc" id="L178">                          this@AlertServiceWrapper.startForeground(id, notification)</span>
+<span class="nc" id="L179">                        }</span>
+
+                        override fun stopSelf() {
+<span class="nc" id="L182">                          logger(&quot;SERVICE&quot;).warning { &quot;stopSelf()&quot; }</span>
+<span class="nc" id="L183">                          this@AlertServiceWrapper.stopSelf()</span>
+<span class="nc" id="L184">                        }</span>
+                      }
+
+<span class="nc" id="L187">                      EnclosingServiceIR()</span>
+                    }
+<span class="nc" id="L189">                  })</span>
+<span class="nc" id="L190">            }</span>
+<span class="nc" id="L191">            .koin</span>
+<span class="nc" id="L192">            .get()</span>
+<span class="nc" id="L193">  }</span>
+
+  override fun onDestroy() {
+<span class="nc" id="L196">    alertService.onDestroy()</span>
+
+<span class="nc" id="L198">    oreo { stopForeground(STOP_FOREGROUND_DETACH) }</span>
+<span class="nc" id="L199">  }</span>
+
+  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+<span class="nc bnc" id="L202" title="All 2 branches missed.">    return if (intent == null) {</span>
+      // this also has to be delivered, because someone has to call startForeground()
+<span class="nc" id="L204">      alertService.onStartCommand(Event.NullEvent())</span>
+<span class="nc" id="L205">      START_NOT_STICKY</span>
+    } else {
+<span class="nc" id="L207">      alertService.onStartCommand(</span>
+<span class="nc bnc" id="L208" title="All 6 branches missed.">          when (intent.action) {</span>
+<span class="nc" id="L209">            Intents.ALARM_ALERT_ACTION -&gt; Event.AlarmEvent(intent.getIntExtra(Intents.EXTRA_ID, -1))</span>
+            Intents.ALARM_PREALARM_ACTION -&gt;
+<span class="nc" id="L211">                Event.PrealarmEvent(intent.getIntExtra(Intents.EXTRA_ID, -1))</span>
+<span class="nc" id="L212">            Intents.ACTION_MUTE -&gt; Event.MuteEvent()</span>
+<span class="nc" id="L213">            Intents.ACTION_DEMUTE -&gt; Event.DemuteEvent()</span>
+            Intents.ALARM_DISMISS_ACTION -&gt;
+<span class="nc" id="L215">                Event.DismissEvent(intent.getIntExtra(Intents.EXTRA_ID, -1))</span>
+<span class="nc" id="L216">            else -&gt; throw RuntimeException(&quot;Unknown action ${intent.action}&quot;)</span>
+          })
+
+<span class="nc" id="L219">      val ret =</span>
+<span class="nc bnc" id="L220" title="All 24 branches missed.">          when (intent.action) {</span>
+            Intents.ALARM_ALERT_ACTION,
+            Intents.ALARM_PREALARM_ACTION,
+            Intents.ACTION_MUTE,
+<span class="nc" id="L224">            Intents.ACTION_DEMUTE -&gt; START_STICKY</span>
+            Intents.ALARM_SNOOZE_ACTION,
+            Intents.ALARM_DISMISS_ACTION,
+<span class="nc" id="L227">            Intents.ACTION_SOUND_EXPIRED -&gt; START_NOT_STICKY</span>
+<span class="nc" id="L228">            else -&gt; throw RuntimeException(&quot;Unknown action ${intent.action}&quot;)</span>
+          }
+
+<span class="nc" id="L231">      wakelocks.releaseTransitionWakeLock(intent)</span>
+<span class="nc" id="L232">      ret</span>
+    }
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

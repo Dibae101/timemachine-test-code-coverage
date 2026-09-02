@@ -1,0 +1,111 @@
+/*
+ * This file is part of Track & Graph
+ *
+ * Track & Graph is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Track & Graph is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package com.samco.trackandgraph.reminders.ui
+
+import androidx.lifecycle.ViewModel
+import com.samco.trackandgraph.data.database.dto.CheckedDays
+import com.samco.trackandgraph.data.database.dto.Reminder
+import com.samco.trackandgraph.data.database.dto.ReminderInput
+import com.samco.trackandgraph.data.database.dto.ReminderParams
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import org.threeten.bp.LocalTime
+import javax.inject.Inject
+
+interface WeekDayReminderConfigurationViewModel {
+    val reminderName: StateFlow<String>
+    val enabled: StateFlow<Boolean>
+    val selectedTime: StateFlow<LocalTime>
+    val checkedDays: StateFlow<CheckedDays>
+
+    fun updateReminderName(name: String)
+    fun updateEnabled(enabled: Boolean)
+    fun updateSelectedTime(time: LocalTime)
+    fun updateCheckedDays(days: CheckedDays)
+    fun getReminderInput(): ReminderInput
+    fun initializeFromReminder(reminder: Reminder?, params: ReminderParams.WeekDayParams?)
+    fun reset()
+}
+
+@HiltViewModel
+class WeekDayReminderConfigurationViewModelImpl @Inject constructor() :
+    ViewModel(), WeekDayReminderConfigurationViewModel {
+
+    private val _reminderName = MutableStateFlow("")
+    override val reminderName: StateFlow<String> = _reminderName.asStateFlow()
+
+    private val _enabled = MutableStateFlow(true)
+    override val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
+
+    private val _selectedTime = MutableStateFlow(LocalTime.of(9, 0))
+    override val selectedTime: StateFlow<LocalTime> = _selectedTime.asStateFlow()
+
+    private val _checkedDays = MutableStateFlow(CheckedDays.all())
+    override val checkedDays: StateFlow<CheckedDays> = _checkedDays.asStateFlow()
+
+    override fun updateReminderName(name: String) {
+        _reminderName.value = name
+    }
+
+    override fun updateEnabled(enabled: Boolean) {
+        _enabled.value = enabled
+    }
+
+    override fun updateSelectedTime(time: LocalTime) {
+        _selectedTime.value = time
+    }
+
+    override fun updateCheckedDays(days: CheckedDays) {
+        _checkedDays.value = days
+    }
+
+    override fun getReminderInput(): ReminderInput {
+        return ReminderInput(
+            reminderName = _reminderName.value,
+            featureId = null,
+            params = ReminderParams.WeekDayParams(
+                time = _selectedTime.value,
+                checkedDays = _checkedDays.value,
+                enabled = _enabled.value
+            )
+        )
+    }
+
+    override fun initializeFromReminder(
+        reminder: Reminder?,
+        params: ReminderParams.WeekDayParams?
+    ) {
+        if (reminder != null) {
+            _reminderName.value = reminder.reminderName
+        }
+        if (params != null) {
+            _selectedTime.value = params.time
+            _checkedDays.value = params.checkedDays
+            _enabled.value = params.enabled
+        }
+    }
+
+    override fun reset() {
+        _reminderName.value = ""
+        _enabled.value = true
+        _selectedTime.value = LocalTime.of(9, 0)
+        _checkedDays.value = CheckedDays.all()
+    }
+}

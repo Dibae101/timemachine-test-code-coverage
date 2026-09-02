@@ -304,13 +304,37 @@ for entry in "${ENTRIES[@]}"; do
     continue
   fi
 
+  # The receiver's fully qualified component. An implicit broadcast to a
+  # manifest-declared receiver is not delivered on API 26 and above: it returns
+  # "Broadcast completed: result=0" with no receiver having run and no .ec
+  # written. Setting the package is not enough either; the component has to be
+  # named. Read it back from the installed app rather than guessing, because the
+  # harness lives in the manifest package while the app may install under an
+  # applicationId with a suffix.
+  receiver=$(timeout 120 $ADB -s "$SERIAL" shell dumpsys package "$pkg" 2>/dev/null \
+             | grep -A2 'COLLECT_COVERAGE:' \
+             | grep -oE "[A-Za-z0-9_.]+/[A-Za-z0-9_.$]+" | head -1 | tr -d '\r')
+  alog "coverage receiver: ${receiver:-<not found>}"
+  [ -n "$receiver" ] || log "  WARN: no COLLECT_COVERAGE receiver registered"
+
   # ---- launch + exercise ---------------------------------------------------
-  out=$(timeout 180 $ADB -s "$SERIAL" shell monkey -p "$pkg" 1 2>&1 | tr -d '\r')
-  alog "launch: $out"
-  if echo "$out" | grep -q 'Events injected'; then
-    launched=yes; log "  launched"
-  else
-    launched=no;  log "  WARN: launch may have failed"
+  # `monkey -p <pkg> 1` is not a reliable launch: it can exit without starting an
+  # activity, leaving no app process, and then the coverage dump only ever sees
+  # the harness classes. Resolve the launcher activity and start it directly,
+  # keeping monkey as the fallback.
+  launch_activity=$(timeout 120 $ADB -s "$SERIAL" shell \
+      "cmd package resolve-activity --brief $pkg | tail -1" 2>/dev/null | tr -d '\r')
+  launched=no
+  if [ -n "$launch_activity" ] && [ "${launch_activity#*/}" != "$launch_activity" ]; then
+    out=$(timeout 180 $ADB -s "$SERIAL" shell am start -W -n "$launch_activity" 2>&1 | tr -d '\r')
+    alog "am start: $out"
+    echo "$out" | grep -q 'Status: ok' && { launched=yes; log "  launched $launch_activity"; }
+  fi
+  if [ "$launched" != yes ]; then
+    out=$(timeout 180 $ADB -s "$SERIAL" shell monkey -p "$pkg" 1 2>&1 | tr -d '\r')
+    alog "monkey launch: $out"
+    echo "$out" | grep -q 'Events injected' && launched=yes
+    [ "$launched" = yes ] && log "  launched via monkey" || log "  WARN: launch may have failed"
   fi
   sleep "$SETTLE"
   timeout 300 $ADB -s "$SERIAL" shell monkey -p "$pkg" --throttle 200 \
@@ -330,9 +354,15 @@ for entry in "${ENTRIES[@]}"; do
     # the app is often gone, the broadcast then returns "completed" without any
     # receiver running, and no .ec is written. Relaunch and confirm the process
     # exists before each broadcast.
-    timeout 180 $ADB -s "$SERIAL" shell monkey -p "$pkg" 1 >>"$APP_LOG" 2>&1
+    if [ -n "$launch_activity" ] && [ "${launch_activity#*/}" != "$launch_activity" ]; then
+      timeout 180 $ADB -s "$SERIAL" shell am start -W -n "$launch_activity" >>"$APP_LOG" 2>&1
+    else
+      timeout 180 $ADB -s "$SERIAL" shell monkey -p "$pkg" 1 >>"$APP_LOG" 2>&1
+    fi
     sleep 12
-    alive=$(timeout 60 $ADB -s "$SERIAL" shell ps 2>/dev/null | grep -c "$pkg")
+    # pidof is exact; `ps | grep` also matches the grep itself and any unrelated
+    # process whose command line happens to contain the package name.
+    alive=$(timeout 60 $ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' | wc -w)
     alog "process alive before broadcast: $alive"
     if [ "${alive:-0}" -eq 0 ]; then
       log "  app not running, relaunching once more"
@@ -340,8 +370,13 @@ for entry in "${ENTRIES[@]}"; do
       sleep 15
     fi
     alog "broadcast attempt $battempt (timeout ${BROADCAST_TIMEOUT}s)"
-    bout=$(timeout "$BROADCAST_TIMEOUT" $ADB -s "$SERIAL" shell am broadcast \
-             -a edu.gatech.m3.emma.COLLECT_COVERAGE 2>&1 | tr -d '\r')
+    if [ -n "$receiver" ]; then
+      bout=$(timeout "$BROADCAST_TIMEOUT" $ADB -s "$SERIAL" shell am broadcast \
+               -a edu.gatech.m3.emma.COLLECT_COVERAGE -n "$receiver" 2>&1 | tr -d '\r')
+    else
+      bout=$(timeout "$BROADCAST_TIMEOUT" $ADB -s "$SERIAL" shell am broadcast \
+               -a edu.gatech.m3.emma.COLLECT_COVERAGE 2>&1 | tr -d '\r')
+    fi
     alog "broadcast said: $bout"
     if ! echo "$bout" | grep -q 'Broadcast completed'; then
       log "  broadcast attempt $battempt did not complete (receiver killed by timeout?)"

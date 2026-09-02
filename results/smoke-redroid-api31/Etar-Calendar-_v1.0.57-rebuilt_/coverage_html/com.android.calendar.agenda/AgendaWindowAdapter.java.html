@@ -1,0 +1,1394 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AgendaWindowAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.agenda</a> &gt; <span class="el_source">AgendaWindowAdapter.java</span></div><h1>AgendaWindowAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2009 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.agenda;
+
+import android.app.Activity;
+import android.content.AsyncQueryHandler;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Handler;
+import android.provider.CalendarContract;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.Calendars;
+import android.provider.CalendarContract.Instances;
+import android.text.format.DateUtils;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.view.ViewGroup;
+import android.widget.AbsListView.OnScrollListener;
+import android.widget.BaseAdapter;
+import android.widget.GridLayout;
+import android.widget.TextView;
+
+import com.android.calendar.CalendarController;
+import com.android.calendar.CalendarController.EventType;
+import com.android.calendar.CalendarController.ViewType;
+import com.android.calendar.StickyHeaderListView;
+import com.android.calendar.Utils;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.util.Date;
+import java.util.Formatter;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.Locale;
+import java.util.concurrent.ConcurrentLinkedQueue;
+
+import ws.xsoh.etar.R;
+
+/*
+Bugs Bugs Bugs:
+- At rotation and launch time, the initial position is not set properly. This code is calling
+ listview.setSelection() in 2 rapid secessions but it dropped or didn't process the first one.
+- Scroll using trackball isn't repositioning properly after a new adapter is added.
+- Track ball clicks at the header/footer doesn't work.
+- Potential ping pong effect if the prefetch window is big and data is limited
+- Add index in calendar provider
+ToDo ToDo ToDo:
+Get design of header and footer from designer
+Make scrolling smoother.
+Test for correctness
+Loading speed
+Check for leaks and excessive allocations
+ */
+
+public class AgendaWindowAdapter extends BaseAdapter
+    implements StickyHeaderListView.HeaderIndexer, StickyHeaderListView.HeaderHeightListener{
+
+    public static final int INDEX_INSTANCE_ID = 0;
+    public static final int INDEX_TITLE = 1;
+    public static final int INDEX_EVENT_LOCATION = 2;
+    public static final int INDEX_ALL_DAY = 3;
+    public static final int INDEX_HAS_ALARM = 4;
+    public static final int INDEX_COLOR = 5;
+    public static final int INDEX_RRULE = 6;
+    public static final int INDEX_BEGIN = 7;
+    public static final int INDEX_END = 8;
+    public static final int INDEX_EVENT_ID = 9;
+    public static final int INDEX_START_DAY = 10;
+    public static final int INDEX_END_DAY = 11;
+    public static final int INDEX_STATUS = 12;
+    public static final int INDEX_SELF_ATTENDEE_STATUS = 13;
+    public static final int INDEX_ORGANIZER = 14;
+    public static final int INDEX_OWNER_ACCOUNT = 15;
+    public static final int INDEX_CAN_ORGANIZER_RESPOND= 16;
+    public static final int INDEX_TIME_ZONE = 17;
+    static final boolean BASICLOG = false;
+    static final boolean DEBUGLOG = false;
+    private static final String TAG = &quot;AgendaWindowAdapter&quot;;
+    private static final String AGENDA_SORT_ORDER =
+            CalendarContract.Instances.START_DAY + &quot; ASC, &quot; +
+                    CalendarContract.Instances.BEGIN + &quot; ASC, &quot; +
+                    CalendarContract.Events.TITLE + &quot; ASC&quot;;
+<span class="nc" id="L103">    private static final String[] PROJECTION = new String[] {</span>
+            Instances._ID, // 0
+            Instances.TITLE, // 1
+            Instances.EVENT_LOCATION, // 2
+            Instances.ALL_DAY, // 3
+            Instances.HAS_ALARM, // 4
+            Instances.DISPLAY_COLOR, // 5
+            Instances.RRULE, // 6
+            Instances.BEGIN, // 7
+            Instances.END, // 8
+            Instances.EVENT_ID, // 9
+            Instances.START_DAY, // 10 Julian start day
+            Instances.END_DAY, // 11 Julian end day
+            Instances.STATUS, // 12
+            Instances.SELF_ATTENDEE_STATUS, // 13
+            Instances.ORGANIZER, // 14
+            Instances.OWNER_ACCOUNT, // 15
+            Instances.CAN_ORGANIZER_RESPOND, // 16
+            Instances.EVENT_TIMEZONE, // 17
+    };
+    // Listview may have a bug where the index/position is not consistent when there's a header.
+    // position == positionInListView - OFF_BY_ONE_BUG
+    // TODO Need to look into this.
+    private static final int OFF_BY_ONE_BUG = 1;
+    private static final int MAX_NUM_OF_ADAPTERS = 5;
+    private static final int IDEAL_NUM_OF_EVENTS = 50;
+    private static final int MIN_QUERY_DURATION = 7; // days
+    private static final int MAX_QUERY_DURATION = 60; // days
+    private static final int PREFETCH_BOUNDARY = 1;
+    /** Times to auto-expand/retry query after getting no data */
+    private static final int RETRIES_ON_NO_DATA = 1;
+    // Types of Query
+    private static final int QUERY_TYPE_OLDER = 0; // Query for older events
+    private static final int QUERY_TYPE_NEWER = 1; // Query for newer events
+    private static final int QUERY_TYPE_CLEAN = 2; // Delete everything and query around a date
+
+
+    private final Context mContext;
+    private final Resources mResources;
+    private final QueryHandler mQueryHandler;
+    private final AgendaListView mAgendaListView;
+<span class="nc" id="L144">    private final LinkedList&lt;DayAdapterInfo&gt; mAdapterInfos =</span>
+            new LinkedList&lt;DayAdapterInfo&gt;();
+<span class="nc" id="L146">    private final ConcurrentLinkedQueue&lt;QuerySpec&gt; mQueryQueue =</span>
+            new ConcurrentLinkedQueue&lt;QuerySpec&gt;();
+    private final TextView mHeaderView;
+    private final TextView mFooterView;
+    private final boolean mIsTabletConfig;
+    // Note: Formatter is not thread safe. Fine for now as it is only used by the main thread.
+    private final Formatter mFormatter;
+    private final StringBuilder mStringBuilder;
+    // defines if to pop-up the current event when the agenda is first shown
+    private final boolean mShowEventOnStart;
+<span class="nc" id="L156">    private final Handler mDataChangedHandler = new Handler();</span>
+<span class="nc" id="L157">    private final Runnable mDataChangedRunnable = new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="nc" id="L160">            notifyDataSetChanged();</span>
+<span class="nc" id="L161">        }</span>
+    };
+    private final int mSelectedItemBackgroundColor;
+    private final int mSelectedItemTextColor;
+    private final float mItemRightMargin;
+<span class="nc" id="L166">    boolean mCleanQueryInitiated = false;</span>
+    // Used to stop a fling motion if the ListView is set to a specific position
+<span class="nc" id="L168">    int mListViewScrollState = OnScrollListener.SCROLL_STATE_IDLE;</span>
+    /**
+     * The sum of the rows in all the adapters
+     */
+    private int mRowCount;
+    /**
+     * The number of times we have queried and gotten no results back
+     */
+    private int mEmptyCursorCount;
+    /**
+     * Cached value of the last used adapter
+     */
+    private DayAdapterInfo mLastUsedInfo;
+<span class="nc" id="L181">    private boolean mDoneSettingUpHeaderFooter = false;</span>
+<span class="nc" id="L182">    private int mStickyHeaderSize = 44; // Initial size big enough for it to work</span>
+    /**
+     * When the user scrolled to the top, a query will be made for older events
+     * and this will be incremented. Don't make more requests if
+     * mOlderRequests &gt; mOlderRequestsProcessed.
+     */
+    private int mOlderRequests;
+    /** Number of &quot;older&quot; query that has been processed. */
+    private int mOlderRequestsProcessed;
+    /**
+     * When the user scrolled to the bottom, a query will be made for newer
+     * events and this will be incremented. Don't make more requests if
+     * mNewerRequests &gt; mNewerRequestsProcessed.
+     */
+    private int mNewerRequests;
+    /** Number of &quot;newer&quot; query that has been processed. */
+    private int mNewerRequestsProcessed;
+    private String mTimeZone;
+<span class="nc" id="L200">    private final Runnable mTZUpdater = new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="nc" id="L203">            mTimeZone = Utils.getTimeZone(mContext, this);</span>
+<span class="nc" id="L204">            notifyDataSetChanged();</span>
+<span class="nc" id="L205">        }</span>
+    };
+    private boolean mShuttingDown;
+    private boolean mHideDeclined;
+    /** The current search query, or null if none */
+    private String mSearchQuery;
+<span class="nc" id="L211">    private long mSelectedInstanceId = -1;</span>
+<span class="nc" id="L212">    private AgendaAdapter.ViewHolder mSelectedVH = null;</span>
+
+    public AgendaWindowAdapter(Context context,
+<span class="nc" id="L215">            AgendaListView agendaListView, boolean showEventOnStart) {</span>
+<span class="nc" id="L216">        mContext = context;</span>
+<span class="nc" id="L217">        mResources = context.getResources();</span>
+<span class="nc" id="L218">        mSelectedItemBackgroundColor = mResources</span>
+<span class="nc" id="L219">                .getColor(R.color.agenda_selected_background_color);</span>
+<span class="nc" id="L220">        mSelectedItemTextColor = mResources.getColor(R.color.agenda_selected_text_color);</span>
+<span class="nc" id="L221">        mItemRightMargin = mResources.getDimension(R.dimen.agenda_item_right_margin);</span>
+<span class="nc" id="L222">        mIsTabletConfig = Utils.getConfigBool(mContext, R.bool.tablet_config);</span>
+
+<span class="nc" id="L224">        mTimeZone = Utils.getTimeZone(context, mTZUpdater);</span>
+<span class="nc" id="L225">        mAgendaListView = agendaListView;</span>
+<span class="nc" id="L226">        mQueryHandler = new QueryHandler(context.getContentResolver());</span>
+
+<span class="nc" id="L228">        mStringBuilder = new StringBuilder(50);</span>
+<span class="nc" id="L229">        mFormatter = new Formatter(mStringBuilder, Locale.getDefault());</span>
+
+<span class="nc" id="L231">        mShowEventOnStart = showEventOnStart;</span>
+
+        // Implies there is no sticky header
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (!mShowEventOnStart) {</span>
+<span class="nc" id="L235">            mStickyHeaderSize = 0;</span>
+        }
+<span class="nc" id="L237">        mSearchQuery = null;</span>
+
+<span class="nc" id="L239">        LayoutInflater inflater = (LayoutInflater) context</span>
+<span class="nc" id="L240">                .getSystemService(Context.LAYOUT_INFLATER_SERVICE);</span>
+<span class="nc" id="L241">        mHeaderView = (TextView)inflater.inflate(R.layout.agenda_header_footer, null);</span>
+<span class="nc" id="L242">        mFooterView = (TextView)inflater.inflate(R.layout.agenda_header_footer, null);</span>
+<span class="nc" id="L243">        mHeaderView.setText(R.string.loading);</span>
+<span class="nc" id="L244">        mAgendaListView.addHeaderView(mHeaderView);</span>
+<span class="nc" id="L245">    }</span>
+
+    static String getViewTitle(View x) {
+<span class="nc" id="L248">        String title = &quot;&quot;;</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        if (x != null) {</span>
+<span class="nc" id="L250">            Object yy = x.getTag();</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            if (yy instanceof AgendaAdapter.ViewHolder) {</span>
+<span class="nc" id="L252">                TextView tv = ((AgendaAdapter.ViewHolder) yy).title;</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                if (tv != null) {</span>
+<span class="nc" id="L254">                    title = (String) tv.getText();</span>
+                }
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            } else if (yy != null) {</span>
+<span class="nc" id="L257">                TextView dateView = ((AgendaByDayAdapter.ViewHolder) yy).dateView;</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                if (dateView != null) {</span>
+<span class="nc" id="L259">                    title = (String) dateView.getText();</span>
+                }
+            }
+        }
+<span class="nc" id="L263">        return title;</span>
+    }
+
+    // Method in Adapter
+    @Override
+    public int getViewTypeCount() {
+<span class="nc" id="L269">        return AgendaByDayAdapter.TYPE_LAST;</span>
+    }
+
+    // Method in BaseAdapter
+    @Override
+    public boolean areAllItemsEnabled() {
+<span class="nc" id="L275">        return false;</span>
+    }
+
+    // Method in Adapter
+    @Override
+    public int getItemViewType(int position) {
+<span class="nc" id="L281">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L283">            return info.dayAdapter.getItemViewType(position - info.offset);</span>
+        } else {
+<span class="nc" id="L285">            return -1;</span>
+        }
+    }
+
+    // Method in BaseAdapter
+    @Override
+    public boolean isEnabled(int position) {
+<span class="nc" id="L292">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L294">            return info.dayAdapter.isEnabled(position - info.offset);</span>
+        } else {
+<span class="nc" id="L296">            return false;</span>
+        }
+    }
+
+    // Abstract Method in BaseAdapter
+    public int getCount() {
+<span class="nc" id="L302">        return mRowCount;</span>
+    }
+
+    // Abstract Method in BaseAdapter
+    public Object getItem(int position) {
+<span class="nc" id="L307">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L309">            return info.dayAdapter.getItem(position - info.offset);</span>
+        } else {
+<span class="nc" id="L311">            return null;</span>
+        }
+    }
+
+    // Method in BaseAdapter
+    @Override
+    public boolean hasStableIds() {
+<span class="nc" id="L318">        return true;</span>
+    }
+
+    // Abstract Method in BaseAdapter
+    @Override
+    public long getItemId(int position) {
+<span class="nc" id="L324">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L326">            int curPos = info.dayAdapter.getCursorPosition(position - info.offset);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (curPos == Integer.MIN_VALUE) {</span>
+<span class="nc" id="L328">                return -1;</span>
+            }
+            // Regular event
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            if (curPos &gt;= 0) {</span>
+<span class="nc" id="L332">                info.cursor.moveToPosition(curPos);</span>
+<span class="nc" id="L333">                return info.cursor.getLong(AgendaWindowAdapter.INDEX_EVENT_ID) &lt;&lt; 20 +</span>
+<span class="nc" id="L334">                    info.cursor.getLong(AgendaWindowAdapter.INDEX_BEGIN);</span>
+            }
+            // Day Header
+<span class="nc" id="L337">            return info.dayAdapter.findJulianDayFromPosition(position);</span>
+
+        } else {
+<span class="nc" id="L340">            return -1;</span>
+        }
+    }
+
+    // Abstract Method in BaseAdapter
+    public View getView(int position, View convertView, ViewGroup parent) {
+<span class="nc bnc" id="L346" title="All 4 branches missed.">        if (position &gt;= (mRowCount - PREFETCH_BOUNDARY)</span>
+                &amp;&amp; mNewerRequests &lt;= mNewerRequestsProcessed) {
+            if (DEBUGLOG) Log.e(TAG, &quot;queryForNewerEvents: &quot;);
+<span class="nc" id="L349">            mNewerRequests++;</span>
+<span class="nc" id="L350">            queueQuery(new QuerySpec(QUERY_TYPE_NEWER));</span>
+        }
+
+<span class="nc bnc" id="L353" title="All 4 branches missed.">        if (position &lt; PREFETCH_BOUNDARY</span>
+                &amp;&amp; mOlderRequests &lt;= mOlderRequestsProcessed) {
+            if (DEBUGLOG) Log.e(TAG, &quot;queryForOlderEvents: &quot;);
+<span class="nc" id="L356">            mOlderRequests++;</span>
+<span class="nc" id="L357">            queueQuery(new QuerySpec(QUERY_TYPE_OLDER));</span>
+        }
+
+        final View v;
+<span class="nc" id="L361">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L363">            int offset = position - info.offset;</span>
+<span class="nc" id="L364">            v = info.dayAdapter.getView(offset, convertView,</span>
+                    parent);
+
+            // Turn on the past/present separator if the view is a day header
+            // and it is the first day with events after yesterday.
+<span class="nc bnc" id="L369" title="All 2 branches missed.">            if (info.dayAdapter.isDayHeaderView(offset)) {</span>
+<span class="nc" id="L370">                View simpleDivider = v.findViewById(R.id.top_divider_simple);</span>
+<span class="nc" id="L371">                View pastPresentDivider = v.findViewById(R.id.top_divider_past_present);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">                if (info.dayAdapter.isFirstDayAfterYesterday(offset)) {</span>
+<span class="nc bnc" id="L373" title="All 4 branches missed.">                    if (simpleDivider != null &amp;&amp; pastPresentDivider != null) {</span>
+<span class="nc" id="L374">                        simpleDivider.setVisibility(View.GONE);</span>
+<span class="nc" id="L375">                        pastPresentDivider.setVisibility(View.VISIBLE);</span>
+                    }
+<span class="nc bnc" id="L377" title="All 4 branches missed.">                } else if (simpleDivider != null &amp;&amp; pastPresentDivider != null) {</span>
+<span class="nc" id="L378">                    simpleDivider.setVisibility(View.VISIBLE);</span>
+<span class="nc" id="L379">                    pastPresentDivider.setVisibility(View.GONE);</span>
+                }
+            }
+<span class="nc" id="L382">        } else {</span>
+            // TODO
+<span class="nc" id="L384">            Log.e(TAG, &quot;BUG: getAdapterInfoByPosition returned null!!! &quot; + position);</span>
+<span class="nc" id="L385">            TextView tv = new TextView(mContext);</span>
+<span class="nc" id="L386">            tv.setText(&quot;Bug! &quot; + position);</span>
+<span class="nc" id="L387">            v = tv;</span>
+        }
+
+        // If this is not a tablet config don't do selection highlighting
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (!mIsTabletConfig) {</span>
+<span class="nc" id="L392">            return v;</span>
+        }
+        // Show selected marker if this is item is selected
+<span class="nc" id="L395">        boolean selected = false;</span>
+<span class="nc" id="L396">        Object yy = v.getTag();</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">        if (yy instanceof AgendaAdapter.ViewHolder) {</span>
+<span class="nc" id="L398">            AgendaAdapter.ViewHolder vh = (AgendaAdapter.ViewHolder) yy;</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">            selected = mSelectedInstanceId == vh.instanceId;</span>
+<span class="nc bnc" id="L400" title="All 4 branches missed.">            vh.selectedMarker.setVisibility((selected &amp;&amp; mShowEventOnStart) ?</span>
+<span class="nc" id="L401">                    View.VISIBLE : View.GONE);</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            if (mShowEventOnStart) {</span>
+<span class="nc" id="L403">                GridLayout.LayoutParams lp =</span>
+<span class="nc" id="L404">                        (GridLayout.LayoutParams)vh.textContainer.getLayoutParams();</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                if (selected) {</span>
+<span class="nc" id="L406">                    mSelectedVH = vh;</span>
+<span class="nc" id="L407">                    v.setBackgroundColor(mSelectedItemBackgroundColor);</span>
+<span class="nc" id="L408">                    vh.title.setTextColor(mSelectedItemTextColor);</span>
+<span class="nc" id="L409">                    vh.when.setTextColor(mSelectedItemTextColor);</span>
+<span class="nc" id="L410">                    vh.where.setTextColor(mSelectedItemTextColor);</span>
+<span class="nc" id="L411">                    lp.setMargins(0, 0, 0, 0);</span>
+<span class="nc" id="L412">                    vh.textContainer.setLayoutParams(lp);</span>
+                } else {
+<span class="nc" id="L414">                    lp.setMargins(0, 0, (int)mItemRightMargin, 0);</span>
+<span class="nc" id="L415">                    vh.textContainer.setLayoutParams(lp);</span>
+                }
+            }
+        }
+
+        if (DEBUGLOG) {
+            Log.e(TAG, &quot;getView &quot; + position + &quot; = &quot; + getViewTitle(v));
+        }
+<span class="nc" id="L423">        return v;</span>
+    }
+
+    private int findEventPositionNearestTime(Time time, long id) {
+<span class="nc" id="L427">        DayAdapterInfo info = getAdapterInfoByTime(time);</span>
+<span class="nc" id="L428">        int pos = -1;</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L430">            pos = info.offset + info.dayAdapter.findEventPositionNearestTime(time, id);</span>
+        }
+        if (DEBUGLOG) Log.e(TAG, &quot;findEventPositionNearestTime &quot; + time + &quot; id:&quot; + id + &quot; =&quot; + pos);
+<span class="nc" id="L433">        return pos;</span>
+    }
+
+    protected DayAdapterInfo getAdapterInfoByPosition(int position) {
+<span class="nc" id="L437">        synchronized (mAdapterInfos) {</span>
+<span class="nc bnc" id="L438" title="All 6 branches missed.">            if (mLastUsedInfo != null &amp;&amp; mLastUsedInfo.offset &lt;= position</span>
+                    &amp;&amp; position &lt; (mLastUsedInfo.offset + mLastUsedInfo.size)) {
+<span class="nc" id="L440">                return mLastUsedInfo;</span>
+            }
+<span class="nc bnc" id="L442" title="All 2 branches missed.">            for (DayAdapterInfo info : mAdapterInfos) {</span>
+<span class="nc bnc" id="L443" title="All 4 branches missed.">                if (info.offset &lt;= position</span>
+                        &amp;&amp; position &lt; (info.offset + info.size)) {
+<span class="nc" id="L445">                    mLastUsedInfo = info;</span>
+<span class="nc" id="L446">                    return info;</span>
+                }
+<span class="nc" id="L448">            }</span>
+<span class="nc" id="L449">        }</span>
+<span class="nc" id="L450">        return null;</span>
+    }
+
+    private DayAdapterInfo getAdapterInfoByTime(Time time) {
+        if (DEBUGLOG) Log.e(TAG, &quot;getAdapterInfoByTime &quot; + time.toString());
+
+<span class="nc" id="L456">        Time tmpTime = new Time();</span>
+<span class="nc" id="L457">        tmpTime.set(time);</span>
+<span class="nc" id="L458">        long timeInMillis = tmpTime.normalize();</span>
+<span class="nc" id="L459">        int day = Time.getJulianDay(timeInMillis, tmpTime.getGmtOffset());</span>
+<span class="nc" id="L460">        synchronized (mAdapterInfos) {</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            for (DayAdapterInfo info : mAdapterInfos) {</span>
+<span class="nc bnc" id="L462" title="All 4 branches missed.">                if (info.start &lt;= day &amp;&amp; day &lt;= info.end) {</span>
+<span class="nc" id="L463">                    return info;</span>
+                }
+<span class="nc" id="L465">            }</span>
+<span class="nc" id="L466">        }</span>
+<span class="nc" id="L467">        return null;</span>
+    }
+
+    public AgendaItem getAgendaItemByPosition(final int positionInListView) {
+<span class="nc" id="L471">        return getAgendaItemByPosition(positionInListView, true);</span>
+    }
+
+    /**
+     * Return the event info for a given position in the adapter
+     * @param positionInListView
+     * @param returnEventStartDay If true, return actual event startday. Otherwise
+     *        return agenda date-header date as the startDay.
+     *        The two will differ for multi-day events after the first day.
+     * @return
+     */
+    public AgendaItem getAgendaItemByPosition(final int positionInListView,
+            boolean returnEventStartDay) {
+        if (DEBUGLOG) Log.e(TAG, &quot;getEventByPosition &quot; + positionInListView);
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        if (positionInListView &lt; 0) {</span>
+<span class="nc" id="L486">            return null;</span>
+        }
+
+<span class="nc" id="L489">        final int positionInAdapter = positionInListView - OFF_BY_ONE_BUG;</span>
+<span class="nc" id="L490">        DayAdapterInfo info = getAdapterInfoByPosition(positionInAdapter);</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">        if (info == null) {</span>
+<span class="nc" id="L492">            return null;</span>
+        }
+
+<span class="nc" id="L495">        int cursorPosition = info.dayAdapter.getCursorPosition(positionInAdapter - info.offset);</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">        if (cursorPosition == Integer.MIN_VALUE) {</span>
+<span class="nc" id="L497">            return null;</span>
+        }
+
+<span class="nc" id="L500">        boolean isDayHeader = false;</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">        if (cursorPosition &lt; 0) {</span>
+<span class="nc" id="L502">            cursorPosition = -cursorPosition;</span>
+<span class="nc" id="L503">            isDayHeader = true;</span>
+        }
+
+<span class="nc bnc" id="L506" title="All 2 branches missed.">        if (cursorPosition &lt; info.cursor.getCount()) {</span>
+<span class="nc" id="L507">            AgendaItem item = buildAgendaItemFromCursor(info.cursor, cursorPosition, isDayHeader);</span>
+<span class="nc bnc" id="L508" title="All 4 branches missed.">            if (!returnEventStartDay &amp;&amp; !isDayHeader) {</span>
+<span class="nc" id="L509">                item.startDay = info.dayAdapter.findJulianDayFromPosition(positionInAdapter -</span>
+                        info.offset);
+            }
+<span class="nc" id="L512">            return item;</span>
+        }
+<span class="nc" id="L514">        return null;</span>
+    }
+
+    private AgendaItem buildAgendaItemFromCursor(final Cursor cursor, int cursorPosition,
+            boolean isDayHeader) {
+<span class="nc bnc" id="L519" title="All 2 branches missed.">        if (cursorPosition &lt;= -1) {</span>
+<span class="nc" id="L520">            cursor.moveToFirst();</span>
+        } else {
+<span class="nc" id="L522">            cursor.moveToPosition(cursorPosition);</span>
+        }
+<span class="nc" id="L524">        AgendaItem agendaItem = new AgendaItem();</span>
+<span class="nc" id="L525">        agendaItem.begin = cursor.getLong(AgendaWindowAdapter.INDEX_BEGIN);</span>
+<span class="nc" id="L526">        agendaItem.end = cursor.getLong(AgendaWindowAdapter.INDEX_END);</span>
+<span class="nc" id="L527">        agendaItem.startDay = cursor.getInt(AgendaWindowAdapter.INDEX_START_DAY);</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        agendaItem.allDay = cursor.getInt(AgendaWindowAdapter.INDEX_ALL_DAY) != 0;</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">        if (agendaItem.allDay) { // UTC to Local time conversion</span>
+<span class="nc" id="L530">            Time time = new Time(mTimeZone);</span>
+<span class="nc" id="L531">            time.setJulianDay(Time.getJulianDay(agendaItem.begin, 0));</span>
+<span class="nc" id="L532">            agendaItem.begin = time.toMillis();</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        } else if (isDayHeader) { // Trim to midnight.</span>
+<span class="nc" id="L534">            Time time = new Time(mTimeZone);</span>
+<span class="nc" id="L535">            time.set(agendaItem.begin);</span>
+<span class="nc" id="L536">            time.setHour(0);</span>
+<span class="nc" id="L537">            time.setMinute(0);</span>
+<span class="nc" id="L538">            time.setSecond(0);</span>
+<span class="nc" id="L539">            agendaItem.begin = time.toMillis();</span>
+        }
+
+        // If this is not a day header, then it's an event.
+<span class="nc bnc" id="L543" title="All 2 branches missed.">        if (!isDayHeader) {</span>
+<span class="nc" id="L544">            agendaItem.id = cursor.getLong(AgendaWindowAdapter.INDEX_EVENT_ID);</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">            if (agendaItem.allDay) {</span>
+<span class="nc" id="L546">                Time time = new Time(mTimeZone);</span>
+<span class="nc" id="L547">                time.setJulianDay(Time.getJulianDay(agendaItem.end, 0));</span>
+<span class="nc" id="L548">                agendaItem.end = time.toMillis();</span>
+            }
+        }
+<span class="nc" id="L551">        return agendaItem;</span>
+    }
+
+    /**
+     * Ensures that any all day events are converted to UTC before a VIEW_EVENT command is sent.
+     */
+    private void sendViewEvent(AgendaItem item, long selectedTime) {
+        long startTime;
+        long endTime;
+<span class="nc bnc" id="L560" title="All 2 branches missed.">        if (item.allDay) {</span>
+<span class="nc" id="L561">            startTime = Utils.convertAlldayLocalToUTC(null, item.begin, mTimeZone);</span>
+<span class="nc" id="L562">            endTime = Utils.convertAlldayLocalToUTC(null, item.end, mTimeZone);</span>
+        } else {
+<span class="nc" id="L564">            startTime = item.begin;</span>
+<span class="nc" id="L565">            endTime = item.end;</span>
+        }
+        if (DEBUGLOG) {
+            Log.d(TAG, &quot;Sent (AgendaWindowAdapter): VIEW EVENT: &quot; + new Date(startTime));
+        }
+<span class="nc" id="L570">        CalendarController.getInstance(mContext)</span>
+<span class="nc" id="L571">        .sendEventRelatedEventWithExtra(this, EventType.VIEW_EVENT,</span>
+                item.id, startTime, endTime, 0,
+<span class="nc" id="L573">               0, CalendarController.EventInfo.buildViewExtraLong(</span>
+                           Attendees.ATTENDEE_STATUS_NONE,
+                           item.allDay), selectedTime);
+<span class="nc" id="L576">    }</span>
+
+    public void refresh(Time goToTime, long id, String searchQuery, boolean forced,
+            boolean refreshEventInfo) {
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        if (searchQuery != null) {</span>
+<span class="nc" id="L581">            mSearchQuery = searchQuery;</span>
+        }
+
+        if (DEBUGLOG) {
+            Log.e(TAG, this + &quot;: refresh &quot; + goToTime.toString() + &quot; id &quot; + id
+                    + ((searchQuery != null) ? searchQuery : &quot;&quot;)
+                    + (forced ? &quot; forced&quot; : &quot; not forced&quot;)
+                    + (refreshEventInfo ? &quot; refresh event info&quot; : &quot;&quot;));
+        }
+
+<span class="nc" id="L591">        int startDay = Time.getJulianDay(goToTime.toMillis(), goToTime.getGmtOffset());</span>
+
+<span class="nc bnc" id="L593" title="All 4 branches missed.">        if (!forced &amp;&amp; isInRange(startDay, startDay)) {</span>
+            // No need to re-query
+<span class="nc bnc" id="L595" title="All 2 branches missed.">            if (!mAgendaListView.isAgendaItemVisible(goToTime, id)) {</span>
+<span class="nc" id="L596">                int gotoPosition = findEventPositionNearestTime(goToTime, id);</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">                if (gotoPosition &gt; 0) {</span>
+<span class="nc" id="L598">                    mAgendaListView.setSelectionFromTop(gotoPosition +</span>
+                            OFF_BY_ONE_BUG, mStickyHeaderSize);
+<span class="nc bnc" id="L600" title="All 2 branches missed.">                    if (mListViewScrollState == OnScrollListener.SCROLL_STATE_FLING) {</span>
+<span class="nc" id="L601">                        mAgendaListView.smoothScrollBy(0, 0);</span>
+                    }
+<span class="nc bnc" id="L603" title="All 2 branches missed.">                    if (refreshEventInfo) {</span>
+<span class="nc" id="L604">                        long newInstanceId = findInstanceIdFromPosition(gotoPosition);</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                        if (newInstanceId != getSelectedInstanceId()) {</span>
+<span class="nc" id="L606">                            setSelectedInstanceId(newInstanceId);</span>
+<span class="nc" id="L607">                            mDataChangedHandler.post(mDataChangedRunnable);</span>
+<span class="nc" id="L608">                            Cursor tempCursor = getCursorByPosition(gotoPosition);</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">                            if (tempCursor != null) {</span>
+<span class="nc" id="L610">                                int tempCursorPosition = getCursorPositionByPosition(gotoPosition);</span>
+<span class="nc" id="L611">                                AgendaItem item =</span>
+<span class="nc" id="L612">                                        buildAgendaItemFromCursor(tempCursor, tempCursorPosition,</span>
+                                                false);
+<span class="nc" id="L614">                                mSelectedVH = new AgendaAdapter.ViewHolder();</span>
+<span class="nc" id="L615">                                mSelectedVH.allDay = item.allDay;</span>
+<span class="nc" id="L616">                                sendViewEvent(item, goToTime.toMillis());</span>
+                            }
+                        }
+                    }
+                }
+
+<span class="nc" id="L622">                Time actualTime = new Time(mTimeZone);</span>
+<span class="nc" id="L623">                actualTime.set(goToTime);</span>
+<span class="nc" id="L624">                CalendarController.getInstance(mContext).sendEvent(this, EventType.UPDATE_TITLE,</span>
+                        actualTime, actualTime, -1, ViewType.CURRENT);
+            }
+<span class="nc" id="L627">            return;</span>
+        }
+
+        // If AllInOneActivity is sending a second GOTO event(in OnResume), ignore it.
+<span class="nc bnc" id="L631" title="All 4 branches missed.">        if (!mCleanQueryInitiated || searchQuery != null) {</span>
+            // Query for a total of MIN_QUERY_DURATION days
+<span class="nc" id="L633">            int endDay = startDay + MIN_QUERY_DURATION;</span>
+
+<span class="nc" id="L635">            mSelectedInstanceId = -1;</span>
+<span class="nc" id="L636">            mCleanQueryInitiated = true;</span>
+<span class="nc" id="L637">            queueQuery(startDay, endDay, goToTime, searchQuery, QUERY_TYPE_CLEAN, id);</span>
+
+            // Pre-fetch more data to overcome a race condition in AgendaListView.shiftSelection
+            // Queuing more data with the goToTime set to the selected time skips the call to
+            // shiftSelection on refresh.
+<span class="nc" id="L642">            mOlderRequests++;</span>
+<span class="nc" id="L643">            queueQuery(0, 0, goToTime, searchQuery, QUERY_TYPE_OLDER, id);</span>
+<span class="nc" id="L644">            mNewerRequests++;</span>
+<span class="nc" id="L645">            queueQuery(0, 0, goToTime, searchQuery, QUERY_TYPE_NEWER, id);</span>
+        }
+<span class="nc" id="L647">    }</span>
+
+    public void close() {
+<span class="nc" id="L650">        mShuttingDown = true;</span>
+<span class="nc" id="L651">        pruneAdapterInfo(QUERY_TYPE_CLEAN);</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        if (mQueryHandler != null) {</span>
+<span class="nc" id="L653">            mQueryHandler.cancelOperation(0);</span>
+        }
+<span class="nc" id="L655">    }</span>
+
+    private DayAdapterInfo pruneAdapterInfo(int queryType) {
+<span class="nc" id="L658">        synchronized (mAdapterInfos) {</span>
+<span class="nc" id="L659">            DayAdapterInfo recycleMe = null;</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">            if (!mAdapterInfos.isEmpty()) {</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                if (mAdapterInfos.size() &gt;= MAX_NUM_OF_ADAPTERS) {</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                    if (queryType == QUERY_TYPE_NEWER) {</span>
+<span class="nc" id="L663">                        recycleMe = mAdapterInfos.removeFirst();</span>
+<span class="nc bnc" id="L664" title="All 2 branches missed.">                    } else if (queryType == QUERY_TYPE_OLDER) {</span>
+<span class="nc" id="L665">                        recycleMe = mAdapterInfos.removeLast();</span>
+                        // Keep the size only if the oldest items are removed.
+<span class="nc" id="L667">                        recycleMe.size = 0;</span>
+                    }
+<span class="nc bnc" id="L669" title="All 2 branches missed.">                    if (recycleMe != null) {</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">                        if (recycleMe.cursor != null) {</span>
+<span class="nc" id="L671">                            recycleMe.cursor.close();</span>
+                        }
+<span class="nc" id="L673">                        return recycleMe;</span>
+                    }
+                }
+
+<span class="nc bnc" id="L677" title="All 4 branches missed.">                if (mRowCount == 0 || queryType == QUERY_TYPE_CLEAN) {</span>
+<span class="nc" id="L678">                    mRowCount = 0;</span>
+<span class="nc" id="L679">                    int deletedRows = 0;</span>
+                    DayAdapterInfo info;
+                    do {
+<span class="nc" id="L682">                        info = mAdapterInfos.poll();</span>
+<span class="nc bnc" id="L683" title="All 2 branches missed.">                        if (info != null) {</span>
+                            // TODO the following causes ANR's. Do this in a thread.
+<span class="nc" id="L685">                            info.cursor.close();</span>
+<span class="nc" id="L686">                            deletedRows += info.size;</span>
+<span class="nc" id="L687">                            recycleMe = info;</span>
+                        }
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                    } while (info != null);</span>
+
+<span class="nc bnc" id="L691" title="All 2 branches missed.">                    if (recycleMe != null) {</span>
+<span class="nc" id="L692">                        recycleMe.cursor = null;</span>
+<span class="nc" id="L693">                        recycleMe.size = deletedRows;</span>
+                    }
+                }
+            }
+<span class="nc" id="L697">            return recycleMe;</span>
+        }
+    }
+
+    private String buildQuerySelection() {
+        // Respect the preference to show/hide declined events
+
+<span class="nc bnc" id="L704" title="All 2 branches missed.">        if (mHideDeclined) {</span>
+<span class="nc" id="L705">            return Calendars.VISIBLE + &quot;=1 AND &quot;</span>
+                    + Instances.SELF_ATTENDEE_STATUS + &quot;!=&quot;
+                    + Attendees.ATTENDEE_STATUS_DECLINED;
+        } else {
+<span class="nc" id="L709">            return Calendars.VISIBLE + &quot;=1&quot;;</span>
+        }
+    }
+
+    private Uri buildQueryUri(int start, int end, String searchQuery) {
+<span class="nc bnc" id="L714" title="All 2 branches missed.">        Uri rootUri = searchQuery == null ?</span>
+<span class="nc" id="L715">                Instances.CONTENT_BY_DAY_URI :</span>
+<span class="nc" id="L716">                Instances.CONTENT_SEARCH_BY_DAY_URI;</span>
+<span class="nc" id="L717">        Uri.Builder builder = rootUri.buildUpon();</span>
+<span class="nc" id="L718">        ContentUris.appendId(builder, start);</span>
+<span class="nc" id="L719">        ContentUris.appendId(builder, end);</span>
+<span class="nc bnc" id="L720" title="All 2 branches missed.">        if (searchQuery != null) {</span>
+<span class="nc" id="L721">            builder.appendPath(searchQuery);</span>
+        }
+<span class="nc" id="L723">        return builder.build();</span>
+    }
+
+    private boolean isInRange(int start, int end) {
+<span class="nc" id="L727">        synchronized (mAdapterInfos) {</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">            if (mAdapterInfos.isEmpty()) {</span>
+<span class="nc" id="L729">                return false;</span>
+            }
+<span class="nc bnc" id="L731" title="All 4 branches missed.">            return mAdapterInfos.getFirst().start &lt;= start &amp;&amp; end &lt;= mAdapterInfos.getLast().end;</span>
+        }
+    }
+
+    private int calculateQueryDuration(int start, int end) {
+<span class="nc" id="L736">        int queryDuration = MAX_QUERY_DURATION;</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        if (mRowCount != 0) {</span>
+<span class="nc" id="L738">            queryDuration = IDEAL_NUM_OF_EVENTS * (end - start + 1) / mRowCount;</span>
+        }
+
+<span class="nc bnc" id="L741" title="All 2 branches missed.">        if (queryDuration &gt; MAX_QUERY_DURATION) {</span>
+<span class="nc" id="L742">            queryDuration = MAX_QUERY_DURATION;</span>
+<span class="nc bnc" id="L743" title="All 2 branches missed.">        } else if (queryDuration &lt; MIN_QUERY_DURATION) {</span>
+<span class="nc" id="L744">            queryDuration = MIN_QUERY_DURATION;</span>
+        }
+
+<span class="nc" id="L747">        return queryDuration;</span>
+    }
+
+    private boolean queueQuery(int start, int end, Time goToTime,
+            String searchQuery, int queryType, long id) {
+<span class="nc" id="L752">        QuerySpec queryData = new QuerySpec(queryType);</span>
+<span class="nc" id="L753">        queryData.goToTime = new Time();    // Creates a new time reference per QuerySpec.</span>
+<span class="nc" id="L754">        queryData.goToTime.set(goToTime);</span>
+<span class="nc" id="L755">        queryData.start = start;</span>
+<span class="nc" id="L756">        queryData.end = end;</span>
+<span class="nc" id="L757">        queryData.searchQuery = searchQuery;</span>
+<span class="nc" id="L758">        queryData.id = id;</span>
+<span class="nc" id="L759">        return queueQuery(queryData);</span>
+    }
+
+    private boolean queueQuery(QuerySpec queryData) {
+<span class="nc" id="L763">        queryData.searchQuery = mSearchQuery;</span>
+        Boolean queuedQuery;
+<span class="nc" id="L765">        synchronized (mQueryQueue) {</span>
+<span class="nc" id="L766">            queuedQuery = false;</span>
+<span class="nc" id="L767">            Boolean doQueryNow = mQueryQueue.isEmpty();</span>
+<span class="nc" id="L768">            mQueryQueue.add(queryData);</span>
+<span class="nc" id="L769">            queuedQuery = true;</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">            if (doQueryNow) {</span>
+<span class="nc" id="L771">                doQuery(queryData);</span>
+            }
+<span class="nc" id="L773">        }</span>
+<span class="nc" id="L774">        return queuedQuery;</span>
+    }
+
+    private void doQuery(QuerySpec queryData) {
+<span class="nc bnc" id="L778" title="All 2 branches missed.">        if (!mAdapterInfos.isEmpty()) {</span>
+<span class="nc" id="L779">            int start = mAdapterInfos.getFirst().start;</span>
+<span class="nc" id="L780">            int end = mAdapterInfos.getLast().end;</span>
+<span class="nc" id="L781">            int queryDuration = calculateQueryDuration(start, end);</span>
+<span class="nc bnc" id="L782" title="All 3 branches missed.">            switch(queryData.queryType) {</span>
+                case QUERY_TYPE_OLDER:
+<span class="nc" id="L784">                    queryData.end = start - 1;</span>
+<span class="nc" id="L785">                    queryData.start = queryData.end - queryDuration;</span>
+<span class="nc" id="L786">                    break;</span>
+                case QUERY_TYPE_NEWER:
+<span class="nc" id="L788">                    queryData.start = end + 1;</span>
+<span class="nc" id="L789">                    queryData.end = queryData.start + queryDuration;</span>
+                    break;
+            }
+
+            // By &quot;compacting&quot; cursors, this fixes the disco/ping-pong problem
+            // b/5311977
+<span class="nc bnc" id="L795" title="All 4 branches missed.">            if (mRowCount &lt; 20 &amp;&amp; queryData.queryType != QUERY_TYPE_CLEAN) {</span>
+                if (DEBUGLOG) {
+                    Log.e(TAG, &quot;Compacting cursor: mRowCount=&quot; + mRowCount
+                            + &quot; totalStart:&quot; + start
+                            + &quot; totalEnd:&quot; + end
+                            + &quot; query.start:&quot; + queryData.start
+                            + &quot; query.end:&quot; + queryData.end);
+                }
+
+<span class="nc" id="L804">                queryData.queryType = QUERY_TYPE_CLEAN;</span>
+
+<span class="nc bnc" id="L806" title="All 2 branches missed.">                if (queryData.start &gt; start) {</span>
+<span class="nc" id="L807">                    queryData.start = start;</span>
+                }
+<span class="nc bnc" id="L809" title="All 2 branches missed.">                if (queryData.end &lt; end) {</span>
+<span class="nc" id="L810">                    queryData.end = end;</span>
+                }
+            }
+        }
+
+        if (BASICLOG) {
+            Time time = new Time(mTimeZone);
+            time.setJulianDay(queryData.start);
+            Time time2 = new Time(mTimeZone);
+            time2.setJulianDay(queryData.end);
+            Log.v(TAG, &quot;startQuery: &quot; + time + &quot; to &quot;
+                    + time2 + &quot; then go to &quot; + queryData.goToTime);
+        }
+
+<span class="nc" id="L824">        mQueryHandler.cancelOperation(0);</span>
+        if (BASICLOG) queryData.queryStartMillis = System.nanoTime();
+
+<span class="nc" id="L827">        Uri queryUri = buildQueryUri(</span>
+                queryData.start, queryData.end, queryData.searchQuery);
+<span class="nc" id="L829">        mQueryHandler.startQuery(0, queryData, queryUri,</span>
+<span class="nc" id="L830">                PROJECTION, buildQuerySelection(), null,</span>
+                AGENDA_SORT_ORDER);
+<span class="nc" id="L832">    }</span>
+
+    private String formatDateString(int julianDay) {
+<span class="nc" id="L835">        Time time = new Time(mTimeZone);</span>
+<span class="nc" id="L836">        time.setJulianDay(julianDay);</span>
+<span class="nc" id="L837">        long millis = time.toMillis();</span>
+<span class="nc" id="L838">        mStringBuilder.setLength(0);</span>
+<span class="nc" id="L839">        return DateUtils.formatDateRange(mContext, mFormatter, millis, millis,</span>
+                DateUtils.FORMAT_SHOW_YEAR | DateUtils.FORMAT_SHOW_DATE
+<span class="nc" id="L841">                        | DateUtils.FORMAT_ABBREV_MONTH, mTimeZone).toString();</span>
+    }
+
+    private void updateHeaderFooter(final int start, final int end) {
+<span class="nc" id="L845">        mHeaderView.setText(mContext.getString(R.string.show_older_events,</span>
+<span class="nc" id="L846">                formatDateString(start)));</span>
+<span class="nc" id="L847">        mFooterView.setText(mContext.getString(R.string.show_newer_events,</span>
+<span class="nc" id="L848">                formatDateString(end)));</span>
+<span class="nc" id="L849">    }</span>
+
+    public void onResume() {
+<span class="nc" id="L852">        mTZUpdater.run();</span>
+<span class="nc" id="L853">    }</span>
+
+    public void setHideDeclinedEvents(boolean hideDeclined) {
+<span class="nc" id="L856">        mHideDeclined = hideDeclined;</span>
+<span class="nc" id="L857">    }</span>
+
+    public void setSelectedView(View v) {
+<span class="nc bnc" id="L860" title="All 2 branches missed.">        if (v != null) {</span>
+<span class="nc" id="L861">            Object vh = v.getTag();</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">            if (vh instanceof AgendaAdapter.ViewHolder) {</span>
+<span class="nc" id="L863">                mSelectedVH = (AgendaAdapter.ViewHolder) vh;</span>
+<span class="nc bnc" id="L864" title="All 2 branches missed.">                if (mSelectedInstanceId != mSelectedVH.instanceId) {</span>
+<span class="nc" id="L865">                    mSelectedInstanceId = mSelectedVH.instanceId;</span>
+<span class="nc" id="L866">                    notifyDataSetChanged();</span>
+                }
+            }
+        }
+<span class="nc" id="L870">    }</span>
+
+    public AgendaAdapter.ViewHolder getSelectedViewHolder() {
+<span class="nc" id="L873">        return mSelectedVH;</span>
+    }
+
+    public long getSelectedInstanceId() {
+<span class="nc" id="L877">        return mSelectedInstanceId;</span>
+    }
+
+    public void setSelectedInstanceId(long selectedInstanceId) {
+<span class="nc" id="L881">        mSelectedInstanceId = selectedInstanceId;</span>
+<span class="nc" id="L882">        mSelectedVH = null;</span>
+<span class="nc" id="L883">    }</span>
+
+    private long findInstanceIdFromPosition(int position) {
+<span class="nc" id="L886">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L887" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L888">            return info.dayAdapter.getInstanceId(position - info.offset);</span>
+        }
+<span class="nc" id="L890">        return -1;</span>
+    }
+
+    private long findStartTimeFromPosition(int position) {
+<span class="nc" id="L894">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L895" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L896">            return info.dayAdapter.getStartTime(position - info.offset);</span>
+        }
+<span class="nc" id="L898">        return -1;</span>
+    }
+
+    private Cursor getCursorByPosition(int position) {
+<span class="nc" id="L902">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L903" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L904">            return info.cursor;</span>
+        }
+<span class="nc" id="L906">        return null;</span>
+    }
+
+    private int getCursorPositionByPosition(int position) {
+<span class="nc" id="L910">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L911" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L912">            return info.dayAdapter.getCursorPosition(position - info.offset);</span>
+        }
+<span class="nc" id="L914">        return -1;</span>
+    }
+
+    // Returns the location of the day header of a specific event specified in the position
+    // in the adapter
+    @Override
+    public int getHeaderPositionFromItemPosition(int position) {
+
+        // For phone configuration, return -1 so there will be no sticky header
+<span class="nc bnc" id="L923" title="All 2 branches missed.">        if (!mIsTabletConfig) {</span>
+<span class="nc" id="L924">            return -1;</span>
+        }
+
+<span class="nc" id="L927">        DayAdapterInfo info = getAdapterInfoByPosition(position);</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L929">            int pos = info.dayAdapter.getHeaderPosition(position - info.offset);</span>
+<span class="nc bnc" id="L930" title="All 2 branches missed.">            return (pos != -1) ? (pos + info.offset) : -1;</span>
+        }
+<span class="nc" id="L932">        return -1;</span>
+    }
+
+    // Returns the number of events for a specific day header
+    @Override
+    public int getHeaderItemsNumber(int headerPosition) {
+<span class="nc bnc" id="L938" title="All 4 branches missed.">        if (headerPosition &lt; 0 || !mIsTabletConfig) {</span>
+<span class="nc" id="L939">            return -1;</span>
+        }
+<span class="nc" id="L941">        DayAdapterInfo info = getAdapterInfoByPosition(headerPosition);</span>
+<span class="nc bnc" id="L942" title="All 2 branches missed.">        if (info != null) {</span>
+<span class="nc" id="L943">            return info.dayAdapter.getHeaderItemsCount(headerPosition - info.offset);</span>
+        }
+<span class="nc" id="L945">        return -1;</span>
+    }
+
+    @Override
+    public void OnHeaderHeightChanged(int height) {
+<span class="nc" id="L950">        mStickyHeaderSize = height;</span>
+<span class="nc" id="L951">    }</span>
+
+    public int getStickyHeaderHeight() {
+<span class="nc" id="L954">        return mStickyHeaderSize;</span>
+    }
+
+    // Implementation of HeaderIndexer interface for StickyHeeaderListView
+
+    public void setScrollState(int state) {
+<span class="nc" id="L960">        mListViewScrollState = state;</span>
+<span class="nc" id="L961">    }</span>
+
+    private static class QuerySpec {
+        long queryStartMillis;
+        Time goToTime;
+        int start;
+        int end;
+        String searchQuery;
+        int queryType;
+        long id;
+
+<span class="nc" id="L972">        public QuerySpec(int queryType) {</span>
+<span class="nc" id="L973">            this.queryType = queryType;</span>
+<span class="nc" id="L974">            id = -1;</span>
+<span class="nc" id="L975">        }</span>
+
+        @Override
+        public int hashCode() {
+<span class="nc" id="L979">            final int prime = 31;</span>
+<span class="nc" id="L980">            int result = 1;</span>
+<span class="nc" id="L981">            result = prime * result + end;</span>
+<span class="nc" id="L982">            result = prime * result + (int) (queryStartMillis ^ (queryStartMillis &gt;&gt;&gt; 32));</span>
+<span class="nc" id="L983">            result = prime * result + queryType;</span>
+<span class="nc" id="L984">            result = prime * result + start;</span>
+<span class="nc bnc" id="L985" title="All 2 branches missed.">            if (searchQuery != null) {</span>
+<span class="nc" id="L986">                result = prime * result + searchQuery.hashCode();</span>
+            }
+<span class="nc bnc" id="L988" title="All 2 branches missed.">            if (goToTime != null) {</span>
+<span class="nc" id="L989">                long goToTimeMillis = goToTime.toMillis();</span>
+<span class="nc" id="L990">                result = prime * result + (int) (goToTimeMillis ^ (goToTimeMillis &gt;&gt;&gt; 32));</span>
+            }
+<span class="nc" id="L992">            result = prime * result + (int) id;</span>
+<span class="nc" id="L993">            return result;</span>
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+<span class="nc bnc" id="L998" title="All 2 branches missed.">            if (this == obj) return true;</span>
+<span class="nc bnc" id="L999" title="All 2 branches missed.">            if (obj == null) return false;</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">            if (getClass() != obj.getClass()) return false;</span>
+<span class="nc" id="L1001">            QuerySpec other = (QuerySpec) obj;</span>
+<span class="nc bnc" id="L1002" title="All 8 branches missed.">            if (end != other.end || queryStartMillis != other.queryStartMillis</span>
+                    || queryType != other.queryType || start != other.start
+<span class="nc bnc" id="L1004" title="All 4 branches missed.">                    || Utils.equals(searchQuery, other.searchQuery) || id != other.id) {</span>
+<span class="nc" id="L1005">                return false;</span>
+            }
+
+<span class="nc bnc" id="L1008" title="All 2 branches missed.">            if (goToTime != null) {</span>
+<span class="nc bnc" id="L1009" title="All 2 branches missed.">                if (goToTime.toMillis() != other.goToTime.toMillis()) {</span>
+<span class="nc" id="L1010">                    return false;</span>
+                }
+            } else {
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">                if (other.goToTime != null) {</span>
+<span class="nc" id="L1014">                    return false;</span>
+                }
+            }
+<span class="nc" id="L1017">            return true;</span>
+        }
+    }
+
+    /**
+     * Class representing a list item within the Agenda view.  Could be either an instance of an
+     * event, or a header marking the specific day.
+     * &lt;p/&gt;
+     * The begin and end times of an AgendaItem should always be in local time, even if the event
+     * is all day.  buildAgendaItemFromCursor() converts each event to local time.
+     */
+<span class="nc" id="L1028">    static class AgendaItem {</span>
+        long begin;
+        long end;
+        long id;
+        int startDay;
+        boolean allDay;
+    }
+
+    static class DayAdapterInfo {
+        Cursor cursor;
+        AgendaByDayAdapter dayAdapter;
+        int start; // start day of the cursor's coverage
+        int end; // end day of the cursor's coverage
+        int offset; // offset in position in the list view
+        int size; // dayAdapter.getCount()
+
+<span class="nc" id="L1044">        public DayAdapterInfo(Context context) {</span>
+<span class="nc" id="L1045">            dayAdapter = new AgendaByDayAdapter(context);</span>
+<span class="nc" id="L1046">        }</span>
+
+        @Override
+        public String toString() {
+            // Static class, so the time in this toString will not reflect the
+            // home tz settings. This should only affect debugging.
+<span class="nc" id="L1052">            Time time = new Time();</span>
+<span class="nc" id="L1053">            StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L1054">            time.setJulianDay(start);</span>
+<span class="nc" id="L1055">            time.normalize();</span>
+<span class="nc" id="L1056">            sb.append(&quot;Start:&quot;).append(time);</span>
+<span class="nc" id="L1057">            time.setJulianDay(end);</span>
+<span class="nc" id="L1058">            time.normalize();</span>
+<span class="nc" id="L1059">            sb.append(&quot; End:&quot;).append(time);</span>
+<span class="nc" id="L1060">            sb.append(&quot; Offset:&quot;).append(offset);</span>
+<span class="nc" id="L1061">            sb.append(&quot; Size:&quot;).append(size);</span>
+<span class="nc" id="L1062">            return sb.toString();</span>
+        }
+    }
+
+    private class QueryHandler extends AsyncQueryHandler {
+
+<span class="nc" id="L1068">        public QueryHandler(ContentResolver cr) {</span>
+<span class="nc" id="L1069">            super(cr);</span>
+<span class="nc" id="L1070">        }</span>
+
+        @Override
+        protected void onQueryComplete(int token, Object cookie, Cursor cursor) {
+            if (DEBUGLOG) {
+                Log.d(TAG, &quot;(+)onQueryComplete&quot;);
+            }
+<span class="nc" id="L1077">            QuerySpec data = (QuerySpec)cookie;</span>
+
+<span class="nc bnc" id="L1079" title="All 2 branches missed.">            if (cursor == null) {</span>
+<span class="nc bnc" id="L1080" title="All 4 branches missed.">                if (mAgendaListView != null &amp;&amp; mAgendaListView.getContext() instanceof Activity) {</span>
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">                    if (Utils.isCalendarPermissionGranted(mContext, true)) {</span>
+<span class="nc" id="L1082">                        ((Activity) mAgendaListView.getContext()).finish();</span>
+                    } else {
+<span class="nc" id="L1084">                        mHeaderView.setText(R.string.calendar_permission_not_granted);</span>
+                    }
+                }
+<span class="nc" id="L1087">                return;</span>
+            }
+
+            if (BASICLOG) {
+                long queryEndMillis = System.nanoTime();
+                Log.e(TAG, &quot;Query time(ms): &quot;
+                        + (queryEndMillis - data.queryStartMillis) / 1000000
+                        + &quot; Count: &quot; + cursor.getCount());
+            }
+
+<span class="nc bnc" id="L1097" title="All 2 branches missed.">            if (data.queryType == QUERY_TYPE_CLEAN) {</span>
+<span class="nc" id="L1098">                mCleanQueryInitiated = false;</span>
+            }
+
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">            if (mShuttingDown) {</span>
+<span class="nc" id="L1102">                cursor.close();</span>
+<span class="nc" id="L1103">                return;</span>
+            }
+
+            // Notify Listview of changes and update position
+<span class="nc" id="L1107">            int cursorSize = cursor.getCount();</span>
+<span class="nc bnc" id="L1108" title="All 6 branches missed.">            if (cursorSize &gt; 0 || mAdapterInfos.isEmpty() || data.queryType == QUERY_TYPE_CLEAN) {</span>
+<span class="nc" id="L1109">                final int listPositionOffset = processNewCursor(data, cursor);</span>
+<span class="nc" id="L1110">                int newPosition = -1;</span>
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">                if (data.goToTime == null) { // Typical Scrolling type query</span>
+<span class="nc" id="L1112">                    notifyDataSetChanged();</span>
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">                    if (listPositionOffset != 0) {</span>
+<span class="nc" id="L1114">                        mAgendaListView.shiftSelection(listPositionOffset);</span>
+                    }
+                } else { // refresh() called. Go to the designated position
+<span class="nc" id="L1117">                    final Time goToTime = data.goToTime;</span>
+<span class="nc" id="L1118">                    notifyDataSetChanged();</span>
+<span class="nc" id="L1119">                    newPosition = findEventPositionNearestTime(goToTime, data.id);</span>
+<span class="nc bnc" id="L1120" title="All 2 branches missed.">                    if (newPosition &gt;= 0) {</span>
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">                        if (mListViewScrollState == OnScrollListener.SCROLL_STATE_FLING) {</span>
+<span class="nc" id="L1122">                            mAgendaListView.smoothScrollBy(0, 0);</span>
+                        }
+<span class="nc" id="L1124">                        mAgendaListView.setSelectionFromTop(newPosition + OFF_BY_ONE_BUG,</span>
+                                mStickyHeaderSize);
+<span class="nc" id="L1126">                        Time actualTime = new Time(mTimeZone);</span>
+<span class="nc" id="L1127">                        actualTime.set(goToTime);</span>
+                        if (DEBUGLOG) {
+                            Log.d(TAG, &quot;onQueryComplete: Updating title...&quot;);
+                        }
+<span class="nc" id="L1131">                        CalendarController.getInstance(mContext).sendEvent(this,</span>
+                                EventType.UPDATE_TITLE, actualTime, actualTime, -1,
+                                ViewType.CURRENT);
+                    }
+                    if (DEBUGLOG) {
+                        Log.e(TAG, &quot;Setting listview to &quot; +
+                                &quot;findEventPositionNearestTime: &quot; + (newPosition + OFF_BY_ONE_BUG));
+                    }
+                }
+
+                // Make sure we change the selected instance Id only on a clean query and we
+                // do not have one set already
+<span class="nc bnc" id="L1143" title="All 6 branches missed.">                if (mSelectedInstanceId == -1 &amp;&amp; newPosition != -1 &amp;&amp;</span>
+                        data.queryType == QUERY_TYPE_CLEAN) {
+<span class="nc bnc" id="L1145" title="All 4 branches missed.">                    if (data.id != -1 || data.goToTime != null) {</span>
+<span class="nc" id="L1146">                        mSelectedInstanceId = findInstanceIdFromPosition(newPosition);</span>
+                    }
+                }
+
+                // size == 1 means a fresh query. Possibly after the data changed.
+                // Let's check whether mSelectedInstanceId is still valid.
+<span class="nc bnc" id="L1152" title="All 4 branches missed.">                if (mAdapterInfos.size() == 1 &amp;&amp; mSelectedInstanceId != -1) {</span>
+<span class="nc" id="L1153">                    boolean found = false;</span>
+<span class="nc" id="L1154">                    cursor.moveToPosition(-1);</span>
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">                    while (cursor.moveToNext()) {</span>
+<span class="nc" id="L1156">                        if (mSelectedInstanceId == cursor</span>
+<span class="nc bnc" id="L1157" title="All 2 branches missed.">                                .getLong(AgendaWindowAdapter.INDEX_INSTANCE_ID)) {</span>
+<span class="nc" id="L1158">                            found = true;</span>
+<span class="nc" id="L1159">                            break;</span>
+                        }
+                    }
+
+<span class="nc bnc" id="L1163" title="All 2 branches missed.">                    if (!found) {</span>
+<span class="nc" id="L1164">                        mSelectedInstanceId = -1;</span>
+                    }
+                }
+
+                // Show the requested event
+<span class="nc bnc" id="L1169" title="All 4 branches missed.">                if (mShowEventOnStart &amp;&amp; data.queryType == QUERY_TYPE_CLEAN) {</span>
+<span class="nc" id="L1170">                    Cursor tempCursor = null;</span>
+<span class="nc" id="L1171">                    int tempCursorPosition = -1;</span>
+
+                    // If no valid event is selected , just pick the first one
+<span class="nc bnc" id="L1174" title="All 2 branches missed.">                    if (mSelectedInstanceId == -1) {</span>
+<span class="nc bnc" id="L1175" title="All 2 branches missed.">                        if (cursor.moveToFirst()) {</span>
+<span class="nc" id="L1176">                            mSelectedInstanceId = cursor</span>
+<span class="nc" id="L1177">                                    .getLong(AgendaWindowAdapter.INDEX_INSTANCE_ID);</span>
+                            // Set up a dummy view holder so we have the right all day
+                            // info when the view is created.
+                            // TODO determine the full set of what might be useful to
+                            // know about the selected view and fill it in.
+<span class="nc" id="L1182">                            mSelectedVH = new AgendaAdapter.ViewHolder();</span>
+<span class="nc" id="L1183">                            mSelectedVH.allDay =</span>
+<span class="nc bnc" id="L1184" title="All 2 branches missed.">                                cursor.getInt(AgendaWindowAdapter.INDEX_ALL_DAY) != 0;</span>
+<span class="nc" id="L1185">                            tempCursor = cursor;</span>
+                        }
+<span class="nc bnc" id="L1187" title="All 2 branches missed.">                    } else if (newPosition != -1) {</span>
+<span class="nc" id="L1188">                         tempCursor = getCursorByPosition(newPosition);</span>
+<span class="nc" id="L1189">                         tempCursorPosition = getCursorPositionByPosition(newPosition);</span>
+                    }
+<span class="nc bnc" id="L1191" title="All 2 branches missed.">                    if (tempCursor != null) {</span>
+<span class="nc" id="L1192">                        AgendaItem item = buildAgendaItemFromCursor(tempCursor, tempCursorPosition,</span>
+                                false);
+<span class="nc" id="L1194">                        long selectedTime = findStartTimeFromPosition(newPosition);</span>
+                        if (DEBUGLOG) {
+                            Log.d(TAG, &quot;onQueryComplete: Sending View Event...&quot;);
+                        }
+<span class="nc" id="L1198">                        sendViewEvent(item, selectedTime);</span>
+                    }
+                }
+<span class="nc" id="L1201">            } else {</span>
+<span class="nc" id="L1202">                cursor.close();</span>
+            }
+
+            // Update header and footer
+<span class="nc bnc" id="L1206" title="All 2 branches missed.">            if (!mDoneSettingUpHeaderFooter) {</span>
+<span class="nc" id="L1207">                OnClickListener headerFooterOnClickListener = new OnClickListener() {</span>
+                    public void onClick(View v) {
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">                        if (v == mHeaderView) {</span>
+<span class="nc" id="L1210">                            queueQuery(new QuerySpec(QUERY_TYPE_OLDER));</span>
+                        } else {
+<span class="nc" id="L1212">                            queueQuery(new QuerySpec(QUERY_TYPE_NEWER));</span>
+                        }
+<span class="nc" id="L1214">                    }};</span>
+<span class="nc" id="L1215">                mHeaderView.setOnClickListener(headerFooterOnClickListener);</span>
+<span class="nc" id="L1216">                mFooterView.setOnClickListener(headerFooterOnClickListener);</span>
+<span class="nc" id="L1217">                mAgendaListView.addFooterView(mFooterView);</span>
+<span class="nc" id="L1218">                mDoneSettingUpHeaderFooter = true;</span>
+            }
+<span class="nc" id="L1220">            synchronized (mQueryQueue) {</span>
+<span class="nc" id="L1221">                int totalAgendaRangeStart = -1;</span>
+<span class="nc" id="L1222">                int totalAgendaRangeEnd = -1;</span>
+
+<span class="nc bnc" id="L1224" title="All 2 branches missed.">                if (cursorSize != 0) {</span>
+                    // Remove the query that just completed
+<span class="nc" id="L1226">                    QuerySpec x = mQueryQueue.poll();</span>
+                    if (BASICLOG &amp;&amp; !x.equals(data)) {
+                        Log.e(TAG, &quot;onQueryComplete - cookie != head of queue&quot;);
+                    }
+<span class="nc" id="L1230">                    mEmptyCursorCount = 0;</span>
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">                    if (data.queryType == QUERY_TYPE_NEWER) {</span>
+<span class="nc" id="L1232">                        mNewerRequestsProcessed++;</span>
+<span class="nc bnc" id="L1233" title="All 2 branches missed.">                    } else if (data.queryType == QUERY_TYPE_OLDER) {</span>
+<span class="nc" id="L1234">                        mOlderRequestsProcessed++;</span>
+                    }
+
+<span class="nc" id="L1237">                    totalAgendaRangeStart = mAdapterInfos.getFirst().start;</span>
+<span class="nc" id="L1238">                    totalAgendaRangeEnd = mAdapterInfos.getLast().end;</span>
+<span class="nc" id="L1239">                } else { // CursorSize == 0</span>
+<span class="nc" id="L1240">                    QuerySpec querySpec = mQueryQueue.peek();</span>
+
+                    // Update Adapter Info with new start and end date range
+<span class="nc bnc" id="L1243" title="All 2 branches missed.">                    if (!mAdapterInfos.isEmpty()) {</span>
+<span class="nc" id="L1244">                        DayAdapterInfo first = mAdapterInfos.getFirst();</span>
+<span class="nc" id="L1245">                        DayAdapterInfo last = mAdapterInfos.getLast();</span>
+
+<span class="nc bnc" id="L1247" title="All 4 branches missed.">                        if (first.start - 1 &lt;= querySpec.end &amp;&amp; querySpec.start &lt; first.start) {</span>
+<span class="nc" id="L1248">                            first.start = querySpec.start;</span>
+                        }
+
+<span class="nc bnc" id="L1251" title="All 4 branches missed.">                        if (querySpec.start &lt;= last.end + 1 &amp;&amp; last.end &lt; querySpec.end) {</span>
+<span class="nc" id="L1252">                            last.end = querySpec.end;</span>
+                        }
+
+<span class="nc" id="L1255">                        totalAgendaRangeStart = first.start;</span>
+<span class="nc" id="L1256">                        totalAgendaRangeEnd = last.end;</span>
+<span class="nc" id="L1257">                    } else {</span>
+<span class="nc" id="L1258">                        totalAgendaRangeStart = querySpec.start;</span>
+<span class="nc" id="L1259">                        totalAgendaRangeEnd = querySpec.end;</span>
+                    }
+
+                    // Update query specification with expanded search range
+                    // and maybe rerun query
+<span class="nc bnc" id="L1264" title="All 4 branches missed.">                    switch (querySpec.queryType) {</span>
+                        case QUERY_TYPE_OLDER:
+<span class="nc" id="L1266">                            totalAgendaRangeStart = querySpec.start;</span>
+<span class="nc" id="L1267">                            querySpec.start -= MAX_QUERY_DURATION;</span>
+<span class="nc" id="L1268">                            break;</span>
+                        case QUERY_TYPE_NEWER:
+<span class="nc" id="L1270">                            totalAgendaRangeEnd = querySpec.end;</span>
+<span class="nc" id="L1271">                            querySpec.end += MAX_QUERY_DURATION;</span>
+<span class="nc" id="L1272">                            break;</span>
+                        case QUERY_TYPE_CLEAN:
+<span class="nc" id="L1274">                            totalAgendaRangeStart = querySpec.start;</span>
+<span class="nc" id="L1275">                            totalAgendaRangeEnd = querySpec.end;</span>
+<span class="nc" id="L1276">                            querySpec.start -= MAX_QUERY_DURATION / 2;</span>
+<span class="nc" id="L1277">                            querySpec.end += MAX_QUERY_DURATION / 2;</span>
+                            break;
+                    }
+
+<span class="nc bnc" id="L1281" title="All 2 branches missed.">                    if (++mEmptyCursorCount &gt; RETRIES_ON_NO_DATA) {</span>
+                        // Nothing in the cursor again. Dropping query
+<span class="nc" id="L1283">                        mQueryQueue.poll();</span>
+                    }
+                }
+
+<span class="nc" id="L1287">                updateHeaderFooter(totalAgendaRangeStart, totalAgendaRangeEnd);</span>
+
+                // Go over the events and mark the first day after yesterday
+                // that has events in it
+                // If the range of adapters doesn't include yesterday, skip marking it since it will
+                // mark the first day in the adapters.
+<span class="nc" id="L1293">                synchronized (mAdapterInfos) {</span>
+<span class="nc" id="L1294">                    DayAdapterInfo info = mAdapterInfos.getFirst();</span>
+<span class="nc" id="L1295">                    Time time = new Time(mTimeZone);</span>
+<span class="nc" id="L1296">                    long now = System.currentTimeMillis();</span>
+<span class="nc" id="L1297">                    time.set(now);</span>
+<span class="nc" id="L1298">                    int JulianToday = Time.getJulianDay(now, time.getGmtOffset());</span>
+<span class="nc bnc" id="L1299" title="All 4 branches missed.">                    if (info != null &amp;&amp; JulianToday &gt;= info.start &amp;&amp; JulianToday</span>
+<span class="nc bnc" id="L1300" title="All 2 branches missed.">                            &lt;= mAdapterInfos.getLast().end) {</span>
+<span class="nc" id="L1301">                        Iterator&lt;DayAdapterInfo&gt; iter = mAdapterInfos.iterator();</span>
+<span class="nc" id="L1302">                        boolean foundDay = false;</span>
+<span class="nc bnc" id="L1303" title="All 4 branches missed.">                        while (iter.hasNext() &amp;&amp; !foundDay) {</span>
+<span class="nc" id="L1304">                            info = iter.next();</span>
+<span class="nc bnc" id="L1305" title="All 2 branches missed.">                            for (int i = 0; i &lt; info.size; i++) {</span>
+<span class="nc bnc" id="L1306" title="All 2 branches missed.">                                if (info.dayAdapter.findJulianDayFromPosition(i) &gt;= JulianToday) {</span>
+<span class="nc" id="L1307">                                    info.dayAdapter.setAsFirstDayAfterYesterday(i);</span>
+<span class="nc" id="L1308">                                    foundDay = true;</span>
+<span class="nc" id="L1309">                                    break;</span>
+                                }
+                            }
+                        }
+                    }
+<span class="nc" id="L1314">                }</span>
+
+                // Fire off the next query if any
+<span class="nc" id="L1317">                Iterator&lt;QuerySpec&gt; it = mQueryQueue.iterator();</span>
+<span class="nc bnc" id="L1318" title="All 2 branches missed.">                while (it.hasNext()) {</span>
+<span class="nc" id="L1319">                    QuerySpec queryData = it.next();</span>
+<span class="nc bnc" id="L1320" title="All 2 branches missed.">                    if (queryData.queryType == QUERY_TYPE_CLEAN</span>
+<span class="nc bnc" id="L1321" title="All 2 branches missed.">                            || !isInRange(queryData.start, queryData.end)) {</span>
+                        // Query accepted
+                        if (DEBUGLOG) Log.e(TAG, &quot;Query accepted. QueueSize:&quot; + mQueryQueue.size());
+<span class="nc" id="L1324">                        doQuery(queryData);</span>
+<span class="nc" id="L1325">                        break;</span>
+                    } else {
+                        // Query rejected
+<span class="nc" id="L1328">                        it.remove();</span>
+                        if (DEBUGLOG) Log.e(TAG, &quot;Query rejected. QueueSize:&quot; + mQueryQueue.size());
+                    }
+<span class="nc" id="L1331">                }</span>
+<span class="nc" id="L1332">            }</span>
+            if (BASICLOG) {
+                for (DayAdapterInfo info3 : mAdapterInfos) {
+                    Log.e(TAG, &quot;&gt; &quot; + info3.toString());
+                }
+            }
+<span class="nc" id="L1338">        }</span>
+
+        /*
+         * Update the adapter info array with a the new cursor. Close out old
+         * cursors as needed.
+         *
+         * @return number of rows removed from the beginning
+         */
+        private int processNewCursor(QuerySpec data, Cursor cursor) {
+<span class="nc" id="L1347">            synchronized (mAdapterInfos) {</span>
+                // Remove adapter info's from adapterInfos as needed
+<span class="nc" id="L1349">                DayAdapterInfo info = pruneAdapterInfo(data.queryType);</span>
+<span class="nc" id="L1350">                int listPositionOffset = 0;</span>
+<span class="nc bnc" id="L1351" title="All 2 branches missed.">                if (info == null) {</span>
+<span class="nc" id="L1352">                    info = new DayAdapterInfo(mContext);</span>
+                } else {
+                    if (DEBUGLOG)
+                        Log.e(TAG, &quot;processNewCursor listPositionOffsetA=&quot;
+                                + -info.size);
+<span class="nc" id="L1357">                    listPositionOffset = -info.size;</span>
+                }
+
+                // Setup adapter info
+<span class="nc" id="L1361">                info.start = data.start;</span>
+<span class="nc" id="L1362">                info.end = data.end;</span>
+<span class="nc" id="L1363">                info.cursor = cursor;</span>
+<span class="nc" id="L1364">                info.dayAdapter.changeCursor(info);</span>
+<span class="nc" id="L1365">                info.size = info.dayAdapter.getCount();</span>
+
+                // Insert into adapterInfos
+<span class="nc bnc" id="L1368" title="All 2 branches missed.">                if (mAdapterInfos.isEmpty()</span>
+<span class="nc bnc" id="L1369" title="All 2 branches missed.">                        || data.end &lt;= mAdapterInfos.getFirst().start) {</span>
+<span class="nc" id="L1370">                    mAdapterInfos.addFirst(info);</span>
+<span class="nc" id="L1371">                    listPositionOffset += info.size;</span>
+                } else if (BASICLOG &amp;&amp; data.start &lt; mAdapterInfos.getLast().end) {
+                    mAdapterInfos.addLast(info);
+                    for (DayAdapterInfo info2 : mAdapterInfos) {
+                        Log.e(&quot;========== BUG ==&quot;, info2.toString());
+                    }
+                } else {
+<span class="nc" id="L1378">                    mAdapterInfos.addLast(info);</span>
+                }
+
+                // Update offsets in adapterInfos
+<span class="nc" id="L1382">                mRowCount = 0;</span>
+<span class="nc bnc" id="L1383" title="All 2 branches missed.">                for (DayAdapterInfo info3 : mAdapterInfos) {</span>
+<span class="nc" id="L1384">                    info3.offset = mRowCount;</span>
+<span class="nc" id="L1385">                    mRowCount += info3.size;</span>
+<span class="nc" id="L1386">                }</span>
+<span class="nc" id="L1387">                mLastUsedInfo = null;</span>
+
+<span class="nc" id="L1389">                return listPositionOffset;</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

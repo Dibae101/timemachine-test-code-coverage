@@ -1,0 +1,1368 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FileUploader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.files.services</a> &gt; <span class="el_source">FileUploader.java</span></div><h1>FileUploader.java</h1><pre class="source lang-java linenums">/**
+ *  ownCloud Android client application
+ *
+ *  @author Bartek Przybylski
+ *  @author masensio
+ *  @author LukeOwnCloud
+ *  @author David A. Velasco
+ *  @author Chris Narkiewicz
+ *
+ *  Copyright (C) 2012 Bartek Przybylski
+ *  Copyright (C) 2012-2016 ownCloud Inc.
+ *  Copyright (C) 2019 Chris Narkiewicz &lt;hello@ezaquarii.com&gt;
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2,
+ *  as published by the Free Software Foundation.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.files.services;
+
+import android.accounts.Account;
+import android.accounts.AccountManager;
+import android.accounts.OnAccountsUpdateListener;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.BitmapFactory;
+import android.os.Binder;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.Message;
+import android.os.Parcelable;
+import android.os.Process;
+import android.util.Pair;
+
+import com.evernote.android.job.JobRequest;
+import com.evernote.android.job.util.Device;
+import com.nextcloud.client.account.UserAccountManager;
+import com.nextcloud.client.device.PowerManagementService;
+import com.nextcloud.client.network.ConnectivityService;
+import com.owncloud.android.MainApp;
+import com.owncloud.android.R;
+import com.owncloud.android.authentication.AuthenticatorActivity;
+import com.owncloud.android.datamodel.FileDataStorageManager;
+import com.owncloud.android.datamodel.OCFile;
+import com.owncloud.android.datamodel.ThumbnailsCacheManager;
+import com.owncloud.android.datamodel.UploadsStorageManager;
+import com.owncloud.android.datamodel.UploadsStorageManager.UploadStatus;
+import com.owncloud.android.db.OCUpload;
+import com.owncloud.android.db.UploadResult;
+import com.owncloud.android.lib.common.OwnCloudAccount;
+import com.owncloud.android.lib.common.OwnCloudClient;
+import com.owncloud.android.lib.common.OwnCloudClientManagerFactory;
+import com.owncloud.android.lib.common.network.OnDatatransferProgressListener;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult;
+import com.owncloud.android.lib.common.operations.RemoteOperationResult.ResultCode;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.lib.resources.files.FileUtils;
+import com.owncloud.android.operations.UploadFileOperation;
+import com.owncloud.android.ui.activity.FileActivity;
+import com.owncloud.android.ui.activity.UploadListActivity;
+import com.owncloud.android.ui.notifications.NotificationUtils;
+import com.owncloud.android.utils.ErrorMessageAdapter;
+import com.owncloud.android.utils.ThemeUtils;
+
+import org.jetbrains.annotations.NotNull;
+
+import java.io.File;
+import java.util.AbstractList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Vector;
+
+import javax.annotation.Nullable;
+import javax.inject.Inject;
+
+import androidx.annotation.NonNull;
+import androidx.core.app.NotificationCompat;
+import dagger.android.AndroidInjection;
+
+/**
+ * Service for uploading files. Invoke using context.startService(...).
+ *
+ * Files to be uploaded are stored persistently using {@link UploadsStorageManager}.
+ *
+ * On next invocation of {@link FileUploader} uploaded files which
+ * previously failed will be uploaded again until either upload succeeded or a
+ * fatal error occurred.
+ *
+ * Every file passed to this service is uploaded. No filtering is performed.
+ * However, Intent keys (e.g., KEY_WIFI_ONLY) are obeyed.
+ */
+<span class="fc" id="L107">public class FileUploader extends Service</span>
+        implements OnDatatransferProgressListener, OnAccountsUpdateListener, UploadFileOperation.OnRenameListener {
+
+<span class="fc" id="L110">    private static final String TAG = FileUploader.class.getSimpleName();</span>
+
+    private static final String UPLOADS_ADDED_MESSAGE = &quot;UPLOADS_ADDED&quot;;
+    private static final String UPLOAD_START_MESSAGE = &quot;UPLOAD_START&quot;;
+    private static final String UPLOAD_FINISH_MESSAGE = &quot;UPLOAD_FINISH&quot;;
+    public static final String EXTRA_UPLOAD_RESULT = &quot;RESULT&quot;;
+    public static final String EXTRA_REMOTE_PATH = &quot;REMOTE_PATH&quot;;
+    public static final String EXTRA_OLD_REMOTE_PATH = &quot;OLD_REMOTE_PATH&quot;;
+    public static final String EXTRA_OLD_FILE_PATH = &quot;OLD_FILE_PATH&quot;;
+    public static final String EXTRA_LINKED_TO_PATH = &quot;LINKED_TO&quot;;
+    public static final String ACCOUNT_NAME = &quot;ACCOUNT_NAME&quot;;
+
+    private static final int FOREGROUND_SERVICE_ID = 411;
+
+    public static final String KEY_FILE = &quot;FILE&quot;;
+    public static final String KEY_LOCAL_FILE = &quot;LOCAL_FILE&quot;;
+    public static final String KEY_REMOTE_FILE = &quot;REMOTE_FILE&quot;;
+    public static final String KEY_MIME_TYPE = &quot;MIME_TYPE&quot;;
+
+    private Notification mNotification;
+
+    @Inject UserAccountManager accountManager;
+
+    /**
+     * Call this Service with only this Intent key if all pending uploads are to be retried.
+     */
+    private static final String KEY_RETRY = &quot;KEY_RETRY&quot;;
+//    /**
+//     * Call this Service with KEY_RETRY and KEY_RETRY_REMOTE_PATH to retry
+//     * upload of file identified by KEY_RETRY_REMOTE_PATH.
+//     */
+//    private static final String KEY_RETRY_REMOTE_PATH = &quot;KEY_RETRY_REMOTE_PATH&quot;;
+    /**
+     * Call this Service with KEY_RETRY and KEY_RETRY_UPLOAD to retry
+     * upload of file identified by KEY_RETRY_UPLOAD.
+     */
+    private static final String KEY_RETRY_UPLOAD = &quot;KEY_RETRY_UPLOAD&quot;;
+    /**
+     * {@link Account} to which file is to be uploaded.
+     */
+    public static final String KEY_ACCOUNT = &quot;ACCOUNT&quot;;
+
+    /**
+     * Set to true if remote file is to be overwritten. Default action is to upload with different name.
+     */
+    public static final String KEY_FORCE_OVERWRITE = &quot;KEY_FORCE_OVERWRITE&quot;;
+    /**
+     * Set to true if remote folder is to be created if it does not exist.
+     */
+    public static final String KEY_CREATE_REMOTE_FOLDER = &quot;CREATE_REMOTE_FOLDER&quot;;
+    /**
+     * Key to signal what is the origin of the upload request
+     */
+    public static final String KEY_CREATED_BY = &quot;CREATED_BY&quot;;
+
+    public static final String KEY_WHILE_ON_WIFI_ONLY = &quot;KEY_ON_WIFI_ONLY&quot;;
+
+    /**
+     * Set to true if upload is to performed only when phone is being charged.
+     */
+    public static final String KEY_WHILE_CHARGING_ONLY = &quot;KEY_WHILE_CHARGING_ONLY&quot;;
+
+    public static final String KEY_LOCAL_BEHAVIOUR = &quot;BEHAVIOUR&quot;;
+
+    public static final int LOCAL_BEHAVIOUR_COPY = 0;
+    public static final int LOCAL_BEHAVIOUR_MOVE = 1;
+    public static final int LOCAL_BEHAVIOUR_FORGET = 2;
+    public static final int LOCAL_BEHAVIOUR_DELETE = 3;
+
+    private Looper mServiceLooper;
+    private ServiceHandler mServiceHandler;
+    private IBinder mBinder;
+    private OwnCloudClient mUploadClient;
+    private Account mCurrentAccount;
+    private FileDataStorageManager mStorageManager;
+    //since there can be only one instance of an Android service, there also just one db connection.
+    @Inject UploadsStorageManager mUploadsStorageManager;
+    @Inject ConnectivityService connectivityService;
+    @Inject PowerManagementService powerManagementService;
+
+<span class="fc" id="L190">    private IndexedForest&lt;UploadFileOperation&gt; mPendingUploads = new IndexedForest&lt;&gt;();</span>
+
+    /**
+     * {@link UploadFileOperation} object of ongoing upload. Can be null. Note: There can only be one concurrent upload!
+     */
+    private UploadFileOperation mCurrentUpload;
+
+    private NotificationManager mNotificationManager;
+    private NotificationCompat.Builder mNotificationBuilder;
+    private int mLastPercent;
+
+    public static String getUploadsAddedMessage() {
+<span class="nc" id="L202">        return FileUploader.class.getName() + UPLOADS_ADDED_MESSAGE;</span>
+    }
+
+    public static String getUploadStartMessage() {
+<span class="nc" id="L206">        return FileUploader.class.getName() + UPLOAD_START_MESSAGE;</span>
+    }
+
+    public static String getUploadFinishMessage() {
+<span class="fc" id="L210">        return FileUploader.class.getName() + UPLOAD_FINISH_MESSAGE;</span>
+    }
+
+    @Override
+    public void onRenameUpload() {
+<span class="nc" id="L215">        mUploadsStorageManager.updateDatabaseUploadStart(mCurrentUpload);</span>
+<span class="nc" id="L216">        sendBroadcastUploadStarted(mCurrentUpload);</span>
+<span class="nc" id="L217">    }</span>
+
+    /**
+     * Helper class providing methods to ease requesting commands to {@link FileUploader} .
+     *
+     * Avoids the need of checking once and again what extras are needed or optional
+     * in the {@link Intent} to pass to {@link Context#startService(Intent)}.
+     */
+<span class="fc" id="L225">    public static class UploadRequester {</span>
+
+        /**
+         * Call to upload several new files
+         */
+        public void uploadNewFile(
+                Context context,
+                Account account,
+                String[] localPaths,
+                String[] remotePaths,
+                String[] mimeTypes,
+                Integer behaviour,
+                Boolean createRemoteFolder,
+                int createdBy,
+                boolean requiresWifi,
+                boolean requiresCharging
+        ) {
+<span class="nc" id="L242">            Intent intent = new Intent(context, FileUploader.class);</span>
+
+<span class="nc" id="L244">            intent.putExtra(FileUploader.KEY_ACCOUNT, account);</span>
+<span class="nc" id="L245">            intent.putExtra(FileUploader.KEY_LOCAL_FILE, localPaths);</span>
+<span class="nc" id="L246">            intent.putExtra(FileUploader.KEY_REMOTE_FILE, remotePaths);</span>
+<span class="nc" id="L247">            intent.putExtra(FileUploader.KEY_MIME_TYPE, mimeTypes);</span>
+<span class="nc" id="L248">            intent.putExtra(FileUploader.KEY_LOCAL_BEHAVIOUR, behaviour);</span>
+<span class="nc" id="L249">            intent.putExtra(FileUploader.KEY_CREATE_REMOTE_FOLDER, createRemoteFolder);</span>
+<span class="nc" id="L250">            intent.putExtra(FileUploader.KEY_CREATED_BY, createdBy);</span>
+<span class="nc" id="L251">            intent.putExtra(FileUploader.KEY_WHILE_ON_WIFI_ONLY, requiresWifi);</span>
+<span class="nc" id="L252">            intent.putExtra(FileUploader.KEY_WHILE_CHARGING_ONLY, requiresCharging);</span>
+
+<span class="nc bnc" id="L254" title="All 2 branches missed.">            if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L255">                context.startForegroundService(intent);</span>
+            } else {
+<span class="nc" id="L257">                context.startService(intent);</span>
+            }
+<span class="nc" id="L259">        }</span>
+
+        public void uploadFileWithOverwrite(
+                Context context,
+                Account account,
+                String[] localPaths,
+                String[] remotePaths,
+                String[] mimeTypes,
+                Integer behaviour,
+                Boolean createRemoteFolder,
+                int createdBy,
+                boolean requiresWifi,
+                boolean requiresCharging,
+                boolean overwrite
+        ) {
+<span class="nc" id="L274">            Intent intent = new Intent(context, FileUploader.class);</span>
+
+<span class="nc" id="L276">            intent.putExtra(FileUploader.KEY_ACCOUNT, account);</span>
+<span class="nc" id="L277">            intent.putExtra(FileUploader.KEY_LOCAL_FILE, localPaths);</span>
+<span class="nc" id="L278">            intent.putExtra(FileUploader.KEY_REMOTE_FILE, remotePaths);</span>
+<span class="nc" id="L279">            intent.putExtra(FileUploader.KEY_MIME_TYPE, mimeTypes);</span>
+<span class="nc" id="L280">            intent.putExtra(FileUploader.KEY_LOCAL_BEHAVIOUR, behaviour);</span>
+<span class="nc" id="L281">            intent.putExtra(FileUploader.KEY_CREATE_REMOTE_FOLDER, createRemoteFolder);</span>
+<span class="nc" id="L282">            intent.putExtra(FileUploader.KEY_CREATED_BY, createdBy);</span>
+<span class="nc" id="L283">            intent.putExtra(FileUploader.KEY_WHILE_ON_WIFI_ONLY, requiresWifi);</span>
+<span class="nc" id="L284">            intent.putExtra(FileUploader.KEY_WHILE_CHARGING_ONLY, requiresCharging);</span>
+<span class="nc" id="L285">            intent.putExtra(FileUploader.KEY_FORCE_OVERWRITE, overwrite);</span>
+
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L288">                context.startForegroundService(intent);</span>
+            } else {
+<span class="nc" id="L290">                context.startService(intent);</span>
+            }
+<span class="nc" id="L292">        }</span>
+
+        /**
+         * Call to upload a file
+         */
+        public void uploadFileWithOverwrite(Context context, Account account, String localPath, String remotePath, int
+                behaviour, String mimeType, boolean createRemoteFile, int createdBy, boolean requiresWifi,
+                                  boolean requiresCharging, boolean overwrite) {
+
+<span class="nc" id="L301">            uploadFileWithOverwrite(</span>
+                    context,
+                    account,
+                    new String[]{localPath},
+                    new String[]{remotePath},
+                    new String[]{mimeType},
+<span class="nc" id="L307">                    behaviour,</span>
+<span class="nc" id="L308">                    createRemoteFile,</span>
+                    createdBy,
+                    requiresWifi,
+                    requiresCharging,
+                    overwrite
+            );
+<span class="nc" id="L314">        }</span>
+
+        /**
+         * Call to upload a new single file
+         */
+        public void uploadNewFile(Context context, Account account, String localPath, String remotePath, int
+                behaviour, String mimeType, boolean createRemoteFile, int createdBy, boolean requiresWifi,
+                                  boolean requiresCharging) {
+
+<span class="nc" id="L323">            uploadNewFile(</span>
+                context,
+                account,
+                new String[]{localPath},
+                new String[]{remotePath},
+                new String[]{mimeType},
+<span class="nc" id="L329">                behaviour,</span>
+<span class="nc" id="L330">                createRemoteFile,</span>
+                createdBy,
+                requiresWifi,
+                requiresCharging
+            );
+<span class="nc" id="L335">        }</span>
+
+        /**
+         * Call to update multiple files already uploaded
+         */
+        public void uploadUpdate(Context context, Account account, OCFile[] existingFiles, Integer behaviour,
+                                        Boolean forceOverwrite) {
+<span class="nc" id="L342">            Intent intent = new Intent(context, FileUploader.class);</span>
+
+<span class="nc" id="L344">            intent.putExtra(FileUploader.KEY_ACCOUNT, account);</span>
+<span class="nc" id="L345">            intent.putExtra(FileUploader.KEY_FILE, existingFiles);</span>
+<span class="nc" id="L346">            intent.putExtra(FileUploader.KEY_LOCAL_BEHAVIOUR, behaviour);</span>
+<span class="nc" id="L347">            intent.putExtra(FileUploader.KEY_FORCE_OVERWRITE, forceOverwrite);</span>
+
+<span class="nc bnc" id="L349" title="All 2 branches missed.">            if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L350">                context.startForegroundService(intent);</span>
+            } else {
+<span class="nc" id="L352">                context.startService(intent);</span>
+            }
+<span class="nc" id="L354">        }</span>
+
+        /**
+         * Call to update a dingle file already uploaded
+         */
+        public void uploadUpdate(Context context, Account account, OCFile existingFile, Integer behaviour,
+                                        Boolean forceOverwrite) {
+
+<span class="nc" id="L362">            uploadUpdate(context, account, new OCFile[]{existingFile}, behaviour, forceOverwrite);</span>
+<span class="nc" id="L363">        }</span>
+
+
+        /**
+         * Call to retry upload identified by remotePath
+         */
+        public void retry (Context context, UserAccountManager accountManager, OCUpload upload) {
+<span class="nc bnc" id="L370" title="All 4 branches missed.">            if (upload != null &amp;&amp; context != null) {</span>
+<span class="nc" id="L371">                Account account = accountManager.getAccountByName(upload.getAccountName());</span>
+<span class="nc" id="L372">                retry(context, account, upload);</span>
+<span class="nc" id="L373">            } else {</span>
+<span class="nc" id="L374">                throw new IllegalArgumentException(&quot;Null parameter!&quot;);</span>
+            }
+<span class="nc" id="L376">        }</span>
+
+        private boolean checkIfUploadCanBeRetried(OCUpload ocUpload, boolean gotWifi, boolean isCharging) {
+<span class="nc" id="L379">            boolean needsWifi = ocUpload.isUseWifiOnly();</span>
+<span class="nc" id="L380">            boolean needsCharging = ocUpload.isWhileChargingOnly();</span>
+
+<span class="nc bnc" id="L382" title="All 10 branches missed.">            return new File(ocUpload.getLocalPath()).exists() &amp;&amp; !(needsCharging &amp;&amp; !isCharging) &amp;&amp;</span>
+                    !(needsWifi &amp;&amp; !gotWifi);
+
+        }
+
+        /**
+         * Retry a subset of all the stored failed uploads.
+         *
+         * @param context           Caller {@link Context}
+         * @param account           If not null, only failed uploads to this OC account will be retried; otherwise,
+         *                          uploads of all accounts will be retried.
+         * @param uploadResult      If not null, only failed uploads with the result specified will be retried;
+         *                          otherwise, failed uploads due to any result will be retried.
+         */
+        public void retryFailedUploads(
+            @NonNull final Context context,
+            @Nullable final Account account,
+            @NotNull final UploadsStorageManager uploadsStorageManager,
+            @NotNull final ConnectivityService connectivityService,
+            @NotNull final UserAccountManager accountManager,
+            @NotNull final PowerManagementService powerManagementService,
+            @Nullable final UploadResult uploadResult
+        ) {
+<span class="fc" id="L405">            OCUpload[] failedUploads = uploadsStorageManager.getFailedUploads();</span>
+<span class="fc" id="L406">            Account currentAccount = null;</span>
+            boolean resultMatch;
+            boolean accountMatch;
+
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">            boolean gotNetwork = connectivityService.getActiveNetworkType() != JobRequest.NetworkType.ANY &amp;&amp;</span>
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">                    !connectivityService.isInternetWalled();</span>
+<span class="pc bpc" id="L412" title="2 of 4 branches missed.">            boolean gotWifi = gotNetwork &amp;&amp; Device.getNetworkType(context).equals(JobRequest.NetworkType.UNMETERED);</span>
+<span class="fc" id="L413">            boolean charging = Device.getBatteryStatus(context).isCharging();</span>
+<span class="fc" id="L414">            boolean isPowerSaving = powerManagementService.isPowerSavingEnabled();</span>
+
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">            for ( OCUpload failedUpload: failedUploads) {</span>
+<span class="nc bnc" id="L417" title="All 4 branches missed.">                accountMatch = account == null || account.name.equals(failedUpload.getAccountName());</span>
+<span class="nc bnc" id="L418" title="All 4 branches missed.">                resultMatch = uploadResult == null || uploadResult.equals(failedUpload.getLastResult());</span>
+<span class="nc bnc" id="L419" title="All 4 branches missed.">                if (accountMatch &amp;&amp; resultMatch) {</span>
+<span class="nc bnc" id="L420" title="All 4 branches missed.">                    if (currentAccount == null || !currentAccount.name.equals(failedUpload.getAccountName())) {</span>
+<span class="nc" id="L421">                        currentAccount = failedUpload.getAccount(accountManager);</span>
+                    }
+
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                    if (!new File(failedUpload.getLocalPath()).exists()) {</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                        if (!failedUpload.getLastResult().equals(UploadResult.FILE_NOT_FOUND)) {</span>
+<span class="nc" id="L426">                            failedUpload.setLastResult(UploadResult.FILE_NOT_FOUND);</span>
+<span class="nc" id="L427">                            uploadsStorageManager.updateUpload(failedUpload);</span>
+                        }
+                    } else {
+<span class="nc bnc" id="L430" title="All 4 branches missed.">                        charging = charging || Device.getBatteryStatus(context).getBatteryPercent() == 1;</span>
+<span class="nc bnc" id="L431" title="All 6 branches missed.">                        if (!isPowerSaving &amp;&amp; gotNetwork &amp;&amp; checkIfUploadCanBeRetried(failedUpload, gotWifi, charging)) {</span>
+<span class="nc" id="L432">                            retry(context, currentAccount, failedUpload);</span>
+                        }
+                    }
+                }
+            }
+<span class="fc" id="L437">        }</span>
+
+        /**
+         * Private implementation of retry.
+         *
+         * @param context
+         * @param account
+         * @param upload
+         */
+        private void retry(Context context, Account account, OCUpload upload) {
+<span class="nc bnc" id="L447" title="All 2 branches missed.">            if (upload != null) {</span>
+<span class="nc" id="L448">                Intent i = new Intent(context, FileUploader.class);</span>
+<span class="nc" id="L449">                i.putExtra(FileUploader.KEY_RETRY, true);</span>
+<span class="nc" id="L450">                i.putExtra(FileUploader.KEY_ACCOUNT, account);</span>
+<span class="nc" id="L451">                i.putExtra(FileUploader.KEY_RETRY_UPLOAD, upload);</span>
+
+<span class="nc bnc" id="L453" title="All 2 branches missed.">                if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L454">                    context.startForegroundService(i);</span>
+                } else {
+<span class="nc" id="L456">                    context.startService(i);</span>
+                }
+            }
+<span class="nc" id="L459">        }</span>
+    }
+
+    /**
+     * Service initialization
+     */
+    @Override
+    public void onCreate() {
+<span class="fc" id="L467">        super.onCreate();</span>
+<span class="fc" id="L468">        AndroidInjection.inject(this);</span>
+<span class="fc" id="L469">        Log_OC.d(TAG, &quot;Creating service&quot;);</span>
+<span class="fc" id="L470">        mNotificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);</span>
+<span class="fc" id="L471">        HandlerThread thread = new HandlerThread(&quot;FileUploaderThread&quot;,</span>
+                Process.THREAD_PRIORITY_BACKGROUND);
+<span class="fc" id="L473">        thread.start();</span>
+<span class="fc" id="L474">        mServiceLooper = thread.getLooper();</span>
+<span class="fc" id="L475">        mServiceHandler = new ServiceHandler(mServiceLooper, this);</span>
+<span class="fc" id="L476">        mBinder = new FileUploaderBinder();</span>
+
+<span class="fc" id="L478">        NotificationCompat.Builder builder = new NotificationCompat.Builder(this).setContentTitle(</span>
+<span class="fc" id="L479">                getApplicationContext().getResources().getString(R.string.app_name))</span>
+<span class="fc" id="L480">                .setContentText(getApplicationContext().getResources().getString(R.string.foreground_service_upload))</span>
+<span class="fc" id="L481">                .setSmallIcon(R.drawable.notification_icon)</span>
+<span class="fc" id="L482">                .setLargeIcon(BitmapFactory.decodeResource(getResources(), R.drawable.notification_icon))</span>
+<span class="fc" id="L483">                .setColor(ThemeUtils.primaryColor(getApplicationContext(), true));</span>
+
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">        if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="fc" id="L486">            builder.setChannelId(NotificationUtils.NOTIFICATION_CHANNEL_UPLOAD);</span>
+        }
+
+<span class="fc" id="L489">        mNotification = builder.build();</span>
+
+<span class="fc" id="L491">        int failedCounter = mUploadsStorageManager.failInProgressUploads(</span>
+            UploadResult.SERVICE_INTERRUPTED    // Add UploadResult.KILLED?
+        );
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">        if (failedCounter &gt; 0) {</span>
+<span class="nc" id="L495">            resurrection();</span>
+        }
+
+        // add AccountsUpdatedListener
+<span class="fc" id="L499">        AccountManager am = AccountManager.get(getApplicationContext());</span>
+<span class="fc" id="L500">        am.addOnAccountsUpdatedListener(this, null, false);</span>
+<span class="fc" id="L501">    }</span>
+
+    /**
+     * Service clean-up when restarted after being killed
+     */
+    private void resurrection() {
+        // remove stucked notification
+<span class="nc" id="L508">        mNotificationManager.cancel(R.string.uploader_upload_in_progress_ticker);</span>
+<span class="nc" id="L509">    }</span>
+
+    /**
+     * Service clean up
+     */
+    @Override
+    public void onDestroy() {
+<span class="nc" id="L516">        Log_OC.v(TAG, &quot;Destroying service&quot;);</span>
+<span class="nc" id="L517">        mBinder = null;</span>
+<span class="nc" id="L518">        mServiceHandler = null;</span>
+<span class="nc" id="L519">        mServiceLooper.quit();</span>
+<span class="nc" id="L520">        mServiceLooper = null;</span>
+<span class="nc" id="L521">        mNotificationManager = null;</span>
+
+        // remove AccountsUpdatedListener
+<span class="nc" id="L524">        AccountManager am = AccountManager.get(getApplicationContext());</span>
+<span class="nc" id="L525">        am.removeOnAccountsUpdatedListener(this);</span>
+
+<span class="nc" id="L527">        super.onDestroy();</span>
+<span class="nc" id="L528">    }</span>
+
+    /**
+     * Entry point to add one or several files to the queue of uploads.
+     *
+     * New uploads are added calling to startService(), resulting in a call to
+     * this method. This ensures the service will keep on working although the
+     * caller activity goes away.
+     */
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+<span class="nc" id="L539">        Log_OC.d(TAG, &quot;Starting command with id &quot; + startId);</span>
+
+<span class="nc" id="L541">        startForeground(FOREGROUND_SERVICE_ID, mNotification);</span>
+
+<span class="nc bnc" id="L543" title="All 2 branches missed.">        if (intent == null) {</span>
+<span class="nc" id="L544">            Log_OC.e(TAG, &quot;Intent is null&quot;);</span>
+<span class="nc" id="L545">            return Service.START_NOT_STICKY;</span>
+        }
+
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (!intent.hasExtra(KEY_ACCOUNT)) {</span>
+<span class="nc" id="L549">            Log_OC.e(TAG, &quot;Not enough information provided in intent&quot;);</span>
+<span class="nc" id="L550">            return Service.START_NOT_STICKY;</span>
+        }
+
+<span class="nc" id="L553">        Account account = intent.getParcelableExtra(KEY_ACCOUNT);</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">        if (!accountManager.exists(account)) {</span>
+<span class="nc" id="L555">            return Service.START_NOT_STICKY;</span>
+        }
+
+<span class="nc" id="L558">        boolean retry = intent.getBooleanExtra(KEY_RETRY, false);</span>
+<span class="nc" id="L559">        AbstractList&lt;String&gt; requestedUploads = new Vector&lt;&gt;();</span>
+
+<span class="nc" id="L561">        boolean onWifiOnly = intent.getBooleanExtra(KEY_WHILE_ON_WIFI_ONLY, false);</span>
+<span class="nc" id="L562">        boolean whileChargingOnly = intent.getBooleanExtra(KEY_WHILE_CHARGING_ONLY, false);</span>
+
+<span class="nc bnc" id="L564" title="All 2 branches missed.">        if (!retry) {</span>
+
+<span class="nc bnc" id="L566" title="All 2 branches missed.">            if (!(intent.hasExtra(KEY_LOCAL_FILE) ||</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">                    intent.hasExtra(KEY_FILE))) {</span>
+<span class="nc" id="L568">                Log_OC.e(TAG, &quot;Not enough information provided in intent&quot;);</span>
+<span class="nc" id="L569">                return Service.START_NOT_STICKY;</span>
+            }
+
+<span class="nc" id="L572">            String[] localPaths = null;</span>
+<span class="nc" id="L573">            String[] remotePaths = null;</span>
+<span class="nc" id="L574">            String[] mimeTypes = null;</span>
+<span class="nc" id="L575">            OCFile[] files = null;</span>
+
+<span class="nc bnc" id="L577" title="All 2 branches missed.">            if (intent.hasExtra(KEY_FILE)) {</span>
+<span class="nc" id="L578">                Parcelable[] files_temp = intent.getParcelableArrayExtra(KEY_FILE);</span>
+<span class="nc" id="L579">                files = new OCFile[files_temp.length];</span>
+<span class="nc" id="L580">                System.arraycopy(files_temp, 0, files, 0, files_temp.length);</span>
+
+<span class="nc" id="L582">            } else {</span>
+<span class="nc" id="L583">                localPaths = intent.getStringArrayExtra(KEY_LOCAL_FILE);</span>
+<span class="nc" id="L584">                remotePaths = intent.getStringArrayExtra(KEY_REMOTE_FILE);</span>
+<span class="nc" id="L585">                mimeTypes = intent.getStringArrayExtra(KEY_MIME_TYPE);</span>
+            }
+
+<span class="nc bnc" id="L588" title="All 4 branches missed.">            if (intent.hasExtra(KEY_FILE) &amp;&amp; files == null) {</span>
+<span class="nc" id="L589">                Log_OC.e(TAG, &quot;Incorrect array for OCFiles provided in upload intent&quot;);</span>
+<span class="nc" id="L590">                return Service.START_NOT_STICKY;</span>
+
+<span class="nc bnc" id="L592" title="All 2 branches missed.">            } else if (!intent.hasExtra(KEY_FILE)) {</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">                if (localPaths == null) {</span>
+<span class="nc" id="L594">                    Log_OC.e(TAG, &quot;Incorrect array for local paths provided in upload intent&quot;);</span>
+<span class="nc" id="L595">                    return Service.START_NOT_STICKY;</span>
+                }
+<span class="nc bnc" id="L597" title="All 2 branches missed.">                if (remotePaths == null) {</span>
+<span class="nc" id="L598">                    Log_OC.e(TAG, &quot;Incorrect array for remote paths provided in upload intent&quot;);</span>
+<span class="nc" id="L599">                    return Service.START_NOT_STICKY;</span>
+                }
+<span class="nc bnc" id="L601" title="All 2 branches missed.">                if (localPaths.length != remotePaths.length) {</span>
+<span class="nc" id="L602">                    Log_OC.e(TAG, &quot;Different number of remote paths and local paths!&quot;);</span>
+<span class="nc" id="L603">                    return Service.START_NOT_STICKY;</span>
+                }
+
+<span class="nc" id="L606">                files = new OCFile[localPaths.length];</span>
+<span class="nc bnc" id="L607" title="All 2 branches missed.">                for (int i = 0; i &lt; localPaths.length; i++) {</span>
+<span class="nc bnc" id="L608" title="All 2 branches missed.">                    files[i] = UploadFileOperation.obtainNewOCFileToUpload(</span>
+                            remotePaths[i],
+                            localPaths[i],
+                            mimeTypes != null ? mimeTypes[i] : null
+                    );
+<span class="nc bnc" id="L613" title="All 2 branches missed.">                    if (files[i] == null) {</span>
+<span class="nc" id="L614">                        Log_OC.e(TAG, &quot;obtainNewOCFileToUpload() returned null for remotePaths[i]:&quot; + remotePaths[i]</span>
+                                + &quot; and localPaths[i]:&quot; + localPaths[i]);
+<span class="nc" id="L616">                        return Service.START_NOT_STICKY;</span>
+                    }
+                }
+            }
+            // at this point variable &quot;OCFile[] files&quot; is loaded correctly.
+
+<span class="nc" id="L622">            boolean forceOverwrite = intent.getBooleanExtra(KEY_FORCE_OVERWRITE, false);</span>
+<span class="nc" id="L623">            int localAction = intent.getIntExtra(KEY_LOCAL_BEHAVIOUR, LOCAL_BEHAVIOUR_FORGET);</span>
+<span class="nc" id="L624">            boolean isCreateRemoteFolder = intent.getBooleanExtra(KEY_CREATE_REMOTE_FOLDER, false);</span>
+<span class="nc" id="L625">            int createdBy = intent.getIntExtra(KEY_CREATED_BY, UploadFileOperation.CREATED_BY_USER);</span>
+            String uploadKey;
+            UploadFileOperation newUpload;
+            try {
+<span class="nc bnc" id="L629" title="All 2 branches missed.">                for (OCFile file : files) {</span>
+
+<span class="nc" id="L631">                    OCUpload ocUpload = new OCUpload(file, account);</span>
+<span class="nc" id="L632">                    ocUpload.setFileSize(file.getFileLength());</span>
+<span class="nc" id="L633">                    ocUpload.setForceOverwrite(forceOverwrite);</span>
+<span class="nc" id="L634">                    ocUpload.setCreateRemoteFolder(isCreateRemoteFolder);</span>
+<span class="nc" id="L635">                    ocUpload.setCreatedBy(createdBy);</span>
+<span class="nc" id="L636">                    ocUpload.setLocalAction(localAction);</span>
+<span class="nc" id="L637">                    ocUpload.setUseWifiOnly(onWifiOnly);</span>
+<span class="nc" id="L638">                    ocUpload.setWhileChargingOnly(whileChargingOnly);</span>
+<span class="nc" id="L639">                    ocUpload.setUploadStatus(UploadStatus.UPLOAD_IN_PROGRESS);</span>
+
+
+<span class="nc" id="L642">                    newUpload = new UploadFileOperation(</span>
+                        mUploadsStorageManager,
+                            connectivityService,
+                            powerManagementService,
+                            account,
+                            file,
+                            ocUpload,
+                            forceOverwrite,
+                            localAction,
+                            this,
+                            onWifiOnly,
+                            whileChargingOnly
+                    );
+<span class="nc" id="L655">                    newUpload.setCreatedBy(createdBy);</span>
+<span class="nc bnc" id="L656" title="All 2 branches missed.">                    if (isCreateRemoteFolder) {</span>
+<span class="nc" id="L657">                        newUpload.setRemoteFolderToBeCreated();</span>
+                    }
+<span class="nc" id="L659">                    newUpload.addDataTransferProgressListener(this);</span>
+<span class="nc" id="L660">                    newUpload.addDataTransferProgressListener((FileUploaderBinder) mBinder);</span>
+
+<span class="nc" id="L662">                    newUpload.addRenameUploadListener(this);</span>
+
+<span class="nc" id="L664">                    Pair&lt;String, String&gt; putResult = mPendingUploads.putIfAbsent(</span>
+                            account.name,
+<span class="nc" id="L666">                            file.getRemotePath(),</span>
+                            newUpload
+                    );
+<span class="nc bnc" id="L669" title="All 2 branches missed.">                    if (putResult != null) {</span>
+<span class="nc" id="L670">                        uploadKey = putResult.first;</span>
+<span class="nc" id="L671">                        requestedUploads.add(uploadKey);</span>
+
+                        // Save upload in database
+<span class="nc" id="L674">                        long id = mUploadsStorageManager.storeUpload(ocUpload);</span>
+<span class="nc" id="L675">                        newUpload.setOCUploadId(id);</span>
+                    }
+                }
+
+<span class="nc" id="L679">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L680">                Log_OC.e(TAG, &quot;Not enough information provided in intent: &quot; + e.getMessage());</span>
+<span class="nc" id="L681">                return START_NOT_STICKY;</span>
+
+<span class="nc" id="L683">            } catch (IllegalStateException e) {</span>
+<span class="nc" id="L684">                Log_OC.e(TAG, &quot;Bad information provided in intent: &quot; + e.getMessage());</span>
+<span class="nc" id="L685">                return START_NOT_STICKY;</span>
+
+<span class="nc" id="L687">            } catch (Exception e) {</span>
+<span class="nc" id="L688">                Log_OC.e(TAG, &quot;Unexpected exception while processing upload intent&quot;, e);</span>
+<span class="nc" id="L689">                return START_NOT_STICKY;</span>
+
+<span class="nc" id="L691">            }</span>
+            // *** TODO REWRITE: block inserted to request A retry; too many code copied, no control exception ***/
+<span class="nc" id="L693">        } else {</span>
+<span class="nc bnc" id="L694" title="All 4 branches missed.">            if (!intent.hasExtra(KEY_ACCOUNT) || !intent.hasExtra(KEY_RETRY_UPLOAD)) {</span>
+<span class="nc" id="L695">                Log_OC.e(TAG, &quot;Not enough information provided in intent: no KEY_RETRY_UPLOAD_KEY&quot;);</span>
+<span class="nc" id="L696">                return START_NOT_STICKY;</span>
+            }
+<span class="nc" id="L698">            OCUpload upload = intent.getParcelableExtra(KEY_RETRY_UPLOAD);</span>
+
+<span class="nc" id="L700">            onWifiOnly = upload.isUseWifiOnly();</span>
+<span class="nc" id="L701">            whileChargingOnly = upload.isWhileChargingOnly();</span>
+
+<span class="nc" id="L703">            UploadFileOperation newUpload = new UploadFileOperation(</span>
+                    mUploadsStorageManager,
+                    connectivityService,
+                    powerManagementService,
+                    account,
+                    null,
+                    upload,
+<span class="nc" id="L710">                    upload.isForceOverwrite(),  // TODO should be read from DB?</span>
+<span class="nc" id="L711">                    upload.getLocalAction(),    // TODO should be read from DB?</span>
+                    this,
+                    onWifiOnly,
+                    whileChargingOnly
+            );
+
+<span class="nc" id="L717">            newUpload.addDataTransferProgressListener(this);</span>
+<span class="nc" id="L718">            newUpload.addDataTransferProgressListener((FileUploaderBinder) mBinder);</span>
+
+<span class="nc" id="L720">            newUpload.addRenameUploadListener(this);</span>
+
+<span class="nc" id="L722">            Pair&lt;String, String&gt; putResult = mPendingUploads.putIfAbsent(</span>
+                    account.name,
+<span class="nc" id="L724">                    upload.getRemotePath(),</span>
+                    newUpload
+                    );
+<span class="nc bnc" id="L727" title="All 2 branches missed.">            if (putResult != null) {</span>
+<span class="nc" id="L728">                String uploadKey = putResult.first;</span>
+<span class="nc" id="L729">                requestedUploads.add(uploadKey);</span>
+
+                // Update upload in database
+<span class="nc" id="L732">                upload.setUploadStatus(UploadStatus.UPLOAD_IN_PROGRESS);</span>
+<span class="nc" id="L733">                mUploadsStorageManager.updateUpload(upload);</span>
+            }
+        }
+        // *** TODO REWRITE END ***/
+
+<span class="nc bnc" id="L738" title="All 2 branches missed.">        if (requestedUploads.size() &gt; 0) {</span>
+<span class="nc" id="L739">            Message msg = mServiceHandler.obtainMessage();</span>
+<span class="nc" id="L740">            msg.arg1 = startId;</span>
+<span class="nc" id="L741">            msg.obj = requestedUploads;</span>
+<span class="nc" id="L742">            mServiceHandler.sendMessage(msg);</span>
+<span class="nc" id="L743">            sendBroadcastUploadsAdded();</span>
+        }
+<span class="nc" id="L745">        return Service.START_NOT_STICKY;</span>
+    }
+
+    /**
+     * Provides a binder object that clients can use to perform operations on
+     * the queue of uploads, excepting the addition of new files.
+     *
+     * Implemented to perform cancellation, pause and resume of existing
+     * uploads.
+     */
+    @Override
+    public IBinder onBind(Intent intent) {
+<span class="fc" id="L757">        return mBinder;</span>
+    }
+
+    /**
+     * Called when ALL the bound clients were onbound.
+     */
+    @Override
+    public boolean onUnbind(Intent intent) {
+<span class="nc" id="L765">        ((FileUploaderBinder) mBinder).clearListeners();</span>
+<span class="nc" id="L766">        return false;   // not accepting rebinding (default behaviour)</span>
+    }
+
+    @Override
+    public void onAccountsUpdated(Account[] accounts) {
+        // Review current upload, and cancel it if its account doen't exist
+<span class="nc bnc" id="L772" title="All 4 branches missed.">        if (mCurrentUpload != null &amp;&amp; !accountManager.exists(mCurrentUpload.getAccount())) {</span>
+<span class="nc" id="L773">            mCurrentUpload.cancel();</span>
+        }
+        // The rest of uploads are cancelled when they try to start
+<span class="nc" id="L776">    }</span>
+
+    /**
+     * Binder to let client components to perform operations on the queue of uploads.
+     *
+     * It provides by itself the available operations.
+     */
+<span class="fc" id="L783">    public class FileUploaderBinder extends Binder implements OnDatatransferProgressListener {</span>
+
+        /**
+         * Map of listeners that will be reported about progress of uploads from a
+         * {@link FileUploaderBinder} instance
+         */
+<span class="fc" id="L789">        private Map&lt;String, OnDatatransferProgressListener&gt; mBoundListeners = new HashMap&lt;&gt;();</span>
+
+        /**
+         * Cancels a pending or current upload of a remote file.
+         *
+         * @param account ownCloud account where the remote file will be stored.
+         * @param file    A file in the queue of pending uploads
+         */
+        public void cancel(Account account, OCFile file) {
+<span class="nc" id="L798">            cancel(account.name, file.getRemotePath(), null);</span>
+<span class="nc" id="L799">        }</span>
+
+        /**
+         * Cancels a pending or current upload that was persisted.
+         *
+         * @param storedUpload Upload operation persisted
+         */
+        public void cancel(OCUpload storedUpload) {
+<span class="nc" id="L807">            cancel(storedUpload.getAccountName(), storedUpload.getRemotePath(), null);</span>
+
+<span class="nc" id="L809">        }</span>
+
+        /**
+         * Cancels a pending or current upload of a remote file.
+         *
+         * @param accountName Local name of an ownCloud account where the remote file will be stored.
+         * @param remotePath  Remote target of the upload
+         *
+         * Setting result code will pause rather than cancel the job
+         */
+        private void cancel(String accountName, String remotePath, @Nullable ResultCode resultCode ) {
+<span class="nc" id="L820">            Pair&lt;UploadFileOperation, String&gt; removeResult =</span>
+<span class="nc" id="L821">                    mPendingUploads.remove(accountName, remotePath);</span>
+<span class="nc" id="L822">            UploadFileOperation upload = removeResult.first;</span>
+<span class="nc bnc" id="L823" title="All 2 branches missed.">            if (upload == null &amp;&amp;</span>
+<span class="nc bnc" id="L824" title="All 4 branches missed.">                    mCurrentUpload != null &amp;&amp; mCurrentAccount != null &amp;&amp;</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">                    mCurrentUpload.getRemotePath().startsWith(remotePath) &amp;&amp;</span>
+<span class="nc bnc" id="L826" title="All 2 branches missed.">                    accountName.equals(mCurrentAccount.name)) {</span>
+
+<span class="nc" id="L828">                upload = mCurrentUpload;</span>
+            }
+
+<span class="nc bnc" id="L831" title="All 2 branches missed.">            if (upload != null) {</span>
+<span class="nc" id="L832">                upload.cancel();</span>
+                // need to update now table in mUploadsStorageManager,
+                // since the operation will not get to be run by FileUploader#uploadFile
+<span class="nc bnc" id="L835" title="All 2 branches missed.">                if (resultCode != null) {</span>
+<span class="nc" id="L836">                    mUploadsStorageManager.updateDatabaseUploadResult(new RemoteOperationResult(resultCode), upload);</span>
+<span class="nc" id="L837">                    notifyUploadResult(upload, new RemoteOperationResult(resultCode));</span>
+                } else {
+<span class="nc" id="L839">                    mUploadsStorageManager.removeUpload(accountName, remotePath);</span>
+                }
+            }
+<span class="nc" id="L842">        }</span>
+
+        /**
+         * Cancels all the uploads for an account.
+         *
+         * @param account ownCloud account.
+         */
+        public void cancel(Account account) {
+<span class="nc" id="L850">            Log_OC.d(TAG, &quot;Account= &quot; + account.name);</span>
+
+<span class="nc bnc" id="L852" title="All 2 branches missed.">            if (mCurrentUpload != null) {</span>
+<span class="nc" id="L853">                Log_OC.d(TAG, &quot;Current Upload Account= &quot; + mCurrentUpload.getAccount().name);</span>
+<span class="nc bnc" id="L854" title="All 2 branches missed.">                if (mCurrentUpload.getAccount().name.equals(account.name)) {</span>
+<span class="nc" id="L855">                    mCurrentUpload.cancel();</span>
+                }
+            }
+            // Cancel pending uploads
+<span class="nc" id="L859">            cancelUploadsForAccount(account);</span>
+<span class="nc" id="L860">        }</span>
+
+        public void clearListeners() {
+<span class="nc" id="L863">            mBoundListeners.clear();</span>
+<span class="nc" id="L864">        }</span>
+
+        /**
+         * Returns True when the file described by 'file' is being uploaded to
+         * the ownCloud account 'account' or waiting for it
+         *
+         * If 'file' is a directory, returns 'true' if some of its descendant files
+         * is uploading or waiting to upload.
+         *
+         * Warning: If remote file exists and !forceOverwrite the original file
+         * is being returned here. That is, it seems as if the original file is
+         * being updated when actually a new file is being uploaded.
+         *
+         * @param account Owncloud account where the remote file will be stored.
+         * @param file    A file that could be in the queue of pending uploads
+         */
+        public boolean isUploading(Account account, OCFile file) {
+<span class="nc bnc" id="L881" title="All 4 branches missed.">            if (account == null || file == null) {</span>
+<span class="nc" id="L882">                return false;</span>
+            }
+<span class="nc" id="L884">            return mPendingUploads.contains(account.name, file.getRemotePath());</span>
+        }
+
+        public boolean isUploadingNow(OCUpload upload) {
+<span class="nc bnc" id="L888" title="All 2 branches missed.">            return</span>
+                    upload != null &amp;&amp;
+<span class="nc bnc" id="L890" title="All 2 branches missed.">                            mCurrentAccount != null &amp;&amp;</span>
+<span class="nc bnc" id="L891" title="All 2 branches missed.">                            mCurrentUpload != null &amp;&amp;</span>
+<span class="nc bnc" id="L892" title="All 2 branches missed.">                            upload.getAccountName().equals(mCurrentAccount.name) &amp;&amp;</span>
+<span class="nc bnc" id="L893" title="All 2 branches missed.">                            upload.getRemotePath().equals(mCurrentUpload.getRemotePath())</span>
+            ;
+        }
+
+        /**
+         * Adds a listener interested in the progress of the upload for a concrete file.
+         *
+         * @param listener Object to notify about progress of transfer.
+         * @param account  ownCloud account holding the file of interest.
+         * @param file     {@link OCFile} of interest for listener.
+         */
+        public void addDatatransferProgressListener(
+                OnDatatransferProgressListener listener,
+                Account account,
+                OCFile file
+        ) {
+<span class="nc bnc" id="L909" title="All 6 branches missed.">            if (account == null || file == null || listener == null) {</span>
+<span class="nc" id="L910">                return;</span>
+            }
+<span class="nc" id="L912">            String targetKey = buildRemoteName(account.name, file.getRemotePath());</span>
+<span class="nc" id="L913">            mBoundListeners.put(targetKey, listener);</span>
+<span class="nc" id="L914">        }</span>
+
+        /**
+         * Adds a listener interested in the progress of the upload for a concrete file.
+         *
+         * @param listener Object to notify about progress of transfer.
+         * @param ocUpload {@link OCUpload} of interest for listener.
+         */
+        public void addDatatransferProgressListener(
+                OnDatatransferProgressListener listener,
+                OCUpload ocUpload
+        ) {
+<span class="nc bnc" id="L926" title="All 4 branches missed.">            if (ocUpload == null || listener == null) {</span>
+<span class="nc" id="L927">                return;</span>
+            }
+<span class="nc" id="L929">            String targetKey = buildRemoteName(ocUpload.getAccountName(), ocUpload.getRemotePath());</span>
+<span class="nc" id="L930">            mBoundListeners.put(targetKey, listener);</span>
+<span class="nc" id="L931">        }</span>
+
+        /**
+         * Removes a listener interested in the progress of the upload for a concrete file.
+         *
+         * @param listener Object to notify about progress of transfer.
+         * @param account  ownCloud account holding the file of interest.
+         * @param file     {@link OCFile} of interest for listener.
+         */
+        public void removeDatatransferProgressListener(
+                OnDatatransferProgressListener listener,
+                Account account,
+                OCFile file
+        ) {
+<span class="nc bnc" id="L945" title="All 6 branches missed.">            if (account == null || file == null || listener == null) {</span>
+<span class="nc" id="L946">                return;</span>
+            }
+<span class="nc" id="L948">            String targetKey = buildRemoteName(account.name, file.getRemotePath());</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">            if (mBoundListeners.get(targetKey) == listener) {</span>
+<span class="nc" id="L950">                mBoundListeners.remove(targetKey);</span>
+            }
+<span class="nc" id="L952">        }</span>
+
+        /**
+         * Removes a listener interested in the progress of the upload for a concrete file.
+         *
+         * @param listener Object to notify about progress of transfer.
+         * @param ocUpload Stored upload of interest
+         */
+        public void removeDatatransferProgressListener(
+                OnDatatransferProgressListener listener,
+                OCUpload ocUpload
+        ) {
+<span class="nc bnc" id="L964" title="All 4 branches missed.">            if (ocUpload == null || listener == null) {</span>
+<span class="nc" id="L965">                return;</span>
+            }
+<span class="nc" id="L967">            String targetKey = buildRemoteName(ocUpload.getAccountName(), ocUpload.getRemotePath());</span>
+<span class="nc bnc" id="L968" title="All 2 branches missed.">            if (mBoundListeners.get(targetKey) == listener) {</span>
+<span class="nc" id="L969">                mBoundListeners.remove(targetKey);</span>
+            }
+<span class="nc" id="L971">        }</span>
+
+        @Override
+        public void onTransferProgress(long progressRate, long totalTransferredSoFar,
+                                       long totalToTransfer, String fileName) {
+<span class="nc" id="L976">            String key = buildRemoteName(mCurrentUpload.getAccount().name, mCurrentUpload.getFile().getRemotePath());</span>
+<span class="nc" id="L977">            OnDatatransferProgressListener boundListener = mBoundListeners.get(key);</span>
+
+<span class="nc bnc" id="L979" title="All 2 branches missed.">            if (boundListener != null) {</span>
+<span class="nc" id="L980">                boundListener.onTransferProgress(progressRate, totalTransferredSoFar,</span>
+                                                 totalToTransfer, fileName);
+            }
+
+<span class="nc bnc" id="L984" title="All 2 branches missed.">            if (MainApp.getAppContext() != null) {</span>
+<span class="nc bnc" id="L985" title="All 2 branches missed.">                if (mCurrentUpload.isWifiRequired() &amp;&amp; !Device.getNetworkType(MainApp.getAppContext()).</span>
+<span class="nc bnc" id="L986" title="All 2 branches missed.">                    equals(JobRequest.NetworkType.UNMETERED)) {</span>
+<span class="nc" id="L987">                    cancel(mCurrentUpload.getAccount().name, mCurrentUpload.getFile().getRemotePath()</span>
+                        , ResultCode.DELAYED_FOR_WIFI);
+<span class="nc bnc" id="L989" title="All 2 branches missed.">                } else if (mCurrentUpload.isChargingRequired() &amp;&amp;</span>
+<span class="nc bnc" id="L990" title="All 2 branches missed.">                    !Device.getBatteryStatus(MainApp.getAppContext()).isCharging()) {</span>
+<span class="nc" id="L991">                    cancel(mCurrentUpload.getAccount().name, mCurrentUpload.getFile().getRemotePath()</span>
+                        , ResultCode.DELAYED_FOR_CHARGING);
+<span class="nc bnc" id="L993" title="All 2 branches missed.">                } else if (!mCurrentUpload.isIgnoringPowerSaveMode() &amp;&amp;</span>
+<span class="nc bnc" id="L994" title="All 2 branches missed.">                    powerManagementService.isPowerSavingEnabled()) {</span>
+<span class="nc" id="L995">                    cancel(mCurrentUpload.getAccount().name, mCurrentUpload.getFile().getRemotePath()</span>
+                        , ResultCode.DELAYED_IN_POWER_SAVE_MODE);
+                }
+            }
+<span class="nc" id="L999">        }</span>
+
+        /**
+         * Builds a key for the map of listeners.
+         *
+         * TODO use method in IndexedForest, or refactor both to a common place
+         * add to local database) to better policy (add to local database, then upload)
+         *
+         * @param accountName Local name of the ownCloud account where the file to upload belongs.
+         * @param remotePath  Remote path to upload the file to.
+         * @return Key
+         */
+        private String buildRemoteName(String accountName, String remotePath) {
+<span class="nc" id="L1012">            return accountName + remotePath;</span>
+        }
+
+    }
+
+
+    /**
+     * Upload worker. Performs the pending uploads in the order they were
+     * requested.
+     *
+     * Created with the Looper of a new thread, started in
+     * {@link FileUploader#onCreate()}.
+     */
+    private static class ServiceHandler extends Handler {
+        // don't make it a final class, and don't remove the static ; lint will
+        // warn about a possible memory leak
+        FileUploader mService;
+
+        public ServiceHandler(Looper looper, FileUploader service) {
+<span class="fc" id="L1031">            super(looper);</span>
+<span class="pc bpc" id="L1032" title="1 of 2 branches missed.">            if (service == null) {</span>
+<span class="nc" id="L1033">                throw new IllegalArgumentException(&quot;Received invalid NULL in parameter 'service'&quot;);</span>
+            }
+<span class="fc" id="L1035">            mService = service;</span>
+<span class="fc" id="L1036">        }</span>
+
+        @Override
+        public void handleMessage(Message msg) {
+            @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L1041">            AbstractList&lt;String&gt; requestedUploads = (AbstractList&lt;String&gt;) msg.obj;</span>
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">            if (msg.obj != null) {</span>
+<span class="nc" id="L1043">                Iterator&lt;String&gt; it = requestedUploads.iterator();</span>
+<span class="nc bnc" id="L1044" title="All 2 branches missed.">                while (it.hasNext()) {</span>
+<span class="nc" id="L1045">                    mService.uploadFile(it.next());</span>
+                }
+            }
+<span class="nc" id="L1048">            Log_OC.d(TAG, &quot;Stopping command after id &quot; + msg.arg1);</span>
+<span class="nc" id="L1049">            mService.stopForeground(true);</span>
+<span class="nc" id="L1050">            mService.stopSelf(msg.arg1);</span>
+
+<span class="nc" id="L1052">        }</span>
+    }
+
+    /**
+     * Core upload method: sends the file(s) to upload
+     *
+     * @param uploadKey Key to access the upload to perform, contained in mPendingUploads
+     */
+    public void uploadFile(String uploadKey) {
+
+<span class="nc" id="L1062">        mCurrentUpload = mPendingUploads.get(uploadKey);</span>
+
+<span class="nc bnc" id="L1064" title="All 2 branches missed.">        if (mCurrentUpload != null) {</span>
+
+            /// Check account existence
+<span class="nc bnc" id="L1067" title="All 2 branches missed.">            if (!accountManager.exists(mCurrentUpload.getAccount())) {</span>
+<span class="nc" id="L1068">                Log_OC.w(TAG, &quot;Account &quot; + mCurrentUpload.getAccount().name +</span>
+                        &quot; does not exist anymore -&gt; cancelling all its uploads&quot;);
+<span class="nc" id="L1070">                cancelUploadsForAccount(mCurrentUpload.getAccount());</span>
+<span class="nc" id="L1071">                return;</span>
+            }
+
+            /// OK, let's upload
+<span class="nc" id="L1075">            mUploadsStorageManager.updateDatabaseUploadStart(mCurrentUpload);</span>
+
+<span class="nc" id="L1077">            notifyUploadStart(mCurrentUpload);</span>
+
+<span class="nc" id="L1079">            sendBroadcastUploadStarted(mCurrentUpload);</span>
+
+<span class="nc" id="L1081">            RemoteOperationResult uploadResult = null;</span>
+
+            try {
+                /// prepare client object to send the request to the ownCloud server
+<span class="nc bnc" id="L1085" title="All 4 branches missed.">                if (mCurrentAccount == null || !mCurrentAccount.equals(mCurrentUpload.getAccount())) {</span>
+<span class="nc" id="L1086">                    mCurrentAccount = mCurrentUpload.getAccount();</span>
+<span class="nc" id="L1087">                    mStorageManager = new FileDataStorageManager(</span>
+                            mCurrentAccount,
+<span class="nc" id="L1089">                            getContentResolver()</span>
+                    );
+                }   // else, reuse storage manager from previous operation
+
+                // always get client from client manager, to get fresh credentials in case of update
+<span class="nc" id="L1094">                OwnCloudAccount ocAccount = new OwnCloudAccount(</span>
+                        mCurrentAccount,
+                        this
+                );
+<span class="nc" id="L1098">                mUploadClient = OwnCloudClientManagerFactory.getDefaultSingleton().</span>
+<span class="nc" id="L1099">                        getClientFor(ocAccount, this);</span>
+
+
+//                // If parent folder is encrypted, upload file encrypted
+//                OCFile parent = mStorageManager.getFileByPath(mCurrentUpload.getFile().getParentRemotePath());
+
+//                if (parent.isEncrypted()) {
+//                    UploadEncryptedFileOperation uploadEncryptedFileOperation =
+//                            new UploadEncryptedFileOperation(parent, mCurrentUpload);
+//
+//                    uploadResult = uploadEncryptedFileOperation.execute(mUploadClient, mStorageManager);
+//                } else {
+                    /// perform the regular upload
+<span class="nc" id="L1112">                    uploadResult = mCurrentUpload.execute(mUploadClient, mStorageManager);</span>
+//                }
+
+
+<span class="nc" id="L1116">            } catch (Exception e) {</span>
+<span class="nc" id="L1117">                Log_OC.e(TAG, &quot;Error uploading&quot;, e);</span>
+<span class="nc" id="L1118">                uploadResult = new RemoteOperationResult(e);</span>
+
+            } finally {
+                Pair&lt;UploadFileOperation, String&gt; removeResult;
+<span class="nc bnc" id="L1122" title="All 2 branches missed.">                if (mCurrentUpload.wasRenamed()) {</span>
+<span class="nc" id="L1123">                    removeResult = mPendingUploads.removePayload(</span>
+                            mCurrentAccount.name,
+<span class="nc" id="L1125">                            mCurrentUpload.getOldFile().getRemotePath()</span>
+                    );
+                    // TODO: grant that name is also updated for mCurrentUpload.getOCUploadId
+
+                } else {
+<span class="nc" id="L1130">                    removeResult = mPendingUploads.removePayload(mCurrentAccount.name,</span>
+<span class="nc" id="L1131">                            mCurrentUpload.getDecryptedRemotePath());</span>
+                }
+
+<span class="nc" id="L1134">                mUploadsStorageManager.updateDatabaseUploadResult(uploadResult, mCurrentUpload);</span>
+
+                /// notify result
+<span class="nc" id="L1137">                notifyUploadResult(mCurrentUpload, uploadResult);</span>
+
+<span class="nc" id="L1139">                sendBroadcastUploadFinished(mCurrentUpload, uploadResult, removeResult.second);</span>
+            }
+
+            // generate new Thumbnail
+<span class="nc" id="L1143">            final ThumbnailsCacheManager.ThumbnailGenerationTask task =</span>
+                    new ThumbnailsCacheManager.ThumbnailGenerationTask(mStorageManager, mCurrentAccount);
+
+<span class="nc" id="L1146">            File file = new File(mCurrentUpload.getOriginalStoragePath());</span>
+<span class="nc" id="L1147">            String remoteId = mCurrentUpload.getFile().getRemoteId();</span>
+
+<span class="nc" id="L1149">            task.execute(new ThumbnailsCacheManager.ThumbnailGenerationTaskObject(file, remoteId));</span>
+        }
+<span class="nc" id="L1151">    }</span>
+
+
+    /**
+     * Creates a status notification to show the upload progress
+     *
+     * @param upload Upload operation starting.
+     */
+    private void notifyUploadStart(UploadFileOperation upload) {
+        // / create status notification with a progress bar
+<span class="nc" id="L1161">        mLastPercent = 0;</span>
+<span class="nc" id="L1162">        mNotificationBuilder = NotificationUtils.newNotificationBuilder(this);</span>
+<span class="nc" id="L1163">        mNotificationBuilder</span>
+<span class="nc" id="L1164">                .setOngoing(true)</span>
+<span class="nc" id="L1165">                .setSmallIcon(R.drawable.notification_icon)</span>
+<span class="nc" id="L1166">                .setTicker(getString(R.string.uploader_upload_in_progress_ticker))</span>
+<span class="nc" id="L1167">                .setContentTitle(getString(R.string.uploader_upload_in_progress_ticker))</span>
+<span class="nc" id="L1168">                .setProgress(100, 0, false)</span>
+<span class="nc" id="L1169">                .setContentText(</span>
+<span class="nc" id="L1170">                        String.format(getString(R.string.uploader_upload_in_progress_content), 0, upload.getFileName())</span>
+                );
+
+<span class="nc bnc" id="L1173" title="All 2 branches missed.">        if (android.os.Build.VERSION.SDK_INT &gt;= android.os.Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L1174">            mNotificationBuilder.setChannelId(NotificationUtils.NOTIFICATION_CHANNEL_UPLOAD);</span>
+        }
+
+        /// includes a pending intent in the notification showing the details
+<span class="nc" id="L1178">        Intent showUploadListIntent = new Intent(this, UploadListActivity.class);</span>
+<span class="nc" id="L1179">        showUploadListIntent.putExtra(FileActivity.EXTRA_FILE, upload.getFile());</span>
+<span class="nc" id="L1180">        showUploadListIntent.putExtra(FileActivity.EXTRA_ACCOUNT, upload.getAccount());</span>
+<span class="nc" id="L1181">        showUploadListIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);</span>
+<span class="nc" id="L1182">        mNotificationBuilder.setContentIntent(PendingIntent.getActivity(this, (int) System.currentTimeMillis(),</span>
+            showUploadListIntent, 0));
+
+<span class="nc bnc" id="L1185" title="All 4 branches missed.">        if (!upload.isInstantPicture() &amp;&amp; !upload.isInstantVideo()) {</span>
+<span class="nc bnc" id="L1186" title="All 2 branches missed.">            if (mNotificationManager == null) {</span>
+<span class="nc" id="L1187">                mNotificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);</span>
+            }
+
+<span class="nc" id="L1190">            mNotificationManager.notify(R.string.uploader_upload_in_progress_ticker, mNotificationBuilder.build());</span>
+        }   // else wait until the upload really start (onTransferProgress is called), so that if it's discarded
+        // due to lack of Wifi, no notification is shown
+        // TODO generalize for automated uploads
+<span class="nc" id="L1194">    }</span>
+
+    /**
+     * Callback method to update the progress bar in the status notification
+     */
+    @Override
+    public void onTransferProgress(long progressRate, long totalTransferredSoFar,
+                                   long totalToTransfer, String filePath) {
+<span class="nc" id="L1202">        int percent = (int) (100.0 * ((double) totalTransferredSoFar) / ((double) totalToTransfer));</span>
+<span class="nc bnc" id="L1203" title="All 2 branches missed.">        if (percent != mLastPercent) {</span>
+<span class="nc" id="L1204">            mNotificationBuilder.setProgress(100, percent, false);</span>
+<span class="nc" id="L1205">            String fileName = filePath.substring(filePath.lastIndexOf(FileUtils.PATH_SEPARATOR) + 1);</span>
+<span class="nc" id="L1206">            String text = String.format(getString(R.string.uploader_upload_in_progress_content), percent, fileName);</span>
+<span class="nc" id="L1207">            mNotificationBuilder.setContentText(text);</span>
+<span class="nc" id="L1208">            mNotificationManager.notify(R.string.uploader_upload_in_progress_ticker, mNotificationBuilder.build());</span>
+        }
+<span class="nc" id="L1210">        mLastPercent = percent;</span>
+<span class="nc" id="L1211">    }</span>
+
+    /**
+     * Updates the status notification with the result of an upload operation.
+     *
+     * @param uploadResult Result of the upload operation.
+     * @param upload       Finished upload operation
+     */
+    private void notifyUploadResult(UploadFileOperation upload,
+                                    RemoteOperationResult uploadResult) {
+<span class="nc" id="L1221">        Log_OC.d(TAG, &quot;NotifyUploadResult with resultCode: &quot; + uploadResult.getCode());</span>
+        // cancelled operation or success -&gt; silent removal of progress notification
+<span class="nc bnc" id="L1223" title="All 2 branches missed.">        if (mNotificationManager == null) {</span>
+<span class="nc" id="L1224">            mNotificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);</span>
+        }
+
+<span class="nc" id="L1227">        mNotificationManager.cancel(R.string.uploader_upload_in_progress_ticker);</span>
+
+        // Only notify if the upload fails
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">        if (!uploadResult.isCancelled() &amp;&amp;</span>
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">            !uploadResult.isSuccess() &amp;&amp;</span>
+<span class="nc bnc" id="L1232" title="All 2 branches missed.">            !ResultCode.LOCAL_FILE_NOT_FOUND.equals(uploadResult.getCode()) &amp;&amp;</span>
+<span class="nc bnc" id="L1233" title="All 2 branches missed.">            !uploadResult.getCode().equals(ResultCode.DELAYED_FOR_WIFI) &amp;&amp;</span>
+<span class="nc bnc" id="L1234" title="All 2 branches missed.">            !uploadResult.getCode().equals(ResultCode.DELAYED_FOR_CHARGING) &amp;&amp;</span>
+<span class="nc bnc" id="L1235" title="All 2 branches missed.">            !uploadResult.getCode().equals(ResultCode.DELAYED_IN_POWER_SAVE_MODE) &amp;&amp;</span>
+<span class="nc bnc" id="L1236" title="All 2 branches missed.">            !uploadResult.getCode().equals(ResultCode.LOCK_FAILED)    ) {</span>
+
+<span class="nc" id="L1238">            int tickerId = R.string.uploader_upload_failed_ticker;</span>
+
+            String content;
+
+            // check credentials error
+<span class="nc" id="L1243">            boolean needsToUpdateCredentials = ResultCode.UNAUTHORIZED.equals(uploadResult.getCode());</span>
+<span class="nc bnc" id="L1244" title="All 2 branches missed.">            tickerId = needsToUpdateCredentials ? R.string.uploader_upload_failed_credentials_error : tickerId;</span>
+
+<span class="nc" id="L1246">            mNotificationBuilder</span>
+<span class="nc" id="L1247">                    .setTicker(getString(tickerId))</span>
+<span class="nc" id="L1248">                    .setContentTitle(getString(tickerId))</span>
+<span class="nc" id="L1249">                    .setAutoCancel(true)</span>
+<span class="nc" id="L1250">                    .setOngoing(false)</span>
+<span class="nc" id="L1251">                    .setProgress(0, 0, false);</span>
+
+<span class="nc" id="L1253">            content = ErrorMessageAdapter.getErrorCauseMessage(uploadResult, upload, getResources());</span>
+
+<span class="nc bnc" id="L1255" title="All 2 branches missed.">            if (needsToUpdateCredentials) {</span>
+                // let the user update credentials with one click
+<span class="nc" id="L1257">                Intent updateAccountCredentials = new Intent(this, AuthenticatorActivity.class);</span>
+<span class="nc" id="L1258">                updateAccountCredentials.putExtra(</span>
+<span class="nc" id="L1259">                        AuthenticatorActivity.EXTRA_ACCOUNT, upload.getAccount()</span>
+                );
+<span class="nc" id="L1261">                updateAccountCredentials.putExtra(</span>
+                        AuthenticatorActivity.EXTRA_ACTION,
+                        AuthenticatorActivity.ACTION_UPDATE_EXPIRED_TOKEN
+                );
+
+<span class="nc" id="L1266">                updateAccountCredentials.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L1267">                updateAccountCredentials.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);</span>
+<span class="nc" id="L1268">                updateAccountCredentials.addFlags(Intent.FLAG_FROM_BACKGROUND);</span>
+<span class="nc" id="L1269">                mNotificationBuilder.setContentIntent(PendingIntent.getActivity(</span>
+                        this,
+<span class="nc" id="L1271">                        (int) System.currentTimeMillis(),</span>
+                        updateAccountCredentials,
+                        PendingIntent.FLAG_ONE_SHOT
+                ));
+
+<span class="nc" id="L1276">            } else {</span>
+                //in case of failure, do not show details file view (because there is no file!)
+<span class="nc" id="L1278">                Intent showUploadListIntent = new Intent(this, UploadListActivity.class);</span>
+<span class="nc" id="L1279">                showUploadListIntent.putExtra(FileActivity.EXTRA_FILE, upload.getFile());</span>
+<span class="nc" id="L1280">                showUploadListIntent.putExtra(FileActivity.EXTRA_ACCOUNT, upload.getAccount());</span>
+<span class="nc" id="L1281">                showUploadListIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);</span>
+<span class="nc" id="L1282">                mNotificationBuilder.setContentIntent(PendingIntent.getActivity(this, (int) System.currentTimeMillis(),</span>
+                        showUploadListIntent, 0));
+            }
+
+<span class="nc" id="L1286">            mNotificationBuilder.setContentText(content);</span>
+<span class="nc" id="L1287">            mNotificationManager.notify(tickerId, mNotificationBuilder.build());</span>
+        }
+<span class="nc" id="L1289">    }</span>
+
+    /**
+     * Sends a broadcast in order to the interested activities can update their
+     * view
+     *
+     * TODO - no more broadcasts, replace with a callback to subscribed listeners
+     */
+    private void sendBroadcastUploadsAdded() {
+<span class="nc" id="L1298">        Intent start = new Intent(getUploadsAddedMessage());</span>
+        // nothing else needed right now
+<span class="nc" id="L1300">        start.setPackage(getPackageName());</span>
+<span class="nc" id="L1301">        sendStickyBroadcast(start);</span>
+<span class="nc" id="L1302">    }</span>
+
+    /**
+     * Sends a broadcast in order to the interested activities can update their
+     * view
+     *
+     * TODO - no more broadcasts, replace with a callback to subscribed listeners
+     *
+     * @param upload Finished upload operation
+     */
+    private void sendBroadcastUploadStarted(
+            UploadFileOperation upload) {
+
+<span class="nc" id="L1315">        Intent start = new Intent(getUploadStartMessage());</span>
+<span class="nc" id="L1316">        start.putExtra(EXTRA_REMOTE_PATH, upload.getRemotePath()); // real remote</span>
+<span class="nc" id="L1317">        start.putExtra(EXTRA_OLD_FILE_PATH, upload.getOriginalStoragePath());</span>
+<span class="nc" id="L1318">        start.putExtra(ACCOUNT_NAME, upload.getAccount().name);</span>
+
+<span class="nc" id="L1320">        start.setPackage(getPackageName());</span>
+<span class="nc" id="L1321">        sendStickyBroadcast(start);</span>
+<span class="nc" id="L1322">    }</span>
+
+    /**
+     * Sends a broadcast in order to the interested activities can update their
+     * view
+     *
+     * TODO - no more broadcasts, replace with a callback to subscribed listeners
+     *
+     * @param upload                 Finished upload operation
+     * @param uploadResult           Result of the upload operation
+     * @param unlinkedFromRemotePath Path in the uploads tree where the upload was unlinked from
+     */
+    private void sendBroadcastUploadFinished(
+            UploadFileOperation upload,
+            RemoteOperationResult uploadResult,
+            String unlinkedFromRemotePath) {
+
+<span class="nc" id="L1339">        Intent end = new Intent(getUploadFinishMessage());</span>
+<span class="nc" id="L1340">        end.putExtra(EXTRA_REMOTE_PATH, upload.getRemotePath()); // real remote</span>
+        // path, after
+        // possible
+        // automatic
+        // renaming
+<span class="nc bnc" id="L1345" title="All 2 branches missed.">        if (upload.wasRenamed()) {</span>
+<span class="nc" id="L1346">            end.putExtra(EXTRA_OLD_REMOTE_PATH, upload.getOldFile().getRemotePath());</span>
+        }
+<span class="nc" id="L1348">        end.putExtra(EXTRA_OLD_FILE_PATH, upload.getOriginalStoragePath());</span>
+<span class="nc" id="L1349">        end.putExtra(ACCOUNT_NAME, upload.getAccount().name);</span>
+<span class="nc" id="L1350">        end.putExtra(EXTRA_UPLOAD_RESULT, uploadResult.isSuccess());</span>
+<span class="nc bnc" id="L1351" title="All 2 branches missed.">        if (unlinkedFromRemotePath != null) {</span>
+<span class="nc" id="L1352">            end.putExtra(EXTRA_LINKED_TO_PATH, unlinkedFromRemotePath);</span>
+        }
+<span class="nc" id="L1354">        end.setPackage(getPackageName());</span>
+<span class="nc" id="L1355">        sendStickyBroadcast(end);</span>
+<span class="nc" id="L1356">    }</span>
+
+    /**
+     * Remove and 'forgets' pending uploads of an account.
+     *
+     * @param account   Account which uploads will be cancelled
+     */
+    private void cancelUploadsForAccount(Account account) {
+<span class="nc" id="L1364">        mPendingUploads.remove(account.name);</span>
+<span class="nc" id="L1365">        mUploadsStorageManager.removeUploads(account.name);</span>
+<span class="nc" id="L1366">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

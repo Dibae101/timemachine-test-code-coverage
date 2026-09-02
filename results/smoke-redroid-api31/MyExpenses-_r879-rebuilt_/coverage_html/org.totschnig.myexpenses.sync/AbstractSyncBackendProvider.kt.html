@@ -1,0 +1,604 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractSyncBackendProvider.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.sync</a> &gt; <span class="el_source">AbstractSyncBackendProvider.kt</span></div><h1>AbstractSyncBackendProvider.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.sync
+
+import android.accounts.AccountManager
+import android.annotation.SuppressLint
+import android.content.ContentValues
+import android.content.Context
+import android.content.SharedPreferences
+import android.net.Uri
+import android.provider.Settings
+import android.text.TextUtils
+import android.util.Base64
+import androidx.annotation.CallSuper
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromStream
+import org.apache.commons.lang3.StringUtils
+import org.totschnig.myexpenses.BuildConfig
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.injector
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.model2.BudgetExport
+import org.totschnig.myexpenses.model2.CategoryExport
+import org.totschnig.myexpenses.myApplication
+import org.totschnig.myexpenses.provider.KEY_URI
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.asSequence
+import org.totschnig.myexpenses.provider.fileName
+import org.totschnig.myexpenses.provider.filter.Operation
+import org.totschnig.myexpenses.provider.useAndMapToList
+import org.totschnig.myexpenses.sync.SyncAdapter.Companion.IO_LOCK_DELAY_MILLIS
+import org.totschnig.myexpenses.sync.SyncBackendProvider.EncryptionException.Companion.encrypted
+import org.totschnig.myexpenses.sync.SyncBackendProvider.EncryptionException.Companion.notEncrypted
+import org.totschnig.myexpenses.sync.SyncBackendProvider.EncryptionException.Companion.wrongPassphrase
+import org.totschnig.myexpenses.sync.json.AccountMetaData
+import org.totschnig.myexpenses.sync.json.ChangeSet
+import org.totschnig.myexpenses.sync.json.TransactionChange
+import org.totschnig.myexpenses.sync.json.Utils.getChanges
+import org.totschnig.myexpenses.util.PictureDirHelper
+import org.totschnig.myexpenses.util.Utils
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.crypt.EncryptionHelper
+import org.totschnig.myexpenses.util.io.FileCopyUtils
+import org.totschnig.myexpenses.util.io.MIME_TYPE_OCTET_STREAM
+import org.totschnig.myexpenses.util.io.getFileExtension
+import org.totschnig.myexpenses.util.io.getNameWithoutExtension
+import java.io.BufferedReader
+import java.io.ByteArrayInputStream
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.security.GeneralSecurityException
+import java.util.Locale
+import androidx.core.content.edit
+
+<span class="nc" id="L59">abstract class AbstractSyncBackendProvider&lt;Res&gt;(protected val context: Context) :</span>
+    SyncBackendProvider, ResourceStorage&lt;Res&gt; {
+    /**
+     * this holds the uuid of the db account which data is currently synced
+     */
+<span class="nc" id="L64">    lateinit var accountUuid: String</span>
+<span class="nc" id="L65">    val sharedPreferences: SharedPreferences by lazy {</span>
+<span class="nc" id="L66">        context.getSharedPreferences(&quot;${sharedPreferencesName}_sync&quot;, 0)</span>
+    }
+    private var appInstance: String? = null
+    private var encryptionPassword: String? = null
+    val mimeTypeForData: String
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        get() = if (isEncrypted) MIME_TYPE_OCTET_STREAM else MIME_TYPE_JSON</span>
+    protected val isEncrypted: Boolean
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        get() = encryptionPassword != null</span>
+    val accountMetadataFilename: String
+<span class="nc" id="L75">        get() = &quot;$ACCOUNT_METADATA_FILENAME.$extensionForData&quot;</span>
+    private val categoriesFilename: String
+<span class="nc" id="L77">        get() = &quot;$CATEGORIES_FILENAME.$extensionForData&quot;</span>
+    override val extensionForData: String
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        get() = if (isEncrypted) &quot;enc&quot; else &quot;json&quot;</span>
+
+    abstract val accountRes: Res
+
+    fun setAccountUuid(account: Account) {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        accountUuid = account.uuid ?: throw IllegalArgumentException(&quot;uuid is null&quot;)</span>
+<span class="nc" id="L85">    }</span>
+
+    protected abstract val sharedPreferencesName: String
+
+    @Throws(GeneralSecurityException::class, IOException::class)
+    override fun initEncryption() {
+<span class="nc" id="L91">        encryptionToken = encrypt(EncryptionHelper.generateRandom(10))</span>
+
+<span class="nc" id="L93">    }</span>
+
+    @Throws(Exception::class)
+    override suspend fun setUp(
+        accountManager: AccountManager,
+        account: android.accounts.Account,
+        encryptionPassword: String?,
+        create: Boolean,
+    ) {
+<span class="nc" id="L102">        this.encryptionPassword = encryptionPassword</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        encryptionToken?.also {</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (encryptionPassword == null) {</span>
+<span class="nc" id="L105">                throw encrypted(context)</span>
+            } else {
+<span class="nc" id="L107">                try {</span>
+<span class="nc" id="L108">                    decrypt(it)</span>
+<span class="nc" id="L109">                } catch (_: GeneralSecurityException) {</span>
+<span class="nc" id="L110">                    throw wrongPassphrase(context)</span>
+                }
+            }
+<span class="nc" id="L113">        } ?: run {</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (encryptionPassword != null) {</span>
+<span class="nc bnc" id="L115" title="All 4 branches missed.">                if (create &amp;&amp; isEmpty) {</span>
+<span class="nc" id="L116">                    initEncryption()</span>
+                } else {
+<span class="nc" id="L118">                    throw notEncrypted(context)</span>
+                }
+            }
+<span class="nc" id="L121">        }</span>
+<span class="nc" id="L122">    }</span>
+
+    @get:Throws(IOException::class)
+    protected abstract val isEmpty: Boolean
+
+    @Throws(GeneralSecurityException::class)
+    private fun decrypt(input: String): String {
+<span class="nc" id="L129">        return String(</span>
+<span class="nc" id="L130">            EncryptionHelper.decrypt(</span>
+<span class="nc" id="L131">                Base64.decode(input, Base64.DEFAULT),</span>
+<span class="nc" id="L132">                encryptionPassword</span>
+            )
+        )
+    }
+
+    @get:Throws(IOException::class)
+    protected var encryptionToken: String?
+<span class="nc" id="L139">        get() = readFileContents(false, ENCRYPTION_TOKEN_FILE_NAME)</span>
+        set(value) {
+<span class="nc" id="L141">            saveFileContents(</span>
+<span class="nc" id="L142">                false, null,</span>
+<span class="nc" id="L143">                ENCRYPTION_TOKEN_FILE_NAME,</span>
+<span class="nc" id="L144">                value!!, MIME_TYPE_OCTET_STREAM, false</span>
+            )
+<span class="nc" id="L146">        }</span>
+
+    open fun deleteLockTokenFile() {
+<span class="nc" id="L149">        throw IllegalStateException(&quot;Should be handled by implementation&quot;)</span>
+    }
+
+<span class="nc" id="L152">    open fun getLockToken() = readFileContents(true, LOCK_FILE)</span>
+    open fun setLockToken(lockToken: String) {
+<span class="nc" id="L154">        saveFileContents(true, null, LOCK_FILE, lockToken, &quot;text/plain&quot;, false)</span>
+<span class="nc" id="L155">    }</span>
+
+    @Throws(GeneralSecurityException::class)
+    protected fun encrypt(plain: ByteArray?): String {
+<span class="nc" id="L159">        return Base64.encodeToString(</span>
+<span class="nc" id="L160">            EncryptionHelper.encrypt(plain, encryptionPassword),</span>
+<span class="nc" id="L161">            Base64.DEFAULT</span>
+        )
+    }
+
+    @Throws(IOException::class)
+    protected fun maybeEncrypt(outputStream: OutputStream): OutputStream {
+<span class="nc" id="L167">        return try {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (isEncrypted) EncryptionHelper.encrypt(</span>
+<span class="nc" id="L169">                outputStream,</span>
+<span class="nc" id="L170">                encryptionPassword</span>
+<span class="nc" id="L171">            ) else outputStream</span>
+<span class="nc" id="L172">        } catch (e: GeneralSecurityException) {</span>
+<span class="nc" id="L173">            throw IOException(e)</span>
+        }
+    }
+
+    @Throws(IOException::class)
+<span class="nc" id="L178">    protected fun maybeEncrypt(</span>
+        inputStream: InputStream,
+<span class="nc" id="L180">        maybeEncrypt: Boolean = true,</span>
+    ): InputStream =
+<span class="nc bnc" id="L182" title="All 4 branches missed.">        if (maybeEncrypt &amp;&amp; isEncrypted) try {</span>
+<span class="nc" id="L183">            EncryptionHelper.encrypt(</span>
+<span class="nc" id="L184">                inputStream,</span>
+<span class="nc" id="L185">                encryptionPassword</span>
+            )
+<span class="nc" id="L187">        } catch (e: GeneralSecurityException) {</span>
+<span class="nc" id="L188">            throw IOException(e)</span>
+<span class="nc" id="L189">        } else inputStream</span>
+
+    @Throws(IOException::class)
+<span class="nc" id="L192">    protected fun maybeDecrypt(</span>
+        inputStream: InputStream,
+<span class="nc" id="L194">        maybeDecrypt: Boolean = true,</span>
+<span class="nc" id="L195">    ): InputStream = try {</span>
+<span class="nc bnc" id="L196" title="All 4 branches missed.">        if (maybeDecrypt &amp;&amp; isEncrypted) EncryptionHelper.decrypt(</span>
+<span class="nc" id="L197">            inputStream,</span>
+<span class="nc" id="L198">            encryptionPassword</span>
+<span class="nc" id="L199">        ) else inputStream</span>
+<span class="nc" id="L200">    } catch (e: GeneralSecurityException) {</span>
+<span class="nc" id="L201">        throw IOException(e)</span>
+<span class="nc" id="L202">    }</span>
+
+    @Throws(IOException::class)
+    protected fun toInputStream(fileContents: String, maybeEncrypt: Boolean) =
+<span class="nc" id="L206">        maybeEncrypt(ByteArrayInputStream(fileContents.toByteArray()), maybeEncrypt)</span>
+
+    @Throws(IOException::class)
+    protected fun getChangeSetFromInputStream(
+        sequenceNumber: SequenceNumber,
+        inputStream: InputStream,
+    ): ChangeSet {
+<span class="nc" id="L213">        log().i(&quot;getChangeSetFromInputStream for $sequenceNumber&quot;)</span>
+<span class="nc" id="L214">        val changes  = getChanges(maybeDecrypt(inputStream)).toMutableList()</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (changes.isEmpty()) {</span>
+<span class="nc" id="L216">            return ChangeSet.empty(sequenceNumber)</span>
+        }
+<span class="nc" id="L218">        val iterator = changes.listIterator()</span>
+<span class="nc" id="L219">        ensureAttachmentsOnRead(changes)</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        while (iterator.hasNext()) {</span>
+<span class="nc" id="L221">            val transactionChange = iterator.next()</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (transactionChange.isEmpty) {</span>
+<span class="nc" id="L223">                log().w(&quot;found empty transaction change in json&quot;)</span>
+<span class="nc" id="L224">                iterator.remove()</span>
+            } else {
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                transactionChange.pictureUri?.let {</span>
+<span class="nc bnc" id="L227" title="All 8 branches missed.">                    if (transactionChange.attachments?.isNotEmpty() == true) {</span>
+<span class="nc" id="L228">                        CrashHandler.report(IllegalStateException(&quot;found attachments and legacy pictureUri together&quot;))</span>
+                    } else {
+<span class="nc" id="L230">                        iterator.set(transactionChange.copy(</span>
+<span class="nc" id="L231">                            attachments =  setOf(mapLegacyPictureDuringRead(it))</span>
+                        ))
+                    }
+<span class="nc" id="L234">                }</span>
+            }
+        }
+<span class="nc" id="L237">        return ChangeSet.create(sequenceNumber, changes)</span>
+    }
+
+    abstract fun getResInAccountDir(resourceName: String): Res?
+
+    final override fun collectionForShard(shardNumber: Int) =
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (shardNumber == 0) accountRes else getResInAccountDir(folderForShard(shardNumber))</span>
+
+    @Throws(IOException::class)
+<span class="nc" id="L246">    private fun mapLegacyPictureDuringRead(uri: String) = generateUuid().also {</span>
+<span class="nc" id="L247">        storeAttachmentToDatabase(uri, it, getInputStreamForLegacyPicture(uri))</span>
+<span class="nc" id="L248">    }</span>
+
+    private fun storeAttachmentToDatabase(fileName: String, uuid:String, inputStream: InputStream) {
+<span class="nc" id="L251">        val homeUri = PictureDirHelper.getOutputMediaUri(</span>
+<span class="nc" id="L252">            false,</span>
+<span class="nc" id="L253">            context.myApplication,</span>
+<span class="nc" id="L254">            fileName = getNameWithoutExtension(fileName),</span>
+<span class="nc" id="L255">            extension = getFileExtension(fileName)</span>
+        )
+<span class="nc bnc" id="L257" title="All 2 branches missed.">        val output = context.contentResolver</span>
+<span class="nc" id="L258">            .openOutputStream(homeUri) ?: throw IOException(&quot;Unable to write picture&quot;)</span>
+<span class="nc" id="L259">        FileCopyUtils.copy(maybeDecrypt(inputStream), output)</span>
+<span class="nc" id="L260">        inputStream.close()</span>
+<span class="nc" id="L261">        output.close()</span>
+<span class="nc" id="L262">        context.contentResolver.insert(</span>
+<span class="nc" id="L263">            TransactionProvider.ATTACHMENTS_URI,</span>
+<span class="nc" id="L264">            ContentValues(2).apply {</span>
+<span class="nc" id="L265">                put(KEY_URI, homeUri.toString())</span>
+<span class="nc" id="L266">                put(KEY_UUID, uuid)</span>
+<span class="nc" id="L267">            }</span>
+        )
+<span class="nc" id="L269">    }</span>
+
+    private fun ensureAttachmentsOnRead(changeSet: List&lt;TransactionChange&gt;) {
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        val attachments = changeSet.flatMap { it.attachments ?: emptyList() }.toSet()</span>
+
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (attachments.isEmpty()) return</span>
+        //noinspection Recycle
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        val existing = context.contentResolver.query(</span>
+<span class="nc" id="L277">            TransactionProvider.ATTACHMENTS_URI,</span>
+<span class="nc" id="L278">            arrayOf(KEY_UUID),</span>
+<span class="nc" id="L279">            &quot;$KEY_UUID ${Operation.IN.getOp(attachments.size)}&quot;,</span>
+<span class="nc" id="L280">            attachments.toTypedArray(),</span>
+<span class="nc" id="L281">            null</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        )?.useAndMapToList { it.getString(0) } ?: emptyList()</span>
+<span class="nc" id="L283">        log().w(&quot;ensureAttachmentsOnRead: found %s&quot;, existing.joinToString())</span>
+<span class="nc" id="L284">        (attachments - existing.toSet()).forEach { uuid -&gt;</span>
+<span class="nc" id="L285">            try {</span>
+<span class="nc" id="L286">                getAttachment(uuid)</span>
+<span class="nc" id="L287">            } catch (e: FileNotFoundException) {</span>
+<span class="nc" id="L288">                null</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            }?.let {</span>
+<span class="nc" id="L290">                (fileName, inputStream) -&gt; storeAttachmentToDatabase(fileName, uuid, inputStream)</span>
+<span class="nc" id="L291">            }</span>
+<span class="nc" id="L292">        }</span>
+
+<span class="nc" id="L294">    }</span>
+
+    @Throws(IOException::class)
+    fun getInputStreamForLegacyPicture(relativeUri: String) =
+<span class="nc bnc" id="L298" title="All 2 branches missed.">        getInputStream(getResInAccountDir(relativeUri) ?: throw FileNotFoundException())</span>
+
+    @Throws(IOException::class)
+    fun getAttachment(uuid: String): Pair&lt;String, InputStream&gt; {
+<span class="nc" id="L302">        val attachmentDir = requireCollection(ATTACHMENT_FOLDER_NAME)</span>
+<span class="nc bnc" id="L303" title="All 10 branches missed.">        val attachment = childrenForCollection(attachmentDir).find { nameForResource(it)?.startsWith(uuid) == true } ?: throw FileNotFoundException()</span>
+<span class="nc" id="L304">        return nameForResource(attachment)!!.substringAfter(&quot;${uuid}_&quot;) to getInputStream(attachment)</span>
+    }
+
+    private fun storeAttachmentToBackendIfNeeded(uuid: String, uri: Uri, fileName: String) {
+<span class="nc" id="L308">        val attachmentDir = requireCollection(ATTACHMENT_FOLDER_NAME)</span>
+<span class="nc bnc" id="L309" title="All 6 branches missed.">        if (childrenForCollection(attachmentDir).none { nameForResource(it)?.startsWith(uuid) == true }) {</span>
+<span class="nc" id="L310">            saveUriToCollection(&quot;${uuid}_$fileName&quot;, uri, attachmentDir)</span>
+        }
+<span class="nc" id="L312">    }</span>
+
+    protected fun getAccountMetaDataFromInputStream(inputStream: InputStream): Result&lt;AccountMetaData&gt; =
+<span class="nc" id="L315">        runCatching {</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            maybeDecrypt(inputStream).bufferedReader().use {</span>
+<span class="nc" id="L317">                Json.decodeFromString&lt;AccountMetaData&gt;(it.readText())</span>
+<span class="nc" id="L318">            }</span>
+
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        }.onFailure {</span>
+<span class="nc" id="L321">            log().e(it)</span>
+<span class="nc" id="L322">        }</span>
+
+    protected fun merge(changeSetList: List&lt;ChangeSet&gt;): ChangeSet? {
+<span class="nc" id="L325">        return changeSetList.reduceOrNull { changeSet1: ChangeSet?, changeSet2: ChangeSet? -&gt;</span>
+<span class="nc" id="L326">            ChangeSet.merge(changeSet1, changeSet2)</span>
+        }
+    }
+
+<span class="nc" id="L330">    private fun getChangeSetFromResource(shardNumber: Int, resource: Res): ChangeSet = getChangeSetFromInputStream(</span>
+<span class="nc" id="L331">        SequenceNumber(shardNumber, getSequenceFromFileName(nameForResource(resource))),</span>
+<span class="nc" id="L332">        getInputStream(resource)</span>
+<span class="nc" id="L333">    )</span>
+
+    final override fun getChangeSetSince(sequenceNumber: SequenceNumber): ChangeSet? =
+<span class="nc" id="L336">        merge(</span>
+<span class="nc" id="L337">            shardResolvingFilterStrategy(sequenceNumber).map {</span>
+<span class="nc" id="L338">                getChangeSetFromResource(it.first, it.second)</span>
+            }
+<span class="nc" id="L340">        )</span>
+
+    @Throws(IOException::class)
+    private fun ensureAttachmentsOnWrite(changeSet: List&lt;TransactionChange&gt;) {
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        val attachments = changeSet.flatMap { it.attachments ?: emptyList() }.toSet()</span>
+<span class="nc bnc" id="L345" title="All 4 branches missed.">        if (attachments.isNotEmpty()) {</span>
+<span class="nc" id="L346">            context.contentResolver.query(</span>
+<span class="nc" id="L347">                TransactionProvider.ATTACHMENTS_URI,</span>
+<span class="nc" id="L348">                arrayOf(KEY_UUID, KEY_URI),</span>
+<span class="nc" id="L349">                &quot;$KEY_UUID ${Operation.IN.getOp(attachments.size)}&quot;,</span>
+<span class="nc" id="L350">                attachments.toTypedArray(),</span>
+<span class="nc" id="L351">                null</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">            )?.use { cursor -&gt;</span>
+<span class="nc" id="L353">                cursor.asSequence.forEach {</span>
+<span class="nc" id="L354">                    val uuid = it.getString(0)</span>
+<span class="nc" id="L355">                    val attachmentUri = Uri.parse(it.getString(1))</span>
+<span class="nc" id="L356">                    storeAttachmentToBackendIfNeeded(uuid, attachmentUri, attachmentUri.fileName(context))</span>
+<span class="nc" id="L357">                }</span>
+<span class="nc" id="L358">            }</span>
+        }
+<span class="nc" id="L360">    }</span>
+
+    @Throws(IOException::class)
+    override fun writeChangeSet(
+        lastSequenceNumber: SequenceNumber,
+        changeSet: List&lt;TransactionChange&gt;,
+        context: Context,
+    ): SequenceNumber {
+<span class="nc" id="L368">        val nextSequence = getLastSequence(lastSequenceNumber).next()</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        val finalChangeSet = if (appInstance != null) {</span>
+<span class="nc" id="L370">            changeSet.map { it.copy(appInstance = appInstance) }</span>
+<span class="nc" id="L371">        } else changeSet</span>
+
+<span class="nc" id="L373">        val fileName = &quot;_${nextSequence.number}.$extensionForData&quot;</span>
+<span class="nc" id="L374">        val fileContents =  Json.encodeToString(finalChangeSet)</span>
+<span class="nc" id="L375">        ensureAttachmentsOnWrite(finalChangeSet)</span>
+<span class="nc" id="L376">        log().i(&quot;Writing to %s&quot;, fileName)</span>
+<span class="nc" id="L377">        log().i(fileContents)</span>
+<span class="nc" id="L378">        saveFileContents(</span>
+<span class="nc" id="L379">            true,</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">            if (nextSequence.shard == 0) null else folderForShard(nextSequence.shard),</span>
+<span class="nc" id="L381">            fileName,</span>
+<span class="nc" id="L382">            fileContents,</span>
+<span class="nc" id="L383">            mimeTypeForData,</span>
+<span class="nc" id="L384">            true</span>
+        )
+<span class="nc" id="L386">        return nextSequence</span>
+    }
+
+
+    /**
+     * should encrypt if backend is configured with encryption
+     */
+    @Throws(IOException::class)
+<span class="nc" id="L394">    protected abstract fun saveUriToCollection(fileName: String, uri: Uri, collection: Res, maybeEncrypt: Boolean = true)</span>
+
+    protected fun buildMetadata(account: Account): String {
+<span class="nc" id="L397">        return Json.encodeToString(</span>
+<span class="nc" id="L398">            AccountMetaData.from(</span>
+<span class="nc" id="L399">                account,</span>
+<span class="nc" id="L400">                context.injector.currencyContext().homeCurrencyString</span>
+            )
+        )
+    }
+
+    protected fun getLastFileNamePart(fileName: String): String {
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        return if (fileName.contains(&quot;/&quot;)) StringUtils.substringAfterLast(</span>
+<span class="nc" id="L407">            fileName,</span>
+<span class="nc" id="L408">            &quot;/&quot;</span>
+<span class="nc" id="L409">        ) else fileName</span>
+    }
+
+    @Throws(IOException::class)
+    protected abstract fun saveFileContents(
+        toAccountDir: Boolean,
+        folder: String?,
+        fileName: String,
+        fileContents: String,
+        mimeType: String,
+        maybeEncrypt: Boolean,
+    )
+
+<span class="nc" id="L422">    protected abstract fun readFileContents(</span>
+        fromAccountDir: Boolean,
+        fileName: String,
+<span class="nc" id="L425">        maybeDecrypt: Boolean = false,</span>
+    ): String?
+
+    protected fun createWarningFile() {
+<span class="nc" id="L429">        try {</span>
+<span class="nc" id="L430">            saveFileContents(</span>
+<span class="nc" id="L431">                true, null,</span>
+<span class="nc" id="L432">                &quot;IMPORTANT_INFORMATION.txt&quot;,</span>
+<span class="nc" id="L433">                Utils.getTextWithAppName(context, R.string.warning_synchronization_folder_usage)</span>
+<span class="nc" id="L434">                    .toString(), &quot;text/plain&quot;, false</span>
+            )
+<span class="nc" id="L436">        } catch (e: IOException) {</span>
+<span class="nc" id="L437">            log().w(e)</span>
+        }
+<span class="nc" id="L439">    }</span>
+
+    @Throws(IOException::class)
+    override fun updateAccount(account: Account) {
+<span class="nc" id="L443">        writeAccount(account, true)</span>
+<span class="nc" id="L444">    }</span>
+
+    final override fun storeBackup(uri: Uri, fileName: String) {
+<span class="nc" id="L447">        saveUriToCollection(fileName, uri, requireCollection(BACKUP_FOLDER_NAME), false)</span>
+<span class="nc" id="L448">    }</span>
+
+    final override val storedBackups: List&lt;String&gt;
+<span class="nc bnc" id="L451" title="All 2 branches missed.">        get() = getCollection(BACKUP_FOLDER_NAME)?.let { folder -&gt;</span>
+<span class="nc" id="L452">            childrenForCollection(folder).mapNotNull { nameForResource(it) }</span>
+<span class="nc" id="L453">        } ?: emptyList()</span>
+
+<span class="nc" id="L455">    final override fun getInputStreamForBackup(backupFile: String) = getInputStream(</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">    childrenForCollection(requireCollection(BACKUP_FOLDER_NAME))</span>
+<span class="nc bnc" id="L457" title="All 4 branches missed.">        .find { nameForResource(it) == backupFile } ?: throw FileNotFoundException()</span>
+<span class="nc" id="L458">    )</span>
+
+    override fun writeCategories(categories: List&lt;CategoryExport&gt;): String {
+<span class="nc" id="L461">        saveFileContents(</span>
+<span class="nc" id="L462">            false,</span>
+<span class="nc" id="L463">            null,</span>
+<span class="nc" id="L464">            categoriesFilename,</span>
+<span class="nc" id="L465">            Json.encodeToString(categories),</span>
+<span class="nc" id="L466">            mimeTypeForData,</span>
+<span class="nc" id="L467">            true</span>
+        )
+<span class="nc" id="L469">        return categoriesFilename</span>
+    }
+
+    override fun writeBudget(uuid: String, budget: BudgetExport): String {
+<span class="nc" id="L473">        val fileName = &quot;$uuid.$extensionForData&quot;</span>
+<span class="nc" id="L474">        requireCollection(BUDGETS_FOLDER_NAME)</span>
+<span class="nc" id="L475">        saveFileContents(</span>
+<span class="nc" id="L476">            false,</span>
+<span class="nc" id="L477">            BUDGETS_FOLDER_NAME,</span>
+<span class="nc" id="L478">            fileName,</span>
+<span class="nc" id="L479">            Json.encodeToString(budget),</span>
+<span class="nc" id="L480">            mimeTypeForData,</span>
+<span class="nc" id="L481">            true</span>
+        )
+<span class="nc" id="L483">        return fileName</span>
+    }
+
+    override val categories: Result&lt;List&lt;CategoryExport&gt;&gt;
+<span class="nc" id="L487">        get() = runCatching {</span>
+<span class="nc bnc" id="L488" title="All 4 branches missed.">            readFileContents(false, categoriesFilename, true)?.let {</span>
+<span class="nc" id="L489">                Json.decodeFromString&lt;List&lt;CategoryExport&gt;&gt;(it)</span>
+            }
+<span class="nc" id="L491">                ?: throw FileNotFoundException(context.getString(R.string.not_exist_file_desc) + &quot;: &quot; + categoriesFilename)</span>
+<span class="nc" id="L492">        }</span>
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override val budgets: List&lt;Pair&lt;String, BudgetExport&gt;&gt;
+<span class="nc bnc" id="L496" title="All 2 branches missed.">        get() = getCollection(BUDGETS_FOLDER_NAME)?.let { folder -&gt;</span>
+<span class="nc" id="L497">            childrenForCollection(folder)</span>
+<span class="nc" id="L498">                .mapNotNull { res -&gt;</span>
+<span class="nc bnc" id="L499" title="All 4 branches missed.">                    nameForResource(res)?.let { getNameWithoutExtension(it) }?.let { uuid -&gt;</span>
+<span class="nc" id="L500">                        maybeDecrypt(getInputStream(res)).let {</span>
+<span class="nc" id="L501">                            uuid to Json.decodeFromStream(it)</span>
+<span class="nc" id="L502">                        }</span>
+<span class="nc" id="L503">                    }</span>
+<span class="nc" id="L504">                }</span>
+<span class="nc" id="L505">        } ?: emptyList()</span>
+
+    final override fun getBudget(uuid: String): BudgetExport {
+<span class="nc" id="L508">        val inputStream = getInputStream(</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">            childrenForCollection(requireCollection(BUDGETS_FOLDER_NAME))</span>
+<span class="nc bnc" id="L510" title="All 4 branches missed.">                .find { nameForResource(it) == &quot;$uuid.$extensionForData&quot; } ?: throw FileNotFoundException()</span>
+        )
+
+<span class="nc" id="L513">        return BufferedReader(InputStreamReader(maybeDecrypt(inputStream))).use { bufferedReader -&gt;</span>
+<span class="nc" id="L514">            Json.decodeFromString&lt;BudgetExport&gt;(bufferedReader.readText())</span>
+        }
+    }
+
+    @CallSuper
+    override fun withAccount(account: Account) {
+<span class="nc" id="L520">        setAccountUuid(account)</span>
+<span class="nc" id="L521">    }</span>
+
+    @Throws(IOException::class)
+    protected abstract fun writeAccount(account: Account, update: Boolean)
+
+    @Throws(IOException::class)
+    override fun lock() {
+<span class="nc" id="L528">        val existingLockToken = getLockToken()</span>
+<span class="nc" id="L529">        log().i(&quot;ExistingLockToken: %s&quot;, existingLockToken)</span>
+<span class="nc bnc" id="L530" title="All 4 branches missed.">        if (TextUtils.isEmpty(existingLockToken) || shouldOverrideLock(existingLockToken)) {</span>
+<span class="nc" id="L531">            val newLockToken = generateUuid()</span>
+<span class="nc" id="L532">            setLockToken(newLockToken)</span>
+<span class="nc" id="L533">            saveLockTokenToPreferences(newLockToken, System.currentTimeMillis(), true)</span>
+        } else {
+<span class="nc" id="L535">            throw IOException(&quot;Backend cannot be locked&quot;)</span>
+        }
+<span class="nc" id="L537">    }</span>
+
+    override fun unlock() {
+<span class="nc" id="L540">        deleteLockTokenFile()</span>
+<span class="nc" id="L541">    }</span>
+
+    private fun shouldOverrideLock(lockToken: String?): Boolean {
+<span class="nc" id="L544">        val now = System.currentTimeMillis()</span>
+<span class="nc" id="L545">        val storedLockToken = sharedPreferences.getString(accountPrefKey(KEY_LOCK_TOKEN), &quot;&quot;)</span>
+<span class="nc" id="L546">        val ownedByUs = sharedPreferences.getBoolean(accountPrefKey(KEY_OWNED_BY_US), false)</span>
+<span class="nc" id="L547">        val timestamp = sharedPreferences.getLong(accountPrefKey(KEY_TIMESTAMP), 0)</span>
+<span class="nc" id="L548">        val since = now - timestamp</span>
+<span class="nc" id="L549">        log().i(&quot;Stored: %s, ownedByUs : %b, since: %d&quot;, storedLockToken, ownedByUs, since)</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">        return if (lockToken == storedLockToken) {</span>
+<span class="nc bnc" id="L551" title="All 4 branches missed.">            (ownedByUs || since &gt; IO_LOCK_DELAY_MILLIS).also {</span>
+<span class="nc" id="L552">                log().i(&quot;tokens are equal, result: %b&quot;, it)</span>
+<span class="nc" id="L553">            }</span>
+        } else {
+<span class="nc" id="L555">            saveLockTokenToPreferences(lockToken, now, false)</span>
+<span class="nc" id="L556">            log().i(&quot;tokens are not equal, result: false&quot;)</span>
+<span class="nc" id="L557">            false</span>
+        }
+    }
+
+    @SuppressLint(&quot;ApplySharedPref&quot;)
+    private fun saveLockTokenToPreferences(
+        lockToken: String?,
+        timestamp: Long,
+        ownedByUs: Boolean,
+    ) {
+<span class="nc" id="L567">        sharedPreferences.edit(commit = true) {</span>
+<span class="nc" id="L568">            putString(accountPrefKey(KEY_LOCK_TOKEN), lockToken)</span>
+<span class="nc" id="L569">                .putLong(accountPrefKey(KEY_TIMESTAMP), timestamp)</span>
+<span class="nc" id="L570">                .putBoolean(accountPrefKey(KEY_OWNED_BY_US), ownedByUs)</span>
+<span class="nc" id="L571">        }</span>
+<span class="nc" id="L572">    }</span>
+
+    private fun accountPrefKey(key: String): String {
+<span class="nc" id="L575">        return String.format(Locale.ROOT, &quot;%s-%s&quot;, accountUuid, key)</span>
+    }
+
+    protected fun verifyRemoteAccountFolderName(folderName: String?) =
+<span class="nc bnc" id="L579" title="All 4 branches missed.">        folderName != null &amp;&amp; folderName !in specialFolders</span>
+
+    companion object {
+        const val LOCK_FILE = &quot;.lock.txt&quot;
+        const val KEY_LOCK_TOKEN = &quot;lockToken&quot;
+        const val BACKUP_FOLDER_NAME = &quot;BACKUPS&quot;
+        const val ATTACHMENT_FOLDER_NAME = &quot;ATTACHMENTS&quot;
+        const val BUDGETS_FOLDER_NAME =&quot;BUDGETS_V2&quot;
+        //BUDGETS was used for first broken version of Budget sync
+<span class="nc" id="L588">        val specialFolders = listOf(BACKUP_FOLDER_NAME, ATTACHMENT_FOLDER_NAME, &quot;BUDGETS&quot;, BUDGETS_FOLDER_NAME)</span>
+        const val MIME_TYPE_JSON = &quot;application/json&quot;
+        private const val ACCOUNT_METADATA_FILENAME = &quot;metadata&quot;
+        private const val CATEGORIES_FILENAME = &quot;categories&quot;
+        private const val KEY_OWNED_BY_US = &quot;ownedByUs&quot;
+        private const val KEY_TIMESTAMP = &quot;timestamp&quot;
+        const val ENCRYPTION_TOKEN_FILE_NAME = &quot;ENCRYPTION_TOKEN&quot;
+    }
+
+<span class="nc" id="L597">    init {</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">        if (BuildConfig.DEBUG) {</span>
+<span class="nc" id="L599">            appInstance =</span>
+<span class="nc" id="L600">                Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)</span>
+        }
+<span class="nc" id="L602">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

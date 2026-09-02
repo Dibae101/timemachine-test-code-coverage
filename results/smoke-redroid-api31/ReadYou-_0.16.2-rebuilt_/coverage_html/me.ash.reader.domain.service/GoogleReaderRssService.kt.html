@@ -1,0 +1,868 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GoogleReaderRssService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ReadYou</a> &gt; <a href="index.source.html" class="el_package">me.ash.reader.domain.service</a> &gt; <span class="el_source">GoogleReaderRssService.kt</span></div><h1>GoogleReaderRssService.kt</h1><pre class="source lang-java linenums">package me.ash.reader.domain.service
+
+import android.content.Context
+import android.util.Log
+import androidx.compose.ui.util.fastFilter
+import androidx.compose.ui.util.fastFilteredMap
+import androidx.work.ListenableWorker
+import androidx.work.WorkManager
+import com.rometools.rome.feed.synd.SyndFeed
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.Calendar
+import java.util.Date
+import javax.inject.Inject
+import kotlin.collections.chunked
+import kotlin.collections.toSet
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.whileSelect
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import me.ash.reader.R
+import me.ash.reader.domain.data.SyncLogger
+import me.ash.reader.domain.model.account.Account
+import me.ash.reader.domain.model.account.AccountType
+import me.ash.reader.domain.model.account.AccountType.Companion.FreshRSS
+import me.ash.reader.domain.model.account.security.GoogleReaderSecurityKey
+import me.ash.reader.domain.model.article.Article
+import me.ash.reader.domain.model.feed.Feed
+import me.ash.reader.domain.model.group.Group
+import me.ash.reader.domain.repository.ArticleDao
+import me.ash.reader.domain.repository.FeedDao
+import me.ash.reader.domain.repository.GroupDao
+import me.ash.reader.infrastructure.android.NotificationHelper
+import me.ash.reader.infrastructure.di.DefaultDispatcher
+import me.ash.reader.infrastructure.di.IODispatcher
+import me.ash.reader.infrastructure.di.MainDispatcher
+import me.ash.reader.infrastructure.html.Readability
+import me.ash.reader.infrastructure.net.onFailure
+import me.ash.reader.infrastructure.net.onSuccess
+import me.ash.reader.infrastructure.rss.RssHelper
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.dbId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.isValidItemId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.ofCategoryIdToStreamId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.ofCategoryStreamIdToId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.ofFeedStreamIdToId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.remoteId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderAPI.Companion.shortId
+import me.ash.reader.infrastructure.rss.provider.greader.GoogleReaderDTO
+import me.ash.reader.ui.ext.decodeHTML
+import me.ash.reader.ui.ext.dollarLast
+import me.ash.reader.ui.ext.isFuture
+import me.ash.reader.ui.ext.spacerDollar
+import timber.log.Timber
+
+private const val TAG = &quot;GoogleReaderRssService&quot;
+
+class GoogleReaderRssService
+<span class="fc" id="L66">@Inject</span>
+constructor(
+<span class="fc" id="L68">    @ApplicationContext private val context: Context,</span>
+<span class="fc" id="L69">    private val articleDao: ArticleDao,</span>
+<span class="fc" id="L70">    private val feedDao: FeedDao,</span>
+<span class="fc" id="L71">    private val rssHelper: RssHelper,</span>
+<span class="fc" id="L72">    private val notificationHelper: NotificationHelper,</span>
+<span class="fc" id="L73">    private val groupDao: GroupDao,</span>
+<span class="fc" id="L74">    @IODispatcher private val ioDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L75">    @MainDispatcher private val mainDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L76">    @DefaultDispatcher private val defaultDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L77">    private val workManager: WorkManager,</span>
+<span class="fc" id="L78">    private val accountService: AccountService,</span>
+<span class="fc" id="L79">    private val syncLogger: SyncLogger,</span>
+) :
+<span class="fc" id="L81">    AbstractRssRepository(</span>
+<span class="fc" id="L82">        articleDao,</span>
+<span class="fc" id="L83">        groupDao,</span>
+<span class="fc" id="L84">        feedDao,</span>
+<span class="fc" id="L85">        workManager,</span>
+<span class="fc" id="L86">        rssHelper,</span>
+<span class="fc" id="L87">        notificationHelper,</span>
+<span class="fc" id="L88">        ioDispatcher,</span>
+<span class="fc" id="L89">        defaultDispatcher,</span>
+<span class="fc" id="L90">        accountService,</span>
+    ) {
+
+<span class="nc" id="L93">    override val importSubscription: Boolean = false</span>
+<span class="pc" id="L94">    override val addSubscription: Boolean = true</span>
+<span class="pc" id="L95">    override val moveSubscription: Boolean = true</span>
+<span class="pc" id="L96">    override val deleteSubscription: Boolean = true</span>
+<span class="pc" id="L97">    override val updateSubscription: Boolean = true</span>
+
+    private suspend fun getGoogleReaderAPI() =
+<span class="nc" id="L100">        GoogleReaderSecurityKey(accountService.getCurrentAccount().securityKey).run {</span>
+<span class="nc" id="L101">            GoogleReaderAPI.getInstance(</span>
+<span class="nc" id="L102">                context = context,</span>
+<span class="nc" id="L103">                serverUrl = serverUrl!!,</span>
+<span class="nc" id="L104">                username = username!!,</span>
+<span class="nc" id="L105">                password = password!!,</span>
+<span class="nc" id="L106">                httpUsername = null,</span>
+<span class="nc" id="L107">                httpPassword = null,</span>
+<span class="nc" id="L108">                clientCertificateAlias = clientCertificateAlias,</span>
+<span class="nc" id="L109">                syncLogger = syncLogger,</span>
+<span class="nc" id="L110">            )</span>
+<span class="nc" id="L111">        }</span>
+
+    override suspend fun validCredentials(account: Account): Boolean {
+<span class="nc" id="L114">        return getGoogleReaderAPI().validCredentials().also { success -&gt;</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (success)</span>
+<span class="nc" id="L116">                try {</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                    getGoogleReaderAPI().getUserInfo().userName?.let {</span>
+<span class="nc" id="L118">                        accountService.update(account.copy(name = it))</span>
+<span class="nc" id="L119">                    }</span>
+<span class="nc" id="L120">                } catch (ignore: Exception) {</span>
+<span class="nc" id="L121">                    Log.e(&quot;RLog&quot;, &quot;get user info is failed: &quot;, ignore)</span>
+                }
+<span class="nc" id="L123">        }</span>
+    }
+
+    override suspend fun clearAuthorization() {
+<span class="nc" id="L127">        GoogleReaderAPI.clearInstance()</span>
+<span class="nc" id="L128">    }</span>
+
+<span class="nc" id="L130">    override suspend fun subscribe(</span>
+        feedLink: String,
+        searchedFeed: SyndFeed,
+        groupId: String,
+        isNotification: Boolean,
+        isFullContent: Boolean,
+        isBrowser: Boolean,
+    ) {
+<span class="nc" id="L138">        val accountId = accountService.getCurrentAccountId()</span>
+<span class="nc" id="L139">        val quickAdd = getGoogleReaderAPI().subscriptionQuickAdd(feedLink)</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        val feedId = quickAdd.streamId?.ofFeedStreamIdToId()</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        requireNotNull(feedId) { &quot;feedId is null&quot; }</span>
+<span class="nc" id="L142">        val feedTitle = searchedFeed.title</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        requireNotNull(feedTitle) { &quot;feedTitle is null&quot; }</span>
+
+<span class="nc" id="L145">        getGoogleReaderAPI()</span>
+<span class="nc" id="L146">            .subscriptionEdit(</span>
+<span class="nc" id="L147">                destFeedId = feedId,</span>
+<span class="nc" id="L148">                destCategoryId = groupId.dollarLast(),</span>
+<span class="nc" id="L149">                destFeedName = feedTitle,</span>
+            )
+<span class="nc" id="L151">        feedDao.insert(</span>
+<span class="nc" id="L152">            Feed(</span>
+<span class="nc" id="L153">                id = accountId.spacerDollar(feedId),</span>
+<span class="nc" id="L154">                name = feedTitle,</span>
+<span class="nc" id="L155">                url = feedLink,</span>
+<span class="nc" id="L156">                groupId = groupId,</span>
+<span class="nc" id="L157">                accountId = accountId,</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                isNotification = isNotification,</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">                isFullContent = isFullContent,</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                isBrowser = isBrowser,</span>
+            )
+        )
+        // TODO: When users need to subscribe to multiple feeds continuously, this makes them
+        // uncomfortable.
+        //  It is necessary to make syncWork support synchronizing individual specified feeds.
+        // super.doSyncOneTime()
+<span class="nc" id="L167">    }</span>
+
+<span class="nc" id="L169">    override suspend fun addGroup(destFeed: Feed?, newGroupName: String): String {</span>
+<span class="nc" id="L170">        val accountId = accountService.getCurrentAccountId()</span>
+<span class="nc" id="L171">        getGoogleReaderAPI()</span>
+<span class="nc" id="L172">            .subscriptionEdit(</span>
+<span class="nc bnc" id="L173" title="All 4 branches missed.">                destFeedId = destFeed?.id?.dollarLast(),</span>
+<span class="nc" id="L174">                destCategoryId = newGroupName,</span>
+            )
+<span class="nc" id="L176">        val id = accountId.spacerDollar(newGroupName.ofCategoryIdToStreamId())</span>
+<span class="nc" id="L177">        groupDao.insert(Group(id = id, name = newGroupName, accountId = accountId))</span>
+<span class="nc" id="L178">        return id</span>
+    }
+
+<span class="nc" id="L181">    override suspend fun renameGroup(group: Group) {</span>
+<span class="nc" id="L182">        getGoogleReaderAPI()</span>
+<span class="nc" id="L183">            .renameTag(categoryId = group.id.dollarLast(), renameToName = group.name)</span>
+        // TODO: Whether to switch the old ID to the new ID?
+<span class="nc" id="L185">        super.renameGroup(group)</span>
+<span class="nc" id="L186">    }</span>
+
+<span class="nc" id="L188">    override suspend fun moveFeed(originGroupId: String, feed: Feed) {</span>
+<span class="nc" id="L189">        getGoogleReaderAPI()</span>
+<span class="nc" id="L190">            .subscriptionEdit(</span>
+<span class="nc" id="L191">                destFeedId = feed.id.dollarLast(),</span>
+<span class="nc" id="L192">                destCategoryId = feed.groupId.dollarLast().ofCategoryStreamIdToId(),</span>
+<span class="nc" id="L193">                originCategoryId = originGroupId.dollarLast().ofCategoryStreamIdToId(),</span>
+            )
+<span class="nc" id="L195">        super.moveFeed(originGroupId, feed)</span>
+<span class="nc" id="L196">    }</span>
+
+    override suspend fun changeFeedUrl(feed: Feed) {
+<span class="nc" id="L199">        throw Exception(&quot;Unsupported&quot;)</span>
+    }
+
+<span class="nc" id="L202">    override suspend fun renameFeed(feed: Feed) {</span>
+<span class="nc" id="L203">        getGoogleReaderAPI()</span>
+<span class="nc" id="L204">            .subscriptionEdit(destFeedId = feed.id.dollarLast(), destFeedName = feed.name)</span>
+        // TODO: Whether to switch the old ID to the new ID?
+<span class="nc" id="L206">        super.renameFeed(feed)</span>
+<span class="nc" id="L207">    }</span>
+
+<span class="nc" id="L209">    override suspend fun deleteGroup(group: Group, onlyDeleteNoStarred: Boolean?) {</span>
+<span class="nc" id="L210">        feedDao.queryByGroupId(accountService.getCurrentAccountId(), group.id).forEach {</span>
+<span class="nc" id="L211">            deleteFeed(it)</span>
+<span class="nc" id="L212">        }</span>
+<span class="nc" id="L213">        getGoogleReaderAPI().disableTag(group.id.dollarLast())</span>
+<span class="nc" id="L214">        super.deleteGroup(group, false)</span>
+<span class="nc" id="L215">    }</span>
+
+<span class="nc" id="L217">    override suspend fun deleteFeed(feed: Feed, onlyDeleteNoStarred: Boolean?) {</span>
+<span class="nc" id="L218">        getGoogleReaderAPI()</span>
+<span class="nc" id="L219">            .subscriptionEdit(action = &quot;unsubscribe&quot;, destFeedId = feed.id.dollarLast())</span>
+<span class="nc" id="L220">        super.deleteFeed(feed, false)</span>
+<span class="nc" id="L221">    }</span>
+
+    override suspend fun sync(
+        accountId: Int,
+        feedId: String?,
+        groupId: String?,
+    ): ListenableWorker.Result {
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        return if (feedId != null) {</span>
+<span class="nc" id="L229">            syncFeed(accountId, feedId)</span>
+        } else {
+<span class="nc" id="L231">            sync(accountId)</span>
+        }
+<span class="nc" id="L233">    }</span>
+
+    /**
+     * This is improved from Reeder's synchronization strategy, which syncs well across multiple
+     * devices.
+     * 1. Fetch tags (not supported yet)
+     * 2. Fetch folder and subscription list
+     * 3. Fetch all unread item id list
+     * 4. Fetch all starred item id list
+     * 5. Fetch unread contents of items with differences (up to 10k items per sync process)
+     * 6. Fetch starred contents of items with differences
+     * 7. Fetch read contents of items with differences (up to one month old)
+     * 8. Remove orphaned groups and feeds, after synchronizing the starred/un-starred
+     *
+     * The following link contains other great synchronization logic, but it was not adopted due to
+     * the solidified domain model of this application.
+     *
+     * @link https://github.com/FreshRSS/FreshRSS/issues/2566#issuecomment-541317776
+     * @link https://github.com/bazqux/bazqux-api?tab=readme-ov-file
+     * @link https://github.com/theoldreader/api
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+<span class="nc bnc" id="L255" title="All 21 branches missed.">    private suspend fun sync(accountId: Int): ListenableWorker.Result = coroutineScope {</span>
+<span class="nc" id="L256">        val preTime = System.currentTimeMillis()</span>
+<span class="nc" id="L257">        val preDate = Date(preTime)</span>
+
+<span class="nc" id="L259">        try {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            val account = accountService.getAccountById(accountId)</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">            requireNotNull(account) { &quot;cannot find account&quot; }</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            check(</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                account.type.id == AccountType.GoogleReader.id ||</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                    account.type.id == AccountType.FreshRSS.id</span>
+            ) {
+<span class="nc" id="L266">                &quot;account type is invalid&quot;</span>
+            }
+<span class="nc bnc" id="L268" title="All 2 branches missed.">            val googleReaderAPI = getGoogleReaderAPI()</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            googleReaderAPI.refreshCredentialsIfNeeded()</span>
+<span class="nc" id="L270">            val lastMonthAt =</span>
+<span class="nc" id="L271">                Calendar.getInstance()</span>
+<span class="nc" id="L272">                    .apply {</span>
+<span class="nc" id="L273">                        time = preDate</span>
+<span class="nc" id="L274">                        add(Calendar.MONTH, -1)</span>
+<span class="nc" id="L275">                    }</span>
+<span class="nc" id="L276">                    .time</span>
+<span class="nc" id="L277">                    .time / 1000</span>
+
+<span class="nc" id="L279">            val remoteUnreadIds = async {</span>
+<span class="nc bnc" id="L280" title="All 5 branches missed.">                fetchItemIdsAndContinue { googleReaderAPI.getUnreadItemIds(continuationId = it) }</span>
+<span class="nc" id="L281">                    .map { it.shortId }</span>
+<span class="nc" id="L282">                    .toSet()</span>
+            }
+
+<span class="nc" id="L285">            val remoteStarredIds = async {</span>
+<span class="nc bnc" id="L286" title="All 5 branches missed.">                fetchItemIdsAndContinue { googleReaderAPI.getStarredItemIds(continuationId = it) }</span>
+<span class="nc" id="L287">                    .map { it.shortId }</span>
+<span class="nc" id="L288">                    .toSet()</span>
+            }
+
+<span class="nc bnc" id="L291" title="All 2 branches missed.">            val isFreshRss = account.type.id == FreshRSS.id</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            val remoteReadIds = async {</span>
+<span class="nc bnc" id="L293" title="All 3 branches missed.">                fetchItemIdsAndContinue {</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                        googleReaderAPI.getReadItemIds(</span>
+<span class="nc" id="L295">                            since = lastMonthAt,</span>
+<span class="nc" id="L296">                            continuationId = it,</span>
+<span class="nc" id="L297">                            useIt = isFreshRss,</span>
+<span class="nc" id="L298">                        )</span>
+                    }
+<span class="nc" id="L300">                    .map { it.shortId }</span>
+<span class="nc" id="L301">                    .toSet()</span>
+            }
+
+<span class="nc" id="L304">            val localAllItems = articleDao.queryMetadataAll(accountId)</span>
+<span class="nc" id="L305">            val localUnreadIds =</span>
+<span class="nc" id="L306">                localAllItems.filter { it.isUnread }.map { it.id.dollarLast() }.toSet()</span>
+<span class="nc" id="L307">            val localStarredIds =</span>
+<span class="nc" id="L308">                localAllItems.filter { it.isStarred }.map { it.id.dollarLast() }.toSet()</span>
+
+<span class="nc" id="L310">            val localReadIds =</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                localAllItems.filter { !it.isUnread }.map { it.id.dollarLast() }.toSet()</span>
+
+<span class="nc" id="L313">            val localItemIds = localAllItems.map { it.id.dollarLast() }.toSet()</span>
+
+            //            launch {
+            //                val toBeStarredRemote = localStarredIds - remoteStarredIds.await()
+            //                if (toBeStarredRemote.isNotEmpty()) {
+            //                    googleReaderAPI.editTag(
+            //                        itemIds = toBeStarredRemote.toList(),
+            //                        mark = GoogleReaderAPI.Stream.Starred.tag,
+            //                    )
+            //                }
+            //            }
+
+<span class="nc" id="L325">            launch {</span>
+<span class="nc" id="L326">                val toBeStarredLocal =</span>
+<span class="nc" id="L327">                    (localItemIds - localStarredIds)</span>
+<span class="nc" id="L328">                        .intersect(remoteStarredIds.await())</span>
+<span class="nc" id="L329">                        .map { accountId spacerDollar it }</span>
+<span class="nc" id="L330">                        .toSet()</span>
+<span class="nc" id="L331">                articleDao.markAsStarredByIdSet(</span>
+<span class="nc" id="L332">                    accountId = accountId,</span>
+<span class="nc" id="L333">                    ids = toBeStarredLocal,</span>
+<span class="nc" id="L334">                    isStarred = true,</span>
+                )
+<span class="nc" id="L336">            }</span>
+
+<span class="nc" id="L338">            launch {</span>
+<span class="nc" id="L339">                val toBeUnstarredLocal =</span>
+<span class="nc" id="L340">                    (localStarredIds - remoteStarredIds.await())</span>
+<span class="nc" id="L341">                        .map { accountId spacerDollar it }</span>
+<span class="nc" id="L342">                        .toSet()</span>
+<span class="nc" id="L343">                articleDao.markAsStarredByIdSet(</span>
+<span class="nc" id="L344">                    accountId = accountId,</span>
+<span class="nc" id="L345">                    ids = toBeUnstarredLocal,</span>
+<span class="nc" id="L346">                    isStarred = false,</span>
+                )
+<span class="nc" id="L348">            }</span>
+
+<span class="nc" id="L350">            launch {</span>
+<span class="nc" id="L351">                val toBeReadLocal =</span>
+<span class="nc" id="L352">                    remoteReadIds.await().intersect(localUnreadIds).map {</span>
+<span class="nc" id="L353">                        accountId spacerDollar it</span>
+                    }
+<span class="nc" id="L355">                toBeReadLocal.chunked(1000).forEach {</span>
+<span class="nc" id="L356">                    articleDao.markAsReadByIdSet(</span>
+<span class="nc" id="L357">                        accountId = accountId,</span>
+<span class="nc" id="L358">                        ids = it.toSet(),</span>
+<span class="nc" id="L359">                        isUnread = false,</span>
+                    )
+<span class="nc" id="L361">                }</span>
+<span class="nc" id="L362">            }</span>
+
+<span class="nc" id="L364">            launch {</span>
+<span class="nc" id="L365">                val toBeUnreadLocal =</span>
+<span class="nc" id="L366">                    localReadIds.intersect(remoteUnreadIds.await()).map {</span>
+<span class="nc" id="L367">                        accountId spacerDollar it</span>
+                    }
+<span class="nc" id="L369">                toBeUnreadLocal.chunked(1000).forEach {</span>
+<span class="nc" id="L370">                    articleDao.markAsReadByIdSet(</span>
+<span class="nc" id="L371">                        accountId = accountId,</span>
+<span class="nc" id="L372">                        ids = it.toSet(),</span>
+<span class="nc" id="L373">                        isUnread = true,</span>
+                    )
+<span class="nc" id="L375">                }</span>
+<span class="nc" id="L376">            }</span>
+
+            //
+            //            launch {
+            //                val toBeReadRemote = localReadIds.intersect(remoteUnreadIds.await())
+            //                if (toBeReadRemote.isNotEmpty()) {
+            //                    googleReaderAPI.editTag(
+            //                        itemIds = toBeReadRemote.toList(),
+            //                        mark = GoogleReaderAPI.Stream.Read.tag,
+            //                    )
+            //                }
+            //            }
+
+            // 2. Fetch folder and subscription list
+<span class="nc" id="L390">            val groupWithFeedsMap = async {</span>
+<span class="nc" id="L391">                val subscriptionList = googleReaderAPI.getSubscriptionList()</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">                requireNotNull(subscriptionList) { &quot;subscriptionList is null&quot; }</span>
+<span class="nc" id="L393">                subscriptionList.subscriptions</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">                    .groupBy { it.categories?.firstOrNull() }</span>
+<span class="nc" id="L395">                    .mapKeys { (category, _) -&gt;</span>
+<span class="nc" id="L396">                        val defaultGroup = accountService.getDefaultGroup()</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                        val categoryId = category?.id</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">                        if (categoryId != null) {</span>
+<span class="nc" id="L399">                            val groupId = accountId spacerDollar categoryId.ofCategoryStreamIdToId()</span>
+<span class="nc" id="L400">                            Group(</span>
+<span class="nc" id="L401">                                id = groupId,</span>
+<span class="nc" id="L402">                                name = category.label.toString(),</span>
+<span class="nc" id="L403">                                accountId = accountId,</span>
+                            )
+<span class="nc" id="L405">                        } else defaultGroup</span>
+                    }
+<span class="nc" id="L407">                    .mapValues { (group, feeds) -&gt;</span>
+<span class="nc" id="L408">                        feeds.map {</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">                            requireNotNull(it.id) { &quot;feed id is null&quot; }</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">                            val feedUrl = it.url ?: it.htmlUrl</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                            requireNotNull(feedUrl) { &quot;feed url is null&quot; }</span>
+<span class="nc" id="L412">                            val feedId = accountId spacerDollar it.id.ofFeedStreamIdToId()</span>
+<span class="nc" id="L413">                            Feed(</span>
+<span class="nc" id="L414">                                id = feedId,</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">                                name = it.title.decodeHTML() ?: context.getString(R.string.empty),</span>
+<span class="nc" id="L416">                                url = feedUrl,</span>
+<span class="nc" id="L417">                                groupId = group.id,</span>
+<span class="nc" id="L418">                                accountId = accountId,</span>
+<span class="nc" id="L419">                                icon = it.iconUrl,</span>
+<span class="nc" id="L420">                            )</span>
+<span class="nc" id="L421">                        }</span>
+                    }
+<span class="nc bnc" id="L423" title="All 4 branches missed.">                    .toSortedMap { c1, c2 -&gt; c1?.name.toString().compareTo(c2?.name.toString()) }</span>
+            }
+
+<span class="nc" id="L426">            val toBeSync = async {</span>
+<span class="nc" id="L427">                (listOf(remoteUnreadIds, remoteStarredIds, remoteReadIds).awaitAll().flatten() -</span>
+<span class="nc" id="L428">                        localItemIds)</span>
+<span class="nc" id="L429">                    .toSet()</span>
+            }
+
+<span class="nc" id="L432">            val deferredList =</span>
+<span class="nc" id="L433">                fetchItemsContentsDeferred(</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                        itemIds = toBeSync.await(),</span>
+<span class="nc" id="L435">                        googleReaderAPI = googleReaderAPI,</span>
+<span class="nc" id="L436">                        accountId = accountId,</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">                        unreadIds = remoteUnreadIds.await(),</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">                        starredIds = remoteStarredIds.await(),</span>
+<span class="nc" id="L439">                        scope = this,</span>
+                    )
+<span class="nc" id="L441">                    .toMutableList()</span>
+
+<span class="nc" id="L443">            val remoteGroups = async { groupWithFeedsMap.await().keys.toList() }</span>
+<span class="nc" id="L444">            val remoteFeeds = async { groupWithFeedsMap.await().values.flatten() }</span>
+
+            // Handle empty icon for feeds
+<span class="nc bnc" id="L447" title="All 6 branches missed.">            launch {</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                val localFeeds = feedDao.queryAll(accountId)</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">                val remoteFeeds = remoteFeeds.await()</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">                val newFeeds = remoteFeeds.filter { feed -&gt; feed.id !in localFeeds.map { it.id } }</span>
+
+<span class="nc" id="L452">                val feedsWithIconFetched =</span>
+<span class="nc" id="L453">                    newFeeds</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">                        .filter { it.icon == null }</span>
+<span class="nc" id="L455">                        .map { feed -&gt;</span>
+<span class="nc" id="L456">                            async { feed.copy(icon = rssHelper.queryRssIconLink(feed.url)) }</span>
+                        }
+<span class="nc" id="L458">                feedsWithIconFetched</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">                    .awaitAll()</span>
+<span class="nc bnc" id="L460" title="All 4 branches missed.">                    .filterNot { it.icon.isNullOrEmpty() }</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">                    .also { feedDao.update(*it.toTypedArray()) }</span>
+<span class="nc" id="L462">            }</span>
+
+<span class="nc bnc" id="L464" title="All 4 branches missed.">            groupDao.insertOrUpdate(remoteGroups.await())</span>
+<span class="nc bnc" id="L465" title="All 4 branches missed.">            feedDao.insertOrUpdate(remoteFeeds.await())</span>
+
+<span class="nc" id="L467">            val notificationFeeds =</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                feedDao.queryNotificationEnabled(accountId).associateBy { it.id }</span>
+<span class="nc" id="L469">            val notificationFeedIds = notificationFeeds.keys</span>
+<span class="nc" id="L470">            val articlesToNotify = mutableListOf&lt;Article&gt;()</span>
+
+<span class="nc bnc" id="L472" title="All 4 branches missed.">            if (deferredList.isNotEmpty()) {</span>
+<span class="nc" id="L473">                launch {</span>
+<span class="nc" id="L474">                        whileSelect {</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                            for (deferred in deferredList) {</span>
+<span class="nc bnc" id="L476" title="All 3 branches missed.">                                deferred.onAwait {</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                                    articleDao.insertList(it)</span>
+<span class="nc" id="L478">                                    articlesToNotify.addAll(</span>
+<span class="nc" id="L479">                                        it.fastFilter {</span>
+<span class="nc bnc" id="L480" title="All 4 branches missed.">                                            it.isUnread &amp;&amp; notificationFeedIds.contains(it.feedId)</span>
+                                        }
+                                    )
+<span class="nc" id="L483">                                    deferredList.remove(deferred)</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">                                    deferredList.isNotEmpty()</span>
+                                }
+                            }
+<span class="nc" id="L487">                        }</span>
+<span class="nc" id="L488">                    }</span>
+<span class="nc" id="L489">                    .invokeOnCompletion {</span>
+<span class="nc" id="L490">                        launch {</span>
+<span class="nc" id="L491">                            articlesToNotify</span>
+<span class="nc" id="L492">                                .groupBy { it.feedId }</span>
+<span class="nc" id="L493">                                .mapKeys { (feedId, _) -&gt; notificationFeeds[feedId]!! }</span>
+<span class="nc" id="L494">                                .forEach { (feed, articles) -&gt;</span>
+<span class="nc" id="L495">                                    notificationHelper.notify(feed, articles)</span>
+<span class="nc" id="L496">                                }</span>
+<span class="nc" id="L497">                        }</span>
+<span class="nc" id="L498">                    }</span>
+            }
+
+            // 8. Remove orphaned groups and feeds, after synchronizing the
+            // starred/un-starred
+<span class="nc" id="L503">            groupDao</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">                .queryAll(accountId)</span>
+<span class="nc bnc" id="L505" title="All 4 branches missed.">                .filter { it.id !in remoteGroups.await().map { group -&gt; group.id } }</span>
+<span class="nc bnc" id="L506" title="All 2 branches missed.">                .forEach { super.deleteGroup(it, true) }</span>
+<span class="nc" id="L507">            feedDao</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">                .queryAll(accountId)</span>
+<span class="nc bnc" id="L509" title="All 4 branches missed.">                .filter { it.id !in remoteFeeds.await().map { feed -&gt; feed.id } }</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">                .forEach { super.deleteFeed(it, true) }</span>
+
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            accountService.update(account.copy(updateAt = Date()))</span>
+<span class="nc" id="L513">            ListenableWorker.Result.success()</span>
+<span class="nc" id="L514">        } catch (e: Exception) {</span>
+<span class="nc" id="L515">            Timber.tag(&quot;RLog&quot;).e(e, &quot;On sync exception: ${e.message}&quot;)</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">            syncLogger.log(e)</span>
+            //                withContext(mainDispatcher) {
+            //                    context.showToast(e.message) todo: find a good way to
+            // notice user
+            // the error
+            //                }
+<span class="nc" id="L522">            ListenableWorker.Result.retry()</span>
+<span class="nc" id="L523">        }</span>
+<span class="nc" id="L524">    }</span>
+
+    private suspend fun syncFeed(accountId: Int, feedId: String): ListenableWorker.Result =
+<span class="nc bnc" id="L527" title="All 10 branches missed.">        supervisorScope {</span>
+<span class="nc" id="L528">            val preTime = System.currentTimeMillis()</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">            val account = accountService.getAccountById(accountId)</span>
+<span class="nc bnc" id="L530" title="All 2 branches missed.">            requireNotNull(account) { &quot;cannot find account&quot; }</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">            check(</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">                account.type.id == AccountType.GoogleReader.id ||</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">                    account.type.id == AccountType.FreshRSS.id</span>
+            ) {
+<span class="nc" id="L535">                &quot;account type is invalid&quot;</span>
+            }
+<span class="nc bnc" id="L537" title="All 2 branches missed.">            val googleReaderAPI = getGoogleReaderAPI()</span>
+
+<span class="nc bnc" id="L539" title="All 2 branches missed.">            val feed = feedDao.queryById(feedId)!!</span>
+
+<span class="nc" id="L541">            val localStarredIds =</span>
+<span class="nc" id="L542">                articleDao</span>
+<span class="nc" id="L543">                    .queryMetadataByFeedId(accountId, feedId, isUnread = true)</span>
+<span class="nc" id="L544">                    .map { it.id.remoteId }</span>
+<span class="nc" id="L545">                    .toSet()</span>
+
+<span class="nc" id="L547">            val localUnreadIds =</span>
+<span class="nc" id="L548">                articleDao</span>
+<span class="nc" id="L549">                    .queryMetadataByFeedId(accountId, feedId, isUnread = true)</span>
+<span class="nc" id="L550">                    .map { it.id.remoteId }</span>
+<span class="nc" id="L551">                    .toSet()</span>
+
+<span class="nc" id="L553">            val localReadIds =</span>
+<span class="nc" id="L554">                articleDao</span>
+<span class="nc" id="L555">                    .queryMetadataByFeedId(accountId, feedId, isUnread = false)</span>
+<span class="nc" id="L556">                    .map { it.id.remoteId }</span>
+<span class="nc" id="L557">                    .toSet()</span>
+
+<span class="nc" id="L559">            val localIds = (localReadIds + localUnreadIds).toSet()</span>
+
+<span class="nc" id="L561">            val remoteUnreadIds = async {</span>
+<span class="nc bnc" id="L562" title="All 3 branches missed.">                fetchItemIdsAndContinue {</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">                        googleReaderAPI.getItemIdsForFeed(</span>
+<span class="nc" id="L564">                            feedId = feedId.dollarLast(),</span>
+<span class="nc" id="L565">                            filterRead = true,</span>
+<span class="nc" id="L566">                            continuationId = it,</span>
+<span class="nc" id="L567">                        )</span>
+                    }
+<span class="nc" id="L569">                    .map { it.shortId }</span>
+<span class="nc" id="L570">                    .toSet()</span>
+            }
+
+<span class="nc" id="L573">            val remoteAllIds = async {</span>
+<span class="nc bnc" id="L574" title="All 3 branches missed.">                fetchItemIdsAndContinue {</span>
+<span class="nc bnc" id="L575" title="All 2 branches missed.">                        googleReaderAPI.getItemIdsForFeed(</span>
+<span class="nc" id="L576">                            feedId = feedId.dollarLast(),</span>
+<span class="nc" id="L577">                            filterRead = false,</span>
+<span class="nc" id="L578">                            continuationId = it,</span>
+<span class="nc" id="L579">                        )</span>
+                    }
+<span class="nc" id="L581">                    .map { it.shortId }</span>
+<span class="nc" id="L582">                    .toSet()</span>
+            }
+
+<span class="nc" id="L585">            val remoteStarredIds = async {</span>
+<span class="nc bnc" id="L586" title="All 5 branches missed.">                fetchItemIdsAndContinue { googleReaderAPI.getStarredItemIds(continuationId = it) }</span>
+<span class="nc" id="L587">                    .map { it.shortId }</span>
+<span class="nc" id="L588">                    .toSet()</span>
+            }
+
+<span class="nc bnc" id="L591" title="All 2 branches missed.">            val toFetch = remoteAllIds.await() - localIds</span>
+
+<span class="nc" id="L593">            val items =</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                fetchItemsContents(</span>
+<span class="nc" id="L595">                    itemIds = toFetch,</span>
+<span class="nc" id="L596">                    googleReaderAPI = googleReaderAPI,</span>
+<span class="nc" id="L597">                    accountId = accountId,</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">                    unreadIds = remoteUnreadIds.await(),</span>
+<span class="nc bnc" id="L599" title="All 2 branches missed.">                    starredIds = remoteStarredIds.await(),</span>
+                )
+
+<span class="nc bnc" id="L602" title="All 2 branches missed.">            if (feed.isNotification) {</span>
+<span class="nc" id="L603">                val articlesToNotify = items.fastFilter { it.isUnread }</span>
+<span class="nc" id="L604">                notificationHelper.notify(feed, articlesToNotify)</span>
+            }
+
+<span class="nc" id="L607">            launch {</span>
+<span class="nc" id="L608">                val remoteReadIds = remoteAllIds.await() - remoteUnreadIds.await()</span>
+<span class="nc" id="L609">                val toBeReadIds = remoteReadIds.intersect(localUnreadIds)</span>
+
+<span class="nc" id="L611">                toBeReadIds</span>
+<span class="nc" id="L612">                    .map { it.dbId(accountId) }</span>
+<span class="nc" id="L613">                    .chunked(1000)</span>
+<span class="nc" id="L614">                    .forEach {</span>
+<span class="nc" id="L615">                        articleDao.markAsReadByIdSet(</span>
+<span class="nc" id="L616">                            accountId = accountId,</span>
+<span class="nc" id="L617">                            ids = it.toSet(),</span>
+<span class="nc" id="L618">                            isUnread = false,</span>
+                        )
+<span class="nc" id="L620">                    }</span>
+<span class="nc" id="L621">            }</span>
+
+<span class="nc" id="L623">            launch {</span>
+<span class="nc" id="L624">                val toBeUnreadIds = localReadIds.intersect(remoteUnreadIds.await())</span>
+<span class="nc" id="L625">                toBeUnreadIds</span>
+<span class="nc" id="L626">                    .map { it.dbId(accountId) }</span>
+<span class="nc" id="L627">                    .chunked(1000)</span>
+<span class="nc" id="L628">                    .forEach {</span>
+<span class="nc" id="L629">                        articleDao.markAsReadByIdSet(</span>
+<span class="nc" id="L630">                            accountId = accountId,</span>
+<span class="nc" id="L631">                            ids = it.toSet(),</span>
+<span class="nc" id="L632">                            isUnread = true,</span>
+                        )
+<span class="nc" id="L634">                    }</span>
+<span class="nc" id="L635">            }</span>
+
+<span class="nc" id="L637">            launch {</span>
+<span class="nc" id="L638">                val toBeStarred = remoteStarredIds.await().intersect(localIds) - localStarredIds</span>
+
+<span class="nc" id="L640">                toBeStarred</span>
+<span class="nc" id="L641">                    .map { it.dbId(accountId) }</span>
+<span class="nc" id="L642">                    .chunked(1000)</span>
+<span class="nc" id="L643">                    .forEach {</span>
+<span class="nc" id="L644">                        articleDao.markAsStarredByIdSet(</span>
+<span class="nc" id="L645">                            accountId = accountId,</span>
+<span class="nc" id="L646">                            ids = it.toSet(),</span>
+<span class="nc" id="L647">                            isStarred = true,</span>
+                        )
+<span class="nc" id="L649">                    }</span>
+<span class="nc" id="L650">            }</span>
+
+<span class="nc" id="L652">            launch {</span>
+<span class="nc" id="L653">                val toBeUnstarred = localStarredIds - remoteStarredIds.await()</span>
+<span class="nc" id="L654">                toBeUnstarred</span>
+<span class="nc" id="L655">                    .map { it.dbId(accountId) }</span>
+<span class="nc" id="L656">                    .chunked(1000)</span>
+<span class="nc" id="L657">                    .forEach {</span>
+<span class="nc" id="L658">                        articleDao.markAsStarredByIdSet(</span>
+<span class="nc" id="L659">                            accountId = accountId,</span>
+<span class="nc" id="L660">                            ids = it.toSet(),</span>
+<span class="nc" id="L661">                            isStarred = false,</span>
+                        )
+<span class="nc" id="L663">                    }</span>
+<span class="nc" id="L664">            }</span>
+
+<span class="nc bnc" id="L666" title="All 2 branches missed.">            articleDao.insert(*items.toTypedArray())</span>
+<span class="nc" id="L667">            Timber.i(&quot;onCompletion: ${System.currentTimeMillis() - preTime}&quot;)</span>
+
+<span class="nc" id="L669">            ListenableWorker.Result.success()</span>
+<span class="nc" id="L670">        }</span>
+
+<span class="nc" id="L672">    private suspend fun fetchItemIdsAndContinue(</span>
+        getItemIdsFunc: suspend (continuationId: String?) -&gt; GoogleReaderDTO.ItemIds?
+    ): MutableList&lt;String&gt; {
+<span class="nc" id="L675">        var result = getItemIdsFunc(null)</span>
+<span class="nc bnc" id="L676" title="All 6 branches missed.">        val ids = result?.itemRefs?.mapNotNull { it.id }?.toMutableList() ?: return mutableListOf()</span>
+<span class="nc bnc" id="L677" title="All 4 branches missed.">        while (result != null &amp;&amp; result.continuation != null) {</span>
+<span class="nc" id="L678">            result = getItemIdsFunc(result.continuation)</span>
+<span class="nc bnc" id="L679" title="All 4 branches missed.">            result?.itemRefs?.mapNotNull { it.id }?.let { ids.addAll(it) }</span>
+        }
+<span class="nc" id="L681">        return ids</span>
+    }
+
+    fun fetchItemsContentsDeferred(
+        itemIds: Set&lt;String&gt;,
+        googleReaderAPI: GoogleReaderAPI,
+        accountId: Int,
+        unreadIds: Set&lt;String&gt;,
+        starredIds: Set&lt;String&gt;,
+        scope: CoroutineScope,
+    ): List&lt;Deferred&lt;List&lt;Article&gt;&gt;&gt; {
+<span class="nc bnc" id="L692" title="All 2 branches missed.">        if (itemIds.isEmpty()) return emptyList()</span>
+<span class="nc" id="L693">        val currentDate = Date()</span>
+<span class="nc" id="L694">        val semaphore = Semaphore(8)</span>
+<span class="nc" id="L695">        return itemIds.chunked(100).mapIndexed { index, chunkedIds -&gt;</span>
+<span class="nc" id="L696">            scope.async(ioDispatcher) {</span>
+<span class="nc" id="L697">                semaphore.withPermit {</span>
+<span class="nc" id="L698">                    val result = googleReaderAPI.getItemsContents(chunkedIds)</span>
+<span class="nc" id="L699">                    val updated = result.updated</span>
+<span class="nc" id="L700">                    val fetchedItems = result.items</span>
+<span class="nc bnc" id="L701" title="All 2 branches missed.">                    if (fetchedItems == null) return@async emptyList()</span>
+<span class="nc" id="L702">                    fetchedItems.fastFilteredMap(</span>
+<span class="nc bnc" id="L703" title="All 4 branches missed.">                        predicate = { it.id?.isValidItemId() == true },</span>
+                        transform = {
+<span class="nc" id="L705">                            val articleId = it.id!!.shortId</span>
+<span class="nc bnc" id="L706" title="All 4 branches missed.">                            Article(</span>
+<span class="nc" id="L707">                                id = accountId.spacerDollar(articleId),</span>
+                                date =
+<span class="nc bnc" id="L709" title="All 2 branches missed.">                                    it.published</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">                                        ?.run { Date(this * 1000) }</span>
+<span class="nc bnc" id="L711" title="All 4 branches missed.">                                        ?.takeIf { !it.isFuture(currentDate) } ?: currentDate,</span>
+<span class="nc bnc" id="L712" title="All 2 branches missed.">                                title = it.title.decodeHTML() ?: context.getString(R.string.empty),</span>
+<span class="nc" id="L713">                                author = it.author,</span>
+<span class="nc bnc" id="L714" title="All 4 branches missed.">                                rawDescription = it.summary?.content ?: &quot;&quot;,</span>
+                                shortDescription =
+<span class="nc bnc" id="L716" title="All 2 branches missed.">                                    Readability.parseToText(it.summary?.content, findArticleURL(it))</span>
+<span class="nc" id="L717">                                        .take(280),</span>
+                                //                        fullContent = it.summary?.content
+                                // ?:
+                                // &quot;&quot;,
+<span class="nc bnc" id="L721" title="All 2 branches missed.">                                img = rssHelper.findThumbnail(it.summary?.content),</span>
+<span class="nc" id="L722">                                link = findArticleURL(it),</span>
+                                feedId =
+<span class="nc" id="L724">                                    accountId.spacerDollar(</span>
+<span class="nc bnc" id="L725" title="All 4 branches missed.">                                        it.origin?.streamId?.ofFeedStreamIdToId()!!</span>
+                                    ),
+<span class="nc" id="L727">                                accountId = accountId,</span>
+<span class="nc" id="L728">                                isUnread = unreadIds.contains(articleId),</span>
+<span class="nc" id="L729">                                isStarred = starredIds.contains(articleId),</span>
+                                updateAt =
+<span class="nc bnc" id="L731" title="All 2 branches missed.">                                    updated?.let { Date(updated * 1000L) }</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">                                        ?: it.crawlTimeMsec?.let { Date(it.toLong()) }</span>
+<span class="nc" id="L733">                                        ?: currentDate,</span>
+<span class="nc" id="L734">                            )</span>
+                        },
+<span class="nc" id="L736">                    )</span>
+<span class="nc" id="L737">                }</span>
+<span class="nc" id="L738">            }</span>
+        }
+    }
+
+    private suspend fun fetchItemsContents(
+        itemIds: Set&lt;String&gt;,
+        googleReaderAPI: GoogleReaderAPI,
+        accountId: Int,
+        unreadIds: Set&lt;String&gt;,
+        starredIds: Set&lt;String&gt;,
+<span class="nc bnc" id="L748" title="All 3 branches missed.">    ): List&lt;Article&gt; = supervisorScope {</span>
+<span class="nc" id="L749">        fetchItemsContentsDeferred(</span>
+<span class="nc" id="L750">                itemIds = itemIds,</span>
+<span class="nc" id="L751">                googleReaderAPI = googleReaderAPI,</span>
+<span class="nc" id="L752">                accountId = accountId,</span>
+<span class="nc" id="L753">                unreadIds = unreadIds,</span>
+<span class="nc" id="L754">                starredIds = starredIds,</span>
+<span class="nc" id="L755">                scope = this,</span>
+            )
+<span class="nc bnc" id="L757" title="All 2 branches missed.">            .awaitAll()</span>
+<span class="nc" id="L758">            .flatten()</span>
+<span class="nc" id="L759">    }</span>
+
+    private fun findArticleURL(it: GoogleReaderDTO.Item) =
+<span class="nc bnc" id="L762" title="All 10 branches missed.">        it.canonical?.firstOrNull()?.href</span>
+<span class="nc bnc" id="L763" title="All 4 branches missed.">            ?: it.alternate?.firstOrNull()?.href</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">            ?: it.origin?.htmlUrl</span>
+<span class="nc" id="L765">            ?: &quot;&quot;</span>
+
+<span class="nc" id="L767">    override suspend fun markAsRead(</span>
+        groupId: String?,
+        feedId: String?,
+        articleId: String?,
+        before: Date?,
+        isUnread: Boolean,
+    ) {
+<span class="nc" id="L774">        val accountId = accountService.getCurrentAccountId()</span>
+<span class="nc" id="L775">        val googleReaderAPI = getGoogleReaderAPI()</span>
+<span class="nc" id="L776">        val markList: List&lt;String&gt; =</span>
+<span class="nc" id="L777">            when {</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">                groupId != null -&gt; {</span>
+<span class="nc bnc" id="L779" title="All 2 branches missed.">                    if (before == null) {</span>
+<span class="nc" id="L780">                            articleDao.queryMetadataByGroupIdWhenIsUnread(</span>
+<span class="nc" id="L781">                                accountId,</span>
+<span class="nc" id="L782">                                groupId,</span>
+<span class="nc bnc" id="L783" title="All 2 branches missed.">                                !isUnread,</span>
+                            )
+                        } else {
+<span class="nc" id="L786">                            articleDao.queryMetadataByGroupIdWhenIsUnread(</span>
+<span class="nc" id="L787">                                accountId,</span>
+<span class="nc" id="L788">                                groupId,</span>
+<span class="nc bnc" id="L789" title="All 2 branches missed.">                                !isUnread,</span>
+<span class="nc" id="L790">                                before,</span>
+                            )
+                        }
+<span class="nc" id="L793">                        .map { it.id.dollarLast() }</span>
+                }
+
+<span class="nc bnc" id="L796" title="All 2 branches missed.">                feedId != null -&gt; {</span>
+<span class="nc bnc" id="L797" title="All 2 branches missed.">                    if (before == null) {</span>
+<span class="nc bnc" id="L798" title="All 2 branches missed.">                            articleDao.queryMetadataByFeedId(accountId, feedId, !isUnread)</span>
+                        } else {
+<span class="nc bnc" id="L800" title="All 2 branches missed.">                            articleDao.queryMetadataByFeedId(accountId, feedId, !isUnread, before)</span>
+                        }
+<span class="nc" id="L802">                        .map { it.id.dollarLast() }</span>
+                }
+
+<span class="nc bnc" id="L805" title="All 2 branches missed.">                articleId != null -&gt; {</span>
+<span class="nc" id="L806">                    listOf(articleId.dollarLast())</span>
+                }
+
+                else -&gt; {
+<span class="nc bnc" id="L810" title="All 2 branches missed.">                    if (before == null) {</span>
+<span class="nc bnc" id="L811" title="All 2 branches missed.">                            articleDao.queryMetadataAll(accountId, isUnread = !isUnread)</span>
+                        } else {
+<span class="nc bnc" id="L813" title="All 2 branches missed.">                            articleDao.queryMetadataAll(accountId, !isUnread, before)</span>
+                        }
+<span class="nc" id="L815">                        .map { it.id.dollarLast() }</span>
+                }
+            }
+<span class="nc bnc" id="L818" title="All 2 branches missed.">        super.markAsRead(groupId, feedId, articleId, before, isUnread)</span>
+<span class="nc" id="L819">        markList</span>
+<span class="nc bnc" id="L820" title="All 4 branches missed.">            .takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L821" title="All 2 branches missed.">            ?.chunked(500)</span>
+<span class="nc bnc" id="L822" title="All 2 branches missed.">            ?.forEachIndexed { index, it -&gt;</span>
+<span class="nc" id="L823">                Log.d(&quot;RLog&quot;, &quot;sync markAsRead:  ${(index * 500) + it.size}/${markList.size} num&quot;)</span>
+<span class="nc" id="L824">                googleReaderAPI.editTag(</span>
+<span class="nc" id="L825">                    itemIds = it,</span>
+<span class="nc bnc" id="L826" title="All 2 branches missed.">                    mark = if (!isUnread) GoogleReaderAPI.Stream.Read.tag else null,</span>
+<span class="nc bnc" id="L827" title="All 2 branches missed.">                    unmark = if (isUnread) GoogleReaderAPI.Stream.Read.tag else null,</span>
+                )
+<span class="nc" id="L829">            }</span>
+<span class="nc" id="L830">    }</span>
+
+<span class="nc" id="L832">    override suspend fun syncReadStatus(articleIds: Set&lt;String&gt;, isUnread: Boolean): Set&lt;String&gt; {</span>
+<span class="nc" id="L833">        val googleReaderAPI = getGoogleReaderAPI()</span>
+<span class="nc" id="L834">        val syncedEntries = mutableSetOf&lt;String&gt;()</span>
+<span class="nc" id="L835">        articleIds</span>
+<span class="nc bnc" id="L836" title="All 4 branches missed.">            .takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L837" title="All 2 branches missed.">            ?.chunked(500)</span>
+<span class="nc bnc" id="L838" title="All 2 branches missed.">            ?.forEachIndexed { index, idList -&gt;</span>
+<span class="nc" id="L839">                Log.d(</span>
+<span class="nc" id="L840">                    &quot;RLog&quot;,</span>
+<span class="nc" id="L841">                    &quot;sync markAsRead:  ${(index * 500) + idList.size}/${articleIds.size} num&quot;,</span>
+                )
+<span class="nc" id="L843">                googleReaderAPI</span>
+<span class="nc" id="L844">                    .editTag(</span>
+<span class="nc" id="L845">                        itemIds = idList.map { it.dollarLast() },</span>
+<span class="nc bnc" id="L846" title="All 2 branches missed.">                        mark = if (!isUnread) GoogleReaderAPI.Stream.Read.tag else null,</span>
+<span class="nc bnc" id="L847" title="All 2 branches missed.">                        unmark = if (isUnread) GoogleReaderAPI.Stream.Read.tag else null,</span>
+                    )
+<span class="nc" id="L849">                    .onFailure { it.printStackTrace() }</span>
+<span class="nc" id="L850">                    .onSuccess {</span>
+<span class="nc" id="L851">                        syncedEntries += idList</span>
+<span class="nc bnc" id="L852" title="All 2 branches missed.">                        println(&quot;synced $idList to isUnread: $isUnread&quot;)</span>
+<span class="nc" id="L853">                    }</span>
+<span class="nc" id="L854">            }</span>
+<span class="nc" id="L855">        return syncedEntries</span>
+    }
+
+<span class="nc" id="L858">    override suspend fun markAsStarred(articleId: String, isStarred: Boolean) {</span>
+<span class="nc bnc" id="L859" title="All 2 branches missed.">        super.markAsStarred(articleId, isStarred)</span>
+<span class="nc" id="L860">        getGoogleReaderAPI()</span>
+<span class="nc" id="L861">            .editTag(</span>
+<span class="nc" id="L862">                itemIds = listOf(articleId.dollarLast()),</span>
+<span class="nc bnc" id="L863" title="All 2 branches missed.">                mark = if (isStarred) GoogleReaderAPI.Stream.Starred.tag else null,</span>
+<span class="nc bnc" id="L864" title="All 2 branches missed.">                unmark = if (!isStarred) GoogleReaderAPI.Stream.Starred.tag else null,</span>
+            )
+<span class="nc" id="L866">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

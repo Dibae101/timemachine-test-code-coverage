@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FilesSyncJob.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE nextcloud</a> &gt; <a href="index.source.html" class="el_package">com.owncloud.android.jobs</a> &gt; <span class="el_source">FilesSyncJob.java</span></div><h1>FilesSyncJob.java</h1><pre class="source lang-java linenums">/*
+ * Nextcloud Android client application
+ *
+ * @author Mario Danic
+ * @author Chris Narkiewicz
+ * Copyright (C) 2017 Mario Danic
+ * Copyright (C) 2017 Nextcloud
+ * Copyright (C) 2919 Chris Narkiewicz
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU AFFERO GENERAL PUBLIC LICENSE
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU AFFERO GENERAL PUBLIC LICENSE for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package com.owncloud.android.jobs;
+
+import android.accounts.Account;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.res.Resources;
+import android.os.Build;
+import android.os.PowerManager;
+import android.text.TextUtils;
+
+import com.evernote.android.job.Job;
+import com.evernote.android.job.util.support.PersistableBundleCompat;
+import com.nextcloud.client.account.UserAccountManager;
+import com.nextcloud.client.device.PowerManagementService;
+import com.nextcloud.client.network.ConnectivityService;
+import com.nextcloud.client.preferences.AppPreferences;
+import com.owncloud.android.MainApp;
+import com.owncloud.android.R;
+import com.owncloud.android.datamodel.ArbitraryDataProvider;
+import com.owncloud.android.datamodel.FilesystemDataProvider;
+import com.owncloud.android.datamodel.MediaFolderType;
+import com.owncloud.android.datamodel.SyncedFolder;
+import com.owncloud.android.datamodel.SyncedFolderProvider;
+import com.owncloud.android.datamodel.UploadsStorageManager;
+import com.owncloud.android.files.services.FileUploader;
+import com.owncloud.android.lib.common.utils.Log_OC;
+import com.owncloud.android.operations.UploadFileOperation;
+import com.owncloud.android.ui.activity.SettingsActivity;
+import com.owncloud.android.utils.FileStorageUtils;
+import com.owncloud.android.utils.FilesSyncHelper;
+import com.owncloud.android.utils.MimeType;
+import com.owncloud.android.utils.MimeTypeUtil;
+
+import java.io.File;
+import java.text.ParsePosition;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
+
+import androidx.annotation.NonNull;
+import androidx.exifinterface.media.ExifInterface;
+
+/*
+    Job that:
+        - restarts existing jobs if required
+        - finds new and modified files since we last run this
+        - creates upload tasks
+ */
+public class FilesSyncJob extends Job {
+    public static final String TAG = &quot;FilesSyncJob&quot;;
+    public static final String SKIP_CUSTOM = &quot;skipCustom&quot;;
+    public static final String OVERRIDE_POWER_SAVING = &quot;overridePowerSaving&quot;;
+    private static final String WAKELOCK_TAG_SEPARATION = &quot;:&quot;;
+
+    private UserAccountManager userAccountManager;
+    private AppPreferences preferences;
+    private UploadsStorageManager uploadsStorageManager;
+    private ConnectivityService connectivityService;
+    private PowerManagementService powerManagementService;
+
+    FilesSyncJob(final UserAccountManager userAccountManager,
+                        final AppPreferences preferences,
+                        final UploadsStorageManager uploadsStorageManager,
+                        final ConnectivityService connectivityService,
+<span class="nc" id="L89">                        final PowerManagementService powerManagementService) {</span>
+<span class="nc" id="L90">        this.userAccountManager = userAccountManager;</span>
+<span class="nc" id="L91">        this.preferences = preferences;</span>
+<span class="nc" id="L92">        this.uploadsStorageManager = uploadsStorageManager;</span>
+<span class="nc" id="L93">        this.connectivityService = connectivityService;</span>
+<span class="nc" id="L94">        this.powerManagementService = powerManagementService;</span>
+<span class="nc" id="L95">    }</span>
+
+    @NonNull
+    @Override
+    protected Result onRunJob(@NonNull Params params) {
+<span class="nc" id="L100">        final Context context = MainApp.getAppContext();</span>
+<span class="nc" id="L101">        PowerManager.WakeLock wakeLock = null;</span>
+
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (android.os.Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.LOLLIPOP) {</span>
+<span class="nc" id="L104">            PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);</span>
+<span class="nc" id="L105">            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, MainApp.getAuthority() +</span>
+                    WAKELOCK_TAG_SEPARATION + TAG);
+<span class="nc" id="L107">            wakeLock.acquire(10 * 60 * 1000);</span>
+        }
+
+<span class="nc" id="L110">        PersistableBundleCompat bundle = params.getExtras();</span>
+<span class="nc" id="L111">        final boolean overridePowerSaving = bundle.getBoolean(OVERRIDE_POWER_SAVING, false);</span>
+
+        // If we are in power save mode, better to postpone upload
+<span class="nc bnc" id="L114" title="All 4 branches missed.">        if (powerManagementService.isPowerSavingEnabled() &amp;&amp; !overridePowerSaving) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (wakeLock != null) {</span>
+<span class="nc" id="L116">                wakeLock.release();</span>
+            }
+<span class="nc" id="L118">            return Result.SUCCESS;</span>
+        }
+
+<span class="nc" id="L121">        Resources resources = MainApp.getAppContext().getResources();</span>
+<span class="nc" id="L122">        boolean lightVersion = resources.getBoolean(R.bool.syncedFolder_light);</span>
+
+<span class="nc" id="L124">        final boolean skipCustom = bundle.getBoolean(SKIP_CUSTOM, false);</span>
+<span class="nc" id="L125">        FilesSyncHelper.restartJobsIfNeeded(uploadsStorageManager,</span>
+                                            userAccountManager,
+                                            connectivityService,
+                                            powerManagementService);
+<span class="nc" id="L129">        FilesSyncHelper.insertAllDBEntries(preferences, skipCustom);</span>
+
+        // Create all the providers we'll need
+<span class="nc" id="L132">        final ContentResolver contentResolver = context.getContentResolver();</span>
+<span class="nc" id="L133">        final FilesystemDataProvider filesystemDataProvider = new FilesystemDataProvider(contentResolver);</span>
+<span class="nc" id="L134">        SyncedFolderProvider syncedFolderProvider = new SyncedFolderProvider(contentResolver,</span>
+                                                                             preferences);
+
+<span class="nc" id="L137">        Locale currentLocale = context.getResources().getConfiguration().locale;</span>
+<span class="nc" id="L138">        SimpleDateFormat sFormatter = new SimpleDateFormat(&quot;yyyy:MM:dd HH:mm:ss&quot;, currentLocale);</span>
+<span class="nc" id="L139">        sFormatter.setTimeZone(TimeZone.getTimeZone(TimeZone.getDefault().getID()));</span>
+<span class="nc" id="L140">        FileUploader.UploadRequester requester = new FileUploader.UploadRequester();</span>
+
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        for (SyncedFolder syncedFolder : syncedFolderProvider.getSyncedFolders()) {</span>
+<span class="nc bnc" id="L143" title="All 6 branches missed.">            if ((syncedFolder.isEnabled()) &amp;&amp; (!skipCustom || MediaFolderType.CUSTOM != syncedFolder.getType())) {</span>
+<span class="nc" id="L144">                syncFolder(context, resources, lightVersion, filesystemDataProvider, currentLocale, sFormatter,</span>
+                        requester, syncedFolder);
+            }
+<span class="nc" id="L147">        }</span>
+
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (wakeLock != null) {</span>
+<span class="nc" id="L150">            wakeLock.release();</span>
+        }
+
+<span class="nc" id="L153">        return Result.SUCCESS;</span>
+    }
+
+    private void syncFolder(Context context, Resources resources, boolean lightVersion,
+                            FilesystemDataProvider filesystemDataProvider, Locale currentLocale,
+                            SimpleDateFormat sFormatter, FileUploader.UploadRequester requester,
+                            SyncedFolder syncedFolder) {
+        String remotePath;
+        boolean subfolderByDate;
+        Integer uploadAction;
+        boolean needsCharging;
+        boolean needsWifi;
+        File file;
+        ArbitraryDataProvider arbitraryDataProvider;
+<span class="nc" id="L167">        Account account = userAccountManager.getAccountByName(syncedFolder.getAccount());</span>
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (lightVersion) {</span>
+<span class="nc" id="L170">            arbitraryDataProvider = new ArbitraryDataProvider(context.getContentResolver());</span>
+        } else {
+<span class="nc" id="L172">            arbitraryDataProvider = null;</span>
+        }
+
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        for (String path : filesystemDataProvider.getFilesForUpload(syncedFolder.getLocalPath(),</span>
+<span class="nc" id="L176">                Long.toString(syncedFolder.getId()))) {</span>
+<span class="nc" id="L177">            file = new File(path);</span>
+<span class="nc" id="L178">            Long lastModificationTime = calculateLastModificationTime(file, syncedFolder, sFormatter);</span>
+<span class="nc" id="L179">            String mimeType = MimeTypeUtil.getBestMimeTypeByFilename(file.getAbsolutePath());</span>
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            if (lightVersion) {</span>
+<span class="nc" id="L182">                needsCharging = resources.getBoolean(R.bool.syncedFolder_light_on_charging);</span>
+<span class="nc bnc" id="L183" title="All 4 branches missed.">                needsWifi = account == null || arbitraryDataProvider.getBooleanValue(account.name,</span>
+                                                                                     SettingsActivity.SYNCED_FOLDER_LIGHT_UPLOAD_ON_WIFI);
+<span class="nc" id="L185">                String uploadActionString = resources.getString(R.string.syncedFolder_light_upload_behaviour);</span>
+<span class="nc" id="L186">                uploadAction = getUploadAction(uploadActionString);</span>
+
+<span class="nc" id="L188">                subfolderByDate = resources.getBoolean(R.bool.syncedFolder_light_use_subfolders);</span>
+
+<span class="nc" id="L190">                remotePath = resources.getString(R.string.syncedFolder_remote_folder);</span>
+<span class="nc" id="L191">            } else {</span>
+<span class="nc" id="L192">                needsCharging = syncedFolder.getChargingOnly();</span>
+<span class="nc" id="L193">                needsWifi = syncedFolder.getWifiOnly();</span>
+<span class="nc" id="L194">                uploadAction = syncedFolder.getUploadAction();</span>
+<span class="nc" id="L195">                subfolderByDate = syncedFolder.getSubfolderByDate();</span>
+<span class="nc" id="L196">                remotePath = syncedFolder.getRemotePath();</span>
+            }
+
+<span class="nc" id="L199">            requester.uploadFileWithOverwrite(</span>
+                    context,
+                    account,
+<span class="nc" id="L202">                    file.getAbsolutePath(),</span>
+<span class="nc" id="L203">                    FileStorageUtils.getInstantUploadFilePath(</span>
+                        file,
+                        currentLocale,
+                        remotePath,
+<span class="nc" id="L207">                        syncedFolder.getLocalPath(),</span>
+<span class="nc" id="L208">                        lastModificationTime,</span>
+<span class="nc" id="L209">                        subfolderByDate),</span>
+<span class="nc" id="L210">                    uploadAction,</span>
+                    mimeType,
+                    true,           // create parent folder if not existent
+                    UploadFileOperation.CREATED_AS_INSTANT_PICTURE,
+                    needsWifi,
+                    needsCharging,
+                    true
+            );
+
+<span class="nc" id="L219">            filesystemDataProvider.updateFilesystemFileAsSentForUpload(path,</span>
+<span class="nc" id="L220">                                                                       Long.toString(syncedFolder.getId()));</span>
+<span class="nc" id="L221">        }</span>
+<span class="nc" id="L222">    }</span>
+
+    private Long calculateLastModificationTime(File file, SyncedFolder syncedFolder, SimpleDateFormat formatter) {
+<span class="nc" id="L225">        Long lastModificationTime = file.lastModified();</span>
+
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if (MediaFolderType.IMAGE == syncedFolder.getType()) {</span>
+<span class="nc" id="L228">            String mimeTypeString = FileStorageUtils.getMimeTypeFromName(file.getAbsolutePath());</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            if (MimeType.JPEG.equalsIgnoreCase(mimeTypeString)</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                    || MimeType.TIFF.equalsIgnoreCase(mimeTypeString)) {</span>
+                try {
+<span class="nc" id="L232">                    ExifInterface exifInterface = new ExifInterface(file.getAbsolutePath());</span>
+<span class="nc" id="L233">                    String exifDate = exifInterface.getAttribute(ExifInterface.TAG_DATETIME);</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                    if (!TextUtils.isEmpty(exifDate)) {</span>
+<span class="nc" id="L235">                        ParsePosition pos = new ParsePosition(0);</span>
+<span class="nc" id="L236">                        Date dateTime = formatter.parse(exifDate, pos);</span>
+<span class="nc" id="L237">                        lastModificationTime = dateTime.getTime();</span>
+                    }
+<span class="nc" id="L239">                } catch (Exception e) {</span>
+<span class="nc" id="L240">                    Log_OC.d(TAG, &quot;Failed to get the proper time &quot; + e.getLocalizedMessage());</span>
+<span class="nc" id="L241">                }</span>
+            }
+        }
+
+<span class="nc" id="L245">        return lastModificationTime;</span>
+    }
+
+    private Integer getUploadAction(String action) {
+<span class="nc bnc" id="L249" title="All 4 branches missed.">        switch (action) {</span>
+            case &quot;LOCAL_BEHAVIOUR_FORGET&quot;:
+<span class="nc" id="L251">                return FileUploader.LOCAL_BEHAVIOUR_FORGET;</span>
+            case &quot;LOCAL_BEHAVIOUR_MOVE&quot;:
+<span class="nc" id="L253">                return FileUploader.LOCAL_BEHAVIOUR_MOVE;</span>
+            case &quot;LOCAL_BEHAVIOUR_DELETE&quot;:
+<span class="nc" id="L255">                return FileUploader.LOCAL_BEHAVIOUR_DELETE;</span>
+            default:
+<span class="nc" id="L257">                return FileUploader.LOCAL_BEHAVIOUR_FORGET;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

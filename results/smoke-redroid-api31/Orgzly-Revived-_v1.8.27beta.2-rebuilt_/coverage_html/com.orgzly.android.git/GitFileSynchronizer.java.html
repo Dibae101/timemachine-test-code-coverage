@@ -1,0 +1,524 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GitFileSynchronizer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Orgzly-Revived</a> &gt; <a href="index.source.html" class="el_package">com.orgzly.android.git</a> &gt; <span class="el_source">GitFileSynchronizer.java</span></div><h1>GitFileSynchronizer.java</h1><pre class="source lang-java linenums">package com.orgzly.android.git;
+
+import static com.orgzly.android.ui.AppSnackbarUtils.showSnackbar;
+
+import android.app.Activity;
+import android.content.Context;
+import android.net.Uri;
+import android.util.Log;
+
+import com.orgzly.BuildConfig;
+import com.orgzly.R;
+import com.orgzly.android.App;
+import com.orgzly.android.util.LogUtils;
+import com.orgzly.android.util.MiscUtils;
+
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.ListBranchCommand;
+import org.eclipse.jgit.api.MergeResult;
+import org.eclipse.jgit.api.ResetCommand;
+import org.eclipse.jgit.api.Status;
+import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.transport.PushResult;
+import org.eclipse.jgit.treewalk.TreeWalk;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.List;
+import java.util.TimeZone;
+
+public class GitFileSynchronizer {
+<span class="nc" id="L42">    private final static String TAG = GitFileSynchronizer.class.getName();</span>
+    public final static String PRE_SYNC_MARKER_BRANCH = &quot;orgzly-pre-sync-marker&quot;;
+
+    private final Git git;
+    private final GitPreferences preferences;
+    private final Context context;
+<span class="nc" id="L48">    private final Activity currentActivity = App.getCurrentActivity();</span>
+
+
+<span class="nc" id="L51">    public GitFileSynchronizer(Git g, GitPreferences prefs) {</span>
+<span class="nc" id="L52">        git = g;</span>
+<span class="nc" id="L53">        preferences = prefs;</span>
+<span class="nc" id="L54">        context = App.getAppContext();</span>
+<span class="nc" id="L55">    }</span>
+
+    private GitTransportSetter transportSetter() {
+<span class="nc" id="L58">        return preferences.createTransportSetter();</span>
+    }
+
+    public void retrieveLatestVersionOfFile(
+            String repositoryPath, File destination) throws IOException {
+<span class="nc" id="L63">        MiscUtils.copyFile(workTreeFile(repositoryPath), destination);</span>
+<span class="nc" id="L64">    }</span>
+
+    public InputStream openRepoFileInputStream(String repositoryPath) throws FileNotFoundException {
+<span class="nc" id="L67">        return new FileInputStream(workTreeFile(repositoryPath));</span>
+    }
+
+    private void fetch() throws IOException {
+        try {
+            if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L73">                LogUtils.d(TAG, String.format(&quot;Fetching Git repo from %s&quot;, preferences.remoteUri()));</span>
+            }
+<span class="nc" id="L75">            transportSetter()</span>
+<span class="nc" id="L76">                    .setTransport(git.fetch()</span>
+<span class="nc" id="L77">                            .setRemote(preferences.remoteName())</span>
+<span class="nc" id="L78">                            .setRemoveDeletedRefs(true))</span>
+<span class="nc" id="L79">                    .call();</span>
+<span class="nc" id="L80">        } catch (GitAPIException e) {</span>
+<span class="nc" id="L81">            e.printStackTrace();</span>
+<span class="nc" id="L82">            throw new IOException(e.getMessage());</span>
+<span class="nc" id="L83">        }</span>
+<span class="nc" id="L84">    }</span>
+
+    public void checkoutSelected() throws GitAPIException {
+<span class="nc" id="L87">        git.checkout().setName(preferences.branchName()).call();</span>
+<span class="nc" id="L88">    }</span>
+
+    public boolean mergeWithRemote() throws IOException {
+<span class="nc" id="L91">        ensureRepoIsClean();</span>
+        try {
+<span class="nc" id="L93">            fetch();</span>
+<span class="nc" id="L94">            RevCommit mergeTarget = getCommit(</span>
+<span class="nc" id="L95">                    String.format(&quot;%s/%s&quot;, preferences.remoteName(),</span>
+<span class="nc" id="L96">                            git.getRepository().getBranch()));</span>
+<span class="nc" id="L97">            return doMerge(mergeTarget);</span>
+<span class="nc" id="L98">        } catch (GitAPIException e) {</span>
+<span class="nc" id="L99">            e.printStackTrace();</span>
+        }
+<span class="nc" id="L101">        return false;</span>
+    }
+
+    private String getShortHash(ObjectId hash) {
+<span class="nc" id="L105">        String shortHash = hash.getName();</span>
+        try {
+<span class="nc" id="L107">            shortHash = git.getRepository().newObjectReader().abbreviate(hash).name();</span>
+<span class="nc" id="L108">        } catch(IOException e) {</span>
+<span class="nc" id="L109">            Log.e(TAG, &quot;Error while abbreviating commit hash &quot; + hash.getName() + &quot;, falling back to full hash&quot;);</span>
+<span class="nc" id="L110">        }</span>
+<span class="nc" id="L111">        return shortHash;</span>
+    }
+
+    private String createMergeBranchName(String repositoryPath, ObjectId commitHash) {
+<span class="nc" id="L115">        String shortCommitHash = getShortHash(commitHash);</span>
+<span class="nc" id="L116">        repositoryPath = repositoryPath.replace(&quot; &quot;, &quot;_&quot;);</span>
+<span class="nc" id="L117">        String now = new SimpleDateFormat(&quot;yyyy-MM-dd_HHmmss&quot;).format(Calendar.getInstance(TimeZone.getTimeZone(&quot;UTC&quot;)).getTime());</span>
+<span class="nc" id="L118">        return &quot;merge-&quot; + repositoryPath + &quot;-&quot; + shortCommitHash + &quot;-&quot; + now;</span>
+    }
+
+    public boolean updateAndCommitFileFromRevisionAndMerge(
+            File sourceFile, String repoRelativePath,
+            ObjectId fileRevision, RevCommit revision)
+            throws IOException {
+<span class="nc" id="L125">        ensureRepoIsClean();</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (updateAndCommitFileFromRevision(sourceFile, repoRelativePath, fileRevision)) {</span>
+            if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L128">                LogUtils.d(TAG, String.format(&quot;File '%s' committed without conflicts.&quot;, repoRelativePath));</span>
+            }
+<span class="nc" id="L130">            return true;</span>
+        }
+
+<span class="nc" id="L133">        String originalBranch = git.getRepository().getFullBranch();</span>
+        if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L135">            LogUtils.d(TAG, String.format(&quot;originalBranch is set to %s&quot;, originalBranch));</span>
+        }
+<span class="nc" id="L137">        String mergeBranch = createMergeBranchName(repoRelativePath, fileRevision);</span>
+        if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L139">            LogUtils.d(TAG, String.format(&quot;originalBranch is set to %s&quot;, originalBranch));</span>
+<span class="nc" id="L140">            LogUtils.d(TAG, String.format(&quot;Temporary mergeBranch is set to %s&quot;, mergeBranch));</span>
+        }
+        try {
+<span class="nc" id="L143">            git.branchDelete().setBranchNames(mergeBranch).call();</span>
+<span class="nc" id="L144">        } catch (GitAPIException ignored) {}</span>
+<span class="nc" id="L145">        boolean mergeSucceeded = false;</span>
+        try {
+<span class="nc" id="L147">            RevCommit mergeTarget = currentHead();</span>
+            // Try to use our &quot;pre sync marker&quot; to find a good point in history for branching off.
+<span class="nc" id="L149">            RevCommit branchStartPoint = getCommit(PRE_SYNC_MARKER_BRANCH);</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (branchStartPoint == null) {</span>
+<span class="nc" id="L151">                branchStartPoint = revision;</span>
+            }
+            if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L154">                LogUtils.d(TAG, String.format(&quot;branchStartPoint is set to %s&quot;, branchStartPoint));</span>
+            }
+<span class="nc" id="L156">            git.checkout().setCreateBranch(true).setForceRefUpdate(true).</span>
+<span class="nc" id="L157">                    setStartPoint(branchStartPoint).setName(mergeBranch).call();</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if (!currentHead().equals(branchStartPoint))</span>
+<span class="nc" id="L159">                throw new IOException(&quot;Failed to create new branch at &quot; + branchStartPoint.toString());</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (!updateAndCommitFileFromRevision(sourceFile, repoRelativePath, fileRevision))</span>
+<span class="nc" id="L161">                throw new IOException(</span>
+<span class="nc" id="L162">                        String.format(</span>
+                                &quot;The provided file revision %s for %s is &quot; +
+                                        &quot;not the same as the one found in the provided commit %s.&quot;,
+<span class="nc" id="L165">                                fileRevision.toString(), repoRelativePath, revision.toString()));</span>
+<span class="nc" id="L166">            mergeSucceeded = doMerge(mergeTarget);</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            if (mergeSucceeded) {</span>
+<span class="nc" id="L168">                RevCommit merged = currentHead();</span>
+<span class="nc" id="L169">                git.checkout().setName(originalBranch).call();</span>
+<span class="nc" id="L170">                MergeResult result = git.merge().include(merged).call();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                if (!result.getMergeStatus().isSuccessful()) {</span>
+<span class="nc" id="L172">                    throw new IOException(String.format(&quot;Unexpected failure to merge '%s' into '%s'&quot;, merged.toString(), originalBranch));</span>
+                }
+            }
+<span class="nc" id="L175">        } catch (GitAPIException e) {</span>
+<span class="nc" id="L176">            e.printStackTrace();</span>
+<span class="nc" id="L177">            throw new IOException(&quot;Failed to handle merge conflict: &quot; + e.getMessage());</span>
+        } finally {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            if (mergeSucceeded) {</span>
+                try {
+                    if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L182">                        LogUtils.d(TAG, String.format(&quot;Checking out originalBranch '%s'&quot;, originalBranch));</span>
+                    }
+<span class="nc" id="L184">                    git.checkout().setName(originalBranch).call();</span>
+<span class="nc" id="L185">                } catch (GitAPIException e) {</span>
+<span class="nc" id="L186">                    Log.w(TAG, String.format(&quot;Failed to checkout original branch '%s': %s&quot;, originalBranch, e.getMessage()));</span>
+<span class="nc" id="L187">                }</span>
+                try {
+                    if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L190">                        LogUtils.d(TAG, String.format(&quot;Deleting temporary mergeBranch '%s'&quot;, mergeBranch));</span>
+                    }
+<span class="nc" id="L192">                    git.branchDelete().setBranchNames(mergeBranch).call();</span>
+<span class="nc" id="L193">                } catch (GitAPIException e) {</span>
+<span class="nc" id="L194">                    Log.w(TAG, String.format(&quot;Failed to delete temporary mergeBranch '%s': %s&quot;, mergeBranch, e.getMessage()));</span>
+<span class="nc" id="L195">                }</span>
+            }
+        }
+<span class="nc" id="L198">        return mergeSucceeded;</span>
+    }
+
+    private boolean doMerge(RevCommit mergeTarget) throws IOException, GitAPIException {
+<span class="nc" id="L202">        MergeResult result = git.merge().include(mergeTarget).call();</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (result.getMergeStatus().equals(MergeResult.MergeStatus.CONFLICTING)) {</span>
+<span class="nc" id="L204">            gitResetMerge();</span>
+<span class="nc" id="L205">            return false;</span>
+        }
+<span class="nc" id="L207">        return true;</span>
+    }
+
+    /**
+     * Try to push to remote if local and remote HEADs for the current branch
+     * point to different commits. This method was added to allow pushing only
+     * once per sync occasion: right after the &quot;for namesake in namesakes&quot;-loop
+     * in SyncService.doInBackground().
+     */
+    public void tryPushIfHeadDiffersFromRemote() {
+<span class="nc" id="L217">        String branchName = null;</span>
+<span class="nc" id="L218">        String remoteName = null;</span>
+<span class="nc" id="L219">        RevCommit localHead = null;</span>
+<span class="nc" id="L220">        RevCommit remoteHead = null;</span>
+<span class="nc" id="L221">        Repository repo = git.getRepository();</span>
+
+        try {
+<span class="nc" id="L224">            branchName = repo.getBranch();</span>
+<span class="nc" id="L225">            localHead = currentHead();</span>
+<span class="nc" id="L226">            remoteName = preferences.remoteName();</span>
+<span class="nc" id="L227">        } catch (IOException e) {</span>
+<span class="nc" id="L228">            e.printStackTrace();</span>
+<span class="nc" id="L229">        }</span>
+
+        // Try to get the commit of the remote head with the same name as our local current head
+        try {
+<span class="nc" id="L233">            remoteHead = getCommit(remoteName + &quot;/&quot; + branchName);</span>
+<span class="nc" id="L234">        } catch (IOException ignored) {}</span>
+
+<span class="nc bnc" id="L236" title="All 4 branches missed.">        if (localHead != null &amp;&amp; !localHead.equals(remoteHead)) {</span>
+<span class="nc" id="L237">            tryPush();</span>
+        }
+<span class="nc" id="L239">    }</span>
+
+    public void tryPush() {
+<span class="nc" id="L242">        final var pushCommand = transportSetter().setTransport(</span>
+<span class="nc" id="L243">                git.push().setRemote(preferences.remoteName()));</span>
+<span class="nc" id="L244">        final Object monitor = new Object();</span>
+
+        if (BuildConfig.LOG_DEBUG) {
+<span class="nc" id="L247">            String currentBranch = &quot;UNKNOWN_BRANCH&quot;;</span>
+            try {
+<span class="nc" id="L249">                currentBranch = git.getRepository().getBranch();</span>
+<span class="nc" id="L250">            } catch (IOException ignored) {}</span>
+<span class="nc" id="L251">            LogUtils.d(TAG, &quot;Pushing branch &quot; + currentBranch + &quot; to &quot; + preferences.remoteUri());</span>
+        }
+<span class="nc" id="L253">        App.EXECUTORS.diskIO().execute(() -&gt; {</span>
+            try {
+<span class="nc" id="L255">                Iterable&lt;PushResult&gt; results = (Iterable&lt;PushResult&gt;) pushCommand.call();</span>
+                // org.eclipse.jgit.api.PushCommand swallows some errors without throwing exceptions.
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                if (!results.iterator().next().getMessages().isEmpty()) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                    if (currentActivity != null) {</span>
+<span class="nc" id="L259">                        showSnackbar(currentActivity, results.iterator().next().getMessages());</span>
+                    }
+                }
+<span class="nc" id="L262">                synchronized (monitor) {</span>
+<span class="nc" id="L263">                    monitor.notify();</span>
+<span class="nc" id="L264">                }</span>
+<span class="nc" id="L265">            } catch (GitAPIException e) {</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                if (currentActivity != null) {</span>
+<span class="nc" id="L267">                    showSnackbar(</span>
+                            currentActivity,
+<span class="nc" id="L269">                            String.format(&quot;Failed to push to remote: %s&quot;, e.getMessage())</span>
+                    );
+                }
+<span class="nc" id="L272">            }</span>
+<span class="nc" id="L273">        });</span>
+<span class="nc" id="L274">        synchronized (monitor) {</span>
+            try {
+<span class="nc" id="L276">                monitor.wait();</span>
+<span class="nc" id="L277">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L278">                e.printStackTrace();</span>
+<span class="nc" id="L279">            }</span>
+<span class="nc" id="L280">        }</span>
+<span class="nc" id="L281">    }</span>
+
+    private void gitResetMerge() throws IOException, GitAPIException {
+<span class="nc" id="L284">        git.getRepository().writeMergeCommitMsg(null);</span>
+<span class="nc" id="L285">        git.getRepository().writeMergeHeads(null);</span>
+<span class="nc" id="L286">        git.reset().setMode(ResetCommand.ResetType.HARD).call();</span>
+<span class="nc" id="L287">    }</span>
+
+    public boolean updateAndCommitFileFromRevision(
+            File sourceFile, String repoRelativePath, ObjectId revision) throws IOException {
+<span class="nc" id="L291">        ensureRepoIsClean();</span>
+<span class="nc" id="L292">        ObjectId repositoryRevision = getFileRevision(repoRelativePath, currentHead());</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (repositoryRevision.equals(revision)) {</span>
+<span class="nc" id="L294">            updateAndCommitFile(sourceFile, repoRelativePath);</span>
+<span class="nc" id="L295">            return true;</span>
+        }
+<span class="nc" id="L297">        return false;</span>
+    }
+
+    public void setBranchAndGetLatest() throws IOException {
+<span class="nc" id="L301">        ensureRepoIsClean();</span>
+        try {
+            // Point a &quot;marker&quot; branch to the current head, so that we know a good starting commit
+            // for merge conflict branches.
+<span class="nc" id="L305">            git.branchCreate().setName(PRE_SYNC_MARKER_BRANCH).setForce(true).call();</span>
+<span class="nc" id="L306">        } catch (GitAPIException e) {</span>
+            // We may end up here when syncing an empty Git repo for the first time. So don't
+            // panic, just log an info message.
+<span class="nc" id="L309">            Log.i(TAG, context.getString(R.string.git_sync_error_failed_set_marker_branch));</span>
+<span class="nc" id="L310">        }</span>
+<span class="nc" id="L311">        fetch();</span>
+        try {
+<span class="nc" id="L313">            RevCommit current = currentHead();</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">            if (current == null) {</span>
+<span class="nc" id="L315">                Log.i(TAG, &quot;Git repo does not seem to have any commits.&quot;);</span>
+<span class="nc" id="L316">                return;</span>
+            }
+<span class="nc" id="L318">            RevCommit mergeTarget = getCommit(</span>
+<span class="nc" id="L319">                    String.format(&quot;%s/%s&quot;, preferences.remoteName(), git.getRepository().getBranch()));</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">            if (mergeTarget != null) {</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                if (doMerge(mergeTarget)) {  // Try to merge with the remote head of the current branch.</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                    if (!git.getRepository().getBranch().equals(preferences.branchName())) {</span>
+                        // We are not on the main branch. Make an attempt to return to it.
+<span class="nc" id="L324">                        attemptReturnToMainBranch();</span>
+                    }
+                } else {
+<span class="nc" id="L327">                    throw new IOException(String.format(&quot;Failed to merge %s and %s&quot;,</span>
+<span class="nc" id="L328">                            current.getName(), mergeTarget.getName()));</span>
+                }
+            } else {
+                // We failed to find a corresponding remote head. Check if the repo is completely
+                // empty, and if so, push to it.
+<span class="nc" id="L333">                pushToRemoteIfEmpty();</span>
+            }
+<span class="nc" id="L335">        } catch (GitAPIException e) {</span>
+<span class="nc" id="L336">            throw new IOException(e.getMessage());</span>
+<span class="nc" id="L337">        }</span>
+<span class="nc" id="L338">    }</span>
+
+    private void pushToRemoteIfEmpty() throws GitAPIException {
+<span class="nc" id="L341">        List&lt;Ref&gt; remoteBranches = git.branchList()</span>
+<span class="nc" id="L342">                .setListMode(ListBranchCommand.ListMode.REMOTE)</span>
+<span class="nc" id="L343">                .call();</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        if (remoteBranches.isEmpty()) {</span>
+<span class="nc" id="L345">            tryPush();</span>
+        }
+<span class="nc" id="L347">    }</span>
+
+    public boolean attemptReturnToMainBranch() throws IOException {
+<span class="nc" id="L350">        ensureRepoIsClean();</span>
+<span class="nc" id="L351">        String originalBranch = git.getRepository().getBranch();</span>
+<span class="nc" id="L352">        RevCommit mergeTarget = getCommit(</span>
+<span class="nc" id="L353">                String.format(&quot;%s/%s&quot;, preferences.remoteName(), preferences.branchName()));</span>
+<span class="nc" id="L354">        boolean backOnMainBranch = false;</span>
+        try {
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            if (doMerge(mergeTarget)) {</span>
+<span class="nc" id="L357">                RevCommit merged = currentHead();</span>
+<span class="nc" id="L358">                checkoutSelected();</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                if (doMerge(merged)) {</span>
+<span class="nc" id="L360">                    backOnMainBranch = true;</span>
+<span class="nc" id="L361">                    git.branchDelete().setBranchNames(originalBranch);</span>
+                }
+            }
+<span class="nc" id="L364">        } catch (Exception e) {</span>
+<span class="nc" id="L365">            e.printStackTrace();</span>
+<span class="nc" id="L366">        }</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        if (!backOnMainBranch) {</span>
+            try {
+<span class="nc" id="L369">                git.checkout().setName(originalBranch).call();</span>
+<span class="nc" id="L370">            } catch (GitAPIException ge) {</span>
+<span class="nc" id="L371">                ge.printStackTrace();</span>
+<span class="nc" id="L372">                throw new IOException(&quot;Error during checkout after failed merge attempt.&quot;);</span>
+<span class="nc" id="L373">            }</span>
+        }
+<span class="nc" id="L375">        return backOnMainBranch;</span>
+    }
+
+    public void updateAndCommitExistingFile(File sourceFile, String repositoryPath) throws IOException {
+<span class="nc" id="L379">        ensureRepoIsClean();</span>
+<span class="nc" id="L380">        File destinationFile = workTreeFile(repositoryPath);</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        if (!destinationFile.exists()) {</span>
+<span class="nc" id="L382">            throw new FileNotFoundException(&quot;File &quot; + destinationFile + &quot; does not exist&quot;);</span>
+        }
+<span class="nc" id="L384">        updateAndCommitFile(sourceFile, repositoryPath);</span>
+<span class="nc" id="L385">    }</span>
+
+    /**
+     * Add a new file to the repository, while ensuring that it didn't already exist.
+     * @param sourceFile This will become the contents of the added file
+     * @param repositoryPath Path inside the repo where the file should be added
+     * @throws IOException If the file already exists
+     */
+    public void addAndCommitNewFile(File sourceFile, String repositoryPath) throws IOException {
+<span class="nc" id="L394">        ensureRepoIsClean();</span>
+<span class="nc" id="L395">        File destinationFile = workTreeFile(repositoryPath);</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (destinationFile.exists()) {</span>
+<span class="nc" id="L397">            throw new IOException(&quot;Can't add new file &quot; + repositoryPath + &quot; that already exists.&quot;);</span>
+        }
+<span class="nc" id="L399">        ensureDirectoryHierarchy(repositoryPath);</span>
+<span class="nc" id="L400">        updateAndCommitFile(sourceFile, repositoryPath);</span>
+<span class="nc" id="L401">    }</span>
+
+    private void ensureDirectoryHierarchy(String repositoryPath) throws IOException {
+<span class="nc bnc" id="L404" title="All 2 branches missed.">        if (repositoryPath.contains(&quot;/&quot;)) {</span>
+<span class="nc" id="L405">            File targetDir = workTreeFile(repositoryPath).getParentFile();</span>
+<span class="nc bnc" id="L406" title="All 4 branches missed.">            if (!(targetDir.exists() || targetDir.mkdirs())) {</span>
+<span class="nc" id="L407">                throw new IOException(&quot;The directory &quot; + targetDir.getAbsolutePath() + &quot; could &quot; +</span>
+                        &quot;not be created&quot;);
+            }
+        }
+<span class="nc" id="L411">    }</span>
+
+    private void updateAndCommitFile(
+            File sourceFile, String repoRelativePath) throws IOException {
+<span class="nc" id="L415">        File destinationFile = workTreeFile(repoRelativePath);</span>
+<span class="nc" id="L416">        MiscUtils.copyFile(sourceFile, destinationFile);</span>
+        try {
+<span class="nc" id="L418">            git.add().addFilepattern(repoRelativePath).call();</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">            if (!gitRepoIsClean())</span>
+<span class="nc" id="L420">                commit(String.format(&quot;Orgzly update: %s&quot;, repoRelativePath));</span>
+<span class="nc" id="L421">        } catch (GitAPIException e) {</span>
+<span class="nc" id="L422">            throw new IOException(&quot;Failed to commit changes.&quot;);</span>
+<span class="nc" id="L423">        }</span>
+<span class="nc" id="L424">    }</span>
+
+    private void commit(String message) throws GitAPIException {
+<span class="nc" id="L427">        git.commit().setMessage(message).call();</span>
+<span class="nc" id="L428">    }</span>
+
+    public RevCommit currentHead() throws IOException {
+<span class="nc" id="L431">        return getCommit(Constants.HEAD);</span>
+    }
+
+    public RevCommit getCommit(String identifier) throws IOException {
+<span class="nc bnc" id="L435" title="All 2 branches missed.">        if (isEmptyRepo()) {</span>
+<span class="nc" id="L436">            return null;</span>
+        }
+<span class="nc" id="L438">        Ref target = git.getRepository().findRef(identifier);</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        if (target == null) {</span>
+<span class="nc" id="L440">            return null;</span>
+        }
+<span class="nc" id="L442">        return new RevWalk(git.getRepository()).parseCommit(target.getObjectId());</span>
+    }
+
+    public RevCommit getLastCommitOfFile(Uri uri) throws GitAPIException {
+<span class="nc" id="L446">        String repoRelativePath = uri.toString().replaceFirst(&quot;^/&quot;, &quot;&quot;);</span>
+<span class="nc" id="L447">        return git.log().setMaxCount(1).addPath(repoRelativePath).call().iterator().next();</span>
+    }
+
+    public String workTreePath() {
+<span class="nc" id="L451">        return git.getRepository().getWorkTree().getAbsolutePath();</span>
+    }
+
+    private boolean gitRepoIsClean() {
+        try {
+<span class="nc" id="L456">            Status status = git.status().call();</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            return !status.hasUncommittedChanges();</span>
+<span class="nc" id="L458">        } catch (GitAPIException e) {</span>
+<span class="nc" id="L459">            return false;</span>
+        }
+    }
+
+    private void ensureRepoIsClean() throws IOException {
+<span class="nc bnc" id="L464" title="All 2 branches missed.">        if (!gitRepoIsClean())</span>
+<span class="nc" id="L465">            throw new IOException(&quot;Refusing to update because there are uncommitted changes.&quot;);</span>
+<span class="nc" id="L466">    }</span>
+
+    public File workTreeFile(String filePath) {
+<span class="nc" id="L469">        return new File(workTreePath(), filePath);</span>
+    }
+
+    public boolean isEmptyRepo() throws IOException{
+<span class="nc bnc" id="L473" title="All 2 branches missed.">        return git.getRepository().exactRef(Constants.HEAD).getObjectId() == null;</span>
+    }
+
+    public ObjectId getFileRevision(String pathString, RevCommit commit) throws IOException {
+<span class="nc" id="L477">        return TreeWalk.forPath(</span>
+<span class="nc" id="L478">                git.getRepository(), pathString, commit.getTree()).getObjectId(0);</span>
+    }
+
+    public boolean deleteFileFromRepo(Uri uri) throws IOException {
+<span class="nc bnc" id="L482" title="All 2 branches missed.">        if (mergeWithRemote()) {</span>
+<span class="nc" id="L483">            String repoRelativePath = uri.toString().replaceFirst(&quot;^/&quot;, &quot;&quot;);</span>
+            try {
+<span class="nc" id="L485">                git.rm().addFilepattern(repoRelativePath).call();</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">                if (!gitRepoIsClean())</span>
+<span class="nc" id="L487">                    commit(String.format(&quot;Orgzly deletion: %s&quot;, repoRelativePath));</span>
+<span class="nc" id="L488">                return true;</span>
+<span class="nc" id="L489">            } catch (GitAPIException e) {</span>
+<span class="nc" id="L490">                throw new IOException(String.format(&quot;Failed to commit deletion of %s, %s&quot;, repoRelativePath, e.getMessage()));</span>
+            }
+        } else {
+<span class="nc" id="L493">            return false;</span>
+        }
+    }
+
+    public boolean renameFileInRepo(String oldPath, String newPath) throws IOException {
+<span class="nc" id="L498">        ensureRepoIsClean();</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">        if (mergeWithRemote()) {</span>
+<span class="nc" id="L500">            File oldFile = workTreeFile(oldPath);</span>
+<span class="nc" id="L501">            File newFile = workTreeFile(newPath);</span>
+            // Abort if destination file exists
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if (newFile.exists()) {</span>
+<span class="nc" id="L504">                throw new IOException(&quot;Repository file &quot; + newPath + &quot; already exists.&quot;);</span>
+            }
+<span class="nc" id="L506">            ensureDirectoryHierarchy(newPath);</span>
+            // Copy the file contents and add it to the index
+<span class="nc" id="L508">            MiscUtils.copyFile(oldFile, newFile);</span>
+            try {
+<span class="nc" id="L510">                git.add().addFilepattern(newPath).call();</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                if (!gitRepoIsClean()) {</span>
+                    // Remove the old file from the Git index
+<span class="nc" id="L513">                    git.rm().addFilepattern(oldPath).call();</span>
+<span class="nc" id="L514">                    commit(String.format(&quot;Orgzly: rename %s to %s&quot;, oldPath, newPath));</span>
+<span class="nc" id="L515">                    return true;</span>
+                }
+<span class="nc" id="L517">            } catch (GitAPIException e) {</span>
+<span class="nc" id="L518">                throw new IOException(&quot;Failed to rename file in repo, &quot; + e.getMessage());</span>
+<span class="nc" id="L519">            }</span>
+        }
+<span class="nc" id="L521">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,514 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MonthByWeekFragment.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.month</a> &gt; <span class="el_source">MonthByWeekFragment.java</span></div><h1>MonthByWeekFragment.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2010 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.month;
+
+import android.app.Activity;
+import android.content.ContentUris;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.graphics.drawable.StateListDrawable;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.Calendars;
+import android.provider.CalendarContract.Instances;
+import android.text.format.DateUtils;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.View.OnTouchListener;
+import android.view.ViewConfiguration;
+import android.view.ViewGroup;
+import android.widget.AbsListView;
+import android.widget.AbsListView.OnScrollListener;
+
+import androidx.annotation.NonNull;
+import androidx.fragment.app.FragmentManager;
+import androidx.loader.app.LoaderManager;
+import androidx.loader.content.CursorLoader;
+import androidx.loader.content.Loader;
+
+import com.android.calendar.CalendarController;
+import com.android.calendar.CalendarController.EventInfo;
+import com.android.calendar.CalendarController.EventType;
+import com.android.calendar.CalendarController.ViewType;
+import com.android.calendar.theme.DynamicThemeKt;
+import com.android.calendar.Event;
+import com.android.calendar.Utils;
+import com.android.calendar.event.CreateEventDialogFragment;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.HashMap;
+import java.util.List;
+
+import ws.xsoh.etar.R;
+
+public class MonthByWeekFragment extends SimpleDayPickerFragment implements
+        CalendarController.EventHandler, LoaderManager.LoaderCallbacks&lt;Cursor&gt;, OnScrollListener,
+        OnTouchListener {
+    private static final String TAG = &quot;MonthFragment&quot;;
+    private static final String TAG_EVENT_DIALOG = &quot;event_dialog&quot;;
+    // Selection and selection args for adding event queries
+    private static final String WHERE_CALENDARS_VISIBLE = Calendars.VISIBLE + &quot;=1&quot;;
+    private static final String INSTANCES_SORT_ORDER = Instances.START_DAY + &quot;,&quot;
+            + Instances.START_MINUTE + &quot;,&quot; + Instances.TITLE;
+    private static final int WEEKS_BUFFER = 1;
+    // How long to wait after scroll stops before starting the loader
+    // Using scroll duration because scroll state changes don't update
+    // correctly when a scroll is triggered programmatically.
+    private static final int LOADER_DELAY = 200;
+    // The minimum time between requeries of the data if the db is
+    // changing
+    private static final int LOADER_THROTTLE_DELAY = 500;
+<span class="nc" id="L82">    protected static boolean mShowDetailsInMonth = false;</span>
+<span class="nc" id="L83">    private final Time mDesiredDay = new Time();</span>
+<span class="nc" id="L84">    private final Runnable mTZUpdater = new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="nc" id="L87">            String tz = Utils.getTimeZone(mContext, mTZUpdater);</span>
+<span class="nc" id="L88">            mSelectedDay.setTimezone(tz);</span>
+<span class="nc" id="L89">            mSelectedDay.normalize();</span>
+<span class="nc" id="L90">            mTempTime.setTimezone(tz);</span>
+<span class="nc" id="L91">            mFirstDayOfMonth.setTimezone(tz);</span>
+<span class="nc" id="L92">            mFirstDayOfMonth.normalize();</span>
+<span class="nc" id="L93">            mFirstVisibleDay.setTimezone(tz);</span>
+<span class="nc" id="L94">            mFirstVisibleDay.normalize();</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            if (mAdapter != null) {</span>
+<span class="nc" id="L96">                mAdapter.refresh();</span>
+            }
+<span class="nc" id="L98">        }</span>
+    };
+    protected float mMinimumTwoMonthFlingVelocity;
+    protected boolean mIsMiniMonth;
+    protected boolean mHideDeclined;
+    protected int mFirstLoadedJulianDay;
+    protected int mLastLoadedJulianDay;
+    private CreateEventDialogFragment mEventDialog;
+    private CursorLoader mLoader;
+    private Uri mEventUri;
+<span class="nc" id="L108">    private volatile boolean mShouldLoad = true;</span>
+<span class="nc" id="L109">    private final Runnable mUpdateLoader = new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="nc" id="L112">            synchronized (this) {</span>
+<span class="nc bnc" id="L113" title="All 4 branches missed.">                if (!mShouldLoad || mLoader == null) {</span>
+<span class="nc" id="L114">                    return;</span>
+                }
+                // Stop any previous loads while we update the uri
+<span class="nc" id="L117">                stopLoader();</span>
+
+                // Start the loader again
+<span class="nc" id="L120">                mEventUri = updateUri();</span>
+
+<span class="nc" id="L122">                mLoader.setUri(mEventUri);</span>
+<span class="nc" id="L123">                mLoader.startLoading();</span>
+<span class="nc" id="L124">                mLoader.onContentChanged();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L126">                    Log.d(TAG, &quot;Started loader with uri: &quot; + mEventUri);</span>
+                }
+<span class="nc" id="L128">            }</span>
+<span class="nc" id="L129">        }</span>
+    };
+<span class="nc" id="L131">    private boolean mUserScrolled = false;</span>
+    private int mEventsLoadingDelay;
+    private boolean mShowCalendarControls;
+    private boolean mIsDetached;
+    // Used to load the events when a delay is needed
+<span class="nc" id="L136">    Runnable mLoadingRunnable = new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            if (!mIsDetached) {</span>
+<span class="nc" id="L140">                mLoader = (CursorLoader) LoaderManager.getInstance(MonthByWeekFragment.this)</span>
+<span class="nc" id="L141">                        .initLoader(0, null, MonthByWeekFragment.this);</span>
+            }
+<span class="nc" id="L143">        }</span>
+    };
+<span class="nc" id="L145">    private Handler mEventDialogHandler = new Handler() {</span>
+
+        @Override
+        public void handleMessage(Message msg) {
+<span class="nc" id="L149">            final FragmentManager manager = getParentFragmentManager();</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (manager != null) {</span>
+<span class="nc" id="L151">                Time day = (Time) msg.obj;</span>
+<span class="nc" id="L152">                mEventDialog = new CreateEventDialogFragment(day);</span>
+<span class="nc" id="L153">                mEventDialog.show(manager, TAG_EVENT_DIALOG);</span>
+            }
+<span class="nc" id="L155">        }</span>
+    };
+
+
+    public MonthByWeekFragment() {
+<span class="nc" id="L160">        this(System.currentTimeMillis(), true);</span>
+<span class="nc" id="L161">    }</span>
+
+    public MonthByWeekFragment(long initialTime, boolean isMiniMonth) {
+<span class="nc" id="L164">        super(initialTime);</span>
+<span class="nc" id="L165">        mIsMiniMonth = isMiniMonth;</span>
+<span class="nc" id="L166">    }</span>
+
+    /**
+     * Updates the uri used by the loader according to the current position of
+     * the listview.
+     *
+     * @return The new Uri to use
+     */
+    private Uri updateUri() {
+<span class="nc" id="L175">        SimpleWeekView child = (SimpleWeekView) mListView.getChildAt(0);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (child != null) {</span>
+<span class="nc" id="L177">            mFirstLoadedJulianDay = child.getFirstJulianDay();</span>
+        }
+        // -1 to ensure we get all day events from any time zone
+<span class="nc" id="L180">        mTempTime.setJulianDay(mFirstLoadedJulianDay - 1);</span>
+<span class="nc" id="L181">        long start = mTempTime.toMillis();</span>
+<span class="nc" id="L182">        mLastLoadedJulianDay = mFirstLoadedJulianDay + (mNumWeeks + 2 * WEEKS_BUFFER) * 7;</span>
+        // +1 to ensure we get all day events from any time zone
+<span class="nc" id="L184">        mTempTime.setJulianDay(mLastLoadedJulianDay + 1);</span>
+<span class="nc" id="L185">        long end = mTempTime.toMillis();</span>
+
+        // Create a new uri with the updated times
+<span class="nc" id="L188">        Uri.Builder builder = Instances.CONTENT_URI.buildUpon();</span>
+<span class="nc" id="L189">        ContentUris.appendId(builder, start);</span>
+<span class="nc" id="L190">        ContentUris.appendId(builder, end);</span>
+<span class="nc" id="L191">        return builder.build();</span>
+    }
+
+    // Extract range of julian days from URI
+    private void updateLoadedDays() {
+<span class="nc" id="L196">        List&lt;String&gt; pathSegments = mEventUri.getPathSegments();</span>
+<span class="nc" id="L197">        int size = pathSegments.size();</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (size &lt;= 2) {</span>
+<span class="nc" id="L199">            return;</span>
+        }
+<span class="nc" id="L201">        long first = Long.parseLong(pathSegments.get(size - 2));</span>
+<span class="nc" id="L202">        long last = Long.parseLong(pathSegments.get(size - 1));</span>
+<span class="nc" id="L203">        mTempTime.set(first);</span>
+<span class="nc" id="L204">        mFirstLoadedJulianDay = Time.getJulianDay(first, mTempTime.getGmtOffset());</span>
+<span class="nc" id="L205">        mTempTime.set(last);</span>
+<span class="nc" id="L206">        mLastLoadedJulianDay = Time.getJulianDay(last, mTempTime.getGmtOffset());</span>
+<span class="nc" id="L207">    }</span>
+
+    protected String updateWhere() {
+        // TODO fix selection/selection args after b/3206641 is fixed
+<span class="nc" id="L211">        String where = WHERE_CALENDARS_VISIBLE;</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">        if (mHideDeclined || !mShowDetailsInMonth) {</span>
+<span class="nc" id="L213">            where += &quot; AND &quot; + Instances.SELF_ATTENDEE_STATUS + &quot;!=&quot;</span>
+                    + Attendees.ATTENDEE_STATUS_DECLINED;
+        }
+<span class="nc" id="L216">        return where;</span>
+    }
+
+    private void stopLoader() {
+<span class="nc" id="L220">        synchronized (mUpdateLoader) {</span>
+<span class="nc" id="L221">            mHandler.removeCallbacks(mUpdateLoader);</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (mLoader != null) {</span>
+<span class="nc" id="L223">                mLoader.stopLoading();</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">                if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L225">                    Log.d(TAG, &quot;Stopped loader from loading&quot;);</span>
+                }
+            }
+<span class="nc" id="L228">        }</span>
+<span class="nc" id="L229">    }</span>
+
+    @Override
+    public void onAttach(Activity activity) {
+<span class="nc" id="L233">        super.onAttach(activity);</span>
+<span class="nc" id="L234">        mTZUpdater.run();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        if (mAdapter != null) {</span>
+<span class="nc" id="L236">            mAdapter.setSelectedDay(mSelectedDay);</span>
+        }
+<span class="nc" id="L238">        mIsDetached = false;</span>
+
+<span class="nc" id="L240">        ViewConfiguration viewConfig = ViewConfiguration.get(activity);</span>
+<span class="nc" id="L241">        mMinimumTwoMonthFlingVelocity = viewConfig.getScaledMaximumFlingVelocity() / 2;</span>
+<span class="nc" id="L242">        Resources res = activity.getResources();</span>
+<span class="nc" id="L243">        mShowCalendarControls = Utils.getConfigBool(activity, R.bool.show_calendar_controls);</span>
+        // Synchronized the loading time of the month's events with the animation of the
+        // calendar controls.
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (mShowCalendarControls) {</span>
+<span class="nc" id="L247">            mEventsLoadingDelay = res.getInteger(R.integer.calendar_controls_animation_time);</span>
+        }
+<span class="nc" id="L249">        mShowDetailsInMonth = res.getBoolean(R.bool.show_details_in_month);</span>
+<span class="nc" id="L250">    }</span>
+
+    @Override
+    public void onDetach() {
+<span class="nc" id="L254">        mIsDetached = true;</span>
+<span class="nc" id="L255">        super.onDetach();</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (mShowCalendarControls) {</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (mListView != null) {</span>
+<span class="nc" id="L258">                mListView.removeCallbacks(mLoadingRunnable);</span>
+            }
+        }
+<span class="nc" id="L261">    }</span>
+
+    @Override
+    protected void setUpAdapter() {
+<span class="nc" id="L265">        mFirstDayOfWeek = Utils.getFirstDayOfWeek(mContext);</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        if (mIsMiniMonth) {</span>
+<span class="nc" id="L267">            mShowWeekNumber = false;</span>
+        } else {
+<span class="nc" id="L269">            mShowWeekNumber = Utils.getShowWeekNumber(mContext);</span>
+        }
+
+<span class="nc" id="L272">        HashMap&lt;String, Integer&gt; weekParams = new HashMap&lt;String, Integer&gt;();</span>
+<span class="nc" id="L273">        weekParams.put(SimpleWeeksAdapter.WEEK_PARAMS_NUM_WEEKS, mNumWeeks);</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        weekParams.put(SimpleWeeksAdapter.WEEK_PARAMS_SHOW_WEEK, mShowWeekNumber ? 1 : 0);</span>
+<span class="nc" id="L275">        weekParams.put(SimpleWeeksAdapter.WEEK_PARAMS_WEEK_START, mFirstDayOfWeek);</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        weekParams.put(MonthByWeekAdapter.WEEK_PARAMS_IS_MINI, mIsMiniMonth ? 1 : 0);</span>
+<span class="nc" id="L277">        weekParams.put(SimpleWeeksAdapter.WEEK_PARAMS_JULIAN_DAY,</span>
+<span class="nc" id="L278">                Time.getJulianDay(mSelectedDay.toMillis(), mSelectedDay.getGmtOffset()));</span>
+<span class="nc" id="L279">        weekParams.put(SimpleWeeksAdapter.WEEK_PARAMS_DAYS_PER_WEEK, mDaysPerWeek);</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">        if (mAdapter == null) {</span>
+<span class="nc" id="L281">            mAdapter = new MonthByWeekAdapter(getActivity(), weekParams, mEventDialogHandler);</span>
+<span class="nc" id="L282">            mAdapter.registerDataSetObserver(mObserver);</span>
+        } else {
+<span class="nc" id="L284">            mAdapter.updateParams(weekParams);</span>
+        }
+<span class="nc" id="L286">        mAdapter.notifyDataSetChanged();</span>
+<span class="nc" id="L287">    }</span>
+
+    @Override
+    public View onCreateView(
+            LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+        View v;
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (mIsMiniMonth) {</span>
+<span class="nc" id="L294">            v = inflater.inflate(R.layout.month_by_week, container, false);</span>
+        } else {
+<span class="nc" id="L296">            v = inflater.inflate(R.layout.full_month_by_week, container, false);</span>
+        }
+<span class="nc" id="L298">        mDayNamesHeader = (ViewGroup) v.findViewById(R.id.day_names);</span>
+<span class="nc" id="L299">        return v;</span>
+    }
+
+    @Override
+    public void onActivityCreated(Bundle savedInstanceState) {
+<span class="nc" id="L304">        super.onActivityCreated(savedInstanceState);</span>
+<span class="nc" id="L305">        mListView.setSelector(new StateListDrawable());</span>
+<span class="nc" id="L306">        mListView.setOnTouchListener(this);</span>
+
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (!mIsMiniMonth) {</span>
+<span class="nc" id="L309">            mListView.setBackgroundColor(DynamicThemeKt.getColor(getActivity(), &quot;month_bgcolor&quot;));</span>
+        }
+
+        // To get a smoother transition when showing this fragment, delay loading of events until
+        // the fragment is expended fully and the calendar controls are gone.
+<span class="nc bnc" id="L314" title="All 4 branches missed.">        if (Utils.isCalendarPermissionGranted(mContext, true) &amp;&amp; !mIsMiniMonth) {</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">            if (mShowCalendarControls) {</span>
+<span class="nc" id="L316">                mListView.postDelayed(mLoadingRunnable, mEventsLoadingDelay);</span>
+            } else {
+<span class="nc" id="L318">                mLoader = (CursorLoader) LoaderManager.getInstance(MonthByWeekFragment.this)</span>
+<span class="nc" id="L319">                        .initLoader(0, null, this);</span>
+            }
+        }
+<span class="nc" id="L322">        mAdapter.setListView(mListView);</span>
+<span class="nc" id="L323">    }</span>
+
+    @Override
+    protected void setUpHeader() {
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (mIsMiniMonth) {</span>
+<span class="nc" id="L328">            super.setUpHeader();</span>
+<span class="nc" id="L329">            return;</span>
+        }
+
+<span class="nc" id="L332">        mDayLabels = new String[7];</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        for (int i = Calendar.SUNDAY; i &lt;= Calendar.SATURDAY; i++) {</span>
+<span class="nc" id="L334">            mDayLabels[i - Calendar.SUNDAY] = DateUtils.getDayOfWeekString(i,</span>
+<span class="nc" id="L335">                    DateUtils.LENGTH_MEDIUM).toUpperCase();</span>
+        }
+<span class="nc" id="L337">    }</span>
+
+    // TODO
+    @NonNull
+    @Override
+    public Loader&lt;Cursor&gt; onCreateLoader(int id, Bundle args) {
+        CursorLoader loader;
+<span class="nc" id="L344">        synchronized (mUpdateLoader) {</span>
+<span class="nc" id="L345">            mFirstLoadedJulianDay =</span>
+<span class="nc" id="L346">                    Time.getJulianDay(mSelectedDay.toMillis(), mSelectedDay.getGmtOffset())</span>
+                    - (mNumWeeks * 7 / 2);
+<span class="nc" id="L348">            mEventUri = updateUri();</span>
+<span class="nc" id="L349">            String where = updateWhere();</span>
+
+<span class="nc" id="L351">            loader = new CursorLoader(</span>
+<span class="nc" id="L352">                    requireActivity(), mEventUri, Event.EVENT_PROJECTION, where,</span>
+                    null /* WHERE_CALENDARS_SELECTED_ARGS */, INSTANCES_SORT_ORDER);
+<span class="nc" id="L354">            loader.setUpdateThrottle(LOADER_THROTTLE_DELAY);</span>
+<span class="nc" id="L355">        }</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L357">            Log.d(TAG, &quot;Returning new loader with uri: &quot; + mEventUri);</span>
+        }
+<span class="nc" id="L359">        return loader;</span>
+    }
+
+    @Override
+    public void doResumeUpdates() {
+<span class="nc" id="L364">        mFirstDayOfWeek = Utils.getFirstDayOfWeek(mContext);</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">        if (mIsMiniMonth) {</span>
+<span class="nc" id="L366">            mShowWeekNumber = false;</span>
+        } else {
+<span class="nc" id="L368">            mShowWeekNumber = Utils.getShowWeekNumber(mContext);</span>
+        }
+<span class="nc" id="L370">        boolean prevHideDeclined = mHideDeclined;</span>
+<span class="nc" id="L371">        mHideDeclined = Utils.getHideDeclinedEvents(mContext);</span>
+<span class="nc bnc" id="L372" title="All 4 branches missed.">        if (prevHideDeclined != mHideDeclined &amp;&amp; mLoader != null) {</span>
+<span class="nc" id="L373">            mLoader.setSelection(updateWhere());</span>
+        }
+<span class="nc" id="L375">        mDaysPerWeek = Utils.getMDaysPerWeek(mContext);</span>
+<span class="nc" id="L376">        updateHeader();</span>
+<span class="nc" id="L377">        mAdapter.setSelectedDay(mSelectedDay);</span>
+<span class="nc" id="L378">        mTZUpdater.run();</span>
+<span class="nc" id="L379">        mTodayUpdater.run();</span>
+<span class="nc" id="L380">        goTo(mSelectedDay.toMillis(), false, true, false);</span>
+<span class="nc" id="L381">    }</span>
+
+    @Override
+    public void onLoadFinished(@NonNull Loader&lt;Cursor&gt; loader, Cursor data) {
+<span class="nc" id="L385">        synchronized (mUpdateLoader) {</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L387">                Log.d(TAG, &quot;Found &quot; + data.getCount() + &quot; cursor entries for uri &quot; + mEventUri);</span>
+            }
+<span class="nc" id="L389">            CursorLoader cLoader = (CursorLoader) loader;</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">            if (mEventUri == null) {</span>
+<span class="nc" id="L391">                mEventUri = cLoader.getUri();</span>
+<span class="nc" id="L392">                updateLoadedDays();</span>
+            }
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            if (cLoader.getUri().compareTo(mEventUri) != 0) {</span>
+                // We've started a new query since this loader ran so ignore the
+                // result
+<span class="nc" id="L397">                return;</span>
+            }
+<span class="nc" id="L399">            ArrayList&lt;Event&gt; events = new ArrayList&lt;Event&gt;();</span>
+<span class="nc" id="L400">            Event.buildEventsFromCursor(</span>
+                    events, data, mContext, mFirstLoadedJulianDay, mLastLoadedJulianDay);
+<span class="nc" id="L402">            ((MonthByWeekAdapter) mAdapter).setEvents(mFirstLoadedJulianDay,</span>
+                    mLastLoadedJulianDay - mFirstLoadedJulianDay + 1, events);
+<span class="nc" id="L404">        }</span>
+<span class="nc" id="L405">    }</span>
+
+    @Override
+    public void onLoaderReset(@NonNull Loader&lt;Cursor&gt; loader) {
+<span class="nc" id="L409">    }</span>
+
+    @Override
+    public void eventsChanged() {
+        // TODO remove this after b/3387924 is resolved
+<span class="nc bnc" id="L414" title="All 2 branches missed.">        if (mLoader != null) {</span>
+<span class="nc" id="L415">            mLoader.forceLoad();</span>
+        }
+<span class="nc" id="L417">    }</span>
+
+    @Override
+    public long getSupportedEventTypes() {
+<span class="nc" id="L421">        return EventType.GO_TO | EventType.EVENTS_CHANGED;</span>
+    }
+
+    @Override
+    public void handleEvent(EventInfo event) {
+<span class="nc bnc" id="L426" title="All 2 branches missed.">        if (event.eventType == EventType.GO_TO) {</span>
+<span class="nc" id="L427">            boolean animate = true;</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            if (mDaysPerWeek * mNumWeeks * 2 &lt; Math.abs(</span>
+<span class="nc" id="L429">                    Time.getJulianDay(event.selectedTime.toMillis(), event.selectedTime.getGmtOffset())</span>
+<span class="nc" id="L430">                    - Time.getJulianDay(mFirstVisibleDay.toMillis(), mFirstVisibleDay.getGmtOffset())</span>
+                    - mDaysPerWeek * mNumWeeks / 2)) {
+<span class="nc" id="L432">                animate = false;</span>
+            }
+<span class="nc" id="L434">            mDesiredDay.set(event.selectedTime);</span>
+<span class="nc" id="L435">            mDesiredDay.normalize();</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">            boolean animateToday = (event.extraLong &amp; CalendarController.EXTRA_GOTO_TODAY) != 0;</span>
+<span class="nc" id="L437">            boolean delayAnimation = goTo(event.selectedTime.toMillis(), animate, true, false);</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            if (animateToday) {</span>
+                // If we need to flash today start the animation after any
+                // movement from listView has ended.
+<span class="nc" id="L441">                mHandler.postDelayed(new Runnable() {</span>
+                    @Override
+                    public void run() {
+<span class="nc" id="L444">                        ((MonthByWeekAdapter) mAdapter).animateToday();</span>
+<span class="nc" id="L445">                        mAdapter.notifyDataSetChanged();</span>
+<span class="nc" id="L446">                    }</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">                }, delayAnimation ? GOTO_SCROLL_DURATION : 0);</span>
+            }
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        } else if (event.eventType == EventType.EVENTS_CHANGED) {</span>
+<span class="nc" id="L450">            eventsChanged();</span>
+        }
+<span class="nc" id="L452">    }</span>
+
+    @Override
+    protected void setMonthDisplayed(Time time, boolean updateHighlight) {
+<span class="nc" id="L456">        super.setMonthDisplayed(time, updateHighlight);</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (!mIsMiniMonth) {</span>
+<span class="nc" id="L458">            boolean useSelected = false;</span>
+<span class="nc bnc" id="L459" title="All 4 branches missed.">            if (time.getYear() == mDesiredDay.getYear() &amp;&amp; time.getMonth() == mDesiredDay.getMonth()) {</span>
+<span class="nc" id="L460">                mSelectedDay.set(mDesiredDay);</span>
+<span class="nc" id="L461">                mAdapter.setSelectedDay(mDesiredDay);</span>
+<span class="nc" id="L462">                useSelected = true;</span>
+            } else {
+<span class="nc" id="L464">                mSelectedDay.set(time);</span>
+<span class="nc" id="L465">                mAdapter.setSelectedDay(time);</span>
+            }
+<span class="nc" id="L467">            CalendarController controller = CalendarController.getInstance(mContext);</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            if (mSelectedDay.getMinute() &gt;= 30) {</span>
+<span class="nc" id="L469">                mSelectedDay.setMinute(30);</span>
+            } else {
+<span class="nc" id="L471">                mSelectedDay.setMinute(0);</span>
+            }
+<span class="nc" id="L473">            long newTime = mSelectedDay.normalize();</span>
+<span class="nc bnc" id="L474" title="All 4 branches missed.">            if (newTime != controller.getTime() &amp;&amp; mUserScrolled) {</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                long offset = useSelected ? 0 : DateUtils.WEEK_IN_MILLIS * mNumWeeks / 3;</span>
+<span class="nc" id="L476">                controller.setTime(newTime + offset);</span>
+            }
+<span class="nc" id="L478">            controller.sendEvent(this, EventType.UPDATE_TITLE, time, time, time, -1,</span>
+                    ViewType.CURRENT, DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_NO_MONTH_DAY
+                            | DateUtils.FORMAT_SHOW_YEAR, null, null);
+        }
+<span class="nc" id="L482">    }</span>
+
+    @Override
+    public void onScrollStateChanged(AbsListView view, int scrollState) {
+
+<span class="nc" id="L487">        synchronized (mUpdateLoader) {</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">            if (scrollState != OnScrollListener.SCROLL_STATE_IDLE) {</span>
+<span class="nc" id="L489">                mShouldLoad = false;</span>
+<span class="nc" id="L490">                stopLoader();</span>
+<span class="nc" id="L491">                mDesiredDay.set(System.currentTimeMillis());</span>
+            } else {
+<span class="nc" id="L493">                mHandler.removeCallbacks(mUpdateLoader);</span>
+<span class="nc" id="L494">                mShouldLoad = true;</span>
+<span class="nc" id="L495">                mHandler.postDelayed(mUpdateLoader, LOADER_DELAY);</span>
+            }
+<span class="nc" id="L497">        }</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        if (scrollState == OnScrollListener.SCROLL_STATE_TOUCH_SCROLL) {</span>
+<span class="nc" id="L499">            mUserScrolled = true;</span>
+        }
+
+<span class="nc" id="L502">        mScrollStateChangedRunnable.doScrollStateChange(view, scrollState);</span>
+<span class="nc" id="L503">    }</span>
+
+    @Override
+    public boolean onTouch(View v, MotionEvent event) {
+<span class="nc" id="L507">        mDesiredDay.set(System.currentTimeMillis());</span>
+<span class="nc" id="L508">        return false;</span>
+        // TODO post a cleanup to push us back onto the grid if something went
+        // wrong in a scroll such as the user stopping the view but not
+        // scrolling
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

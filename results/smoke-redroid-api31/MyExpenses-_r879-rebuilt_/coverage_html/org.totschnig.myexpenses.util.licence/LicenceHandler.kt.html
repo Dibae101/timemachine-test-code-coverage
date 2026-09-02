@@ -1,0 +1,560 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LicenceHandler.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.util.licence</a> &gt; <span class="el_source">LicenceHandler.kt</span></div><h1>LicenceHandler.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.util.licence
+
+import android.app.Application
+import android.content.Context
+import android.net.Uri
+import androidx.annotation.VisibleForTesting
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.key
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.dimensionResource
+import androidx.compose.ui.res.stringResource
+import com.google.android.vending.licensing.PreferenceObfuscator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import org.apache.commons.lang3.time.DateUtils
+import org.totschnig.myexpenses.BuildConfig
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.activity.IapActivity
+import org.totschnig.myexpenses.compose.AppTheme
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.countAccounts
+import org.totschnig.myexpenses.db2.updateNewPlanEnabled
+import org.totschnig.myexpenses.model.ContribFeature
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.sync.GenericAccountService
+import org.totschnig.myexpenses.util.EU_COUNTRIES
+import org.totschnig.myexpenses.util.ICurrencyFormatter
+import org.totschnig.myexpenses.util.ShortcutHelper
+import org.totschnig.myexpenses.util.Utils
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.distrib.DistributionHelper
+import org.totschnig.myexpenses.util.enumValueOrNull
+import org.totschnig.myexpenses.util.epochMillis2LocalDate
+import timber.log.Timber
+import java.time.Clock
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+
+<span class="fc" id="L56">open class LicenceHandler(</span>
+<span class="pc" id="L57">    protected val context: Application,</span>
+<span class="pc" id="L58">    var licenseStatusPrefs: PreferenceObfuscator,</span>
+<span class="fc" id="L59">    private val crashHandler: CrashHandler,</span>
+<span class="pc" id="L60">    protected val prefHandler: PrefHandler,</span>
+<span class="fc" id="L61">    private val repository: Repository,</span>
+<span class="fc" id="L62">    private val currencyFormatter: ICurrencyFormatter,</span>
+<span class="fc" id="L63">    private val clock: Clock = Clock.systemUTC(),</span>
+<span class="fc" id="L64">) {</span>
+    private var hasOurLicence = false
+<span class="fc" id="L66">    private val isSandbox = BuildConfig.DEBUG</span>
+
+<span class="nc" id="L68">    class LicenceUpdateEvent</span>
+
+<span class="pc" id="L70">    private val licenceStatusFlow by lazy {</span>
+<span class="nc" id="L71">        MutableStateFlow(LicenceUpdateEvent())</span>
+    }
+
+    protected suspend fun licenceStatusUpdated() {
+<span class="nc" id="L75">        licenceStatusFlow.emit(LicenceUpdateEvent())</span>
+<span class="nc" id="L76">    }</span>
+
+<span class="fc" id="L78">    var licenceStatus: LicenceStatus? = null</span>
+        internal set(value) {
+<span class="pc bpc" id="L80" title="3 of 4 branches missed.">            crashHandler.putCustomData(&quot;Licence&quot;, value?.name ?: &quot;null&quot;)</span>
+<span class="fc" id="L81">            field = value</span>
+<span class="fc" id="L82">        }</span>
+<span class="pc" id="L83">    protected val addOnFeatures: MutableSet&lt;ContribFeature&gt; = mutableSetOf()</span>
+
+<span class="pc" id="L85">    val currencyUnit: CurrencyUnit = CurrencyUnit(&quot;EUR&quot;, &quot;€&quot;, 2)</span>
+<span class="nc" id="L86">    fun hasValidKey() = hasOurLicence</span>
+
+    //called from PlayStoreLicenceHandler
+    fun maybeUpgradeAddonFeatures(features: List&lt;ContribFeature&gt;, newPurchase: Boolean) {
+<span class="nc bnc" id="L90" title="All 4 branches missed.">        if (!hasOurLicence &amp;&amp; !newPurchase) {</span>
+<span class="nc" id="L91">            addOnFeatures.clear()</span>
+        }
+<span class="nc" id="L93">        addFeatures(features)</span>
+<span class="nc" id="L94">        persistAddonFeatures()</span>
+<span class="nc" id="L95">    }</span>
+
+    val hasAnyLicence: Boolean
+<span class="nc bnc" id="L98" title="All 6 branches missed.">        get() = licenceStatus != null || addOnFeatures.isNotEmpty()</span>
+
+    private fun addFeatures(features: List&lt;ContribFeature&gt;) {
+<span class="nc" id="L101">        addOnFeatures.addAll(features)</span>
+<span class="nc" id="L102">    }</span>
+
+    //called from PlayStoreLicenceHandler
+    fun maybeUpgradeLicence(licenceStatus: LicenceStatus?) {
+        //we downgrade only if we do not have our own licence
+<span class="nc bnc" id="L107" title="All 8 branches missed.">        if (!hasOurLicence || this.licenceStatus?.greaterOrEqual(licenceStatus) != true) {</span>
+<span class="nc" id="L108">            this.licenceStatus = licenceStatus</span>
+        }
+<span class="nc" id="L110">    }</span>
+
+    val isContribEnabled: Boolean
+<span class="nc" id="L113">        get() = isEnabledFor(LicenceStatus.CONTRIB)</span>
+
+    @get:VisibleForTesting
+    val isExtendedEnabled: Boolean
+<span class="nc" id="L117">        get() = isEnabledFor(LicenceStatus.EXTENDED)</span>
+    val isProfessionalEnabled: Boolean
+<span class="nc" id="L119">        get() = isEnabledFor(LicenceStatus.PROFESSIONAL)</span>
+
+    /**
+     * @return user either has access through licence or through trial
+     */
+    fun hasTrialAccessTo(feature: ContribFeature) =
+<span class="nc bnc" id="L125" title="All 4 branches missed.">        hasAccessTo(feature) || usagesLeft(feature)</span>
+
+    fun hasAccessTo(feature: ContribFeature) =
+<span class="nc bnc" id="L128" title="All 4 branches missed.">        isEnabledFor(feature.licenceStatus) || addOnFeatures.contains(feature)</span>
+
+    open fun isEnabledFor(licenceStatus: LicenceStatus) =
+<span class="nc bnc" id="L131" title="All 4 branches missed.">        (this.licenceStatus?.compareTo(licenceStatus) ?: -1) &gt;= 0</span>
+
+    val isUpgradeable: Boolean
+<span class="nc bnc" id="L134" title="All 6 branches missed.">        get() = licenceStatus?.isUpgradeable != false</span>
+
+    open fun init() {
+<span class="pc" id="L137">        this.licenceStatus = enumValueOrNull&lt;LicenceStatus&gt;(</span>
+<span class="fc" id="L138">            licenseStatusPrefs.getString(LICENSE_STATUS_KEY, null)</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">        )?.also {</span>
+<span class="nc" id="L140">            hasOurLicence = true</span>
+<span class="nc" id="L141">        }</span>
+<span class="fc" id="L142">        restoreAddOnFeatures()</span>
+<span class="fc" id="L143">    }</span>
+
+    fun update() {
+<span class="nc" id="L146">        CoroutineScope(Dispatchers.IO).launch {</span>
+<span class="nc" id="L147">            try {</span>
+<span class="nc" id="L148">                repository.updateNewPlanEnabled(this@LicenceHandler)</span>
+<span class="nc" id="L149">                updateNewAccountEnabled()</span>
+<span class="nc" id="L150">            } catch (_: Exception) {</span>
+            }
+<span class="nc" id="L152">            GenericAccountService.updateAccountsIsSyncable(</span>
+<span class="nc" id="L153">                context,</span>
+<span class="nc" id="L154">                this@LicenceHandler,</span>
+<span class="nc" id="L155">                prefHandler</span>
+            )
+<span class="nc" id="L157">            ShortcutHelper.configureSplitShortcut(context, isContribEnabled)</span>
+<span class="nc" id="L158">        }</span>
+<span class="nc" id="L159">    }</span>
+
+    open suspend fun voidLicenceStatus(keepFeatures: Boolean) {
+<span class="nc" id="L162">        licenseStatusPrefs.remove(LICENSE_STATUS_KEY)</span>
+<span class="nc" id="L163">        licenseStatusPrefs.remove(LICENSE_VALID_SINCE_KEY)</span>
+<span class="nc" id="L164">        licenseStatusPrefs.remove(LICENSE_VALID_UNTIL_KEY)</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (!keepFeatures) {</span>
+<span class="nc" id="L166">            addOnFeatures.clear()</span>
+<span class="nc" id="L167">            licenseStatusPrefs.remove(LICENSE_FEATURES)</span>
+        }
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (addOnFeatures.isEmpty()) {</span>
+<span class="nc" id="L170">            hasOurLicence = false</span>
+        }
+<span class="nc" id="L172">        licenseStatusPrefs.commit()</span>
+<span class="nc" id="L173">        licenceStatusUpdated()</span>
+<span class="nc" id="L174">        this.licenceStatus = null</span>
+<span class="nc" id="L175">    }</span>
+
+    open suspend fun updateLicenceStatus(licence: Licence) {
+<span class="nc" id="L178">        hasOurLicence = true</span>
+<span class="nc" id="L179">        val licence = licence.let {</span>
+<span class="nc bnc" id="L180" title="All 4 branches missed.">            if (it.type == LicenceStatus.EXTENDED &amp;&amp; it.fallback)</span>
+<span class="nc" id="L181">                it.copy(type = LicenceStatus.EXTENDED_FALLBACK)</span>
+<span class="nc" id="L182">            else it</span>
+        }
+<span class="nc bnc" id="L184" title="All 4 branches missed.">        licenseStatusPrefs.putString(LICENSE_STATUS_KEY, licence.type?.name ?: &quot;null&quot;)</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (licence.validSince != null) {</span>
+<span class="nc" id="L186">            val validSince =</span>
+<span class="nc" id="L187">                licence.validSince.atTime(LocalTime.MAX).atZone(ZoneId.of(&quot;Etc/GMT-14&quot;))</span>
+<span class="nc" id="L188">            licenseStatusPrefs.putString(</span>
+<span class="nc" id="L189">                LICENSE_VALID_SINCE_KEY,</span>
+<span class="nc" id="L190">                (validSince.toEpochSecond() * 1000).toString()</span>
+            )
+        }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (licence.validUntil != null) {</span>
+<span class="nc" id="L194">            val validUntil =</span>
+<span class="nc" id="L195">                licence.validUntil.atTime(LocalTime.MAX).atZone(ZoneId.of(&quot;Etc/GMT+12&quot;))</span>
+<span class="nc" id="L196">            licenseStatusPrefs.putString(</span>
+<span class="nc" id="L197">                LICENSE_VALID_UNTIL_KEY,</span>
+<span class="nc" id="L198">                (validUntil.toEpochSecond() * 1000).toString()</span>
+            )
+        } else {
+<span class="nc" id="L201">            licenseStatusPrefs.remove(LICENSE_VALID_UNTIL_KEY)</span>
+        }
+<span class="nc" id="L203">        addFeatures(licence.featureList)</span>
+<span class="nc" id="L204">        persistAddonFeatures()</span>
+<span class="nc" id="L205">        licenseStatusPrefs.commit()</span>
+<span class="nc" id="L206">        this.licenceStatus = licence.type</span>
+<span class="nc" id="L207">        licenceStatusUpdated()</span>
+<span class="nc" id="L208">        update()</span>
+<span class="nc" id="L209">    }</span>
+
+    fun reset() {
+<span class="nc" id="L212">        init()</span>
+<span class="nc" id="L213">        update()</span>
+<span class="nc" id="L214">    }</span>
+
+    open fun getFormattedPrice(aPackage: Package): String? {
+<span class="nc" id="L217">        return getFormattedPriceWithExtra(aPackage, false)</span>
+    }
+
+    @Suppress(&quot;RedundantNullableReturnType&quot;)
+    fun getFormattedPriceWithExtra(aPackage: Package, withExtra: Boolean): String? {
+<span class="nc" id="L222">        return aPackage.getFormattedPrice(</span>
+<span class="nc" id="L223">            context,</span>
+<span class="nc" id="L224">            currencyFormatter,</span>
+<span class="nc" id="L225">            currencyUnit,</span>
+<span class="nc" id="L226">            withExtra,</span>
+<span class="nc" id="L227">            usesSubscriptions</span>
+        )
+    }
+
+    fun getFormattedPriceWithSaving(aPackage: ProfessionalPackage): String? {
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        val withExtra = licenceStatus === LicenceStatus.EXTENDED</span>
+<span class="nc" id="L233">        val formattedPrice = getFormattedPriceWithExtra(aPackage, withExtra)</span>
+<span class="nc" id="L234">        val base = ProfessionalPackage.Professional_6</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        return if (aPackage == base) formattedPrice else String.format(</span>
+<span class="nc" id="L236">            Locale.ROOT, &quot;%s (- %d %%)&quot;, formattedPrice,</span>
+<span class="nc" id="L237">            100 - aPackage.defaultPrice * 100 * base.getDuration(withExtra) /</span>
+<span class="nc" id="L238">                    (aPackage.getDuration(withExtra) * base.defaultPrice)</span>
+        )
+    }
+
+    open fun getExtendOrSwitchMessage(aPackage: ProfessionalPackage): String {
+<span class="nc" id="L243">        val extendedDate = DateUtils.addMonths(</span>
+<span class="nc" id="L244">            Date(validUntilMillis.coerceAtLeast(clock.millis())),</span>
+<span class="nc" id="L245">            aPackage.getDuration(false)</span>
+        )
+<span class="nc" id="L247">        return context.getString(</span>
+<span class="nc" id="L248">            R.string.extend_until,</span>
+<span class="nc" id="L249">            Utils.getDateFormatSafe(context).format(extendedDate),</span>
+<span class="nc" id="L250">            aPackage.getFormattedPriceRaw(currencyUnit, currencyFormatter)</span>
+        )
+    }
+
+<span class="nc" id="L254">    open fun getProLicenceStatus(context: Context) = getProValidUntil(context)</span>
+
+    @Suppress(&quot;MemberVisibilityCanBePrivate&quot;) //used from Huawei
+    fun getProValidUntil(context: Context): String? {
+<span class="nc bnc" id="L258" title="All 6 branches missed.">        return validUntilMillis.takeIf { it != 0L }?.let {</span>
+<span class="nc" id="L259">            context.getString(</span>
+<span class="nc" id="L260">                R.string.valid_until,</span>
+<span class="nc" id="L261">                DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)</span>
+<span class="nc" id="L262">                    .format(epochMillis2LocalDate(it))</span>
+<span class="nc" id="L263">            )</span>
+        }
+    }
+
+    val validUntilMillis: Long
+<span class="nc" id="L268">        get() = licenseStatusPrefs.getString(LICENSE_VALID_UNTIL_KEY, &quot;0&quot;).toLong()</span>
+
+    @Suppress(&quot;MemberVisibilityCanBePrivate&quot;)
+    val validSinceMillis: Long
+<span class="nc" id="L272">        get() = licenseStatusPrefs.getString(LICENSE_VALID_SINCE_KEY, &quot;0&quot;).toLong()</span>
+
+    open val proPackages: Array&lt;ProfessionalPackage&gt;
+        get() = arrayOf(
+<span class="nc" id="L276">            ProfessionalPackage.Professional_6,</span>
+<span class="nc" id="L277">            ProfessionalPackage.Professional_12,</span>
+<span class="nc" id="L278">            ProfessionalPackage.Professional_24</span>
+<span class="nc" id="L279">        )</span>
+
+    open fun getExtendedUpgradeGoodyMessage(selectedPackage: ProfessionalPackage): String? {
+<span class="nc" id="L282">        return context.getString(R.string.extended_upgrade_goodie_github, 3)</span>
+    }
+
+    open val professionalPriceShortInfo: String
+<span class="nc" id="L286">        get() = joinPriceInformation(*proPackages)</span>
+
+    @Suppress(&quot;MemberVisibilityCanBePrivate&quot;) //used from Amazon
+    protected fun joinPriceInformation(vararg packages: Package) =
+<span class="nc" id="L290">        packages.mapNotNull(::getFormattedPrice)</span>
+<span class="nc" id="L291">            .joinToString(&quot; ${context.getString(R.string.joining_or)} &quot;)</span>
+
+    open val proPackagesForExtendOrSwitch: Array&lt;ProfessionalPackage&gt;?
+<span class="nc" id="L294">        get() = proPackages</span>
+
+    open fun getProLicenceAction(context: Context): String {
+<span class="nc" id="L297">        return context.getString(R.string.extend_validity)</span>
+    }
+
+    open val purchaseExtraInfo: String?
+<span class="nc" id="L301">        get() = null</span>
+
+    open val roadmapVoteKey: Pair&lt;String, String&gt;?
+<span class="nc bnc" id="L304" title="All 2 branches missed.">        get() = if (isProfessionalEnabled)</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">            prefHandler.getString(PrefKey.NEW_LICENCE)?.let {</span>
+<span class="nc" id="L306">                DistributionHelper.Distribution.GITHUB.name to it</span>
+            }
+<span class="nc" id="L308">        else null</span>
+
+    /**
+     * @return true if licenceStatus has been upEd
+     */
+    open fun registerUnlockLegacy(): Boolean {
+<span class="nc" id="L314">        return false</span>
+    }
+
+<span class="nc" id="L317">    fun getPaymentOptions(aPackage: Package, userCountry: String) = listOfNotNull(</span>
+<span class="nc" id="L318">        R.string.donate_button_paypal,</span>
+<span class="nc bnc" id="L319" title="All 4 branches missed.">        if (aPackage.defaultPrice &gt;= 500 &amp;&amp; EU_COUNTRIES.contains(userCountry))</span>
+<span class="nc" id="L320">            R.string.donate_button_invoice else null</span>
+<span class="nc" id="L321">    )</span>
+
+    open val needsKeyEntry: Boolean
+<span class="nc" id="L324">        get() = true</span>
+
+    open val usesSubscriptions: Boolean
+<span class="nc" id="L327">        get() = false</span>
+
+    fun getPaypalUri(aPackage: Package): String {
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        val host = if (isSandbox) &quot;www.sandbox.paypal.com&quot; else &quot;www.paypal.com&quot;</span>
+<span class="nc" id="L331">        var uri = &quot;https://$host/cgi-bin/webscr?cmd=_s-xclick&amp;hosted_button_id=${</span>
+<span class="nc" id="L332">            aPackage.payPalButtonId(isSandbox)</span>
+<span class="nc" id="L333">        }&amp;on0=${aPackage.optionName}&amp;os0=${aPackage::class.java.simpleName}&amp;lc=$paypalLocale&amp;currency_code=EUR&quot;</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        prefHandler.getString(PrefKey.LICENCE_EMAIL, null)?.let {</span>
+<span class="nc" id="L335">            uri += &quot;&amp;custom=&quot; + Uri.encode(it)</span>
+<span class="nc" id="L336">        }</span>
+<span class="nc" id="L337">        Timber.d(&quot;Paypal URI: %s&quot;, uri)</span>
+<span class="nc" id="L338">        return uri</span>
+    }
+
+<span class="pc" id="L341">    val backendUri = when {</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">        isSandbox -&gt; &quot;http://10.0.2.2:3000/&quot;</span>
+<span class="nc" id="L343">        else -&gt; &quot;https://licencedb.myexpenses.mobi/&quot;</span>
+    }
+
+    private val paypalLocale: String
+        get() {
+<span class="nc" id="L348">            val locale = Locale.getDefault()</span>
+<span class="nc bnc" id="L349" title="All 20 branches missed.">            return when (locale.language) {</span>
+<span class="nc" id="L350">                &quot;en&quot; -&gt; &quot;en_US&quot;</span>
+<span class="nc" id="L351">                &quot;fr&quot; -&gt; &quot;fr_FR&quot;</span>
+<span class="nc" id="L352">                &quot;es&quot; -&gt; &quot;es_ES&quot;</span>
+<span class="nc" id="L353">                &quot;zh&quot; -&gt; &quot;zh_CN&quot;</span>
+<span class="nc" id="L354">                &quot;ar&quot; -&gt; &quot;ar_EG&quot;</span>
+<span class="nc" id="L355">                &quot;de&quot; -&gt; &quot;de_DE&quot;</span>
+<span class="nc" id="L356">                &quot;nl&quot; -&gt; &quot;nl_NL&quot;</span>
+<span class="nc" id="L357">                &quot;pt&quot; -&gt; &quot;pt_PT&quot;</span>
+<span class="nc" id="L358">                &quot;da&quot; -&gt; &quot;da_DK&quot;</span>
+<span class="nc" id="L359">                &quot;ru&quot; -&gt; &quot;ru_RU&quot;</span>
+<span class="nc" id="L360">                &quot;id&quot; -&gt; &quot;id_ID&quot;</span>
+<span class="nc" id="L361">                &quot;iw&quot;, &quot;he&quot; -&gt; &quot;he_IL&quot;</span>
+<span class="nc" id="L362">                &quot;it&quot; -&gt; &quot;it_IT&quot;</span>
+<span class="nc" id="L363">                &quot;ja&quot; -&gt; &quot;ja_JP&quot;</span>
+<span class="nc" id="L364">                &quot;no&quot; -&gt; &quot;no_NO&quot;</span>
+<span class="nc" id="L365">                &quot;pl&quot; -&gt; &quot;pl_PL&quot;</span>
+<span class="nc" id="L366">                &quot;ko&quot; -&gt; &quot;ko_KO&quot;</span>
+<span class="nc" id="L367">                &quot;sv&quot; -&gt; &quot;sv_SE&quot;</span>
+<span class="nc" id="L368">                &quot;th&quot; -&gt; &quot;th_TH&quot;</span>
+<span class="nc" id="L369">                else -&gt; &quot;en_US&quot;</span>
+            }
+        }
+
+    suspend fun handleExpiration() {
+<span class="nc" id="L374">        val licenceDuration = validUntilMillis - validSinceMillis</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">        if (TimeUnit.MILLISECONDS.toDays(licenceDuration) &gt; 760) { // roughly 25 months</span>
+<span class="nc" id="L376">            licenceStatus = LicenceStatus.EXTENDED_FALLBACK</span>
+<span class="nc" id="L377">            licenseStatusPrefs.putString(LICENSE_STATUS_KEY, LicenceStatus.EXTENDED_FALLBACK.name)</span>
+<span class="nc" id="L378">            licenseStatusPrefs.remove(LICENSE_VALID_UNTIL_KEY)</span>
+<span class="nc" id="L379">            licenseStatusPrefs.commit()</span>
+        } else {
+<span class="nc" id="L381">            voidLicenceStatus(true)</span>
+        }
+<span class="nc" id="L383">    }</span>
+
+    fun prettyPrintStatus(context: Context): String? {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        var result = licenceStatus?.let { context.getString(it.resId) }</span>
+<span class="nc bnc" id="L387" title="All 4 branches missed.">        addOnFeatures.takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L388" title="All 4 branches missed.">            ?.joinToString { context.getString(it.labelResId) }?.let {</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                if (result == null) {</span>
+<span class="nc" id="L390">                    result = &quot;&quot;</span>
+                } else {
+<span class="nc" id="L392">                    result += &quot; &quot;</span>
+                }
+<span class="nc" id="L394">                result += &quot;(+ $it)&quot;</span>
+<span class="nc" id="L395">            }</span>
+<span class="nc" id="L396">        return result</span>
+    }
+
+    fun getButtonLabel(aPackage: Package): String {
+<span class="nc" id="L400">        val resId = when (aPackage) {</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">            Package.Contrib -&gt; LicenceStatus.CONTRIB.resId</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            Package.Upgrade -&gt; R.string.pref_contrib_purchase_title_upgrade</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">            Package.Extended -&gt; LicenceStatus.EXTENDED.resId</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">            is ProfessionalPackage -&gt; LicenceStatus.PROFESSIONAL.resId</span>
+<span class="nc" id="L405">            is AddOnPackage -&gt; aPackage.feature.labelResId</span>
+        }
+<span class="nc" id="L407">        return String.format(</span>
+<span class="nc" id="L408">            &quot;%s (%s)&quot;,</span>
+<span class="nc" id="L409">            context.getString(resId),</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            getFormattedPriceWithExtra(aPackage, licenceStatus === LicenceStatus.EXTENDED)</span>
+        )
+    }
+
+    open fun initBillingManager(activity: IapActivity, query: Boolean): BillingManager? {
+<span class="nc" id="L415">        return null</span>
+    }
+
+    open suspend fun launchPurchase(
+        aPackage: Package,
+        shouldReplaceExisting: Boolean,
+        billingManager: BillingManager,
+    ) {
+<span class="nc" id="L423">    }</span>
+
+    private fun persistAddonFeatures() {
+<span class="nc" id="L426">        val joinToString = addOnFeatures.joinToString(&quot;,&quot;, transform = ContribFeature::name)</span>
+<span class="nc" id="L427">        licenseStatusPrefs.putString(LICENSE_FEATURES, joinToString)</span>
+<span class="nc" id="L428">        crashHandler.putCustomData(&quot;AddOns&quot;, joinToString)</span>
+<span class="nc" id="L429">    }</span>
+
+    private fun restoreAddOnFeatures() {
+<span class="pc bpc" id="L432" title="2 of 4 branches missed.">        licenseStatusPrefs.getString(LICENSE_FEATURES, null)?.split(',')?.mapNotNull {</span>
+<span class="nc" id="L433">            try {</span>
+<span class="nc" id="L434">                ContribFeature.valueOf(it)</span>
+<span class="nc" id="L435">            } catch (_: Exception) {</span>
+<span class="nc" id="L436">                null</span>
+<span class="nc" id="L437">            }</span>
+<span class="nc" id="L438">        }?.let { addFeatures(it) }</span>
+<span class="fc" id="L439">    }</span>
+
+    fun updateNewAccountEnabled() {
+<span class="nc" id="L442">        val newAccountEnabled =</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">            hasAccessTo(ContribFeature.ACCOUNTS_UNLIMITED) ||</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                    repository.countAccounts() &lt; ContribFeature.FREE_ACCOUNTS</span>
+<span class="nc" id="L445">        prefHandler.putBoolean(PrefKey.NEW_ACCOUNT_ENABLED, newAccountEnabled)</span>
+<span class="nc" id="L446">    }</span>
+
+    fun recordUsage(feature: ContribFeature) {
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        if (!hasAccessTo(feature) &amp;&amp;</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            feature.trialMode == ContribFeature.TrialMode.DURATION &amp;&amp;</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">            !prefHandler.isSet(feature.prefKey)</span>
+        ) {
+<span class="nc" id="L453">            prefHandler.putLong(feature.prefKey, clock.millis())</span>
+        }
+<span class="nc" id="L455">    }</span>
+
+
+<span class="nc bnc" id="L458" title="All 3 branches missed.">    fun usagesLeft(feature: ContribFeature) = when (feature.trialMode) {</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">        ContribFeature.TrialMode.DURATION -&gt; getEndOfTrial(feature) &gt; clock.millis()</span>
+<span class="nc" id="L460">        ContribFeature.TrialMode.UNLIMITED -&gt; true</span>
+<span class="nc" id="L461">        else -&gt; false</span>
+<span class="nc" id="L462">    }</span>
+
+    private fun getStartOfTrial(feature: ContribFeature): Long {
+<span class="nc" id="L465">        return prefHandler.getLong(feature.prefKey, clock.millis())</span>
+    }
+
+    fun getEndOfTrial(feature: ContribFeature) =
+<span class="nc" id="L469">        getStartOfTrial(feature) + TimeUnit.DAYS.toMillis(TRIAL_DURATION_DAYS)</span>
+
+    @Composable
+    fun ManageLicence(
+        contribBuyDo: (ProfessionalPackage?) -&gt; Unit,
+        validateLicence: () -&gt; Unit,
+        removeLicence: () -&gt; Unit,
+        manageSubscription: (Uri) -&gt; Unit,
+<span class="nc bnc" id="L477" title="All 24 branches missed.">    ) {</span>
+<span class="nc" id="L478">        AppTheme {</span>
+<span class="nc" id="L479">            key(licenceStatusFlow.collectAsState().value) {</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">                if (hasAnyLicence) {</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">                    val isPro = licenceStatus == LicenceStatus.PROFESSIONAL</span>
+<span class="nc" id="L482">                    Column(</span>
+<span class="nc" id="L483">                        modifier = Modifier.padding(</span>
+<span class="nc" id="L484">                            dimensionResource(id = R.dimen.general_padding)</span>
+                        ),
+<span class="nc" id="L486">                        horizontalAlignment = Alignment.CenterHorizontally</span>
+                    ) {
+<span class="nc" id="L488">                        Text(</span>
+<span class="nc" id="L489">                            text = stringResource(id = R.string.thank_you),</span>
+<span class="nc" id="L490">                            style = MaterialTheme.typography.titleSmall</span>
+                        )
+<span class="nc bnc" id="L492" title="All 2 branches missed.">                        if (hasOurLicence) {</span>
+<span class="nc" id="L493">                            Text(</span>
+<span class="nc" id="L494">                                prefHandler.getString(</span>
+<span class="nc" id="L495">                                    PrefKey.LICENCE_EMAIL,</span>
+<span class="nc" id="L496">                                    &quot;&quot;</span>
+<span class="nc" id="L497">                                ) + &quot;: &quot; + prefHandler.getString(PrefKey.NEW_LICENCE, &quot;&quot;)</span>
+                            )
+<span class="nc" id="L499">                        }</span>
+<span class="nc" id="L500">                        Text(prettyPrintStatus(context)!!)</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">                        if (isPro) {</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">                            getProLicenceStatus(context)?.let { Text(it) }</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">                            proPackagesForExtendOrSwitch?.forEach {</span>
+<span class="nc" id="L504">                                Button(onClick = { contribBuyDo(it) }) {</span>
+<span class="nc" id="L505">                                    Text(getExtendOrSwitchMessage(it))</span>
+<span class="nc" id="L506">                                }</span>
+<span class="nc" id="L507">                            }</span>
+<span class="nc" id="L508">                        } else {</span>
+<span class="nc" id="L509">                            Button(onClick = { contribBuyDo(null) }) {</span>
+<span class="nc" id="L510">                                Text(</span>
+<span class="nc" id="L511">                                    stringResource(</span>
+<span class="nc" id="L512">                                        id = R.string.pref_contrib_purchase_title_upgrade</span>
+                                    )
+                                )
+<span class="nc" id="L515">                            }</span>
+                        }
+<span class="nc bnc" id="L517" title="All 2 branches missed.">                        if (needsKeyEntry) {</span>
+<span class="nc" id="L518">                            Button(onClick = validateLicence) {</span>
+<span class="nc" id="L519">                                Text(stringResource(id = R.string.button_validate))</span>
+<span class="nc" id="L520">                            }</span>
+<span class="nc" id="L521">                            Button(onClick = removeLicence) {</span>
+<span class="nc" id="L522">                                Text(stringResource(id = R.string.remove))</span>
+<span class="nc" id="L523">                            }</span>
+<span class="nc" id="L524">                        }</span>
+<span class="nc bnc" id="L525" title="All 2 branches missed.">                        subscriptionManagementLink?.let {</span>
+<span class="nc" id="L526">                            Button(onClick = {</span>
+<span class="nc" id="L527">                                manageSubscription(it)</span>
+<span class="nc" id="L528">                            }) {</span>
+<span class="nc" id="L529">                                Text(stringResource(id = R.string.pref_category_title_manage))</span>
+<span class="nc" id="L530">                            }</span>
+<span class="nc" id="L531">                        }</span>
+<span class="nc" id="L532">                    }</span>
+                } else {
+<span class="nc" id="L534">                    Button(</span>
+<span class="nc" id="L535">                        modifier = Modifier.wrapContentSize(),</span>
+<span class="nc" id="L536">                        onClick = { contribBuyDo(null) }) {</span>
+<span class="nc" id="L537">                        Text(stringResource(id = R.string.menu_contrib))</span>
+<span class="nc" id="L538">                    }</span>
+                }
+            }
+<span class="nc" id="L541">        }</span>
+<span class="nc" id="L542">    }</span>
+
+    open val subscriptionManagementLink: Uri?
+<span class="nc" id="L545">        get() = null</span>
+
+
+    companion object {
+        protected const val LICENSE_STATUS_KEY = &quot;licence_status&quot;
+        protected const val LICENSE_FEATURES = &quot;licence_features&quot;
+        private const val LICENSE_VALID_SINCE_KEY = &quot;licence_valid_since&quot;
+        private const val LICENSE_VALID_UNTIL_KEY = &quot;licence_valid_until&quot;
+        const val TAG = &quot;LicenceHandler&quot;
+        const val TRIAL_DURATION_DAYS = 60L
+        fun log(): Timber.Tree {
+<span class="nc" id="L556">            return Timber.tag(TAG)</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

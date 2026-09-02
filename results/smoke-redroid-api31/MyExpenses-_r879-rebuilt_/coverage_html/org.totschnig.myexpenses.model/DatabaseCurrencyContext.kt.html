@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DatabaseCurrencyContext.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.model</a> &gt; <span class="el_source">DatabaseCurrencyContext.kt</span></div><h1>DatabaseCurrencyContext.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.model
+
+import android.content.ContentResolver
+import android.database.Cursor
+import app.cash.copper.flow.mapToList
+import app.cash.copper.flow.observeQuery
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.provider.DataBaseAccount
+import org.totschnig.myexpenses.provider.KEY_CODE
+import org.totschnig.myexpenses.provider.KEY_COMMODITY_TYPE
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_FRACTION_DIGITS
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SYMBOL
+import org.totschnig.myexpenses.provider.KEY_USAGES
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.getEnum
+import org.totschnig.myexpenses.provider.getIntOrNull
+import org.totschnig.myexpenses.provider.getLong
+import org.totschnig.myexpenses.provider.getString
+import org.totschnig.myexpenses.provider.getStringOrNull
+import org.totschnig.myexpenses.util.Utils
+import java.util.Currency
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+
+const val DEFAULT_FRACTION_DIGITS = 8
+
+<span class="pc" id="L38">open class DatabaseCurrencyContext(</span>
+<span class="fc" id="L39">    private val prefHandler: PrefHandler,</span>
+<span class="fc" id="L40">    private val application: MyApplication,</span>
+<span class="nc" id="L41">    dispatcher: CoroutineDispatcher = Dispatchers.IO,</span>
+<span class="nc" id="L42">) : CurrencyContext {</span>
+<span class="fc" id="L43">    private val contentResolver: ContentResolver = application.contentResolver</span>
+<span class="fc" id="L44">    private val instances = ConcurrentHashMap&lt;String, CurrencyUnit&gt;()</span>
+<span class="fc" id="L45">    private val scope = CoroutineScope(dispatcher + SupervisorJob())</span>
+
+    private fun Cursor.toCurrencyUnit(): CurrencyUnit {
+<span class="fc" id="L48">        val databaseId = getLong(KEY_ROWID)</span>
+<span class="fc" id="L49">        val code = getString(KEY_CODE)</span>
+<span class="fc" id="L50">        val dbSymbol = getStringOrNull(KEY_SYMBOL)</span>
+<span class="fc" id="L51">        val dbFractionDigits = getIntOrNull(KEY_FRACTION_DIGITS)</span>
+<span class="fc" id="L52">        val dbLabel = getStringOrNull(KEY_LABEL)</span>
+<span class="fc" id="L53">        val commodityType = getEnum(KEY_COMMODITY_TYPE, CommodityType.FIAT)</span>
+
+<span class="pc bpc" id="L55" title="5 of 6 branches missed.">        val (symbol, fractionDigits, label) = if (dbSymbol == null || dbFractionDigits == null || dbLabel == null) {</span>
+<span class="pc" id="L56">            val javaCurrency = try { Currency.getInstance(code) } catch (_: Exception) { null }</span>
+<span class="fc" id="L57">            Triple(</span>
+<span class="pc bpc" id="L58" title="3 of 6 branches missed.">                dbSymbol ?: javaCurrency?.getSymbol(application.userPreferredLocale) ?: &quot;¤&quot;,</span>
+<span class="pc bpc" id="L59" title="5 of 10 branches missed.">                dbFractionDigits ?: javaCurrency?.defaultFractionDigits?.takeIf { it != -1 } ?: DEFAULT_FRACTION_DIGITS,</span>
+<span class="pc bpc" id="L60" title="3 of 6 branches missed.">                dbLabel ?: javaCurrency?.getDisplayName(application.userPreferredLocale)</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">                    ?: runCatching { CurrencyEnum.valueOf(code).description }.getOrDefault(code)</span>
+            )
+<span class="nc" id="L63">        } else Triple(dbSymbol, dbFractionDigits, dbLabel)</span>
+
+<span class="fc" id="L65">        return CurrencyUnit(</span>
+<span class="fc" id="L66">            code = code,</span>
+<span class="fc" id="L67">            symbol = symbol,</span>
+<span class="fc" id="L68">            fractionDigits = fractionDigits,</span>
+<span class="fc" id="L69">            description = label,</span>
+<span class="fc" id="L70">            commodityType = commodityType,</span>
+<span class="fc" id="L71">            databaseId = databaseId</span>
+        )
+    }
+
+    private fun preloadCurrencies() {
+<span class="fc" id="L76">        val usedCurrencies = mutableSetOf&lt;String&gt;()</span>
+        // Ensure home currency is preloaded even if no accounts exist yet
+<span class="fc" id="L78">        usedCurrencies.add(homeCurrencyString)</span>
+
+<span class="fc" id="L80">        contentResolver.query(</span>
+<span class="fc" id="L81">            TransactionProvider.ACCOUNTS_URI,</span>
+<span class="fc" id="L82">            arrayOf(KEY_CURRENCY),</span>
+<span class="fc" id="L83">            null,</span>
+<span class="fc" id="L84">            null,</span>
+<span class="fc" id="L85">            null</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">        )?.use { cursor -&gt;</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">            while (cursor.moveToNext()) {</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                cursor.getStringOrNull(KEY_CURRENCY)?.let { usedCurrencies.add(it) }</span>
+            }
+<span class="fc" id="L90">        }</span>
+
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">        if (usedCurrencies.isEmpty()) return</span>
+
+<span class="fc" id="L94">        val placeholders = usedCurrencies.joinToString(&quot;,&quot;) { &quot;?&quot; }</span>
+<span class="fc" id="L95">        val selection = &quot;$KEY_CODE IN ($placeholders)&quot;</span>
+<span class="fc" id="L96">        val selectionArgs = usedCurrencies.toTypedArray()</span>
+
+<span class="fc" id="L98">        contentResolver.query(</span>
+<span class="fc" id="L99">            TransactionProvider.CURRENCIES_URI,</span>
+<span class="fc" id="L100">            null,</span>
+<span class="fc" id="L101">            selection,</span>
+<span class="fc" id="L102">            selectionArgs,</span>
+<span class="fc" id="L103">            null</span>
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">        )?.use { cursor -&gt;</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">            while (cursor.moveToNext()) {</span>
+<span class="fc" id="L106">                cursor.toCurrencyUnit().let { unit -&gt;</span>
+<span class="fc" id="L107">                    instances[unit.code] = unit</span>
+<span class="fc" id="L108">                }</span>
+            }
+<span class="fc" id="L110">        }</span>
+<span class="fc" id="L111">    }</span>
+
+    override val homeCurrencyUnit: CurrencyUnit
+<span class="fc" id="L114">        get() = get(homeCurrencyString)</span>
+
+    override fun get(currencyCode: String): CurrencyUnit {
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">        if (currencyCode == DataBaseAccount.AGGREGATE_HOME_CURRENCY_CODE) return homeCurrencyUnit</span>
+
+<span class="fc" id="L119">        return instances.getOrPut(currencyCode) {</span>
+<span class="nc" id="L120">            fetchCurrency(currencyCode)</span>
+        }
+    }
+
+<span class="nc" id="L124">    override fun getAll(): Flow&lt;List&lt;CurrencyUnit&gt;&gt; = contentResolver.observeQuery(</span>
+<span class="nc" id="L125">        TransactionProvider.CURRENCIES_URI,</span>
+<span class="nc" id="L126">        null,</span>
+<span class="nc" id="L127">        null,</span>
+<span class="nc" id="L128">        null,</span>
+<span class="nc" id="L129">        &quot;$KEY_USAGES DESC, $KEY_CODE&quot;,</span>
+<span class="nc" id="L130">        true</span>
+<span class="nc" id="L131">    ).mapToList(mapper = { cursor -&gt;</span>
+<span class="nc" id="L132">        cursor.toCurrencyUnit()</span>
+<span class="nc" id="L133">    })</span>
+
+    private fun fetchCurrency(currencyCode: String): CurrencyUnit =
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        contentResolver.query(</span>
+<span class="nc" id="L137">            TransactionProvider.CURRENCIES_URI,</span>
+<span class="nc" id="L138">            null,</span>
+<span class="nc" id="L139">            &quot;$KEY_CODE = ?&quot;,</span>
+<span class="nc" id="L140">            arrayOf(currencyCode),</span>
+<span class="nc" id="L141">            null</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        )?.use { cursor -&gt;</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            if (cursor.moveToFirst()) cursor.toCurrencyUnit() else null</span>
+<span class="nc" id="L144">        } ?: runCatching { CurrencyUnit(Currency.getInstance(currencyCode)) }</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            .getOrElse { CurrencyUnit(currencyCode, currencyCode, 2) }</span>
+
+    override fun invalidate(currencyCode: String) {
+<span class="nc" id="L148">        instances.remove(currencyCode)</span>
+<span class="nc" id="L149">    }</span>
+
+    override fun invalidateHomeCurrency() {
+<span class="nc" id="L152">        instances.remove(homeCurrencyString)</span>
+        //TODO remove when V1 is sunset
+<span class="nc" id="L154">        instances.remove(DataBaseAccount.AGGREGATE_HOME_CURRENCY_CODE)</span>
+<span class="nc" id="L155">    }</span>
+
+    override val homeCurrencyString: String
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">        get() = prefHandler.getString(PrefKey.HOME_CURRENCY, null)</span>
+<span class="fc" id="L159">            ?: localCurrency.currencyCode</span>
+
+<span class="fc" id="L161">    override val localCurrency: Currency by lazy {</span>
+<span class="pc bpc" id="L162" title="2 of 4 branches missed.">        Utils.getCountryFromTelephonyManager(application)?.let {</span>
+<span class="fc" id="L163">            try {</span>
+<span class="nc" id="L164">                Currency.getInstance(Locale(&quot;&quot;, it))</span>
+<span class="fc" id="L165">            } catch (_: Exception) {</span>
+<span class="fc" id="L166">                null</span>
+<span class="fc" id="L167">            }</span>
+<span class="fc" id="L168">        } ?: Utils.getSaveDefault()</span>
+    }
+
+    override fun preload() {
+<span class="fc" id="L172">        scope.launch {</span>
+<span class="fc" id="L173">            preloadCurrencies()</span>
+<span class="fc" id="L174">        }</span>
+<span class="fc" id="L175">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

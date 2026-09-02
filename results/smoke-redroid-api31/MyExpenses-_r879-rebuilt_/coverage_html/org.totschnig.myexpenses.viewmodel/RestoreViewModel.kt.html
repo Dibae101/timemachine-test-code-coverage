@@ -1,0 +1,692 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RestoreViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">RestoreViewModel.kt</span></div><h1>RestoreViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.accounts.AccountManager
+import android.app.Application
+import android.content.ContentUris
+import android.content.ContentValues
+import android.database.sqlite.SQLiteException
+import android.net.Uri
+import android.os.Bundle
+import android.provider.CalendarContract
+import android.text.TextUtils
+import androidx.core.os.BundleCompat
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.preference.PrefKey
+import org.totschnig.myexpenses.provider.BACKUP_DB_FILE_NAME
+import org.totschnig.myexpenses.provider.BACKUP_PREF_FILE_NAME
+import org.totschnig.myexpenses.provider.CALENDAR_FULL_PATH_PROJECTION
+import org.totschnig.myexpenses.provider.KEY_URI
+import org.totschnig.myexpenses.provider.DatabaseVersionPeekHelper
+import org.totschnig.myexpenses.provider.DbUtils
+import org.totschnig.myexpenses.provider.INVALID_CALENDAR_ID
+import org.totschnig.myexpenses.provider.KEY_PLANID
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SYNC_ACCOUNT_NAME
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.PlannerUtils
+import org.totschnig.myexpenses.provider.PlannerUtils.Companion.copyEventData
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.TransactionProvider.TEMPLATES_URI
+import org.totschnig.myexpenses.provider.asSequence
+import org.totschnig.myexpenses.provider.checkSyncAccounts
+import org.totschnig.myexpenses.provider.getBackupDataStoreFile
+import org.totschnig.myexpenses.provider.getBackupDbFile
+import org.totschnig.myexpenses.provider.getBackupPrefFile
+import org.totschnig.myexpenses.provider.getCalendarPath
+import org.totschnig.myexpenses.provider.insertEventAndUpdatePlan
+import org.totschnig.myexpenses.sync.GenericAccountService
+import org.totschnig.myexpenses.sync.SyncAdapter
+import org.totschnig.myexpenses.sync.SyncBackendProviderFactory
+import org.totschnig.myexpenses.util.AppDirHelper
+import org.totschnig.myexpenses.util.PermissionHelper
+import org.totschnig.myexpenses.util.PictureDirHelper
+import org.totschnig.myexpenses.util.Utils
+import org.totschnig.myexpenses.util.ZipUtils
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.crypt.EncryptionHelper
+import org.totschnig.myexpenses.util.io.FileCopyUtils
+import timber.log.Timber
+import java.io.File
+import java.io.IOException
+import java.io.PushbackInputStream
+import java.security.GeneralSecurityException
+import javax.inject.Inject
+
+<span class="fc" id="L69">class RestoreViewModel(application: Application) : ContentResolvingAndroidViewModel(application) {</span>
+
+<span class="fc" id="L71">    private val _publishProgress: MutableSharedFlow&lt;String?&gt; = MutableSharedFlow()</span>
+<span class="fc" id="L72">    private val _result: MutableStateFlow&lt;Result&lt;Unit&gt;?&gt; = MutableStateFlow(null)</span>
+<span class="fc" id="L73">    val publishProgress: SharedFlow&lt;String?&gt; = _publishProgress</span>
+<span class="fc" id="L74">    val result: StateFlow&lt;Result&lt;Unit&gt;?&gt; = _result</span>
+
+<span class="fc" id="L76">    private val _permissionRequested = MutableLiveData&lt;Unit?&gt;(null)</span>
+<span class="fc" id="L77">    val permissionRequested: LiveData&lt;Unit?&gt; = _permissionRequested</span>
+<span class="nc" id="L78">    var permissionRequestFuture: CompletableDeferred&lt;Boolean&gt;? = null</span>
+    fun submitPermissionRequestResult(granted: Boolean) {
+<span class="nc bnc" id="L80" title="All 2 branches missed.">        permissionRequestFuture?.complete(granted)</span>
+<span class="nc" id="L81">    }</span>
+
+    @Inject
+<span class="nc" id="L84">    lateinit var versionPeekHelper: DatabaseVersionPeekHelper</span>
+
+    @Inject
+<span class="nc" id="L87">    lateinit var plannerUtils: PlannerUtils</span>
+
+    private fun failureResult(throwable: Throwable) {
+<span class="nc" id="L90">        _result.update {</span>
+<span class="nc" id="L91">            Result.failure(throwable)</span>
+        }
+<span class="nc" id="L93">    }</span>
+
+    private fun failureResult(error: String) {
+<span class="nc" id="L96">        failureResult(Exception(error))</span>
+<span class="nc" id="L97">    }</span>
+
+    private fun failureResult(error: Int, vararg formatArgs: Any?) {
+<span class="nc" id="L100">        failureResult(Exception(getString(error, *formatArgs)))</span>
+<span class="nc" id="L101">    }</span>
+
+    private suspend fun publishProgress(string: String) {
+<span class="nc" id="L104">        _publishProgress.emit(string)</span>
+<span class="nc" id="L105">    }</span>
+
+    private suspend fun publishProgress(resId: Int, vararg formatArgs: Any?) {
+<span class="nc" id="L108">        _publishProgress.emit(getString(resId, *formatArgs))</span>
+<span class="nc" id="L109">    }</span>
+
+    fun resultProcessed() {
+<span class="nc" id="L112">        _result.update {</span>
+<span class="nc" id="L113">            null</span>
+        }
+<span class="nc" id="L115">    }</span>
+
+    fun startRestore(args: Bundle) {
+<span class="nc bnc" id="L118" title="All 9 branches missed.">        viewModelScope.launch(coroutineDispatcher) {</span>
+<span class="nc" id="L119">            val fileUri: Uri? = BundleCompat.getParcelable(args, KEY_FILE_PATH, Uri::class.java)</span>
+<span class="nc" id="L120">            val syncAccountName: String? =</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                if (fileUri == null) args.getString(KEY_SYNC_ACCOUNT_NAME) else null</span>
+<span class="nc" id="L122">            val backupFromSync: String? =</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                if (fileUri == null) args.getString(KEY_BACKUP_FROM_SYNC) else null</span>
+<span class="nc" id="L124">            val password: String? = args.getString(KEY_PASSWORD)</span>
+<span class="nc" id="L125">            var currentPlannerId: String? = null</span>
+<span class="nc" id="L126">            var currentPlannerPath: String? = null</span>
+<span class="nc" id="L127">            val application = getApplication&lt;MyApplication&gt;()</span>
+
+<span class="nc bnc" id="L129" title="All 2 branches missed.">            val workingDir = AppDirHelper.newWorkingDirectory(application, &quot;restore&quot;).getOrElse {</span>
+<span class="nc" id="L130">                failureResult(it)</span>
+<span class="nc" id="L131">                return@launch</span>
+            }
+<span class="nc" id="L133">            try {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                val inputStream: PushbackInputStream? = if (syncAccountName != null) {</span>
+<span class="nc" id="L135">                    val account = GenericAccountService.getAccount(syncAccountName)</span>
+<span class="nc bnc" id="L136" title="All 4 branches missed.">                    SyncBackendProviderFactory.get(application, account, false).onFailure {</span>
+<span class="nc" id="L137">                        val error = Exception(</span>
+<span class="nc" id="L138">                            &quot;Unable to get sync backend provider for $syncAccountName&quot;,</span>
+<span class="nc" id="L139">                            it</span>
+                        )
+<span class="nc" id="L141">                        CrashHandler.report(error)</span>
+<span class="nc" id="L142">                        failureResult(error)</span>
+<span class="nc" id="L143">                        return@launch</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                    }.mapCatching {</span>
+<span class="nc" id="L145">                        EncryptionHelper.wrap(it.getInputStreamForBackup(backupFromSync!!))</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                    }.onFailure {</span>
+<span class="nc" id="L147">                        failureResult(it)</span>
+<span class="nc" id="L148">                        return@launch</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">                    }.getOrNull()</span>
+                } else {
+<span class="nc" id="L151">                    EncryptionHelper.wrap(contentResolver.openInputStream(fileUri!!))</span>
+                }
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                if (inputStream == null) {</span>
+<span class="nc" id="L154">                    failureResult(&quot;Unable to open backup file&quot;)</span>
+<span class="nc" id="L155">                    return@launch</span>
+                }
+<span class="nc" id="L157">                val isEncrypted = EncryptionHelper.isEncrypted(inputStream)</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                if (isEncrypted) {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">                    if (TextUtils.isEmpty(password)) {</span>
+<span class="nc" id="L160">                        failureResult(R.string.backup_is_encrypted)</span>
+<span class="nc" id="L161">                        return@launch</span>
+                    }
+                }
+<span class="nc" id="L164">                inputStream.use {</span>
+<span class="nc" id="L165">                    try {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                        ZipUtils.unzip(inputStream, workingDir, if (isEncrypted) password else null)</span>
+<span class="nc" id="L167">                    } catch (e: IOException) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                        if (e.cause is GeneralSecurityException) {</span>
+<span class="nc" id="L169">                            failureResult(R.string.backup_wrong_password)</span>
+                        } else {
+<span class="nc" id="L171">                            failureResult(e)</span>
+                        }
+<span class="nc" id="L173">                        return@launch</span>
+                    }
+<span class="nc" id="L175">                }</span>
+<span class="nc" id="L176">                val backupFile = getBackupDbFile(workingDir)</span>
+<span class="nc" id="L177">                val backupPrefFile = getBackupPrefFile(workingDir)</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                if (!backupFile.exists()) {</span>
+<span class="nc" id="L179">                    failureResult(</span>
+<span class="nc" id="L180">                        R.string.restore_backup_file_not_found,</span>
+<span class="nc" id="L181">                        BACKUP_DB_FILE_NAME, workingDir</span>
+                    )
+<span class="nc" id="L183">                    return@launch</span>
+                }
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                if (!backupPrefFile.exists()) {</span>
+<span class="nc" id="L186">                    failureResult(</span>
+<span class="nc" id="L187">                        R.string.restore_backup_file_not_found,</span>
+<span class="nc" id="L188">                        BACKUP_PREF_FILE_NAME, workingDir</span>
+                    )
+<span class="nc" id="L190">                    return@launch</span>
+                }
+
+                //peek into file to inspect version
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                versionPeekHelper.checkVersion(application, backupFile.path).onFailure {</span>
+<span class="nc" id="L195">                    failureResult(it)</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                    if (it is SQLiteException) {</span>
+<span class="nc" id="L197">                        CrashHandler.report(it)</span>
+                    }
+<span class="nc" id="L199">                    return@launch</span>
+                }
+
+                //peek into preferences to see if there is a calendar configured
+<span class="nc" id="L203">                val internalAppDir = application.filesDir.parentFile!!</span>
+<span class="nc" id="L204">                val sharedPrefsDir = File(internalAppDir.path + &quot;/shared_prefs/&quot;)</span>
+<span class="nc" id="L205">                sharedPrefsDir.mkdir()</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                if (!sharedPrefsDir.isDirectory) {</span>
+<span class="nc" id="L207">                    CrashHandler.report(</span>
+<span class="nc" id="L208">                        Exception(&quot;Could not access shared preferences directory at ${sharedPrefsDir.absolutePath}&quot;)</span>
+                    )
+<span class="nc" id="L210">                    failureResult(R.string.restore_preferences_failure)</span>
+<span class="nc" id="L211">                    return@launch</span>
+                }
+<span class="nc" id="L213">                val tempPrefFile = File(sharedPrefsDir, &quot;backup_temp.xml&quot;)</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                if (!FileCopyUtils.copy(backupPrefFile, tempPrefFile)) {</span>
+<span class="nc" id="L215">                    CrashHandler.report(</span>
+<span class="nc" id="L216">                        Exception(&quot;Preferences restore failed&quot;),</span>
+<span class="nc" id="L217">                        &quot;FAILED_COPY_OPERATION&quot;, String.format(</span>
+<span class="nc" id="L218">                            &quot;%s =&gt; %s&quot;,</span>
+<span class="nc" id="L219">                            backupPrefFile.absolutePath,</span>
+<span class="nc" id="L220">                            tempPrefFile.absolutePath</span>
+                        )
+                    )
+<span class="nc" id="L223">                    failureResult(R.string.restore_preferences_failure)</span>
+<span class="nc" id="L224">                    return@launch</span>
+                }
+<span class="nc" id="L226">                val backupPref = application.getSharedPreferences(&quot;backup_temp&quot;, 0)</span>
+<span class="nc" id="L227">                val calendarId = backupPref</span>
+<span class="nc" id="L228">                    .getString(prefHandler.getKey(PrefKey.PLANNER_CALENDAR_ID), &quot;-1&quot;)</span>
+<span class="nc" id="L229">                val calendarPath = backupPref</span>
+<span class="nc" id="L230">                    .getString(prefHandler.getKey(PrefKey.PLANNER_CALENDAR_PATH), &quot;&quot;)</span>
+<span class="nc bnc" id="L231" title="All 4 branches missed.">                if (!(calendarId == &quot;-1&quot; || calendarPath == &quot;&quot;)) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                    if (!PermissionHelper.hasCalendarPermission(getApplication())) {</span>
+<span class="nc" id="L233">                        _permissionRequested.postValue(Unit)</span>
+<span class="nc" id="L234">                        val granted = CompletableDeferred&lt;Boolean&gt;().also {</span>
+<span class="nc" id="L235">                            permissionRequestFuture = it</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                        }.await()</span>
+<span class="nc" id="L237">                        _permissionRequested.postValue(null)</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                        if (!granted) {</span>
+<span class="nc" id="L239">                            failureResult(</span>
+<span class="nc" id="L240">                                Utils.getTextWithAppName(</span>
+<span class="nc" id="L241">                                    getApplication(),</span>
+<span class="nc" id="L242">                                    R.string.notifications_permission_required_planner</span>
+<span class="nc" id="L243">                                ).toString()</span>
+                            )
+<span class="nc" id="L245">                            return@launch</span>
+                        }
+                    }
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                    if (try {</span>
+<span class="nc" id="L249">                            contentResolver.query(</span>
+<span class="nc" id="L250">                                CalendarContract.Calendars.CONTENT_URI,</span>
+<span class="nc" id="L251">                                arrayOf(CalendarContract.Calendars._ID),</span>
+<span class="nc" id="L252">                                &quot;$CALENDAR_FULL_PATH_PROJECTION = ?&quot;,</span>
+<span class="nc" id="L253">                                arrayOf(calendarPath),</span>
+<span class="nc" id="L254">                                null</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                            )?.use {</span>
+<span class="nc" id="L256">                                it.moveToFirst()</span>
+                            }
+<span class="nc" id="L258">                        } catch (e: SecurityException) {</span>
+<span class="nc" id="L259">                            failureResult(e)</span>
+<span class="nc" id="L260">                            return@launch</span>
+<span class="nc" id="L261">                        } == false</span>
+                    ) {
+                        //the calendar configured in the backup does not exist
+<span class="nc" id="L264">                        currentPlannerId = plannerUtils.checkPlanner()</span>
+<span class="nc" id="L265">                        currentPlannerPath =</span>
+<span class="nc" id="L266">                            prefHandler.getString(PrefKey.PLANNER_CALENDAR_PATH, &quot;&quot;)</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                        if (INVALID_CALENDAR_ID == currentPlannerId) {</span>
+                            //there is no locally configured calendar, we create a new one
+                            //noinspection MissingPermission
+<span class="nc" id="L270">                            currentPlannerId = plannerUtils.createPlanner(false)</span>
+<span class="nc" id="L271">                            currentPlannerPath =</span>
+<span class="nc" id="L272">                                getCalendarPath(contentResolver, currentPlannerId)</span>
+                        }
+                    }
+                }
+
+<span class="nc" id="L277">                val dataStoreBackup =</span>
+<span class="nc bnc" id="L278" title="All 4 branches missed.">                    getBackupDataStoreFile(workingDir).takeIf { it.exists() }?.let {</span>
+<span class="nc" id="L279">                        PreferenceDataStoreFactory.create(</span>
+<span class="nc" id="L280">                            scope = this,</span>
+<span class="nc" id="L281">                            produceFile = { it }</span>
+<span class="nc" id="L282">                        )</span>
+                    }
+
+<span class="nc bnc" id="L285" title="All 5 branches missed.">                dataStore.edit {</span>
+<span class="nc" id="L286">                    it.clear()</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                    if (dataStoreBackup != null) {</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">                        it.plusAssign(dataStoreBackup.data.first())</span>
+                    }
+<span class="nc" id="L290">                }</span>
+
+<span class="nc" id="L292">                val encrypt = args.getBoolean(KEY_ENCRYPT, false)</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">                if (DbUtils.restore(getApplication(), backupFile, encrypt)) {</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                    publishProgress(R.string.restore_db_success)</span>
+
+                    //since we already started reading settings, we can not just copy the file
+                    //unless I found a way
+                    //either to close the shared preferences and read it again
+                    //or to find out if we are on a new install without reading preferences
+                    //
+                    //we open the backup file and read every entry
+                    //getSharedPreferences does not allow to access file if it not in private data directory
+                    //hence we copy it there first
+                    //upon application install does not exist yet
+<span class="nc" id="L305">                    application.settings</span>
+<span class="nc" id="L306">                        .unregisterOnSharedPreferenceChangeListener(application)</span>
+<span class="nc" id="L307">                    val edit = application.settings.edit()</span>
+<span class="nc" id="L308">                    application.settings.all.forEach {</span>
+<span class="nc" id="L309">                        val key = it.key</span>
+<span class="nc bnc" id="L310" title="All 4 branches missed.">                        if (key != prefHandler.getKey(PrefKey.NEW_LICENCE) &amp;&amp; key != prefHandler.getKey(</span>
+<span class="nc" id="L311">                                PrefKey.LICENCE_EMAIL</span>
+                            )
+<span class="nc bnc" id="L313" title="All 4 branches missed.">                            &amp;&amp; !key.startsWith(&quot;acra&quot;) &amp;&amp; key != prefHandler.getKey(PrefKey.FIRST_INSTALL_VERSION)</span>
+                        ) {
+<span class="nc" id="L315">                            edit.remove(key)</span>
+                        }
+<span class="nc" id="L317">                    }</span>
+
+<span class="nc" id="L319">                    backupPref.all.forEach {</span>
+<span class="nc" id="L320">                        val key = it.key</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                        if (key == prefHandler.getKey(PrefKey.LICENCE_LEGACY) ||</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                            key == prefHandler.getKey(PrefKey.FIRST_INSTALL_VERSION) ||</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                            key == prefHandler.getKey(PrefKey.UI_WEB)</span>
+                        ) {
+<span class="nc" id="L325">                            return@forEach</span>
+                        }
+<span class="nc" id="L327">                        val value = it.value</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                        if (value == null) {</span>
+<span class="nc" id="L329">                            Timber.i(&quot;Found: %s null&quot;, key)</span>
+<span class="nc" id="L330">                            return@forEach</span>
+                        }
+<span class="nc" id="L332">                        when (value) {</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                            is Long -&gt; {</span>
+<span class="nc" id="L334">                                edit.putLong(key, backupPref.getLong(key, 0))</span>
+                            }
+
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                            is Int -&gt; {</span>
+<span class="nc" id="L338">                                edit.putInt(key, backupPref.getInt(key, 0))</span>
+                            }
+
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                            is String -&gt; {</span>
+<span class="nc" id="L342">                                edit.putString(key, backupPref.getString(key, &quot;&quot;))</span>
+                            }
+
+<span class="nc bnc" id="L345" title="All 2 branches missed.">                            is Boolean -&gt; {</span>
+<span class="nc" id="L346">                                edit.putBoolean(key, backupPref.getBoolean(key, false))</span>
+                            }
+
+                            else -&gt; {
+<span class="nc" id="L350">                                Timber.i(&quot;Found: %s of type %s&quot;, key, value.javaClass.name)</span>
+                            }
+                        }
+<span class="nc" id="L353">                    }</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                    if (currentPlannerId != null) {</span>
+<span class="nc" id="L355">                        edit.putString(</span>
+<span class="nc" id="L356">                            prefHandler.getKey(PrefKey.PLANNER_CALENDAR_PATH),</span>
+<span class="nc" id="L357">                            currentPlannerPath</span>
+                        )
+<span class="nc" id="L359">                        edit.putString(</span>
+<span class="nc" id="L360">                            prefHandler.getKey(PrefKey.PLANNER_CALENDAR_ID),</span>
+<span class="nc" id="L361">                            currentPlannerId</span>
+                        )
+                    }
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                    edit.putBoolean(prefHandler.getKey(PrefKey.ENCRYPT_DATABASE), encrypt)</span>
+<span class="nc" id="L365">                    edit.apply()</span>
+<span class="nc" id="L366">                    tempPrefFile.delete()</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                    publishProgress(R.string.restore_preferences_success)</span>
+                    //if a user restores a backup we do not want past plan instances to flood the database
+<span class="nc" id="L369">                    prefHandler.putLong(</span>
+<span class="nc" id="L370">                        PrefKey.PLANNER_LAST_EXECUTION_TIMESTAMP,</span>
+<span class="nc" id="L371">                        System.currentTimeMillis()</span>
+                    )
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                    publishProgress(</span>
+<span class="nc" id="L374">                        R.string.restore_calendar_success,</span>
+<span class="nc" id="L375">                        restorePlanner()</span>
+                    )
+<span class="nc" id="L377">                    application.settings</span>
+<span class="nc" id="L378">                        .registerOnSharedPreferenceChangeListener(application)</span>
+<span class="nc" id="L379">                    Timber.i(&quot;now emptying event cache&quot;)</span>
+<span class="nc" id="L380">                    contentResolver.delete(</span>
+<span class="nc" id="L381">                        TransactionProvider.EVENT_CACHE_URI, null, null</span>
+                    )
+
+                    //now handling pictures
+                    //1.stale uris in the backup can be ignored1
+                    //delete from db
+<span class="nc" id="L387">                    contentResolver.delete(</span>
+<span class="nc" id="L388">                        TransactionProvider.STALE_IMAGES_URI, null, null</span>
+                    )
+                    //2. all images that are left over in external and
+                    //internal picture dir are now stale
+<span class="nc" id="L392">                    registerAsStale(false)</span>
+<span class="nc" id="L393">                    registerAsStale(true)</span>
+
+                    //3. move pictures home and update uri
+<span class="nc" id="L396">                    val backupPictureDir = File(workingDir, ZipUtils.PICTURES)</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">                    val backupFiles = backupPictureDir.listFiles() ?: emptyArray()</span>
+<span class="nc" id="L398">                    contentResolver.query(</span>
+<span class="nc" id="L399">                        TransactionProvider.ATTACHMENTS_URI,</span>
+<span class="nc" id="L400">                        arrayOf(KEY_ROWID, KEY_URI),</span>
+<span class="nc" id="L401">                        null,</span>
+<span class="nc" id="L402">                        null,</span>
+<span class="nc" id="L403">                        null</span>
+<span class="nc" id="L404">                    )!!.use { c -&gt;</span>
+<span class="nc" id="L405">                        c.asSequence.forEach { cursor -&gt;</span>
+<span class="nc" id="L406">                            val uriValues = ContentValues(1)</span>
+<span class="nc" id="L407">                            val rowId = cursor.getLong(0)</span>
+<span class="nc" id="L408">                            val fromBackup = cursor.getString(1)</span>
+<span class="nc" id="L409">                            val selection = &quot;$KEY_URI = ?&quot;</span>
+<span class="nc" id="L410">                            val selectionArguments = arrayOf(fromBackup)</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                            val restored = (backupFiles.firstOrNull { file -&gt;</span>
+<span class="nc" id="L412">                                file.name.startsWith(&quot;${rowId}_&quot;)</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">                            }?.let {</span>
+<span class="nc" id="L414">                                it to it.nameWithoutExtension.substringAfter('_')</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">                            } ?: Uri.parse(fromBackup).lastPathSegment?.let { fileName -&gt;</span>
+                                //legacy backups
+<span class="nc" id="L417">                                backupFiles.firstOrNull { it.name == fileName }</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">                                    ?.let { it to it.nameWithoutExtension }</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                            })?.let { (image, fileName) -&gt;</span>
+<span class="nc" id="L420">                                val restoredImage = PictureDirHelper.getOutputMediaFile(</span>
+<span class="nc" id="L421">                                    fileName = fileName,</span>
+<span class="nc" id="L422">                                    temp = false,</span>
+<span class="nc" id="L423">                                    checkUnique = true,</span>
+<span class="nc" id="L424">                                    application = getApplication(),</span>
+<span class="nc" id="L425">                                    extension = image.extension</span>
+                                )
+<span class="nc bnc" id="L427" title="All 2 branches missed.">                                if (FileCopyUtils.copy(image, restoredImage)) {</span>
+<span class="nc" id="L428">                                    val restored =</span>
+<span class="nc" id="L429">                                        AppDirHelper.getContentUriForFile(</span>
+<span class="nc" id="L430">                                            application,</span>
+<span class="nc" id="L431">                                            restoredImage</span>
+                                        )
+<span class="nc" id="L433">                                    uriValues.put(KEY_URI, restored.toString())</span>
+<span class="nc" id="L434">                                    contentResolver.update(</span>
+<span class="nc" id="L435">                                        TransactionProvider.ATTACHMENTS_URI,</span>
+<span class="nc" id="L436">                                        uriValues,</span>
+<span class="nc" id="L437">                                        selection,</span>
+<span class="nc" id="L438">                                        selectionArguments</span>
+                                    )
+<span class="nc" id="L440">                                    true</span>
+<span class="nc" id="L441">                                } else false</span>
+                            }
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                            if (restored != true) {</span>
+<span class="nc" id="L444">                                CrashHandler.report(</span>
+<span class="nc" id="L445">                                    Exception(&quot;Could not restore file $fromBackup from backup&quot;)</span>
+                                )
+                            }
+<span class="nc" id="L448">                        }</span>
+<span class="nc" id="L449">                    }</span>
+
+<span class="nc bnc" id="L451" title="All 8 branches missed.">                    restoreSyncState().takeIf { it.isNotEmpty() }?.let { publishProgress(it) }</span>
+<span class="nc" id="L452">                    updateTransferShortcut()</span>
+<span class="nc" id="L453">                    _result.update { Result.success(Unit) }</span>
+                } else {
+<span class="nc" id="L455">                    failureResult(R.string.restore_db_failure)</span>
+                }
+<span class="nc" id="L457">            } catch (e: Exception) {</span>
+<span class="nc" id="L458">                CrashHandler.report(</span>
+<span class="nc" id="L459">                    e, mapOf(</span>
+<span class="nc bnc" id="L460" title="All 4 branches missed.">                        &quot;fileUri&quot; to (fileUri?.toString() ?: &quot;null&quot;),</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">                        &quot;syncAccountName&quot; to (syncAccountName ?: &quot;null&quot;),</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">                        &quot;backupFromSync&quot; to (backupFromSync ?: &quot;null&quot;)</span>
+                    )
+                )
+<span class="nc" id="L465">                failureResult(e)</span>
+<span class="nc" id="L466">                return@launch</span>
+            } finally {
+<span class="nc" id="L468">                workingDir.deleteRecursively()</span>
+            }
+<span class="nc" id="L470">        }</span>
+<span class="nc" id="L471">    }</span>
+
+    private fun restoreSyncState(): String {
+<span class="nc" id="L474">        var message = &quot;&quot;</span>
+<span class="nc" id="L475">        val application = getApplication&lt;MyApplication&gt;()</span>
+<span class="nc" id="L476">        val accountManager = AccountManager.get(application)</span>
+<span class="nc" id="L477">        val accounts = listOf(*GenericAccountService.getAccountNames(application))</span>
+<span class="nc" id="L478">        val activeAccounts = mutableSetOf&lt;String&gt;()</span>
+<span class="nc" id="L479">        val projection =</span>
+<span class="nc" id="L480">            arrayOf(KEY_ROWID, KEY_SYNC_ACCOUNT_NAME)</span>
+<span class="nc" id="L481">        contentResolver.query(</span>
+<span class="nc" id="L482">            TransactionProvider.ACCOUNTS_URI, projection,</span>
+<span class="nc" id="L483">            &quot;$KEY_SYNC_ACCOUNT_NAME IS NOT null&quot;, null, null</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">        )?.use {</span>
+<span class="nc" id="L485">            val sharedPreferences = application.settings</span>
+<span class="nc" id="L486">            val editor = sharedPreferences.edit()</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">            if (it.moveToFirst()) {</span>
+<span class="nc" id="L488">                var restored = 0</span>
+<span class="nc" id="L489">                var failed = 0</span>
+                do {
+<span class="nc" id="L491">                    val accountId = it.getLong(0)</span>
+<span class="nc" id="L492">                    val accountName = it.getString(1)</span>
+<span class="nc" id="L493">                    val localKey = SyncAdapter.KEY_LAST_SYNCED_LOCAL(accountId)</span>
+<span class="nc" id="L494">                    val remoteKey = SyncAdapter.KEY_LAST_SYNCED_REMOTE(accountId)</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                    if (accounts.contains(accountName)) {</span>
+<span class="nc" id="L496">                        val account = GenericAccountService.getAccount(accountName)</span>
+<span class="nc" id="L497">                        accountManager.setUserData(</span>
+<span class="nc" id="L498">                            account,</span>
+<span class="nc" id="L499">                            localKey,</span>
+<span class="nc" id="L500">                            sharedPreferences.getString(localKey, null)</span>
+                        )
+<span class="nc" id="L502">                        accountManager.setUserData(</span>
+<span class="nc" id="L503">                            account,</span>
+<span class="nc" id="L504">                            remoteKey,</span>
+<span class="nc" id="L505">                            sharedPreferences.getString(remoteKey, null)</span>
+                        )
+<span class="nc" id="L507">                        activeAccounts.add(accountName)</span>
+<span class="nc" id="L508">                        restored++</span>
+                    } else {
+<span class="nc" id="L510">                        failed++</span>
+                    }
+<span class="nc" id="L512">                    editor.remove(localKey)</span>
+<span class="nc" id="L513">                    editor.remove(remoteKey)</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                } while (it.moveToNext())</span>
+<span class="nc" id="L515">                editor.apply()</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">                if (restored &gt; 0) {</span>
+<span class="nc" id="L517">                    message += getString(R.string.sync_state_restored, restored)</span>
+<span class="nc" id="L518">                    activeAccounts.forEach { account -&gt;</span>
+<span class="nc" id="L519">                        GenericAccountService.activateSync(account, prefHandler)</span>
+<span class="nc" id="L520">                    }</span>
+                }
+<span class="nc bnc" id="L522" title="All 2 branches missed.">                if (failed &gt; 0) {</span>
+<span class="nc" id="L523">                    message += getString(</span>
+<span class="nc" id="L524">                        R.string.sync_state_could_not_be_restored,</span>
+<span class="nc" id="L525">                        failed</span>
+                    )
+                }
+<span class="nc" id="L528">                checkSyncAccounts(application)</span>
+            }
+<span class="nc" id="L530">        }</span>
+<span class="nc" id="L531">        return message</span>
+    }
+
+    private fun registerAsStale(secure: Boolean) {
+<span class="nc bnc" id="L535" title="All 2 branches missed.">        val dir = PictureDirHelper.getPictureDir(getApplication(), secure) ?: return</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        val files = dir.listFiles() ?: return</span>
+<span class="nc" id="L537">        val values = ContentValues(1)</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">        for (file: File in files) {</span>
+<span class="nc" id="L539">            values.put(</span>
+<span class="nc" id="L540">                KEY_URI,</span>
+<span class="nc" id="L541">                AppDirHelper.getContentUriForFile(getApplication(), file).toString()</span>
+            )
+<span class="nc" id="L543">            contentResolver.insert(TransactionProvider.ATTACHMENTS_URI, values)</span>
+        }
+<span class="nc" id="L545">    }</span>
+
+    /**
+     * 1.check if a planner is configured. If no, nothing to do 2.check if the
+     * configured planner exists on the device 2.1 if yes go through all events
+     * and look for them based on UUID added to description recreate events that
+     * we did not find (2.2 if no, user should have been asked to select a target
+     * calendar where we will store the recreated events)
+     *
+     * @return number of restored plans
+     */
+    private fun restorePlanner(): Int {
+<span class="nc" id="L557">        val calendarIdFromBackup = prefHandler.getString(</span>
+<span class="nc" id="L558">            PrefKey.PLANNER_CALENDAR_ID,</span>
+<span class="nc" id="L559">            INVALID_CALENDAR_ID</span>
+        )
+<span class="nc" id="L561">        val calendarPath = prefHandler.getString(PrefKey.PLANNER_CALENDAR_PATH, &quot;&quot;)</span>
+<span class="nc" id="L562">        Timber.d(</span>
+<span class="nc" id="L563">            &quot;restore plans to calendar with id %s and path %s&quot;, calendarIdFromBackup,</span>
+<span class="nc" id="L564">            calendarPath</span>
+        )
+<span class="nc" id="L566">        var restoredPlansCount = 0</span>
+<span class="nc bnc" id="L567" title="All 4 branches missed.">        if (!(calendarIdFromBackup == INVALID_CALENDAR_ID || calendarPath == &quot;&quot;)) {</span>
+<span class="nc" id="L568">            contentResolver.query(</span>
+<span class="nc" id="L569">                CalendarContract.Calendars.CONTENT_URI,</span>
+<span class="nc" id="L570">                arrayOf(CalendarContract.Calendars._ID),</span>
+<span class="nc" id="L571">                CALENDAR_FULL_PATH_PROJECTION</span>
+                        + &quot; = ?&quot;,
+<span class="nc" id="L573">                arrayOf(calendarPath),</span>
+<span class="nc" id="L574">                null</span>
+<span class="nc bnc" id="L575" title="All 2 branches missed.">            )?.use {</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                if (it.moveToFirst()) {</span>
+<span class="nc" id="L577">                    val calendarId = it.getLong(0)</span>
+<span class="nc" id="L578">                    Timber.d(&quot;restorePlaner: found calendar with id %d&quot;, calendarId)</span>
+<span class="nc" id="L579">                    prefHandler.putString(PrefKey.PLANNER_CALENDAR_ID, calendarId.toString())</span>
+<span class="nc" id="L580">                    val planValues = ContentValues()</span>
+<span class="nc" id="L581">                    val eventValues = ContentValues()</span>
+<span class="nc" id="L582">                    eventValues.put(</span>
+<span class="nc" id="L583">                        CalendarContract.Events.CALENDAR_ID,</span>
+<span class="nc" id="L584">                        calendarId</span>
+                    )
+<span class="nc" id="L586">                    contentResolver.query(</span>
+<span class="nc" id="L587">                        TEMPLATES_URI, arrayOf(</span>
+<span class="nc" id="L588">                            KEY_ROWID, KEY_PLANID,</span>
+<span class="nc" id="L589">                            KEY_UUID</span>
+<span class="nc" id="L590">                        ), &quot;$KEY_PLANID IS NOT null&quot;, null, null</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">                    )?.use { plan -&gt;</span>
+<span class="nc bnc" id="L592" title="All 2 branches missed.">                        if (plan.moveToFirst()) {</span>
+                            do {
+<span class="nc" id="L594">                                val templateId = plan.getLong(0)</span>
+<span class="nc" id="L595">                                val oldPlanId = plan.getLong(1)</span>
+<span class="nc" id="L596">                                val uuid = plan.getString(2)</span>
+<span class="nc bnc" id="L597" title="All 4 branches missed.">                                if (contentResolver.query(</span>
+<span class="nc" id="L598">                                        CalendarContract.Events.CONTENT_URI,</span>
+<span class="nc" id="L599">                                        arrayOf(CalendarContract.Events._ID),</span>
+<span class="nc" id="L600">                                        CalendarContract.Events.CALENDAR_ID + &quot; = ? AND &quot; + CalendarContract.Events.DESCRIPTION</span>
+                                                + &quot; LIKE ?&quot;,
+<span class="nc" id="L602">                                        arrayOf(calendarId.toString(), &quot;%$uuid%&quot;),</span>
+<span class="nc" id="L603">                                        null</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">                                    )?.use { event -&gt;</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                                        if (event.moveToFirst()) {</span>
+<span class="nc" id="L606">                                            val newPlanId = event.getLong(0)</span>
+<span class="nc" id="L607">                                            Timber.d(</span>
+<span class="nc" id="L608">                                                &quot;Looking for event with uuid %s: found id %d. Original event had id %d&quot;,</span>
+<span class="nc" id="L609">                                                uuid, newPlanId, oldPlanId</span>
+                                            )
+<span class="nc bnc" id="L611" title="All 2 branches missed.">                                            if (newPlanId != oldPlanId) {</span>
+<span class="nc" id="L612">                                                planValues.put(</span>
+<span class="nc" id="L613">                                                    KEY_PLANID,</span>
+<span class="nc" id="L614">                                                    newPlanId</span>
+                                                )
+<span class="nc" id="L616">                                                val updated = contentResolver.update(</span>
+<span class="nc" id="L617">                                                    ContentUris.withAppendedId(</span>
+<span class="nc" id="L618">                                                        TEMPLATES_URI, templateId</span>
+<span class="nc" id="L619">                                                    ), planValues, null,</span>
+<span class="nc" id="L620">                                                    null</span>
+                                                )
+<span class="nc bnc" id="L622" title="All 2 branches missed.">                                                if (updated &gt; 0) {</span>
+<span class="nc" id="L623">                                                    Timber.i(</span>
+<span class="nc" id="L624">                                                        &quot;updated plan id in template: %d&quot;,</span>
+<span class="nc" id="L625">                                                        templateId</span>
+                                                    )
+<span class="nc" id="L627">                                                    restoredPlansCount++</span>
+                                                }
+                                            } else {
+<span class="nc" id="L630">                                                restoredPlansCount++</span>
+                                            }
+<span class="nc" id="L632">                                            true</span>
+<span class="nc" id="L633">                                        } else false</span>
+<span class="nc" id="L634">                                    } == false</span>
+                                ) {
+<span class="nc" id="L636">                                    Timber.d(</span>
+<span class="nc" id="L637">                                        &quot;Looking for event with uuid %s did not find, now reconstructing from cache&quot;,</span>
+<span class="nc" id="L638">                                        uuid</span>
+                                    )
+<span class="nc bnc" id="L640" title="All 4 branches missed.">                                    if (contentResolver.query(</span>
+<span class="nc" id="L641">                                            TransactionProvider.EVENT_CACHE_URI,</span>
+<span class="nc" id="L642">                                            PlannerUtils.eventProjection,</span>
+<span class="nc" id="L643">                                            CalendarContract.Events.DESCRIPTION + &quot; LIKE ?&quot;,</span>
+<span class="nc" id="L644">                                            arrayOf(&quot;%$uuid%&quot;),</span>
+<span class="nc" id="L645">                                            null</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">                                        )?.use { event -&gt;</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">                                            if (event.moveToFirst()) {</span>
+<span class="nc" id="L648">                                                eventValues.copyEventData(event)</span>
+<span class="nc bnc" id="L649" title="All 2 branches missed.">                                                if (insertEventAndUpdatePlan(</span>
+<span class="nc" id="L650">                                                        contentResolver,</span>
+<span class="nc" id="L651">                                                        eventValues,</span>
+<span class="nc" id="L652">                                                        templateId</span>
+                                                    )
+                                                ) {
+<span class="nc" id="L655">                                                    Timber.i(</span>
+<span class="nc" id="L656">                                                        &quot;updated plan id in template %d&quot;,</span>
+<span class="nc" id="L657">                                                        templateId</span>
+                                                    )
+<span class="nc" id="L659">                                                    restoredPlansCount++</span>
+                                                }
+<span class="nc" id="L661">                                                true</span>
+<span class="nc" id="L662">                                            } else false</span>
+<span class="nc" id="L663">                                        } == false</span>
+                                    ) {
+                                        //need to set eventId to null
+<span class="nc" id="L666">                                        planValues.putNull(KEY_PLANID)</span>
+<span class="nc" id="L667">                                        contentResolver.update(</span>
+<span class="nc" id="L668">                                            ContentUris.withAppendedId(</span>
+<span class="nc" id="L669">                                                TEMPLATES_URI,</span>
+<span class="nc" id="L670">                                                templateId</span>
+                                            ),
+<span class="nc" id="L672">                                            planValues, null, null</span>
+                                        )
+                                    }
+                                }
+<span class="nc bnc" id="L676" title="All 2 branches missed.">                            } while (plan.moveToNext())</span>
+                        }
+<span class="nc" id="L678">                    }</span>
+                }
+<span class="nc" id="L680">            }</span>
+        }
+<span class="nc" id="L682">        return restoredPlansCount</span>
+    }
+
+    companion object {
+        const val KEY_BACKUP_FROM_SYNC = &quot;backupFromSync&quot;
+        const val KEY_PASSWORD = &quot;passwordEncryption&quot;
+        const val KEY_FILE_PATH = &quot;filePath&quot;
+        const val KEY_ENCRYPT = &quot;encrypt&quot;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

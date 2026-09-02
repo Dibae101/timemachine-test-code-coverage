@@ -1,0 +1,814 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FeedViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.ui.compose.feedarticle</a> &gt; <span class="el_source">FeedViewModel.kt</span></div><h1>FeedViewModel.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.ui.compose.feedarticle
+
+import androidx.compose.runtime.Immutable
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.viewModelScope
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
+import com.nononsenseapps.feeder.ApplicationCoroutineScope
+import com.nononsenseapps.feeder.archmodel.FeedItemStyle
+import com.nononsenseapps.feeder.archmodel.FeedType
+import com.nononsenseapps.feeder.archmodel.ItemOpener
+import com.nononsenseapps.feeder.archmodel.OpenAISettings
+import com.nononsenseapps.feeder.archmodel.Repository
+import com.nononsenseapps.feeder.archmodel.ScreenTitle
+import com.nononsenseapps.feeder.archmodel.SwipeAsRead
+import com.nononsenseapps.feeder.archmodel.ThemeOptions
+import com.nononsenseapps.feeder.background.runOnceRssSync
+import com.nononsenseapps.feeder.base.DIAwareViewModel
+import com.nononsenseapps.feeder.blob.blobFullInputStream
+import com.nononsenseapps.feeder.blob.blobInputStream
+import com.nononsenseapps.feeder.db.room.FeedItemCursor
+import com.nononsenseapps.feeder.db.room.FeedTitle
+import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.localtranslation.BergamotModelDownloadProgress
+import com.nononsenseapps.feeder.localtranslation.BergamotModelManager
+import com.nononsenseapps.feeder.localtranslation.LocalTranslator
+import com.nononsenseapps.feeder.model.FeedUnreadCount
+import com.nononsenseapps.feeder.model.LocaleOverride
+import com.nononsenseapps.feeder.model.PlaybackStatus
+import com.nononsenseapps.feeder.model.PodcastPlayerState
+import com.nononsenseapps.feeder.model.PodcastPlayerStateHolder
+import com.nononsenseapps.feeder.model.TTSStateHolder
+import com.nononsenseapps.feeder.model.TranslationManager
+import com.nononsenseapps.feeder.openai.canUseAsTranslationApi
+import com.nononsenseapps.feeder.openai.isLocalTranslation
+import com.nononsenseapps.feeder.ui.compose.feed.FeedListItem
+import com.nononsenseapps.feeder.ui.compose.feed.FeedOrTag
+import com.nononsenseapps.feeder.ui.compose.text.htmlToAnnotatedString
+import com.nononsenseapps.feeder.util.Either
+import com.nononsenseapps.feeder.util.FilePathProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.kodein.di.DI
+import org.kodein.di.instance
+import java.io.FileNotFoundException
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+
+<span class="fc" id="L58">class FeedViewModel(</span>
+    di: DI,
+<span class="fc" id="L60">    private val state: SavedStateHandle,</span>
+<span class="fc" id="L61">) : DIAwareViewModel(di),</span>
+    FeedListFilterCallback {
+<span class="fc" id="L63">    private val repository: Repository by instance()</span>
+<span class="fc" id="L64">    private val ttsStateHolder: TTSStateHolder by instance()</span>
+<span class="fc" id="L65">    private val podcastPlayerStateHolder: PodcastPlayerStateHolder by instance()</span>
+<span class="pc" id="L66">    private val filePathProvider: FilePathProvider by instance()</span>
+<span class="pc" id="L67">    private val translationManager: TranslationManager by instance()</span>
+<span class="fc" id="L68">    private val bergamotModelManager: BergamotModelManager by instance()</span>
+<span class="pc" id="L69">    private val localTranslator: LocalTranslator by instance()</span>
+
+    // Use this for actions which should complete even if app goes off screen
+<span class="pc" id="L72">    private val applicationCoroutineScope: ApplicationCoroutineScope by instance()</span>
+
+<span class="fc" id="L74">    val currentFeedListItems: Flow&lt;PagingData&lt;FeedListItem&gt;&gt; =</span>
+<span class="fc" id="L75">        repository</span>
+<span class="fc" id="L76">            .getCurrentFeedListItems()</span>
+<span class="fc" id="L77">            .cachedIn(viewModelScope)</span>
+
+<span class="fc" id="L79">    private val translatedFeedCardEntries = MutableStateFlow&lt;Map&lt;FeedCardSource, FeedCardTranslationEntry&gt;&gt;(emptyMap())</span>
+<span class="fc" id="L80">    private val feedCardTranslationGeneration = MutableStateFlow(0)</span>
+<span class="fc" id="L81">    val translatedFeedCards: StateFlow&lt;TranslatedFeedCards&gt; =</span>
+<span class="pc bpc" id="L82" title="1 of 2 branches missed.">        combine(translatedFeedCardEntries, feedCardTranslationGeneration) { entries, generation -&gt;</span>
+<span class="fc" id="L83">            TranslatedFeedCards(</span>
+<span class="fc" id="L84">                generation = generation,</span>
+<span class="pc" id="L85">                items = entries.mapValues { it.value.item },</span>
+<span class="fc" id="L86">            )</span>
+<span class="fc" id="L87">        }.stateIn(</span>
+<span class="fc" id="L88">            viewModelScope,</span>
+<span class="fc" id="L89">            SharingStarted.Eagerly,</span>
+<span class="fc" id="L90">            TranslatedFeedCards(),</span>
+        )
+<span class="fc" id="L92">    private val inFlightFeedCardTranslations = ConcurrentHashMap.newKeySet&lt;FeedCardTranslationRequest&gt;()</span>
+
+<span class="fc" id="L94">    val pagedNavDrawerItems: Flow&lt;PagingData&lt;FeedUnreadCount&gt;&gt; =</span>
+<span class="fc" id="L95">        repository</span>
+<span class="fc" id="L96">            .getPagedNavDrawerItems()</span>
+<span class="fc" id="L97">            .cachedIn(viewModelScope)</span>
+
+    private val visibleFeedItemCount: StateFlow&lt;Int&gt; =
+<span class="fc" id="L100">        repository</span>
+<span class="fc" id="L101">            .getCurrentFeedListVisibleItemCount()</span>
+<span class="fc" id="L102">            .stateIn(</span>
+<span class="fc" id="L103">                viewModelScope,</span>
+<span class="fc" id="L104">                SharingStarted.Eagerly,</span>
+                // So we display an empty screen before data is loaded (less flicker)
+<span class="fc" id="L106">                1,</span>
+            )
+
+    private val screenTitleForCurrentFeedOrTag: StateFlow&lt;ScreenTitle&gt; =
+<span class="fc" id="L110">        repository</span>
+<span class="fc" id="L111">            .getScreenTitleForCurrentFeedOrTag()</span>
+<span class="fc" id="L112">            .stateIn(</span>
+<span class="fc" id="L113">                viewModelScope,</span>
+<span class="fc" id="L114">                SharingStarted.Eagerly,</span>
+<span class="fc" id="L115">                ScreenTitle(&quot;&quot;, FeedType.ALL_FEEDS, 0),</span>
+            )
+
+    private val visibleFeeds: StateFlow&lt;List&lt;FeedTitle&gt;&gt; =
+<span class="fc" id="L119">        repository</span>
+<span class="fc" id="L120">            .getCurrentlyVisibleFeedTitles()</span>
+<span class="fc" id="L121">            .stateIn(</span>
+<span class="fc" id="L122">                viewModelScope,</span>
+<span class="fc" id="L123">                SharingStarted.Eagerly,</span>
+<span class="fc" id="L124">                emptyList(),</span>
+            )
+
+    fun deleteFeeds(feedIds: List&lt;Long&gt;) =
+<span class="nc" id="L128">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L129">            repository.deleteFeeds(feedIds)</span>
+<span class="nc" id="L130">        }</span>
+
+    fun renameTag(
+        oldTag: String,
+        newTag: String,
+<span class="nc" id="L135">    ) = applicationCoroutineScope.launch {</span>
+<span class="nc" id="L136">        repository.renameTag(oldTag, newTag)</span>
+<span class="nc" id="L137">    }</span>
+
+    fun markAllAsRead() =
+<span class="nc" id="L140">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L141">            val (feedId, feedTag) = repository.currentFeedAndTag.value</span>
+<span class="nc" id="L142">            repository.markAllAsReadInFeedOrTag(feedId, feedTag)</span>
+<span class="nc" id="L143">        }</span>
+
+    fun markAsUnread(itemId: Long) =
+<span class="nc" id="L146">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L147">            repository.markAsUnread(itemId)</span>
+<span class="nc" id="L148">        }</span>
+
+    fun markAsRead(itemId: Long) =
+<span class="nc" id="L151">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L152">            repository.markAsReadAndNotified(itemId)</span>
+<span class="nc" id="L153">        }</span>
+
+    fun markAsReadOnSwipe(itemId: Long) =
+<span class="nc" id="L156">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L157">            repository.markAsReadAndNotified(itemId = itemId, readTimeBeforeMinReadTime = true)</span>
+<span class="nc" id="L158">        }</span>
+
+    fun markBeforeAsRead(cursor: FeedItemCursor) =
+<span class="nc" id="L161">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L162">            val (feedId, feedTag) = repository.currentFeedAndTag.value</span>
+<span class="nc" id="L163">            repository.markBeforeAsRead(cursor, feedId, feedTag)</span>
+<span class="nc" id="L164">        }</span>
+
+    fun markAfterAsRead(cursor: FeedItemCursor) =
+<span class="nc" id="L167">        applicationCoroutineScope.launch {</span>
+<span class="nc" id="L168">            val (feedId, feedTag) = repository.currentFeedAndTag.value</span>
+<span class="nc" id="L169">            repository.markAfterAsRead(cursor, feedId, feedTag)</span>
+<span class="nc" id="L170">        }</span>
+
+    fun setBookmarked(
+        itemId: Long,
+        bookmarked: Boolean,
+<span class="nc" id="L175">    ) = applicationCoroutineScope.launch {</span>
+<span class="nc" id="L176">        repository.setBookmarked(itemId, bookmarked)</span>
+<span class="nc" id="L177">    }</span>
+
+    fun requestImmediateSyncOfCurrentFeedOrTag() {
+<span class="nc" id="L180">        val (feedId, feedTag) = repository.currentFeedAndTag.value</span>
+<span class="nc" id="L181">        runOnceRssSync(</span>
+<span class="nc" id="L182">            di = di,</span>
+<span class="nc" id="L183">            feedId = feedId,</span>
+<span class="nc" id="L184">            feedTag = feedTag,</span>
+<span class="nc" id="L185">            forceNetwork = true,</span>
+<span class="nc" id="L186">            triggeredByUser = true,</span>
+        )
+<span class="nc" id="L188">    }</span>
+
+    fun requestImmediateSyncOfAll() {
+<span class="nc" id="L191">        runOnceRssSync(</span>
+<span class="nc" id="L192">            di = di,</span>
+<span class="nc" id="L193">            forceNetwork = true,</span>
+<span class="nc" id="L194">            triggeredByUser = true,</span>
+        )
+<span class="nc" id="L196">    }</span>
+
+    private val toolbarVisible: MutableStateFlow&lt;Boolean&gt; =
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">        MutableStateFlow(state[&quot;toolbarMenuVisible&quot;] ?: false)</span>
+
+<span class="fc" id="L201">    init {</span>
+<span class="fc" id="L202">        viewModelScope.launch {</span>
+<span class="fc" id="L203">            combine(</span>
+<span class="fc" id="L204">                repository.translateArticlePreviewsByDefault,</span>
+<span class="fc" id="L205">                repository.translationApiSettings,</span>
+<span class="fc" id="L206">                repository.preferredTranslationLanguage,</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">            ) { shouldTranslate, settings, targetLanguage -&gt;</span>
+<span class="fc" id="L208">                feedCardTranslationConfig(</span>
+<span class="fc" id="L209">                    enabled = shouldTranslate,</span>
+<span class="fc" id="L210">                    settings = settings,</span>
+<span class="fc" id="L211">                    targetLanguage = targetLanguage,</span>
+<span class="fc" id="L212">                )</span>
+<span class="fc" id="L213">            }.distinctUntilChanged()</span>
+<span class="fc" id="L214">                .collect {</span>
+<span class="fc" id="L215">                    inFlightFeedCardTranslations.clear()</span>
+<span class="fc" id="L216">                    translatedFeedCardEntries.value = emptyMap()</span>
+<span class="fc" id="L217">                    feedCardTranslationGeneration.update { it + 1 }</span>
+<span class="fc" id="L218">                }</span>
+<span class="nc" id="L219">        }</span>
+<span class="fc" id="L220">    }</span>
+
+    fun setToolbarMenuVisible(visible: Boolean) {
+<span class="nc" id="L223">        state[&quot;toolbarMenuVisible&quot;] = visible</span>
+<span class="nc" id="L224">        toolbarVisible.update { visible }</span>
+<span class="nc" id="L225">    }</span>
+
+    fun translateFeedCardIfNeeded(item: FeedListItem) {
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">        if (item.id == ID_UNSET) {</span>
+<span class="nc" id="L229">            return</span>
+        }
+
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">        val config = currentFeedCardTranslationConfig() ?: return</span>
+<span class="nc" id="L233">        val source = FeedCardSource.from(item)</span>
+<span class="nc" id="L234">        val existingEntry = translatedFeedCardEntries.value[source]</span>
+<span class="nc bnc" id="L235" title="All 6 branches missed.">        if (existingEntry?.isComplete == true) {</span>
+<span class="nc" id="L236">            return</span>
+        }
+
+<span class="nc" id="L239">        val request =</span>
+<span class="nc" id="L240">            FeedCardTranslationRequest(</span>
+<span class="nc" id="L241">                itemId = item.id,</span>
+<span class="nc" id="L242">                sourceTitle = item.title,</span>
+<span class="nc" id="L243">                sourceSnippet = item.snippet,</span>
+<span class="nc" id="L244">                settings = config.settings,</span>
+<span class="nc" id="L245">                targetLanguage = config.targetLanguage,</span>
+            )
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        if (!inFlightFeedCardTranslations.add(request)) {</span>
+<span class="nc" id="L248">            return</span>
+        }
+
+<span class="nc" id="L251">        viewModelScope.launch {</span>
+<span class="nc" id="L252">            try {</span>
+<span class="nc" id="L253">                val cached = translationManager.getCachedTranslatedFeedListItem(item, config.settings, config.targetLanguage)</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">                if (cached.hasCachedTranslation) {</span>
+<span class="nc" id="L255">                    updateTranslatedFeedCard(</span>
+<span class="nc" id="L256">                        source = source,</span>
+                        entry =
+<span class="nc" id="L258">                            FeedCardTranslationEntry(</span>
+<span class="nc" id="L259">                                item = cached.item,</span>
+<span class="nc" id="L260">                                isComplete = cached.isFullyCached,</span>
+                            ),
+                    )
+                }
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                if (cached.isFullyCached) {</span>
+<span class="nc" id="L266">                    return@launch</span>
+                }
+
+<span class="nc bnc" id="L269" title="All 2 branches missed.">                if (config.settings.isLocalTranslation) {</span>
+<span class="nc" id="L270">                    val text =</span>
+<span class="nc" id="L271">                        listOf(item.title, item.snippet)</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                            .filter { it.isNotBlank() }</span>
+<span class="nc" id="L273">                            .joinToString(separator = &quot; &quot;)</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                    if (!localTranslator.canTranslateWithoutBergamotDownload(</span>
+<span class="nc" id="L275">                            content = text,</span>
+<span class="nc" id="L276">                            targetLanguage = config.targetLanguage,</span>
+<span class="nc" id="L277">                            preserveHtml = false,</span>
+                        )
+                    ) {
+<span class="nc" id="L280">                        return@launch</span>
+                    }
+                }
+
+<span class="nc" id="L284">                val translatedItem =</span>
+<span class="nc" id="L285">                    translationManager.translateFeedListItem(</span>
+<span class="nc" id="L286">                        item = item,</span>
+<span class="nc" id="L287">                        settings = config.settings,</span>
+<span class="nc" id="L288">                        targetLanguage = config.targetLanguage,</span>
+                    )
+<span class="nc" id="L290">                val updatedCached =</span>
+<span class="nc" id="L291">                    translationManager.getCachedTranslatedFeedListItem(</span>
+<span class="nc" id="L292">                        item = item,</span>
+<span class="nc" id="L293">                        settings = config.settings,</span>
+<span class="nc" id="L294">                        targetLanguage = config.targetLanguage,</span>
+                    )
+<span class="nc" id="L296">                val displayItem =</span>
+<span class="nc" id="L297">                    when {</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">                        updatedCached.hasCachedTranslation -&gt; updatedCached.item</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                        translatedItem != item -&gt; translatedItem</span>
+<span class="nc" id="L300">                        else -&gt; null</span>
+                    }
+
+<span class="nc bnc" id="L303" title="All 4 branches missed.">                if (displayItem != null &amp;&amp; currentFeedCardTranslationConfig() == config) {</span>
+<span class="nc" id="L304">                    updateTranslatedFeedCard(</span>
+<span class="nc" id="L305">                        source = source,</span>
+                        entry =
+<span class="nc" id="L307">                            FeedCardTranslationEntry(</span>
+<span class="nc" id="L308">                                item = displayItem,</span>
+<span class="nc" id="L309">                                isComplete = updatedCached.isFullyCached,</span>
+                            ),
+                    )
+                }
+            } finally {
+<span class="nc" id="L314">                inFlightFeedCardTranslations.remove(request)</span>
+            }
+<span class="nc" id="L316">        }</span>
+<span class="nc" id="L317">    }</span>
+
+    private fun currentFeedCardTranslationConfig(): FeedCardTranslationConfig? =
+<span class="fc" id="L320">        feedCardTranslationConfig(</span>
+<span class="fc" id="L321">            enabled = repository.translateArticlePreviewsByDefault.value,</span>
+<span class="fc" id="L322">            settings = repository.translationApiSettings.value,</span>
+<span class="fc" id="L323">            targetLanguage = repository.preferredTranslationLanguage.value,</span>
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">        ).takeIf(FeedCardTranslationConfig::isActive)</span>
+
+    private fun feedCardTranslationConfig(
+        enabled: Boolean,
+        settings: OpenAISettings,
+        targetLanguage: String,
+    ): FeedCardTranslationConfig =
+<span class="fc" id="L331">        FeedCardTranslationConfig(</span>
+<span class="fc" id="L332">            enabled = enabled,</span>
+<span class="fc" id="L333">            settings = settings,</span>
+<span class="fc" id="L334">            targetLanguage = targetLanguage.trim(),</span>
+<span class="fc" id="L335">        )</span>
+
+    private fun updateTranslatedFeedCard(
+        source: FeedCardSource,
+        entry: FeedCardTranslationEntry,
+    ) {
+<span class="nc" id="L341">        translatedFeedCardEntries.update { current -&gt;</span>
+<span class="nc" id="L342">            current</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                .filterKeys { it.itemId != source.itemId } + (source to entry)</span>
+        }
+<span class="nc" id="L345">    }</span>
+
+    private val filterMenuVisible: MutableStateFlow&lt;Boolean&gt; =
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">        MutableStateFlow(state[&quot;filterMenuVisible&quot;] ?: false)</span>
+
+    fun setFilterMenuVisible(visible: Boolean) {
+<span class="nc" id="L351">        state[&quot;filterMenuVisible&quot;] = visible</span>
+<span class="nc" id="L352">        filterMenuVisible.update { visible }</span>
+<span class="nc" id="L353">    }</span>
+
+<span class="fc" id="L355">    val filterCallback: FeedListFilterCallback = this</span>
+
+    private val searchBarVisible: MutableStateFlow&lt;Boolean&gt; =
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">        MutableStateFlow(state[&quot;searchBarVisible&quot;] ?: false)</span>
+
+    fun setSearchBarVisible(visible: Boolean) {
+<span class="nc" id="L361">        state[&quot;searchBarVisible&quot;] = visible</span>
+<span class="nc" id="L362">        searchBarVisible.update { visible }</span>
+<span class="nc" id="L363">    }</span>
+
+    fun searchCallback(search: String) {
+<span class="nc" id="L366">        repository.searchFor(search)</span>
+<span class="nc" id="L367">    }</span>
+
+<span class="nc" id="L369">    fun toggleTagExpansion(tag: String) = repository.toggleTagExpansion(tag)</span>
+
+<span class="fc" id="L371">    private val editDialogVisible = MutableStateFlow(false)</span>
+
+    fun setShowEditDialog(visible: Boolean) {
+<span class="nc" id="L374">        editDialogVisible.update { visible }</span>
+<span class="nc" id="L375">    }</span>
+
+<span class="fc" id="L377">    private val deleteDialogVisible = MutableStateFlow(false)</span>
+
+    fun setShowDeleteDialog(visible: Boolean) {
+<span class="nc" id="L380">        deleteDialogVisible.update { visible }</span>
+<span class="nc" id="L381">    }</span>
+
+<span class="fc" id="L383">    private val renameTagDialogVisible = MutableStateFlow(false)</span>
+
+    fun setShowRenameTagDialog(visible: Boolean) {
+<span class="nc" id="L386">        renameTagDialogVisible.update { visible }</span>
+<span class="nc" id="L387">    }</span>
+
+    private fun setCurrentArticle(itemId: Long) {
+<span class="nc" id="L390">        repository.setCurrentArticle(itemId)</span>
+<span class="nc" id="L391">        repository.setIsArticleOpen(true)</span>
+<span class="nc" id="L392">    }</span>
+
+    fun openArticle(
+        itemId: Long,
+        openInCustomTab: (String) -&gt; Unit,
+        openInBrowser: (String) -&gt; Unit,
+        navigateToArticle: () -&gt; Unit,
+<span class="nc" id="L399">    ) = viewModelScope.launch {</span>
+<span class="nc" id="L400">        val itemOpener = repository.getArticleOpener(itemId = itemId)</span>
+<span class="nc" id="L401">        val articleLink = repository.getLink(itemId)</span>
+<span class="nc" id="L402">        when {</span>
+<span class="nc bnc" id="L403" title="All 4 branches missed.">            ItemOpener.CUSTOM_TAB == itemOpener &amp;&amp; articleLink != null -&gt; {</span>
+<span class="nc" id="L404">                openInCustomTab(articleLink)</span>
+            }
+
+<span class="nc bnc" id="L407" title="All 4 branches missed.">            ItemOpener.DEFAULT_BROWSER == itemOpener &amp;&amp; articleLink != null -&gt; {</span>
+<span class="nc" id="L408">                openInBrowser(articleLink)</span>
+            }
+
+            else -&gt; {
+<span class="nc" id="L412">                setCurrentArticle(itemId)</span>
+<span class="nc" id="L413">                navigateToArticle()</span>
+            }
+        }
+<span class="nc" id="L416">        markAsRead(itemId)</span>
+<span class="nc" id="L417">    }</span>
+
+    fun openArticleInCustomTab(
+        itemId: Long,
+        openInCustomTab: (String) -&gt; Unit,
+        onNoArticleLink: () -&gt; Unit,
+<span class="nc" id="L423">    ) = viewModelScope.launch {</span>
+<span class="nc" id="L424">        val articleLink = repository.getLink(itemId)</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">        if (articleLink != null) {</span>
+<span class="nc" id="L426">            openInCustomTab(articleLink)</span>
+        } else {
+<span class="nc" id="L428">            onNoArticleLink()</span>
+        }
+<span class="nc" id="L430">        markAsRead(itemId)</span>
+<span class="nc" id="L431">    }</span>
+
+    fun openArticleInBrowser(
+        itemId: Long,
+        openInBrowser: (String) -&gt; Unit,
+        onNoArticleLink: () -&gt; Unit,
+<span class="nc" id="L437">    ) = viewModelScope.launch {</span>
+<span class="nc" id="L438">        val articleLink = repository.getLink(itemId)</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        if (articleLink != null) {</span>
+<span class="nc" id="L440">            openInBrowser(articleLink)</span>
+        } else {
+<span class="nc" id="L442">            onNoArticleLink()</span>
+        }
+<span class="nc" id="L444">        markAsRead(itemId)</span>
+<span class="nc" id="L445">    }</span>
+
+    fun openArticleInReader(
+        itemId: Long,
+        navigateToArticle: () -&gt; Unit,
+    ) {
+<span class="nc" id="L451">        setCurrentArticle(itemId)</span>
+<span class="nc" id="L452">        navigateToArticle()</span>
+<span class="nc" id="L453">        markAsRead(itemId)</span>
+<span class="nc" id="L454">    }</span>
+
+<span class="fc" id="L456">    val viewState: StateFlow&lt;FeedScreenViewState&gt; =</span>
+<span class="fc" id="L457">        combine(</span>
+            // 0
+<span class="fc" id="L459">            repository.showFab,</span>
+<span class="fc" id="L460">            repository.showThumbnails,</span>
+<span class="fc" id="L461">            repository.currentTheme,</span>
+<span class="fc" id="L462">            repository.currentlySyncing,</span>
+<span class="fc" id="L463">            repository.feedItemStyle,</span>
+            // 5
+<span class="fc" id="L465">            repository.expandedTags,</span>
+<span class="fc" id="L466">            toolbarVisible,</span>
+<span class="fc" id="L467">            visibleFeedItemCount,</span>
+<span class="fc" id="L468">            screenTitleForCurrentFeedOrTag,</span>
+<span class="fc" id="L469">            editDialogVisible,</span>
+            // 10
+<span class="fc" id="L471">            deleteDialogVisible,</span>
+<span class="fc" id="L472">            visibleFeeds,</span>
+<span class="fc" id="L473">            repository.isArticleOpen,</span>
+<span class="fc" id="L474">            repository.currentFeedAndTag.map { (feedId, tag) -&gt; FeedOrTag(feedId, tag) },</span>
+<span class="fc" id="L475">            ttsStateHolder.ttsState,</span>
+            // 15
+<span class="fc" id="L477">            repository.swipeAsRead,</span>
+<span class="fc" id="L478">            ttsStateHolder.availableLanguages,</span>
+<span class="fc" id="L479">            repository.isMarkAsReadOnScroll,</span>
+<span class="fc" id="L480">            repository.maxLines,</span>
+<span class="fc" id="L481">            filterMenuVisible,</span>
+            // 20
+<span class="fc" id="L483">            repository.feedListFilter,</span>
+<span class="fc" id="L484">            searchBarVisible,</span>
+<span class="fc" id="L485">            repository.search,</span>
+<span class="fc" id="L486">            repository.showOnlyTitle,</span>
+<span class="fc" id="L487">            repository.showReadingTime,</span>
+            // 25
+<span class="fc" id="L489">            repository.showTitleUnreadCount,</span>
+<span class="fc" id="L490">            repository.syncWorkerRunning,</span>
+<span class="fc" id="L491">            repository.isOpenDrawerOnFab,</span>
+<span class="fc" id="L492">            bergamotModelManager.downloadProgress,</span>
+<span class="fc" id="L493">            renameTagDialogVisible,</span>
+<span class="fc" id="L494">            podcastPlayerStateHolder.playerState,</span>
+<span class="fc" id="L495">            repository.forceSingleColumn,</span>
+        ) { params: Array&lt;Any?&gt; -&gt;
+<span class="fc" id="L497">            val haveVisibleFeedItems = (params[7] as Int) &gt; 0</span>
+<span class="fc" id="L498">            val currentFeedOrTag = params[13] as FeedOrTag</span>
+<span class="fc" id="L499">            val ttsState = params[14] as PlaybackStatus</span>
+<span class="fc" id="L500">            val podcastPlayerState = params[30] as PodcastPlayerState</span>
+
+            @Suppress(&quot;UNCHECKED_CAST&quot;)
+<span class="fc" id="L503">            FeedState(</span>
+<span class="fc" id="L504">                showFab = haveVisibleFeedItems &amp;&amp; (params[0] as Boolean),</span>
+<span class="fc" id="L505">                showThumbnails = params[1] as Boolean,</span>
+<span class="fc" id="L506">                currentTheme = params[2] as ThemeOptions,</span>
+<span class="fc" id="L507">                currentlySyncing = (params[26] as Boolean) &amp;&amp; (params[3] as Boolean),</span>
+<span class="fc" id="L508">                feedItemStyle = params[4] as FeedItemStyle,</span>
+<span class="fc" id="L509">                expandedTags = params[5] as Set&lt;String&gt;,</span>
+<span class="fc" id="L510">                showToolbarMenu = params[6] as Boolean,</span>
+                // 7
+<span class="fc" id="L512">                haveVisibleFeedItems = haveVisibleFeedItems,</span>
+<span class="fc" id="L513">                feedScreenTitle = params[8] as ScreenTitle,</span>
+<span class="fc" id="L514">                showEditDialog = params[9] as Boolean,</span>
+<span class="fc" id="L515">                showDeleteDialog = params[10] as Boolean,</span>
+<span class="fc" id="L516">                showRenameTagDialog = params[29] as Boolean,</span>
+<span class="fc" id="L517">                visibleFeeds = params[11] as List&lt;FeedTitle&gt;,</span>
+<span class="fc" id="L518">                isArticleOpen = params[12] as Boolean,</span>
+                // 13
+<span class="fc" id="L520">                currentFeedOrTag = currentFeedOrTag,</span>
+                // 14
+<span class="fc" id="L522">                isTTSPlaying = ttsState == PlaybackStatus.PLAYING,</span>
+<span class="fc" id="L523">                podcastPlayerState = podcastPlayerState,</span>
+<span class="fc" id="L524">                isBottomBarVisible = ttsState != PlaybackStatus.STOPPED || podcastPlayerState.isVisible,</span>
+<span class="fc" id="L525">                swipeAsRead = params[15] as SwipeAsRead,</span>
+<span class="fc" id="L526">                ttsLanguages = params[16] as List&lt;Locale&gt;,</span>
+<span class="fc" id="L527">                markAsReadOnScroll = params[17] as Boolean,</span>
+<span class="fc" id="L528">                maxLines = params[18] as Int,</span>
+<span class="fc" id="L529">                showFilterMenu = params[19] as Boolean,</span>
+<span class="fc" id="L530">                filter = params[20] as FeedListFilter,</span>
+<span class="fc" id="L531">                searchBarVisible = (params[22] as String).isNotEmpty() || params[21] as Boolean,</span>
+<span class="fc" id="L532">                search = params[22] as String,</span>
+<span class="fc" id="L533">                showOnlyTitle = params[23] as Boolean,</span>
+<span class="fc" id="L534">                showReadingTime = params[24] as Boolean,</span>
+<span class="fc" id="L535">                showTitleUnreadCount = params[25] as Boolean,</span>
+<span class="fc" id="L536">                isOpenDrawerOnFab = params[27] as Boolean,</span>
+<span class="fc" id="L537">                translationModelDownloadProgress = params[28] as BergamotModelDownloadProgress?,</span>
+<span class="fc" id="L538">                forceSingleColumn = params[31] as Boolean,</span>
+<span class="fc" id="L539">            )</span>
+<span class="fc" id="L540">        }.stateIn(</span>
+<span class="fc" id="L541">            viewModelScope,</span>
+<span class="fc" id="L542">            SharingStarted.Eagerly,</span>
+<span class="fc" id="L543">            FeedState(),</span>
+        )
+
+    fun ttsStop() {
+<span class="nc" id="L547">        ttsStateHolder.stop()</span>
+<span class="nc" id="L548">    }</span>
+
+    fun podcastPlay() {
+<span class="nc" id="L551">        podcastPlayerStateHolder.play()</span>
+<span class="nc" id="L552">    }</span>
+
+    fun podcastPause() {
+<span class="nc" id="L555">        podcastPlayerStateHolder.pause()</span>
+<span class="nc" id="L556">    }</span>
+
+    fun podcastStop() {
+<span class="nc" id="L559">        podcastPlayerStateHolder.stop()</span>
+<span class="nc" id="L560">    }</span>
+
+    fun podcastSeekBy(deltaMillis: Int) {
+<span class="nc" id="L563">        podcastPlayerStateHolder.seekBy(deltaMillis)</span>
+<span class="nc" id="L564">    }</span>
+
+    fun podcastSeekTo(positionMillis: Int) {
+<span class="nc" id="L567">        podcastPlayerStateHolder.seekTo(positionMillis)</span>
+<span class="nc" id="L568">    }</span>
+
+    fun ttsPause() {
+<span class="nc" id="L571">        ttsStateHolder.pause()</span>
+<span class="nc" id="L572">    }</span>
+
+    fun ttsSkipNext() {
+<span class="nc" id="L575">        ttsStateHolder.skipNext()</span>
+<span class="nc" id="L576">    }</span>
+
+    fun ttsOnSelectLanguage(lang: LocaleOverride) {
+<span class="nc" id="L579">        ttsStateHolder.setLanguage(lang)</span>
+<span class="nc" id="L580">    }</span>
+
+    fun ttsPlay() {
+<span class="nc" id="L583">        podcastPlayerStateHolder.stop()</span>
+<span class="nc" id="L584">        viewModelScope.launch(Dispatchers.IO) {</span>
+<span class="nc" id="L585">            val article =</span>
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                repository.getCurrentArticle()</span>
+<span class="nc" id="L587">                    ?: return@launch</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">            if (ttsStateHolder.resumeIfPausedOn(article.id)) {</span>
+<span class="nc" id="L589">                return@launch</span>
+            }
+<span class="nc" id="L591">            val isFullText = repository.shouldDisplayFullTextForItemByDefault(article.id)</span>
+<span class="nc" id="L592">            val textToRead =</span>
+<span class="nc" id="L593">                when (isFullText) {</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                    false -&gt;</span>
+<span class="nc" id="L595">                        Either.catching(</span>
+                            onCatch = {
+<span class="nc" id="L597">                                when (it) {</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">                                    is FileNotFoundException -&gt; TTSFileNotFound</span>
+<span class="nc" id="L599">                                    else -&gt; TTSUnknownError</span>
+<span class="nc" id="L600">                                }</span>
+                            },
+                        ) {
+<span class="nc" id="L603">                            blobInputStream(article.id, filePathProvider.articleDir).use {</span>
+<span class="nc" id="L604">                                htmlToAnnotatedString(</span>
+<span class="nc" id="L605">                                    inputStream = it,</span>
+<span class="nc" id="L606">                                    baseUrl = article.feedUrl.toString(),</span>
+<span class="nc" id="L607">                                )</span>
+<span class="nc" id="L608">                            }</span>
+                        }
+
+<span class="nc bnc" id="L611" title="All 2 branches missed.">                    true -&gt;</span>
+<span class="nc" id="L612">                        Either.catching(</span>
+                            onCatch = {
+<span class="nc" id="L614">                                when (it) {</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                                    is FileNotFoundException -&gt; TTSFileNotFound</span>
+<span class="nc" id="L616">                                    else -&gt; TTSUnknownError</span>
+<span class="nc" id="L617">                                }</span>
+                            },
+                        ) {
+<span class="nc" id="L620">                            blobFullInputStream(</span>
+<span class="nc" id="L621">                                article.id,</span>
+<span class="nc" id="L622">                                filePathProvider.fullArticleDir,</span>
+<span class="nc" id="L623">                            ).use {</span>
+<span class="nc" id="L624">                                htmlToAnnotatedString(</span>
+<span class="nc" id="L625">                                    inputStream = it,</span>
+<span class="nc" id="L626">                                    baseUrl = article.feedUrl.toString(),</span>
+<span class="nc" id="L627">                                )</span>
+<span class="nc" id="L628">                            }</span>
+                        }
+                }
+
+            // TODO show error some message
+<span class="nc" id="L633">            textToRead.onRight {</span>
+<span class="nc" id="L634">                ttsStateHolder.tts(</span>
+<span class="nc" id="L635">                    textArray = it,</span>
+<span class="nc" id="L636">                    useDetectLanguage = repository.useDetectLanguage.value,</span>
+<span class="nc" id="L637">                    articleId = article.id,</span>
+                )
+<span class="nc" id="L639">            }</span>
+<span class="nc" id="L640">        }</span>
+<span class="nc" id="L641">    }</span>
+
+    override fun onCleared() {
+<span class="nc" id="L644">        super.onCleared()</span>
+<span class="nc" id="L645">        ttsStateHolder.shutdown()</span>
+<span class="nc" id="L646">    }</span>
+
+    override fun setSaved(value: Boolean) {
+<span class="nc" id="L649">        repository.setFeedListFilterSaved(value)</span>
+<span class="nc" id="L650">    }</span>
+
+    override fun setRecentlyRead(value: Boolean) {
+<span class="nc" id="L653">        repository.setFeedListFilterRecentlyRead(value)</span>
+<span class="nc" id="L654">    }</span>
+
+    override fun setRead(value: Boolean) {
+<span class="nc" id="L657">        repository.setFeedListFilterRead(value)</span>
+<span class="nc" id="L658">    }</span>
+}
+
+<span class="fc" id="L661">@Immutable</span>
+<span class="fc" id="L662">data class FeedState(</span>
+<span class="fc" id="L663">    override val currentFeedOrTag: FeedOrTag = FeedOrTag(ID_UNSET, &quot;&quot;),</span>
+<span class="fc" id="L664">    override val showFab: Boolean = true,</span>
+<span class="fc" id="L665">    override val showThumbnails: Boolean = true,</span>
+<span class="pc" id="L666">    override val currentTheme: ThemeOptions = ThemeOptions.SYSTEM,</span>
+<span class="fc" id="L667">    override val currentlySyncing: Boolean = false,</span>
+    // Defaults to empty string to avoid rendering until loading complete
+<span class="fc" id="L669">    override val feedScreenTitle: ScreenTitle = ScreenTitle(&quot;&quot;, FeedType.FEED, 0),</span>
+<span class="pc" id="L670">    override val visibleFeeds: List&lt;FeedTitle&gt; = emptyList(),</span>
+<span class="fc" id="L671">    override val feedItemStyle: FeedItemStyle = FeedItemStyle.CARD,</span>
+<span class="pc" id="L672">    override val expandedTags: Set&lt;String&gt; = emptySet(),</span>
+<span class="fc" id="L673">    override val isBottomBarVisible: Boolean = false,</span>
+<span class="fc" id="L674">    override val isTTSPlaying: Boolean = false,</span>
+<span class="fc" id="L675">    override val podcastPlayerState: PodcastPlayerState = PodcastPlayerState(),</span>
+<span class="fc" id="L676">    override val ttsLanguages: List&lt;Locale&gt; = emptyList(),</span>
+<span class="fc" id="L677">    override val showToolbarMenu: Boolean = false,</span>
+<span class="fc" id="L678">    override val showDeleteDialog: Boolean = false,</span>
+<span class="fc" id="L679">    override val showEditDialog: Boolean = false,</span>
+<span class="fc" id="L680">    override val showRenameTagDialog: Boolean = false,</span>
+    // Defaults to true so empty screen doesn't appear before load
+<span class="fc" id="L682">    override val haveVisibleFeedItems: Boolean = true,</span>
+<span class="fc" id="L683">    override val swipeAsRead: SwipeAsRead = SwipeAsRead.ONLY_FROM_END,</span>
+<span class="fc" id="L684">    override val markAsReadOnScroll: Boolean = false,</span>
+<span class="fc" id="L685">    override val maxLines: Int = 2,</span>
+<span class="fc" id="L686">    override val showOnlyTitle: Boolean = false,</span>
+<span class="fc" id="L687">    override val showReadingTime: Boolean = false,</span>
+<span class="fc" id="L688">    override val showFilterMenu: Boolean = false,</span>
+<span class="fc" id="L689">    override val filter: FeedListFilter = emptyFeedListFilter,</span>
+<span class="pc" id="L690">    val isArticleOpen: Boolean = false,</span>
+<span class="fc" id="L691">    override val searchBarVisible: Boolean = false,</span>
+<span class="pc" id="L692">    override val search: String = &quot;&quot;,</span>
+<span class="fc" id="L693">    override val showTitleUnreadCount: Boolean = false,</span>
+<span class="pc" id="L694">    override val isOpenDrawerOnFab: Boolean = false,</span>
+<span class="fc" id="L695">    override val translationModelDownloadProgress: BergamotModelDownloadProgress? = null,</span>
+<span class="pc" id="L696">    override val forceSingleColumn: Boolean = false,</span>
+<span class="fc" id="L697">) : FeedScreenViewState</span>
+
+@Immutable
+interface FeedScreenViewState {
+    val currentFeedOrTag: FeedOrTag
+    val showFab: Boolean
+    val showThumbnails: Boolean
+    val currentTheme: ThemeOptions
+    val currentlySyncing: Boolean
+    val feedScreenTitle: ScreenTitle
+    val visibleFeeds: List&lt;FeedTitle&gt;
+    val feedItemStyle: FeedItemStyle
+    val expandedTags: Set&lt;String&gt;
+    val isBottomBarVisible: Boolean
+    val isTTSPlaying: Boolean
+    val podcastPlayerState: PodcastPlayerState
+    val ttsLanguages: List&lt;Locale&gt;
+    val showToolbarMenu: Boolean
+    val showDeleteDialog: Boolean
+    val showEditDialog: Boolean
+    val showRenameTagDialog: Boolean
+    val haveVisibleFeedItems: Boolean
+    val swipeAsRead: SwipeAsRead
+    val markAsReadOnScroll: Boolean
+    val maxLines: Int
+    val showOnlyTitle: Boolean
+    val showReadingTime: Boolean
+    val filter: FeedListFilter
+    val showFilterMenu: Boolean
+    val searchBarVisible: Boolean
+    val search: String
+    val showTitleUnreadCount: Boolean
+    val isOpenDrawerOnFab: Boolean
+    val translationModelDownloadProgress: BergamotModelDownloadProgress?
+    val forceSingleColumn: Boolean
+}
+
+<span class="fc" id="L734">private data class FeedCardTranslationConfig(</span>
+<span class="fc" id="L735">    val enabled: Boolean,</span>
+<span class="pc" id="L736">    val settings: OpenAISettings,</span>
+<span class="pc" id="L737">    val targetLanguage: String,</span>
+)
+
+<span class="fc" id="L740">@Immutable</span>
+<span class="fc" id="L741">class TranslatedFeedCards internal constructor(</span>
+<span class="fc" id="L742">    val generation: Int = 0,</span>
+<span class="fc" id="L743">    private val items: Map&lt;FeedCardSource, FeedListItem&gt; = emptyMap(),</span>
+<span class="fc" id="L744">) {</span>
+    fun merge(item: FeedListItem): FeedListItem =
+<span class="pc bpc" id="L746" title="3 of 4 branches missed.">        items[FeedCardSource.from(item)]?.let { translatedItem -&gt;</span>
+<span class="nc" id="L747">            item.copy(</span>
+<span class="nc bnc" id="L748" title="All 2 branches missed.">                title = translatedItem.title.ifBlank { item.title },</span>
+<span class="nc bnc" id="L749" title="All 2 branches missed.">                snippet = translatedItem.snippet.ifBlank { item.snippet },</span>
+<span class="nc" id="L750">            )</span>
+<span class="fc" id="L751">        } ?: item</span>
+}
+
+<span class="pc bpc" id="L754" title="7 of 8 branches missed.">private fun FeedCardTranslationConfig.isActive(): Boolean = enabled &amp;&amp; settings.canUseAsTranslationApi &amp;&amp; targetLanguage.isNotBlank()</span>
+
+<span class="nc" id="L756">private data class FeedCardTranslationRequest(</span>
+<span class="nc" id="L757">    val itemId: Long,</span>
+<span class="nc" id="L758">    val sourceTitle: String,</span>
+<span class="nc" id="L759">    val sourceSnippet: String,</span>
+<span class="nc" id="L760">    val settings: OpenAISettings,</span>
+<span class="nc" id="L761">    val targetLanguage: String,</span>
+)
+
+<span class="nc" id="L764">private data class FeedCardTranslationEntry(</span>
+<span class="nc" id="L765">    val item: FeedListItem,</span>
+<span class="nc" id="L766">    val isComplete: Boolean,</span>
+)
+
+<span class="fc" id="L769">internal data class FeedCardSource(</span>
+<span class="pc" id="L770">    val itemId: Long,</span>
+<span class="pc" id="L771">    val title: String,</span>
+<span class="pc" id="L772">    val snippet: String,</span>
+) {
+    companion object {
+        fun from(item: FeedListItem): FeedCardSource =
+<span class="fc" id="L776">            FeedCardSource(</span>
+<span class="fc" id="L777">                itemId = item.id,</span>
+<span class="fc" id="L778">                title = item.title,</span>
+<span class="fc" id="L779">                snippet = item.snippet,</span>
+<span class="fc" id="L780">            )</span>
+    }
+}
+
+@Immutable
+interface FeedListFilter {
+    val unread: Boolean
+    val saved: Boolean
+    val recentlyRead: Boolean
+    val read: Boolean
+}
+
+<span class="fc" id="L792">val emptyFeedListFilter =</span>
+<span class="fc" id="L793">    object : FeedListFilter {</span>
+<span class="fc" id="L794">        override val unread: Boolean = true</span>
+<span class="fc" id="L795">        override val saved: Boolean = false</span>
+<span class="fc" id="L796">        override val recentlyRead: Boolean = false</span>
+<span class="fc" id="L797">        override val read: Boolean = false</span>
+    }
+
+@Immutable
+interface FeedListFilterCallback {
+    fun setSaved(value: Boolean)
+
+    fun setRecentlyRead(value: Boolean)
+
+    fun setRead(value: Boolean)
+}
+
+val FeedListFilter.onlyUnread: Boolean
+<span class="nc bnc" id="L810" title="All 8 branches missed.">    get() = unread &amp;&amp; !saved &amp;&amp; !recentlyRead &amp;&amp; !read</span>
+
+val FeedListFilter.onlyUnreadAndSaved: Boolean
+<span class="nc bnc" id="L813" title="All 8 branches missed.">    get() = unread &amp;&amp; saved &amp;&amp; !recentlyRead &amp;&amp; !read</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

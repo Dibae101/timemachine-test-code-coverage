@@ -1,0 +1,622 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CalendarAppWidgetService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.widget</a> &gt; <span class="el_source">CalendarAppWidgetService.java</span></div><h1>CalendarAppWidgetService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2009 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.widget;
+
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.appwidget.AppWidgetManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.CursorLoader;
+import android.content.Intent;
+import android.content.Loader;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.graphics.Paint;
+import android.net.Uri;
+import android.os.Handler;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.Calendars;
+import android.provider.CalendarContract.Events;
+import android.provider.CalendarContract.Instances;
+import android.text.format.DateUtils;
+import android.util.Log;
+import android.view.View;
+import android.widget.RemoteViews;
+import android.widget.RemoteViewsService;
+
+import com.android.calendar.Utils;
+import com.android.calendar.theme.DynamicThemeKt;
+import com.android.calendar.widget.CalendarAppWidgetModel.DayInfo;
+import com.android.calendar.widget.CalendarAppWidgetModel.EventInfo;
+import com.android.calendar.widget.CalendarAppWidgetModel.RowInfo;
+import com.android.calendar.calendarcommon2.Time;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import ws.xsoh.etar.R;
+
+<span class="nc" id="L56">public class CalendarAppWidgetService extends RemoteViewsService {</span>
+    static final int EVENT_MIN_COUNT = 20;
+    static final int EVENT_MAX_COUNT = 100;
+    // Minimum delay between queries on the database for widget updates in ms
+    static final int WIDGET_UPDATE_THROTTLE = 500;
+<span class="nc" id="L61">    static final String[] EVENT_PROJECTION = new String[] {</span>
+        Instances.ALL_DAY,
+        Instances.BEGIN,
+        Instances.END,
+        Instances.TITLE,
+        Instances.EVENT_LOCATION,
+        Instances.EVENT_ID,
+        Instances.START_DAY,
+        Instances.END_DAY,
+        Instances.DISPLAY_COLOR,
+        Instances.SELF_ATTENDEE_STATUS,
+    };
+    static final int INDEX_ALL_DAY = 0;
+    static final int INDEX_BEGIN = 1;
+    static final int INDEX_END = 2;
+    static final int INDEX_TITLE = 3;
+    static final int INDEX_EVENT_LOCATION = 4;
+    static final int INDEX_EVENT_ID = 5;
+    static final int INDEX_START_DAY = 6;
+    static final int INDEX_END_DAY = 7;
+    static final int INDEX_COLOR = 8;
+    static final int INDEX_SELF_ATTENDEE_STATUS = 9;
+    static final int MAX_DAYS = 31;
+    private static final String TAG = &quot;CalendarWidget&quot;;
+    private static final String EVENT_SORT_ORDER = Instances.START_DAY + &quot; ASC, &quot;
+            + Instances.START_MINUTE + &quot; ASC, &quot; + Instances.END_DAY + &quot; ASC, &quot;
+            + Instances.END_MINUTE + &quot; ASC LIMIT &quot; + EVENT_MAX_COUNT;
+    private static final String EVENT_SELECTION = Calendars.VISIBLE + &quot;=1&quot;;
+    private static final String EVENT_SELECTION_HIDE_DECLINED = Calendars.VISIBLE + &quot;=1 AND &quot;
+            + Instances.SELF_ATTENDEE_STATUS + &quot;!=&quot; + Attendees.ATTENDEE_STATUS_DECLINED;
+    private static final long SEARCH_DURATION = MAX_DAYS * DateUtils.DAY_IN_MILLIS;
+    /**
+     * Update interval used when no next-update calculated, or bad trigger time in past.
+     * Unit: milliseconds.
+     */
+    private static final long UPDATE_TIME_NO_EVENTS = DateUtils.HOUR_IN_MILLIS * 6;
+
+
+    /**
+     * Format given time for debugging output.
+     *
+     * @param unixTime Target time to report.
+     * @param now Current system time from {@link System#currentTimeMillis()}
+     *            for calculating time difference.
+     */
+    static String formatDebugTime(long unixTime, long now) {
+<span class="nc" id="L107">        Time time = new Time();</span>
+<span class="nc" id="L108">        time.set(unixTime);</span>
+
+<span class="nc" id="L110">        long delta = unixTime - now;</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (delta &gt; DateUtils.MINUTE_IN_MILLIS) {</span>
+<span class="nc" id="L112">            delta /= DateUtils.MINUTE_IN_MILLIS;</span>
+<span class="nc" id="L113">            return String.format(&quot;[%d] %s (%+d mins)&quot;, unixTime, time.format(), delta);</span>
+        } else {
+<span class="nc" id="L115">            delta /= DateUtils.SECOND_IN_MILLIS;</span>
+<span class="nc" id="L116">            return String.format(&quot;[%d] %s (%+d secs)&quot;, unixTime, time.format(), delta);</span>
+        }
+    }
+
+    @Override
+    public RemoteViewsFactory onGetViewFactory(Intent intent) {
+<span class="nc" id="L122">        return new CalendarFactory(getApplicationContext(), intent);</span>
+    }
+
+    public static class CalendarFactory extends BroadcastReceiver implements
+            RemoteViewsService.RemoteViewsFactory, Loader.OnLoadCompleteListener&lt;Cursor&gt; {
+        private static final boolean LOGD = false;
+<span class="nc" id="L128">        private static final AtomicInteger currentVersion = new AtomicInteger(0);</span>
+        // Suppress unnecessary logging about update time. Need to be static as this object is
+        // re-instanciated frequently.
+        // TODO: It seems loadData() is called via onCreate() four times, which should mean
+        // unnecessary CalendarFactory object is created and dropped. It is not efficient.
+<span class="nc" id="L133">        private static long sLastUpdateTime = UPDATE_TIME_NO_EVENTS;</span>
+        private static CalendarAppWidgetModel mModel;
+<span class="nc" id="L135">        private static Object mLock = new Object();</span>
+<span class="nc" id="L136">        private static volatile int mSerialNum = 0;</span>
+<span class="nc" id="L137">        private final Handler mHandler = new Handler();</span>
+<span class="nc" id="L138">        private final ExecutorService executor = Executors.newSingleThreadExecutor();</span>
+        private Context mContext;
+        private Resources mResources;
+<span class="nc" id="L141">        private int mLastSerialNum = -1;</span>
+        private CursorLoader mLoader;
+<span class="nc" id="L143">        private final Runnable mTimezoneChanged = new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                if (mLoader != null) {</span>
+<span class="nc" id="L147">                    mLoader.forceLoad();</span>
+                }
+<span class="nc" id="L149">            }</span>
+        };
+        private int mAppWidgetId;
+        private int mDeclinedColor;
+        private int mStandardColor;
+        private int mAllDayColor;
+
+<span class="nc" id="L156">        protected CalendarFactory(Context context, Intent intent) {</span>
+<span class="nc" id="L157">            mContext = context;</span>
+<span class="nc" id="L158">            mResources = context.getResources();</span>
+<span class="nc" id="L159">            mAppWidgetId = intent.getIntExtra(</span>
+                    AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID);
+
+<span class="nc" id="L162">            mDeclinedColor = mResources.getColor(R.color.appwidget_item_declined_color);</span>
+<span class="nc" id="L163">            mStandardColor = mResources.getColor(R.color.appwidget_item_standard_color);</span>
+<span class="nc" id="L164">            mAllDayColor = mResources.getColor(R.color.appwidget_item_allday_color);</span>
+<span class="nc" id="L165">        }</span>
+
+<span class="nc" id="L167">        public CalendarFactory() {</span>
+            // This is being created as part of onReceive
+
+<span class="nc" id="L170">        }</span>
+
+        /* @VisibleForTesting */
+        protected static CalendarAppWidgetModel buildAppWidgetModel(
+                Context context, Cursor cursor, String timeZone) {
+<span class="nc" id="L175">            CalendarAppWidgetModel model = new CalendarAppWidgetModel(context, timeZone);</span>
+<span class="nc" id="L176">            model.buildFromCursor(cursor, timeZone);</span>
+<span class="nc" id="L177">            return model;</span>
+        }
+
+        private static long getNextMidnightTimeMillis(String timezone) {
+<span class="nc" id="L181">            Time time = new Time();</span>
+<span class="nc" id="L182">            time.set(System.currentTimeMillis());</span>
+<span class="nc" id="L183">            time.setDay(time.getDay() + 1);</span>
+<span class="nc" id="L184">            time.setHour(0);</span>
+<span class="nc" id="L185">            time.setMinute(0);</span>
+<span class="nc" id="L186">            time.setSecond(0);</span>
+<span class="nc" id="L187">            long midnightDeviceTz = time.normalize();</span>
+
+<span class="nc" id="L189">            time.setTimezone(timezone);</span>
+<span class="nc" id="L190">            time.set(System.currentTimeMillis());</span>
+<span class="nc" id="L191">            time.setDay(time.getDay() + 1);</span>
+<span class="nc" id="L192">            time.setHour(0);</span>
+<span class="nc" id="L193">            time.setMinute(0);</span>
+<span class="nc" id="L194">            time.setSecond(0);</span>
+<span class="nc" id="L195">            long midnightHomeTz = time.normalize();</span>
+
+<span class="nc" id="L197">            return Math.min(midnightDeviceTz, midnightHomeTz);</span>
+        }
+
+        static void updateTextView(RemoteViews views, int id, int visibility, String string) {
+<span class="nc" id="L201">            views.setViewVisibility(id, visibility);</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (visibility == View.VISIBLE) {</span>
+<span class="nc" id="L203">                views.setTextViewText(id, string);</span>
+            }
+<span class="nc" id="L205">        }</span>
+
+        private Runnable createUpdateLoaderRunnable(final String selection,
+                final PendingResult result, final int version) {
+<span class="nc" id="L209">            return new Runnable() {</span>
+                @Override
+                public void run() {
+                    // If there is a newer load request in the queue, skip loading.
+<span class="nc bnc" id="L213" title="All 4 branches missed.">                    if (mLoader != null &amp;&amp; version &gt;= currentVersion.get()) {</span>
+<span class="nc" id="L214">                        Uri uri = createLoaderUri();</span>
+<span class="nc" id="L215">                        mLoader.setUri(uri);</span>
+<span class="nc" id="L216">                        mLoader.setSelection(selection);</span>
+<span class="nc" id="L217">                        synchronized (mLock) {</span>
+<span class="nc" id="L218">                            mLastSerialNum = ++mSerialNum;</span>
+<span class="nc" id="L219">                        }</span>
+<span class="nc" id="L220">                        mLoader.forceLoad();</span>
+                    }
+<span class="nc" id="L222">                    result.finish();</span>
+<span class="nc" id="L223">                }</span>
+            };
+        }
+
+        @Override
+        public void onCreate() {
+<span class="nc" id="L229">            String selection = queryForSelection();</span>
+<span class="nc" id="L230">            initLoader(selection);</span>
+<span class="nc" id="L231">        }</span>
+
+        @Override
+        public void onDataSetChanged() {
+<span class="nc" id="L235">        }</span>
+
+        @Override
+        public void onDestroy() {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">            if (mLoader != null) {</span>
+<span class="nc" id="L240">                mLoader.reset();</span>
+            }
+<span class="nc" id="L242">        }</span>
+
+        @Override
+        public RemoteViews getLoadingView() {
+<span class="nc" id="L246">            return new RemoteViews(mContext.getPackageName(),</span>
+                    R.layout.appwidget_loading);
+        }
+
+        @Override
+        public RemoteViews getViewAt(int position) {
+            // we use getCount here so that it doesn't return null when empty
+<span class="nc bnc" id="L253" title="All 4 branches missed.">            if (position &lt; 0 || position &gt;= getCount()) {</span>
+<span class="nc" id="L254">                return null;</span>
+            }
+
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (mModel == null) {</span>
+<span class="nc" id="L258">                RemoteViews views = new RemoteViews(mContext.getPackageName(),</span>
+                        R.layout.appwidget_loading);
+<span class="nc" id="L260">                final Intent intent = CalendarAppWidgetProvider.getLaunchFillInIntent(mContext, 0,</span>
+                        0, 0, false);
+<span class="nc" id="L262">                views.setOnClickFillInIntent(R.id.appwidget_loading, intent);</span>
+<span class="nc" id="L263">                return views;</span>
+
+            }
+<span class="nc bnc" id="L266" title="All 4 branches missed.">            if (mModel.mEventInfos.isEmpty() || mModel.mRowInfos.isEmpty()) {</span>
+<span class="nc" id="L267">                RemoteViews views = new RemoteViews(mContext.getPackageName(),</span>
+                        R.layout.appwidget_no_events);
+<span class="nc" id="L269">                final Intent intent = CalendarAppWidgetProvider.getLaunchFillInIntent(mContext, 0,</span>
+                        0, 0, false);
+<span class="nc" id="L271">                views.setOnClickFillInIntent(R.id.appwidget_no_events, intent);</span>
+<span class="nc" id="L272">                return views;</span>
+            }
+
+<span class="nc" id="L275">            RowInfo rowInfo = mModel.mRowInfos.get(position);</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            if (rowInfo.mType == RowInfo.TYPE_DAY) {</span>
+<span class="nc" id="L277">                RemoteViews views = new RemoteViews(mContext.getPackageName(),</span>
+                        R.layout.appwidget_day);
+<span class="nc" id="L279">                DayInfo dayInfo = mModel.mDayInfos.get(rowInfo.mIndex);</span>
+<span class="nc" id="L280">                updateTextView(views, R.id.date, View.VISIBLE, dayInfo.mDayLabel);</span>
+<span class="nc" id="L281">                return views;</span>
+            } else {
+                RemoteViews views;
+<span class="nc" id="L284">                final EventInfo eventInfo = mModel.mEventInfos.get(rowInfo.mIndex);</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                if (eventInfo.allDay) {</span>
+<span class="nc" id="L286">                    views = new RemoteViews(mContext.getPackageName(),</span>
+                            R.layout.widget_all_day_item);
+                } else {
+<span class="nc" id="L289">                    views = new RemoteViews(mContext.getPackageName(), R.layout.widget_item);</span>
+                }
+<span class="nc" id="L291">                int displayColor = Utils.getDisplayColorFromColor(mContext, eventInfo.color);</span>
+<span class="nc" id="L292">                int adaptiveTextColor = Utils.getAdaptiveTextColor(mContext, mStandardColor, displayColor);</span>
+<span class="nc" id="L293">                int adaptiveAllDayTextColor = Utils.getAdaptiveTextColor(mContext, mAllDayColor, displayColor);</span>
+
+<span class="nc" id="L295">                final long now = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L296" title="All 6 branches missed.">                if (!eventInfo.allDay &amp;&amp; eventInfo.start &lt;= now &amp;&amp; now &lt;= eventInfo.end) {</span>
+<span class="nc" id="L297">                    int past_bg_color = R.color.agenda_past_days_bar_background_color;</span>
+<span class="nc" id="L298">                    views.setInt(R.id.widget_row, &quot;setBackgroundResource&quot;, past_bg_color);</span>
+<span class="nc" id="L299">                } else {</span>
+<span class="nc" id="L300">                    int future_bg_color = DynamicThemeKt.getWidgetBackgroundStyle(mContext);</span>
+<span class="nc" id="L301">                    views.setInt(R.id.widget_row, &quot;setBackgroundResource&quot;, future_bg_color);</span>
+                }
+
+<span class="nc bnc" id="L304" title="All 2 branches missed.">                if (!eventInfo.allDay) {</span>
+<span class="nc" id="L305">                    updateTextView(views, R.id.when, eventInfo.visibWhen, eventInfo.when);</span>
+<span class="nc" id="L306">                    updateTextView(views, R.id.where, eventInfo.visibWhere, eventInfo.where);</span>
+                }
+<span class="nc" id="L308">                updateTextView(views, R.id.title, eventInfo.visibTitle, eventInfo.title);</span>
+
+<span class="nc" id="L310">                views.setViewVisibility(R.id.agenda_item_color, View.VISIBLE);</span>
+
+<span class="nc" id="L312">                int selfAttendeeStatus = eventInfo.selfAttendeeStatus;</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                if (eventInfo.allDay) {</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">                    if (selfAttendeeStatus == Attendees.ATTENDEE_STATUS_INVITED) {</span>
+<span class="nc" id="L315">                        views.setInt(R.id.agenda_item_color, &quot;setImageResource&quot;,</span>
+                                R.drawable.widget_chip_not_responded_bg);
+<span class="nc" id="L317">                        views.setInt(R.id.title, &quot;setTextColor&quot;, displayColor);</span>
+                    } else {
+<span class="nc" id="L319">                        views.setInt(R.id.agenda_item_color, &quot;setImageResource&quot;,</span>
+                                R.drawable.widget_chip_responded_bg);
+<span class="nc" id="L321">                        views.setInt(R.id.title, &quot;setTextColor&quot;, adaptiveAllDayTextColor);</span>
+                    }
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                    if (selfAttendeeStatus == Attendees.ATTENDEE_STATUS_DECLINED) {</span>
+                        // 40% opacity
+<span class="nc" id="L325">                        views.setInt(R.id.agenda_item_color, &quot;setColorFilter&quot;,</span>
+<span class="nc" id="L326">                                Utils.getDeclinedColorFromColor(displayColor));</span>
+                    } else {
+<span class="nc" id="L328">                        views.setInt(R.id.agenda_item_color, &quot;setColorFilter&quot;, displayColor);</span>
+                    }
+<span class="nc bnc" id="L330" title="All 2 branches missed.">                } else if (selfAttendeeStatus == Attendees.ATTENDEE_STATUS_DECLINED) {</span>
+<span class="nc" id="L331">                    views.setInt(R.id.title, &quot;setTextColor&quot;, mDeclinedColor);</span>
+<span class="nc" id="L332">                    views.setInt(R.id.when, &quot;setTextColor&quot;, mDeclinedColor);</span>
+<span class="nc" id="L333">                    views.setInt(R.id.where, &quot;setTextColor&quot;, mDeclinedColor);</span>
+
+<span class="nc" id="L335">                    views.setInt(R.id.agenda_item_color, &quot;setImageResource&quot;,</span>
+                            R.drawable.widget_chip_responded_bg);
+                    // 40% opacity
+<span class="nc" id="L338">                    views.setInt(R.id.agenda_item_color, &quot;setColorFilter&quot;,</span>
+<span class="nc" id="L339">                            Utils.getDeclinedColorFromColor(displayColor));</span>
+                } else {
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                    if (selfAttendeeStatus == Attendees.ATTENDEE_STATUS_INVITED) {</span>
+<span class="nc" id="L342">                        views.setInt(R.id.agenda_item_color, &quot;setImageResource&quot;,</span>
+                                R.drawable.widget_chip_not_responded_bg);
+<span class="nc" id="L344">                        views.setInt(R.id.title, &quot;setTextColor&quot;, displayColor);</span>
+<span class="nc" id="L345">                        views.setInt(R.id.when, &quot;setTextColor&quot;, displayColor);</span>
+<span class="nc" id="L346">                        views.setInt(R.id.where, &quot;setTextColor&quot;, displayColor);</span>
+                    } else {
+<span class="nc" id="L348">                        views.setInt(R.id.agenda_item_color, &quot;setImageResource&quot;,</span>
+                                R.drawable.widget_chip_responded_bg);
+<span class="nc" id="L350">                        views.setInt(R.id.title, &quot;setTextColor&quot;, adaptiveTextColor);</span>
+<span class="nc" id="L351">                        views.setInt(R.id.when, &quot;setTextColor&quot;, adaptiveTextColor);</span>
+<span class="nc" id="L352">                        views.setInt(R.id.where, &quot;setTextColor&quot;, adaptiveTextColor);</span>
+                    }
+<span class="nc" id="L354">                    views.setInt(R.id.agenda_item_color, &quot;setColorFilter&quot;, displayColor);</span>
+                }
+
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                if (eventInfo.status == Events.STATUS_CANCELED) {</span>
+<span class="nc" id="L358">                    views.setInt(R.id.title, &quot;setPaintFlags&quot;, Paint.STRIKE_THRU_TEXT_FLAG);</span>
+                }
+
+<span class="nc" id="L361">                long start = eventInfo.start;</span>
+<span class="nc" id="L362">                long end = eventInfo.end;</span>
+                // An element in ListView.
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                if (eventInfo.allDay) {</span>
+<span class="nc" id="L365">                    String tz = Utils.getTimeZone(mContext, null);</span>
+<span class="nc" id="L366">                    Time recycle = new Time();</span>
+<span class="nc" id="L367">                    start = Utils.convertAlldayLocalToUTC(recycle, start, tz);</span>
+<span class="nc" id="L368">                    end = Utils.convertAlldayLocalToUTC(recycle, end, tz);</span>
+                }
+<span class="nc" id="L370">                final Intent fillInIntent = CalendarAppWidgetProvider.getLaunchFillInIntent(</span>
+                        mContext, eventInfo.id, start, end, eventInfo.allDay);
+<span class="nc" id="L372">                views.setOnClickFillInIntent(R.id.widget_row, fillInIntent);</span>
+<span class="nc" id="L373">                return views;</span>
+            }
+        }
+
+        @Override
+        public int getViewTypeCount() {
+<span class="nc" id="L379">            return 5;</span>
+        }
+
+        @Override
+        public int getCount() {
+            // if there are no events, we still return 1 to represent the &quot;no
+            // events&quot; view
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            if (mModel == null) {</span>
+<span class="nc" id="L387">                return 1;</span>
+            }
+<span class="nc" id="L389">            return Math.max(1, mModel.mRowInfos.size());</span>
+        }
+
+        @Override
+        public long getItemId(int position) {
+<span class="nc bnc" id="L394" title="All 6 branches missed.">            if (mModel == null ||  mModel.mRowInfos.isEmpty() || position &gt;= getCount()) {</span>
+<span class="nc" id="L395">                return 0;</span>
+            }
+<span class="nc" id="L397">            RowInfo rowInfo = mModel.mRowInfos.get(position);</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (rowInfo.mType == RowInfo.TYPE_DAY) {</span>
+<span class="nc" id="L399">                return rowInfo.mIndex;</span>
+            }
+<span class="nc" id="L401">            EventInfo eventInfo = mModel.mEventInfos.get(rowInfo.mIndex);</span>
+<span class="nc" id="L402">            long prime = 31;</span>
+<span class="nc" id="L403">            long result = 1;</span>
+<span class="nc" id="L404">            result = prime * result + (int) (eventInfo.id ^ (eventInfo.id &gt;&gt;&gt; 32));</span>
+<span class="nc" id="L405">            result = prime * result + (int) (eventInfo.start ^ (eventInfo.start &gt;&gt;&gt; 32));</span>
+<span class="nc" id="L406">            return result;</span>
+        }
+
+        @Override
+        public boolean hasStableIds() {
+<span class="nc" id="L411">            return true;</span>
+        }
+
+        /**
+         * Query across all calendars for upcoming event instances from now
+         * until some time in the future. Widen the time range that we query by
+         * one day on each end so that we can catch all-day events. All-day
+         * events are stored starting at midnight in UTC but should be included
+         * in the list of events starting at midnight local time. This may fetch
+         * more events than we actually want, so we filter them out later.
+         *
+         * @param selection The selection string for the loader to filter the query with.
+         */
+        public void initLoader(String selection) {
+            if (LOGD)
+                Log.d(TAG, &quot;Querying for widget events...&quot;);
+
+            // Search for events from now until some time in the future
+<span class="nc" id="L429">            Uri uri = createLoaderUri();</span>
+<span class="nc" id="L430">            mLoader = new CursorLoader(mContext, uri, EVENT_PROJECTION, selection, null,</span>
+                    EVENT_SORT_ORDER);
+<span class="nc" id="L432">            mLoader.setUpdateThrottle(WIDGET_UPDATE_THROTTLE);</span>
+<span class="nc" id="L433">            synchronized (mLock) {</span>
+<span class="nc" id="L434">                mLastSerialNum = ++mSerialNum;</span>
+<span class="nc" id="L435">            }</span>
+<span class="nc" id="L436">            mLoader.registerListener(mAppWidgetId, this);</span>
+<span class="nc" id="L437">            mLoader.startLoading();</span>
+
+<span class="nc" id="L439">        }</span>
+
+        /**
+         * This gets the selection string for the loader.  This ends up doing a query in the
+         * shared preferences.
+         */
+        private String queryForSelection() {
+<span class="nc bnc" id="L446" title="All 2 branches missed.">            return Utils.getHideDeclinedEvents(mContext) ? EVENT_SELECTION_HIDE_DECLINED</span>
+<span class="nc" id="L447">                    : EVENT_SELECTION;</span>
+        }
+
+        /**
+         * @return The uri for the loader
+         */
+        private Uri createLoaderUri() {
+<span class="nc" id="L454">            long now = System.currentTimeMillis();</span>
+            // Add a day on either side to catch all-day events
+<span class="nc" id="L456">            long begin = now - DateUtils.DAY_IN_MILLIS;</span>
+<span class="nc" id="L457">            long end = now + SEARCH_DURATION + DateUtils.DAY_IN_MILLIS;</span>
+
+<span class="nc" id="L459">            return Uri.withAppendedPath(Instances.CONTENT_URI, Long.toString(begin) + &quot;/&quot; + end);</span>
+        }
+
+        /**
+         * Calculates and returns the next time we should push widget updates.
+         */
+        private long calculateUpdateTime(CalendarAppWidgetModel model, long now, String timeZone) {
+            // Make sure an update happens at midnight or earlier
+<span class="nc" id="L467">            long minUpdateTime = getNextMidnightTimeMillis(timeZone);</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            for (EventInfo event : model.mEventInfos) {</span>
+                final long start;
+                final long end;
+<span class="nc" id="L471">                start = event.start;</span>
+<span class="nc" id="L472">                end = event.end;</span>
+
+                // We want to update widget when we enter/exit time range of an event.
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                if (now &lt; start) {</span>
+<span class="nc" id="L476">                    minUpdateTime = Math.min(minUpdateTime, start);</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                } else if (now &lt; end) {</span>
+<span class="nc" id="L478">                    minUpdateTime = Math.min(minUpdateTime, end);</span>
+                }
+<span class="nc" id="L480">            }</span>
+<span class="nc" id="L481">            return minUpdateTime;</span>
+        }
+
+        /*
+         * (non-Javadoc)
+         * @see
+         * android.content.Loader.OnLoadCompleteListener#onLoadComplete(android
+         * .content.Loader, java.lang.Object)
+         */
+        @Override
+        public void onLoadComplete(Loader&lt;Cursor&gt; loader, Cursor cursor) {
+<span class="nc bnc" id="L492" title="All 2 branches missed.">            if (cursor == null) {</span>
+<span class="nc" id="L493">                return;</span>
+            }
+            // If a newer update has happened since we started clean up and
+            // return
+<span class="nc" id="L497">            synchronized (mLock) {</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">                if (cursor.isClosed()) {</span>
+<span class="nc" id="L499">                    Log.wtf(TAG, &quot;Got a closed cursor from onLoadComplete&quot;);</span>
+<span class="nc" id="L500">                    return;</span>
+                }
+
+<span class="nc bnc" id="L503" title="All 2 branches missed.">                if (mLastSerialNum != mSerialNum) {</span>
+<span class="nc" id="L504">                    return;</span>
+                }
+
+<span class="nc" id="L507">                final long now = System.currentTimeMillis();</span>
+<span class="nc" id="L508">                String tz = Utils.getTimeZone(mContext, mTimezoneChanged);</span>
+
+                // Copy it to a local static cursor.
+<span class="nc" id="L511">                MatrixCursor matrixCursor = Utils.matrixCursorFromCursor(cursor);</span>
+                try {
+<span class="nc" id="L513">                    mModel = buildAppWidgetModel(mContext, matrixCursor, tz);</span>
+                } finally {
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                    if (matrixCursor != null) {</span>
+<span class="nc" id="L516">                        matrixCursor.close();</span>
+                    }
+
+<span class="nc bnc" id="L519" title="All 2 branches missed.">                    if (cursor != null) {</span>
+<span class="nc" id="L520">                        cursor.close();</span>
+                    }
+                }
+
+                // Schedule an alarm to wake ourselves up for the next update.
+                // We also cancel
+                // all existing wake-ups because PendingIntents don't match
+                // against extras.
+<span class="nc" id="L528">                long triggerTime = calculateUpdateTime(mModel, now, tz);</span>
+
+                // If no next-update calculated, or bad trigger time in past,
+                // schedule
+                // update about six hours from now.
+<span class="nc bnc" id="L533" title="All 2 branches missed.">                if (triggerTime &lt; now) {</span>
+<span class="nc" id="L534">                    Log.w(TAG, &quot;Encountered bad trigger time &quot; + formatDebugTime(triggerTime, now));</span>
+<span class="nc" id="L535">                    triggerTime = now + UPDATE_TIME_NO_EVENTS;</span>
+                }
+
+<span class="nc" id="L538">                final AlarmManager alertManager = (AlarmManager) mContext</span>
+<span class="nc" id="L539">                        .getSystemService(Context.ALARM_SERVICE);</span>
+<span class="nc" id="L540">                final PendingIntent pendingUpdate = CalendarAppWidgetProvider</span>
+<span class="nc" id="L541">                        .getUpdateIntent(mContext);</span>
+
+<span class="nc" id="L543">                alertManager.cancel(pendingUpdate);</span>
+<span class="nc" id="L544">                alertManager.set(AlarmManager.RTC, triggerTime, pendingUpdate);</span>
+<span class="nc" id="L545">                Time time = new Time(Utils.getTimeZone(mContext, null));</span>
+<span class="nc" id="L546">                time.set(System.currentTimeMillis());</span>
+
+<span class="nc bnc" id="L548" title="All 2 branches missed.">                if (time.normalize() != sLastUpdateTime) {</span>
+<span class="nc" id="L549">                    Time time2 = new Time(Utils.getTimeZone(mContext, null));</span>
+<span class="nc" id="L550">                    time2.set(sLastUpdateTime);</span>
+<span class="nc" id="L551">                    time2.normalize();</span>
+<span class="nc bnc" id="L552" title="All 4 branches missed.">                    if (time.getYear() != time2.getYear() || time.getYearDay() != time2.getYearDay()) {</span>
+<span class="nc" id="L553">                        Utils.sendUpdateWidgetIntent(mContext);</span>
+                    }
+
+<span class="nc" id="L556">                    sLastUpdateTime = time.toMillis();</span>
+                }
+
+<span class="nc bnc" id="L559" title="All 2 branches missed.">                if (CalendarAppWidgetProvider.isWidgetSupported(mContext)) {</span>
+<span class="nc" id="L560">                    AppWidgetManager widgetManager = AppWidgetManager.getInstance(mContext);</span>
+<span class="nc bnc" id="L561" title="All 2 branches missed.">                    if (mAppWidgetId == -1) {</span>
+<span class="nc" id="L562">                        int[] ids = widgetManager.getAppWidgetIds(CalendarAppWidgetProvider</span>
+<span class="nc" id="L563">                                .getComponentName(mContext));</span>
+
+<span class="nc" id="L565">                        widgetManager.notifyAppWidgetViewDataChanged(ids, R.id.events_list);</span>
+<span class="nc" id="L566">                    } else {</span>
+<span class="nc" id="L567">                        widgetManager.notifyAppWidgetViewDataChanged(mAppWidgetId,</span>
+                                R.id.events_list);
+                    }
+                }
+<span class="nc" id="L571">            }</span>
+<span class="nc" id="L572">        }</span>
+
+        @Override
+        public void onReceive(final Context context, Intent intent) {
+            if (LOGD)
+                Log.d(TAG, &quot;AppWidgetService received an intent. It was &quot; + intent.toString());
+<span class="nc" id="L578">            mContext = context;</span>
+
+            // We cannot do any queries from the UI thread, so push the 'selection' query
+            // to a background thread.  However the implementation of the latter query
+            // (cursor loading) uses CursorLoader which must be initiated from the UI thread,
+            // so there is some convoluted handshaking here.
+            //
+            // Note that as currently implemented, this must run in a single threaded executor
+            // or else the loads may be run out of order.
+            //
+            // TODO: Remove use of mHandler and CursorLoader, and do all the work synchronously
+            // in the background thread.  All the handshaking going on here between the UI and
+            // background thread with using goAsync, mHandler, and CursorLoader is confusing.
+<span class="nc" id="L591">            final PendingResult result = goAsync();</span>
+<span class="nc" id="L592">            executor.submit(new Runnable() {</span>
+                @Override
+                public void run() {
+                    // We always complete queryForSelection() even if the load task ends up being
+                    // canceled because of a more recent one.  Optimizing this to allow
+                    // canceling would require keeping track of all the PendingResults
+                    // (from goAsync) to abort them.  Defer this until it becomes a problem.
+<span class="nc" id="L599">                    final String selection = queryForSelection();</span>
+
+<span class="nc bnc" id="L601" title="All 2 branches missed.">                    if (mLoader == null) {</span>
+<span class="nc" id="L602">                        mAppWidgetId = -1;</span>
+<span class="nc" id="L603">                        mHandler.post(new Runnable() {</span>
+                            @Override
+                            public void run() {
+<span class="nc bnc" id="L606" title="All 2 branches missed.">                                if (!Utils.isCalendarPermissionGranted(context, true)) {</span>
+<span class="nc" id="L607">                                    return;</span>
+                                }
+<span class="nc" id="L609">                                initLoader(selection);</span>
+<span class="nc" id="L610">                                result.finish();</span>
+<span class="nc" id="L611">                            }</span>
+                        });
+                    } else {
+<span class="nc" id="L614">                        mHandler.post(createUpdateLoaderRunnable(selection, result,</span>
+<span class="nc" id="L615">                                currentVersion.incrementAndGet()));</span>
+                    }
+<span class="nc" id="L617">                }</span>
+            });
+<span class="nc" id="L619">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

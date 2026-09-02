@@ -1,0 +1,821 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AlertReceiver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Etar-Calendar</a> &gt; <a href="index.source.html" class="el_package">com.android.calendar.alerts</a> &gt; <span class="el_source">AlertReceiver.java</span></div><h1>AlertReceiver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2007 The Android Open Source Project
+ * Copyright (C) 2022 The Calyx Institute
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.calendar.alerts;
+
+import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.TaskStackBuilder;
+import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
+import android.content.ContentUris;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.PowerManager;
+import android.provider.CalendarContract.Attendees;
+import android.provider.CalendarContract.Calendars;
+import android.provider.CalendarContract.Events;
+import android.telephony.TelephonyManager;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.TextUtils;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.TextAppearanceSpan;
+import android.text.style.URLSpan;
+import android.util.Log;
+import android.widget.Toast;
+import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
+
+import com.android.calendar.theme.DynamicThemeKt;
+import com.android.calendar.EventInfoActivity;
+import com.android.calendar.Utils;
+import com.android.calendar.alerts.AlertService.NotificationWrapper;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+import ws.xsoh.etar.R;
+
+/**
+ * Receives android.intent.action.EVENT_REMINDER intents and handles
+ * event reminders.  The intent URI specifies an alert id in the
+ * CalendarAlerts database table.
+ * It also receives the TIME_CHANGED action so that it can fire off
+ * snoozed alarms that have become ready.  The real work is done in
+ * the AlertService class.
+ *
+ * To trigger this code after pushing the apk to device:
+ * adb shell am broadcast -a &quot;android.intent.action.EVENT_REMINDER&quot;
+ *    -n &quot;com.android.calendar/.alerts.AlertReceiver&quot;
+ */
+<span class="nc" id="L74">public class AlertReceiver extends BroadcastReceiver {</span>
+    // The broadcast for notification refreshes scheduled by the app. This is to
+    // distinguish the EVENT_REMINDER broadcast sent by the provider.
+    public static final String EVENT_REMINDER_APP_ACTION =
+            &quot;com.android.calendar.EVENT_REMINDER_APP&quot;;
+    public static final String ACTION_DISMISS_OLD_REMINDERS = &quot;removeOldReminders&quot;;
+<span class="nc" id="L80">    static final Object mStartingServiceSync = new Object();</span>
+    private static final String TAG = &quot;AlertReceiver&quot;;
+    private static final String MAP_ACTION = &quot;com.android.calendar.MAP&quot;;
+    private static final String CALL_ACTION = &quot;com.android.calendar.CALL&quot;;
+    private static final String MAIL_ACTION = &quot;com.android.calendar.MAIL&quot;;
+    private static final String EXTRA_EVENT_ID = &quot;eventid&quot;;
+<span class="nc" id="L86">    private static final Pattern mBlankLinePattern = Pattern.compile(&quot;^\\s*$[\n\r]&quot;,</span>
+            Pattern.MULTILINE);
+    private static final int NOTIFICATION_DIGEST_MAX_LENGTH = 3;
+    private static final String GEO_PREFIX = &quot;geo:&quot;;
+    private static final String TEL_PREFIX = &quot;tel:&quot;;
+    private static final int MAX_NOTIF_ACTIONS = 3;
+<span class="nc" id="L92">    private static final String[] ATTENDEES_PROJECTION = new String[]{</span>
+            Attendees.ATTENDEE_EMAIL,           // 0
+            Attendees.ATTENDEE_STATUS,          // 1
+    };
+    private static final int ATTENDEES_INDEX_EMAIL = 0;
+    private static final int ATTENDEES_INDEX_STATUS = 1;
+    private static final String ATTENDEES_WHERE = Attendees.EVENT_ID + &quot;=?&quot;;
+    private static final String ATTENDEES_SORT_ORDER = Attendees.ATTENDEE_NAME + &quot; ASC, &quot;
+            + Attendees.ATTENDEE_EMAIL + &quot; ASC&quot;;
+<span class="nc" id="L101">    private static final String[] EVENT_PROJECTION = new String[]{</span>
+            Calendars.OWNER_ACCOUNT, // 0
+            Calendars.ACCOUNT_NAME,  // 1
+            Events.TITLE,            // 2
+            Events.ORGANIZER,        // 3
+    };
+    private static final int EVENT_INDEX_OWNER_ACCOUNT = 0;
+    private static final int EVENT_INDEX_ACCOUNT_NAME = 1;
+    private static final int EVENT_INDEX_TITLE = 2;
+    private static final int EVENT_INDEX_ORGANIZER = 3;
+    static PowerManager.WakeLock mStartingService;
+    private static Handler sAsyncHandler;
+
+    static {
+<span class="nc" id="L115">        HandlerThread thr = new HandlerThread(&quot;AlertReceiver async&quot;);</span>
+<span class="nc" id="L116">        thr.start();</span>
+<span class="nc" id="L117">        sAsyncHandler = new Handler(thr.getLooper());</span>
+<span class="nc" id="L118">    }</span>
+
+    private static PendingIntent createClickEventIntent(Context context, long eventId,
+        int notificationId, long startMillis, long endMillis) {
+<span class="nc" id="L122">        Intent intent = AlertUtils.buildEventViewIntent(context, eventId, startMillis, endMillis);</span>
+<span class="nc" id="L123">        intent.putExtra(AlertUtils.NOTIFICATION_ID_KEY, notificationId);</span>
+<span class="nc" id="L124">        return TaskStackBuilder.create(context)</span>
+<span class="nc" id="L125">            .addParentStack(EventInfoActivity.class)</span>
+<span class="nc" id="L126">            .addNextIntent(intent)</span>
+<span class="nc" id="L127">            .getPendingIntent(0, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);</span>
+    }
+
+    private static PendingIntent createDeleteEventIntent(Context context, long eventId,
+            long startMillis, long endMillis, int notificationId) {
+<span class="nc" id="L132">        return createDismissAlarmsIntent(context, eventId, startMillis, endMillis, notificationId,</span>
+                DismissAlarmsService.DISMISS_ACTION);
+    }
+
+    private static PendingIntent createDismissAlarmsIntent(Context context, long eventId,
+            long startMillis, long endMillis, int notificationId, String action) {
+<span class="nc" id="L138">        Intent intent = new Intent();</span>
+<span class="nc" id="L139">        intent.setClass(context, DismissAlarmsService.class);</span>
+<span class="nc" id="L140">        intent.setAction(action);</span>
+<span class="nc" id="L141">        intent.putExtra(AlertUtils.EVENT_ID_KEY, eventId);</span>
+<span class="nc" id="L142">        intent.putExtra(AlertUtils.EVENT_START_KEY, startMillis);</span>
+<span class="nc" id="L143">        intent.putExtra(AlertUtils.EVENT_END_KEY, endMillis);</span>
+<span class="nc" id="L144">        intent.putExtra(AlertUtils.NOTIFICATION_ID_KEY, notificationId);</span>
+
+        // Must set a field that affects Intent.filterEquals so that the resulting
+        // PendingIntent will be a unique instance (the 'extras' don't achieve this).
+        // This must be unique for the click event across all reminders (so using
+        // event ID + startTime should be unique).  This also must be unique from
+        // the delete event (which also uses DismissAlarmsService).
+<span class="nc" id="L151">        Uri.Builder builder = Events.CONTENT_URI.buildUpon();</span>
+<span class="nc" id="L152">        ContentUris.appendId(builder, eventId);</span>
+<span class="nc" id="L153">        ContentUris.appendId(builder, startMillis);</span>
+<span class="nc" id="L154">        intent.setData(builder.build());</span>
+<span class="nc" id="L155">        return PendingIntent.getService(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);</span>
+    }
+
+    // if default snooze minute &lt; 0, means the snooze option is disable
+    // in this case return null as intent
+    @Nullable
+    private static PendingIntent createSnoozeIntent(Context context, long eventId,
+            long startMillis, long endMillis, int notificationId) {
+
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (Utils.getDefaultSnoozeDelayMs(context) &lt; 0L) {</span>
+<span class="nc" id="L165">            return null;</span>
+        }
+
+<span class="nc" id="L168">        Intent intent = new Intent();</span>
+<span class="nc" id="L169">        intent.putExtra(AlertUtils.EVENT_ID_KEY, eventId);</span>
+<span class="nc" id="L170">        intent.putExtra(AlertUtils.EVENT_START_KEY, startMillis);</span>
+<span class="nc" id="L171">        intent.putExtra(AlertUtils.EVENT_END_KEY, endMillis);</span>
+<span class="nc" id="L172">        intent.putExtra(AlertUtils.NOTIFICATION_ID_KEY, notificationId);</span>
+
+<span class="nc" id="L174">        Uri.Builder builder = Events.CONTENT_URI.buildUpon();</span>
+<span class="nc" id="L175">        ContentUris.appendId(builder, eventId);</span>
+<span class="nc" id="L176">        ContentUris.appendId(builder, startMillis);</span>
+<span class="nc" id="L177">        intent.setData(builder.build());</span>
+
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (Utils.useCustomSnoozeDelay(context)) {</span>
+<span class="nc" id="L180">            intent.setClass(context, SnoozeDelayActivity.class);</span>
+<span class="nc" id="L181">            return PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);</span>
+        } else {
+<span class="nc" id="L183">            intent.setClass(context, SnoozeAlarmsService.class);</span>
+<span class="nc" id="L184">            return PendingIntent.getService(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);</span>
+        }
+    }
+
+    private static PendingIntent createAlertActivityIntent(Context context) {
+<span class="nc" id="L189">        Intent clickIntent = new Intent();</span>
+<span class="nc" id="L190">        clickIntent.setClass(context, AlertActivity.class);</span>
+<span class="nc" id="L191">        clickIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L192">        return PendingIntent.getActivity(context, 0, clickIntent,</span>
+                    PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    public static NotificationWrapper makeBasicNotification(Context context, String title,
+            String summaryText, long startMillis, long endMillis, long eventId, long calendarId,
+            int notificationId, boolean doPopup, int priority) {
+<span class="nc" id="L199">        Notification n = buildBasicNotification(new Notification.Builder(context),</span>
+                context, title, summaryText, startMillis, endMillis, eventId, calendarId, notificationId,
+                doPopup, priority, false);
+<span class="nc" id="L202">        return new NotificationWrapper(n, notificationId, eventId, startMillis, endMillis, doPopup);</span>
+    }
+
+    public static boolean isResolveIntent(Context context, Intent intent) {
+<span class="nc" id="L206">        final PackageManager packageManager = context.getPackageManager();</span>
+<span class="nc" id="L207">        List&lt;ResolveInfo&gt; resolveInfo = packageManager.queryIntentActivities(intent,</span>
+                PackageManager.MATCH_DEFAULT_ONLY);
+<span class="nc bnc" id="L209" title="All 2 branches missed.">        return (!resolveInfo.isEmpty());</span>
+    }
+
+    private static Notification buildBasicNotification(Notification.Builder notificationBuilder,
+            Context context, String title, String summaryText, long startMillis, long endMillis,
+            long eventId, long calendarId, int notificationId, boolean doPopup, int priority,
+            boolean addActionButtons) {
+<span class="nc" id="L216">        Resources resources = context.getResources();</span>
+<span class="nc bnc" id="L217" title="All 4 branches missed.">        if (title == null || title.isEmpty()) {</span>
+<span class="nc" id="L218">            title = resources.getString(R.string.no_title_label);</span>
+        }
+
+        // Create an intent triggered by clicking on the status icon, that dismisses the
+        // notification and shows the event.
+<span class="nc" id="L223">        PendingIntent clickIntent = createClickEventIntent(context, eventId, notificationId,</span>
+            startMillis, endMillis);
+
+        // Create a delete intent triggered by dismissing the notification.
+<span class="nc" id="L227">        PendingIntent deleteIntent = createDeleteEventIntent(context, eventId, startMillis,</span>
+            endMillis, notificationId);
+
+        // Create the base notification.
+<span class="nc" id="L231">        notificationBuilder.setContentTitle(title);</span>
+<span class="nc" id="L232">        notificationBuilder.setContentText(summaryText);</span>
+<span class="nc" id="L233">        notificationBuilder.setSmallIcon(R.drawable.stat_notify_calendar_events);</span>
+<span class="nc" id="L234">        int color = DynamicThemeKt.getColorId(DynamicThemeKt.getPrimaryColor(context));</span>
+<span class="nc" id="L235">        notificationBuilder.setColor(ContextCompat.getColor(context, color));</span>
+<span class="nc" id="L236">        notificationBuilder.setContentIntent(clickIntent);</span>
+<span class="nc" id="L237">        notificationBuilder.setDeleteIntent(deleteIntent);</span>
+
+        // Add setting channel ID for Oreo or later
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L241">            notificationBuilder.setChannelId(UtilsKt.channelId(calendarId));</span>
+        }
+
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (doPopup) {</span>
+<span class="nc" id="L245">            notificationBuilder.setFullScreenIntent(createAlertActivityIntent(context), true);</span>
+        }
+
+<span class="nc" id="L248">        PendingIntent mapIntent = null, callIntent = null, snoozeIntent = null, emailIntent = null;</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        if (addActionButtons) {</span>
+            // Send map, call, and email intent back to ourself first for a couple reasons:
+            // 1) Workaround issue where clicking action button in notification does
+            //    not automatically close the notification shade.
+            // 2) Event information will always be up to date.
+
+            // Create map and/or call intents.
+<span class="nc" id="L256">            URLSpan[] urlSpans = getURLSpans(context, eventId);</span>
+<span class="nc" id="L257">            mapIntent = createMapBroadcastIntent(context, urlSpans, eventId);</span>
+<span class="nc" id="L258">            callIntent = createCallBroadcastIntent(context, urlSpans, eventId);</span>
+
+            // Create email intent for emailing attendees.
+<span class="nc" id="L261">            emailIntent = createBroadcastMailIntent(context, eventId, title);</span>
+
+            // Create snooze intent.  TODO: change snooze to 10 minutes.
+<span class="nc" id="L264">            snoozeIntent = createSnoozeIntent(context, eventId, startMillis, endMillis,</span>
+                    notificationId);
+        }
+
+        // Turn off timestamp.
+<span class="nc" id="L269">        notificationBuilder.setWhen(0);</span>
+
+        // Should be one of the values in Notification (ie. Notification.PRIORITY_HIGH, etc).
+        // A higher priority will encourage notification manager to expand it.
+<span class="nc" id="L273">        notificationBuilder.setPriority(priority);</span>
+
+        // Add action buttons. Show at most three, using the following priority ordering:
+        // 1. Map
+        // 2. Call
+        // 3. Email
+        // 4. Snooze
+        // Actions will only be shown if they are applicable; i.e. with no location, map will
+        // not be shown, and with no recipients, snooze will not be shown.
+        // TODO: Get icons, get strings. Maybe show preview of actual location/number?
+<span class="nc" id="L283">        int numActions = 0;</span>
+<span class="nc bnc" id="L284" title="All 4 branches missed.">        if (mapIntent != null &amp;&amp; numActions &lt; MAX_NOTIF_ACTIONS) {</span>
+<span class="nc" id="L285">            notificationBuilder.addAction(R.drawable.ic_map,</span>
+<span class="nc" id="L286">                    resources.getString(R.string.map_label), mapIntent);</span>
+<span class="nc" id="L287">            numActions++;</span>
+        }
+<span class="nc bnc" id="L289" title="All 4 branches missed.">        if (callIntent != null &amp;&amp; numActions &lt; MAX_NOTIF_ACTIONS) {</span>
+<span class="nc" id="L290">            notificationBuilder.addAction(R.drawable.ic_call,</span>
+<span class="nc" id="L291">                    resources.getString(R.string.call_label), callIntent);</span>
+<span class="nc" id="L292">            numActions++;</span>
+        }
+<span class="nc bnc" id="L294" title="All 4 branches missed.">        if (emailIntent != null &amp;&amp; numActions &lt; MAX_NOTIF_ACTIONS) {</span>
+<span class="nc" id="L295">            notificationBuilder.addAction(R.drawable.ic_menu_email_holo_dark,</span>
+<span class="nc" id="L296">                    resources.getString(R.string.email_guests_label), emailIntent);</span>
+<span class="nc" id="L297">            numActions++;</span>
+        }
+<span class="nc bnc" id="L299" title="All 4 branches missed.">        if (snoozeIntent != null &amp;&amp; numActions &lt; MAX_NOTIF_ACTIONS) {</span>
+<span class="nc" id="L300">            notificationBuilder.addAction(R.drawable.ic_alarm_holo_dark,</span>
+<span class="nc" id="L301">                    resources.getString(R.string.snooze_label), snoozeIntent);</span>
+<span class="nc" id="L302">            numActions++;</span>
+        }
+<span class="nc" id="L304">        return notificationBuilder.build();</span>
+    }
+
+    /**
+     * Creates an expanding notification.  The initial expanded state is decided by
+     * the notification manager based on the priority.
+     */
+    public static NotificationWrapper makeExpandingNotification(Context context, String title,
+            String summaryText, String description, long startMillis, long endMillis, long eventId,
+            long calendarId, int notificationId, boolean doPopup, int priority) {
+<span class="nc" id="L314">        Notification.Builder basicBuilder = new Notification.Builder(context);</span>
+<span class="nc" id="L315">        Notification notification = buildBasicNotification(basicBuilder, context, title,</span>
+                summaryText, startMillis, endMillis, eventId, calendarId, notificationId, doPopup,
+                priority, true);
+
+        // Create a new-style expanded notification
+<span class="nc" id="L320">        Notification.BigTextStyle expandedBuilder = new Notification.BigTextStyle();</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (description != null) {</span>
+<span class="nc" id="L322">            description = mBlankLinePattern.matcher(description).replaceAll(&quot;&quot;);</span>
+<span class="nc" id="L323">            description = description.trim();</span>
+        }
+        CharSequence text;
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        if (TextUtils.isEmpty(description)) {</span>
+<span class="nc" id="L327">            text = summaryText;</span>
+        } else {
+<span class="nc" id="L329">            SpannableStringBuilder stringBuilder = new SpannableStringBuilder();</span>
+<span class="nc" id="L330">            stringBuilder.append(summaryText);</span>
+<span class="nc" id="L331">            stringBuilder.append(&quot;\n\n&quot;);</span>
+<span class="nc" id="L332">            stringBuilder.setSpan(new RelativeSizeSpan(0.5f), summaryText.length(),</span>
+<span class="nc" id="L333">                    stringBuilder.length(), 0);</span>
+<span class="nc" id="L334">            stringBuilder.append(description);</span>
+<span class="nc" id="L335">            text = stringBuilder;</span>
+        }
+<span class="nc" id="L337">        expandedBuilder.bigText(text);</span>
+<span class="nc" id="L338">        basicBuilder.setStyle(expandedBuilder);</span>
+<span class="nc" id="L339">        notification = basicBuilder.build();</span>
+
+<span class="nc" id="L341">        return new NotificationWrapper(notification, notificationId, eventId, startMillis,</span>
+                endMillis, doPopup);
+    }
+
+    /**
+     * Creates an expanding digest notification for expired events.
+     */
+    public static NotificationWrapper makeDigestNotification(Context context,
+            ArrayList&lt;AlertService.NotificationInfo&gt; notificationInfos, String digestTitle,
+            boolean expandable) {
+<span class="nc bnc" id="L351" title="All 4 branches missed.">        if (notificationInfos == null || notificationInfos.size() &lt; 1) {</span>
+<span class="nc" id="L352">            return null;</span>
+        }
+
+<span class="nc" id="L355">        Resources res = context.getResources();</span>
+<span class="nc" id="L356">        int numEvents = notificationInfos.size();</span>
+<span class="nc" id="L357">        long[] eventIds = new long[notificationInfos.size()];</span>
+<span class="nc" id="L358">        long[] startMillis = new long[notificationInfos.size()];</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">        for (int i = 0; i &lt; notificationInfos.size(); i++) {</span>
+<span class="nc" id="L360">            eventIds[i] = notificationInfos.get(i).eventId;</span>
+<span class="nc" id="L361">            startMillis[i] = notificationInfos.get(i).startMillis;</span>
+        }
+
+        // Create an intent triggered by clicking on the status icon that shows the alerts list.
+<span class="nc" id="L365">        PendingIntent pendingClickIntent = createAlertActivityIntent(context);</span>
+
+        // Create an intent triggered by dismissing the digest notification that clears all
+        // expired events.
+<span class="nc" id="L369">        Intent deleteIntent = new Intent();</span>
+<span class="nc" id="L370">        deleteIntent.setClass(context, DismissAlarmsService.class);</span>
+<span class="nc" id="L371">        deleteIntent.setAction(DismissAlarmsService.DISMISS_ACTION);</span>
+<span class="nc" id="L372">        deleteIntent.putExtra(AlertUtils.EVENT_IDS_KEY, eventIds);</span>
+<span class="nc" id="L373">        deleteIntent.putExtra(AlertUtils.EVENT_STARTS_KEY, startMillis);</span>
+<span class="nc" id="L374">        PendingIntent pendingDeleteIntent = PendingIntent.getService(context, 0, deleteIntent,</span>
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+<span class="nc bnc" id="L377" title="All 4 branches missed.">        if (digestTitle == null || digestTitle.length() == 0) {</span>
+<span class="nc" id="L378">            digestTitle = res.getString(R.string.no_title_label);</span>
+        }
+
+<span class="nc" id="L381">        Notification.Builder notificationBuilder = new Notification.Builder(context);</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L383">            notificationBuilder.setChannelId(UtilsKt.channelId(notificationInfos.get(0).calendarId));</span>
+        }
+<span class="nc" id="L385">        notificationBuilder.setContentText(digestTitle);</span>
+<span class="nc" id="L386">        notificationBuilder.setSmallIcon(R.drawable.stat_notify_calendar_multiple);</span>
+<span class="nc" id="L387">        notificationBuilder.setContentIntent(pendingClickIntent);</span>
+<span class="nc" id="L388">        notificationBuilder.setDeleteIntent(pendingDeleteIntent);</span>
+<span class="nc" id="L389">        String nEventsStr = res.getQuantityString(R.plurals.Nevents, numEvents, numEvents);</span>
+<span class="nc" id="L390">        notificationBuilder.setContentTitle(nEventsStr);</span>
+
+        Notification n;
+        // New-style notification...
+
+        // Set to min priority to encourage the notification manager to collapse it.
+<span class="nc" id="L396">        notificationBuilder.setPriority(Notification.PRIORITY_MIN);</span>
+
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (expandable) {</span>
+            // Multiple reminders.  Combine into an expanded digest notification.
+<span class="nc" id="L400">            Notification.InboxStyle expandedBuilder = new Notification.InboxStyle();</span>
+<span class="nc" id="L401">            int i = 0;</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">            for (AlertService.NotificationInfo info : notificationInfos) {</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">                if (i &lt; NOTIFICATION_DIGEST_MAX_LENGTH) {</span>
+<span class="nc" id="L404">                    String name = info.eventName;</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                    if (TextUtils.isEmpty(name)) {</span>
+<span class="nc" id="L406">                        name = context.getResources().getString(R.string.no_title_label);</span>
+                    }
+<span class="nc" id="L408">                    String timeLocation = AlertUtils.formatTimeLocation(context,</span>
+                            info.startMillis, info.allDay, info.location);
+
+<span class="nc" id="L411">                    TextAppearanceSpan primaryTextSpan = new TextAppearanceSpan(context,</span>
+                            R.style.NotificationPrimaryText);
+<span class="nc" id="L413">                    TextAppearanceSpan secondaryTextSpan = new TextAppearanceSpan(context,</span>
+                            R.style.NotificationSecondaryText);
+
+                    // Event title in bold.
+<span class="nc" id="L417">                    SpannableStringBuilder stringBuilder = new SpannableStringBuilder();</span>
+<span class="nc" id="L418">                    stringBuilder.append(name);</span>
+<span class="nc" id="L419">                    stringBuilder.setSpan(primaryTextSpan, 0, stringBuilder.length(), 0);</span>
+<span class="nc" id="L420">                    stringBuilder.append(&quot;  &quot;);</span>
+
+                    // Followed by time and location.
+<span class="nc" id="L423">                    int secondaryIndex = stringBuilder.length();</span>
+<span class="nc" id="L424">                    stringBuilder.append(timeLocation);</span>
+<span class="nc" id="L425">                    stringBuilder.setSpan(secondaryTextSpan, secondaryIndex,</span>
+<span class="nc" id="L426">                            stringBuilder.length(), 0);</span>
+<span class="nc" id="L427">                    expandedBuilder.addLine(stringBuilder);</span>
+<span class="nc" id="L428">                    i++;</span>
+                } else {
+                    break;
+                }
+<span class="nc" id="L432">            }</span>
+
+            // If there are too many to display, add &quot;+X missed events&quot; for the last line.
+<span class="nc" id="L435">            int remaining = numEvents - i;</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">            if (remaining &gt; 0) {</span>
+<span class="nc" id="L437">                String nMoreEventsStr = res.getQuantityString(R.plurals.N_remaining_events,</span>
+<span class="nc" id="L438">                            remaining, remaining);</span>
+                // TODO: Add highlighting and icon to this last entry once framework allows it.
+<span class="nc" id="L440">                expandedBuilder.setSummaryText(nMoreEventsStr);</span>
+            }
+
+            // Remove the title in the expanded form (redundant with the listed items).
+<span class="nc" id="L444">            expandedBuilder.setBigContentTitle(&quot;&quot;);</span>
+
+<span class="nc" id="L446">            notificationBuilder.setStyle(expandedBuilder);</span>
+        }
+
+<span class="nc" id="L449">        n = notificationBuilder.build();</span>
+
+<span class="nc" id="L451">        NotificationWrapper nw = new NotificationWrapper(n);</span>
+        if (AlertService.DEBUG) {
+<span class="nc bnc" id="L453" title="All 2 branches missed.">            for (AlertService.NotificationInfo info : notificationInfos) {</span>
+<span class="nc" id="L454">                nw.add(new NotificationWrapper(null, 0, info.eventId, info.startMillis,</span>
+                        info.endMillis, false));
+<span class="nc" id="L456">            }</span>
+        }
+<span class="nc" id="L458">        return nw;</span>
+    }
+
+    private static Cursor getEventCursor(Context context, long eventId) {
+<span class="nc" id="L462">        return context.getContentResolver().query(</span>
+<span class="nc" id="L463">                ContentUris.withAppendedId(Events.CONTENT_URI, eventId), EVENT_PROJECTION,</span>
+                null, null, null);
+    }
+
+    private static Cursor getAttendeesCursor(Context context, long eventId) {
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        if (!Utils.isCalendarPermissionGranted(context, false)) {</span>
+            //If permission is not granted then just return.
+<span class="nc" id="L470">            Log.d(TAG, &quot;Manifest.permission.READ_CALENDAR is not granted&quot;);</span>
+<span class="nc" id="L471">            return null;</span>
+        }
+<span class="nc" id="L473">        return context.getContentResolver().query(Attendees.CONTENT_URI,</span>
+<span class="nc" id="L474">                ATTENDEES_PROJECTION, ATTENDEES_WHERE, new String[] { Long.toString(eventId) },</span>
+                ATTENDEES_SORT_ORDER);
+    }
+
+    private static Cursor getLocationCursor(Context context, long eventId) {
+<span class="nc" id="L479">        return context.getContentResolver().query(</span>
+<span class="nc" id="L480">                ContentUris.withAppendedId(Events.CONTENT_URI, eventId),</span>
+                new String[] { Events.EVENT_LOCATION }, null, null, null);
+    }
+
+    /**
+     * Creates a broadcast pending intent that fires to AlertReceiver when the email button
+     * is clicked.
+     */
+    private static PendingIntent createBroadcastMailIntent(Context context, long eventId,
+            String eventTitle) {
+        // Query for viewer account.
+<span class="nc" id="L491">        String syncAccount = null;</span>
+<span class="nc" id="L492">        Cursor eventCursor = getEventCursor(context, eventId);</span>
+        try {
+<span class="nc bnc" id="L494" title="All 4 branches missed.">            if (eventCursor != null &amp;&amp; eventCursor.moveToFirst()) {</span>
+<span class="nc" id="L495">                syncAccount = eventCursor.getString(EVENT_INDEX_ACCOUNT_NAME);</span>
+            }
+        } finally {
+<span class="nc bnc" id="L498" title="All 2 branches missed.">            if (eventCursor != null) {</span>
+<span class="nc" id="L499">                eventCursor.close();</span>
+            }
+        }
+
+        // Query attendees to see if there are any to email.
+<span class="nc" id="L504">        Cursor attendeesCursor = getAttendeesCursor(context, eventId);</span>
+        try {
+<span class="nc bnc" id="L506" title="All 4 branches missed.">            if (attendeesCursor != null &amp;&amp; attendeesCursor.moveToFirst()) {</span>
+                do {
+<span class="nc" id="L508">                    String email = attendeesCursor.getString(ATTENDEES_INDEX_EMAIL);</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">                    if (Utils.isEmailableFrom(email, syncAccount)) {</span>
+<span class="nc" id="L510">                        Intent broadcastIntent = new Intent(MAIL_ACTION);</span>
+<span class="nc" id="L511">                        broadcastIntent.setClass(context, AlertReceiver.class);</span>
+<span class="nc" id="L512">                        broadcastIntent.putExtra(EXTRA_EVENT_ID, eventId);</span>
+<span class="nc" id="L513">                        return PendingIntent.getBroadcast(context,</span>
+<span class="nc" id="L514">                                Long.valueOf(eventId).hashCode(), broadcastIntent,</span>
+                                PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                    }
+<span class="nc bnc" id="L517" title="All 2 branches missed.">                } while (attendeesCursor.moveToNext());</span>
+            }
+<span class="nc" id="L519">            return null;</span>
+
+        } finally {
+<span class="nc bnc" id="L522" title="All 2 branches missed.">            if (attendeesCursor != null) {</span>
+<span class="nc" id="L523">                attendeesCursor.close();</span>
+            }
+        }
+    }
+
+    /**
+     * Creates an Intent for emailing the attendees of the event.  Returns null if there
+     * are no emailable attendees.
+     */
+    static Intent createEmailIntent(Context context, long eventId, String body) {
+        // TODO: Refactor to move query part into Utils.createEmailAttendeeIntent, to
+        // be shared with EventInfoFragment.
+
+        // Query for the owner account(s).
+<span class="nc" id="L537">        String ownerAccount = null;</span>
+<span class="nc" id="L538">        String syncAccount = null;</span>
+<span class="nc" id="L539">        String eventTitle = null;</span>
+<span class="nc" id="L540">        String eventOrganizer = null;</span>
+<span class="nc" id="L541">        Cursor eventCursor = getEventCursor(context, eventId);</span>
+        try {
+<span class="nc bnc" id="L543" title="All 4 branches missed.">            if (eventCursor != null &amp;&amp; eventCursor.moveToFirst()) {</span>
+<span class="nc" id="L544">                ownerAccount = eventCursor.getString(EVENT_INDEX_OWNER_ACCOUNT);</span>
+<span class="nc" id="L545">                syncAccount = eventCursor.getString(EVENT_INDEX_ACCOUNT_NAME);</span>
+<span class="nc" id="L546">                eventTitle = eventCursor.getString(EVENT_INDEX_TITLE);</span>
+<span class="nc" id="L547">                eventOrganizer = eventCursor.getString(EVENT_INDEX_ORGANIZER);</span>
+            }
+        } finally {
+<span class="nc bnc" id="L550" title="All 2 branches missed.">            if (eventCursor != null) {</span>
+<span class="nc" id="L551">                eventCursor.close();</span>
+            }
+        }
+<span class="nc bnc" id="L554" title="All 2 branches missed.">        if (TextUtils.isEmpty(eventTitle)) {</span>
+<span class="nc" id="L555">            eventTitle = context.getResources().getString(R.string.no_title_label);</span>
+        }
+
+        // Query for the attendees.
+<span class="nc" id="L559">        List&lt;String&gt; toEmails = new ArrayList&lt;String&gt;();</span>
+<span class="nc" id="L560">        List&lt;String&gt; ccEmails = new ArrayList&lt;String&gt;();</span>
+<span class="nc" id="L561">        Cursor attendeesCursor = getAttendeesCursor(context, eventId);</span>
+        try {
+<span class="nc bnc" id="L563" title="All 4 branches missed.">            if (attendeesCursor != null &amp;&amp; attendeesCursor.moveToFirst()) {</span>
+                do {
+<span class="nc" id="L565">                    int status = attendeesCursor.getInt(ATTENDEES_INDEX_STATUS);</span>
+<span class="nc" id="L566">                    String email = attendeesCursor.getString(ATTENDEES_INDEX_EMAIL);</span>
+<span class="nc bnc" id="L567" title="All 2 branches missed.">                    switch(status) {</span>
+                        case Attendees.ATTENDEE_STATUS_DECLINED:
+<span class="nc" id="L569">                            addIfEmailable(ccEmails, email, syncAccount);</span>
+<span class="nc" id="L570">                            break;</span>
+                        default:
+<span class="nc" id="L572">                            addIfEmailable(toEmails, email, syncAccount);</span>
+                    }
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                } while (attendeesCursor.moveToNext());</span>
+            }
+        } finally {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">            if (attendeesCursor != null) {</span>
+<span class="nc" id="L578">                attendeesCursor.close();</span>
+            }
+        }
+
+        // Add organizer only if no attendees to email (the case when too many attendees
+        // in the event to sync or show).
+<span class="nc bnc" id="L584" title="All 6 branches missed.">        if (toEmails.size() == 0 &amp;&amp; ccEmails.size() == 0 &amp;&amp; eventOrganizer != null) {</span>
+<span class="nc" id="L585">            addIfEmailable(toEmails, eventOrganizer, syncAccount);</span>
+        }
+
+<span class="nc" id="L588">        Intent intent = null;</span>
+<span class="nc bnc" id="L589" title="All 6 branches missed.">        if (ownerAccount != null &amp;&amp; (toEmails.size() &gt; 0 || ccEmails.size() &gt; 0)) {</span>
+<span class="nc" id="L590">            intent = Utils.createEmailAttendeesIntent(context.getResources(), eventTitle, body,</span>
+                    toEmails, ccEmails, ownerAccount);
+        }
+
+<span class="nc bnc" id="L594" title="All 2 branches missed.">        if (intent == null) {</span>
+<span class="nc" id="L595">            return null;</span>
+        }
+        else {
+<span class="nc" id="L598">            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);</span>
+<span class="nc" id="L599">            return intent;</span>
+        }
+    }
+
+    private static void addIfEmailable(List&lt;String&gt; emailList, String email, String syncAccount) {
+<span class="nc bnc" id="L604" title="All 2 branches missed.">        if (Utils.isEmailableFrom(email, syncAccount)) {</span>
+<span class="nc" id="L605">            emailList.add(email);</span>
+        }
+<span class="nc" id="L607">    }</span>
+
+    /**
+     * Using the linkify magic, get a list of URLs from the event's location. If no such links
+     * are found, we should end up with a single geo link of the entire string.
+     */
+    private static URLSpan[] getURLSpans(Context context, long eventId) {
+<span class="nc" id="L614">        Cursor locationCursor = getLocationCursor(context, eventId);</span>
+
+        // Default to empty list
+<span class="nc" id="L617">        URLSpan[] urlSpans = new URLSpan[0];</span>
+<span class="nc bnc" id="L618" title="All 4 branches missed.">        if (locationCursor != null &amp;&amp; locationCursor.moveToFirst()) {</span>
+<span class="nc" id="L619">            String location = locationCursor.getString(0); // Only one item in this cursor.</span>
+<span class="nc bnc" id="L620" title="All 4 branches missed.">            if (location != null &amp;&amp; !location.isEmpty()) {</span>
+<span class="nc" id="L621">                Spannable text = Utils.extendedLinkify(location, true);</span>
+                // The linkify method should have found at least one link, at the very least.
+                // If no smart links were found, it should have set the whole string as a geo link.
+<span class="nc" id="L624">                urlSpans = text.getSpans(0, text.length(), URLSpan.class);</span>
+            }
+<span class="nc" id="L626">            locationCursor.close();</span>
+        }
+
+<span class="nc" id="L629">        return urlSpans;</span>
+    }
+
+    /**
+     * Create a pending intent to send ourself a broadcast to start maps, using the first map
+     * link available.
+     * If no links or resolved applications are found, return null.
+     */
+    private static PendingIntent createMapBroadcastIntent(Context context, URLSpan[] urlSpans,
+            long eventId) {
+<span class="nc bnc" id="L639" title="All 2 branches missed.">        for (URLSpan urlSpan : urlSpans) {</span>
+<span class="nc" id="L640">            String urlString = urlSpan.getURL();</span>
+<span class="nc bnc" id="L641" title="All 2 branches missed.">            if (urlString.startsWith(GEO_PREFIX)) {</span>
+<span class="nc" id="L642">                Intent geoIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(urlString));</span>
+<span class="nc" id="L643">                geoIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+                // If this intent cannot be handled, do not create the map action
+<span class="nc bnc" id="L645" title="All 2 branches missed.">                if (isResolveIntent(context, geoIntent)) {</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">                    if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.S) {</span>
+<span class="nc" id="L647">                        TaskStackBuilder taskStackBuilder = TaskStackBuilder.create(context);</span>
+<span class="nc" id="L648">                        geoIntent = createMapActivityIntent(context, urlSpans);</span>
+<span class="nc bnc" id="L649" title="All 2 branches missed.">                        if (geoIntent != null) {</span>
+<span class="nc" id="L650">                            taskStackBuilder.addNextIntentWithParentStack(geoIntent);</span>
+<span class="nc" id="L651">                            return taskStackBuilder.getPendingIntent(0,</span>
+                                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                        }
+                    }
+<span class="nc" id="L655">                    Intent broadcastIntent = new Intent(MAP_ACTION);</span>
+<span class="nc" id="L656">                    broadcastIntent.setClass(context, AlertReceiver.class);</span>
+<span class="nc" id="L657">                    broadcastIntent.putExtra(EXTRA_EVENT_ID, eventId);</span>
+<span class="nc" id="L658">                    return PendingIntent.getBroadcast(context,</span>
+<span class="nc" id="L659">                            Long.valueOf(eventId).hashCode(), broadcastIntent,</span>
+                            PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                }
+            }
+        }
+
+        // No geo link was found, so return null;
+<span class="nc" id="L666">        return null;</span>
+    }
+
+    /**
+     * Create an intent to take the user to maps, using the first map link available.
+     * If no links are found, return null.
+     */
+    private static Intent createMapActivityIntent(Context context, URLSpan[] urlSpans) {
+<span class="nc bnc" id="L674" title="All 2 branches missed.">        for (URLSpan urlSpan : urlSpans) {</span>
+<span class="nc" id="L675">            String urlString = urlSpan.getURL();</span>
+<span class="nc bnc" id="L676" title="All 2 branches missed.">            if (urlString.startsWith(GEO_PREFIX)) {</span>
+<span class="nc" id="L677">                Intent geoIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(urlString));</span>
+<span class="nc" id="L678">                geoIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L679">                return geoIntent;</span>
+            }
+        }
+
+        // No geo link was found, so return null;
+<span class="nc" id="L684">        return null;</span>
+    }
+
+    /**
+     * Create a pending intent to send ourself a broadcast to take the user to dialer, or any other
+     * app capable of making phone calls. Use the first phone number available. If no phone number
+     * is found, or if the device is not capable of making phone calls (i.e. a tablet), return null.
+     */
+    private static PendingIntent createCallBroadcastIntent(Context context, URLSpan[] urlSpans,
+            long eventId) {
+        // Return null if the device is unable to make phone calls.
+<span class="nc" id="L695">        TelephonyManager tm =</span>
+<span class="nc" id="L696">                (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);</span>
+<span class="nc bnc" id="L697" title="All 2 branches missed.">        if (tm.getPhoneType() == TelephonyManager.PHONE_TYPE_NONE) {</span>
+<span class="nc" id="L698">            return null;</span>
+        }
+
+<span class="nc bnc" id="L701" title="All 2 branches missed.">        for (URLSpan urlSpan : urlSpans) {</span>
+<span class="nc" id="L702">            String urlString = urlSpan.getURL();</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">            if (urlString.startsWith(TEL_PREFIX)) {</span>
+<span class="nc" id="L704">                Intent broadcastIntent = new Intent(CALL_ACTION);</span>
+<span class="nc" id="L705">                broadcastIntent.setClass(context, AlertReceiver.class);</span>
+<span class="nc" id="L706">                broadcastIntent.putExtra(EXTRA_EVENT_ID, eventId);</span>
+<span class="nc" id="L707">                return PendingIntent.getBroadcast(context,</span>
+<span class="nc" id="L708">                        Long.valueOf(eventId).hashCode(), broadcastIntent,</span>
+                        PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            }
+        }
+
+        // No tel link was found, so return null;
+<span class="nc" id="L714">        return null;</span>
+    }
+
+    /**
+     * Create an intent to take the user to dialer, or any other app capable of making phone calls.
+     * Use the first phone number available. If no phone number is found, or if the device is
+     * not capable of making phone calls (i.e. a tablet), return null.
+     */
+    private static Intent createCallActivityIntent(Context context, URLSpan[] urlSpans) {
+        // Return null if the device is unable to make phone calls.
+<span class="nc" id="L724">        TelephonyManager tm =</span>
+<span class="nc" id="L725">                (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);</span>
+<span class="nc bnc" id="L726" title="All 2 branches missed.">        if (tm.getPhoneType() == TelephonyManager.PHONE_TYPE_NONE) {</span>
+<span class="nc" id="L727">            return null;</span>
+        }
+
+<span class="nc bnc" id="L730" title="All 2 branches missed.">        for (URLSpan urlSpan : urlSpans) {</span>
+<span class="nc" id="L731">            String urlString = urlSpan.getURL();</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">            if (urlString.startsWith(TEL_PREFIX)) {</span>
+<span class="nc" id="L733">                Intent callIntent = new Intent(Intent.ACTION_DIAL, Uri.parse(urlString));</span>
+<span class="nc" id="L734">                callIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L735">                return callIntent;</span>
+            }
+        }
+
+        // No tel link was found, so return null;
+<span class="nc" id="L740">        return null;</span>
+    }
+
+    @Override
+    public void onReceive(final Context context, final Intent intent) {
+<span class="nc bnc" id="L745" title="All 4 branches missed.">        if (context == null || intent.getAction() == null)</span>
+<span class="nc" id="L746">            return;</span>
+
+<span class="nc" id="L748">        String action = intent.getAction();</span>
+
+        if (AlertService.DEBUG) {
+<span class="nc" id="L751">            Log.d(TAG, &quot;onReceive: a=&quot; + intent.getAction() + &quot; &quot; + intent);</span>
+        }
+<span class="nc bnc" id="L753" title="All 2 branches missed.">        if (MAP_ACTION.equals(intent.getAction())) {</span>
+            // Try starting the map action.
+            // If no map location is found (something changed since the notification was originally
+            // fired), update the notifications to express this change.
+<span class="nc" id="L757">            final long eventId = intent.getLongExtra(EXTRA_EVENT_ID, -1);</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">            if (eventId != -1) {</span>
+<span class="nc" id="L759">                URLSpan[] urlSpans = getURLSpans(context, eventId);</span>
+<span class="nc" id="L760">                Intent geoIntent = createMapActivityIntent(context, urlSpans);</span>
+<span class="nc bnc" id="L761" title="All 2 branches missed.">                if (geoIntent != null) {</span>
+                    // Location was successfully found, so dismiss the shade and start maps.
+                    try {
+<span class="nc" id="L764">                        context.startActivity(geoIntent);</span>
+<span class="nc" id="L765">                    } catch (ActivityNotFoundException exception) {</span>
+<span class="nc" id="L766">                        Toast.makeText(context,</span>
+<span class="nc" id="L767">                                context.getString(R.string.no_map),</span>
+<span class="nc" id="L768">                                Toast.LENGTH_SHORT).show();</span>
+<span class="nc" id="L769">                    }</span>
+<span class="nc" id="L770">                    closeNotificationShade(context);</span>
+                } else {
+                    // No location was found, so update all notifications.
+                    // Our alert service does not currently allow us to specify only one
+                    // specific notification to refresh.
+<span class="nc" id="L775">                    AlertService.updateAlertNotification(context);</span>
+                }
+            }
+<span class="nc bnc" id="L778" title="All 2 branches missed.">        } else if (CALL_ACTION.equals(intent.getAction())) {</span>
+            // Try starting the call action.
+            // If no call location is found (something changed since the notification was originally
+            // fired), update the notifications to express this change.
+<span class="nc" id="L782">            final long eventId = intent.getLongExtra(EXTRA_EVENT_ID, -1);</span>
+<span class="nc bnc" id="L783" title="All 2 branches missed.">            if (eventId != -1) {</span>
+<span class="nc" id="L784">                URLSpan[] urlSpans = getURLSpans(context, eventId);</span>
+<span class="nc" id="L785">                Intent callIntent = createCallActivityIntent(context, urlSpans);</span>
+<span class="nc bnc" id="L786" title="All 2 branches missed.">                if (callIntent != null) {</span>
+                    // Call location was successfully found, so dismiss the shade and start dialer.
+<span class="nc" id="L788">                    context.startActivity(callIntent);</span>
+<span class="nc" id="L789">                    closeNotificationShade(context);</span>
+                } else {
+                    // No call location was found, so update all notifications.
+                    // Our alert service does not currently allow us to specify only one
+                    // specific notification to refresh.
+<span class="nc" id="L794">                    AlertService.updateAlertNotification(context);</span>
+                }
+            }
+<span class="nc bnc" id="L797" title="All 2 branches missed.">        } else if (MAIL_ACTION.equals(intent.getAction())) {</span>
+<span class="nc" id="L798">            closeNotificationShade(context);</span>
+
+            // Now start the email intent.
+<span class="nc" id="L801">            final long eventId = intent.getLongExtra(EXTRA_EVENT_ID, -1);</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">            if (eventId != -1) {</span>
+<span class="nc" id="L803">                Intent i = new Intent(context, QuickResponseActivity.class);</span>
+<span class="nc" id="L804">                i.putExtra(QuickResponseActivity.EXTRA_EVENT_ID, eventId);</span>
+<span class="nc" id="L805">                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L806">                context.startActivity(i);</span>
+            }
+<span class="nc" id="L808">        } else {</span>
+<span class="nc" id="L809">            AlertUtils.scheduleAlertWorker(context, action);</span>
+        }
+<span class="nc" id="L811">    }</span>
+
+    private void closeNotificationShade(Context context) {
+        // https://developer.android.com/about/versions/12/behavior-changes-all#close-system-dialogs
+<span class="nc bnc" id="L815" title="All 2 branches missed.">        if (Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.S) {</span>
+<span class="nc" id="L816">            Intent closeNotificationShadeIntent = new Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);</span>
+<span class="nc" id="L817">            context.sendBroadcast(closeNotificationShadeIntent);</span>
+        }
+<span class="nc" id="L819">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

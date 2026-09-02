@@ -1,0 +1,701 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DecodeJob.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE FirefoxLite</a> &gt; <a href="index.source.html" class="el_package">com.bumptech.glide.load.engine</a> &gt; <span class="el_source">DecodeJob.java</span></div><h1>DecodeJob.java</h1><pre class="source lang-java linenums">package com.bumptech.glide.load.engine;
+
+import android.os.Build;
+import androidx.core.os.TraceCompat;
+import androidx.core.util.Pools;
+import android.util.Log;
+import com.bumptech.glide.GlideContext;
+import com.bumptech.glide.Priority;
+import com.bumptech.glide.Registry;
+import com.bumptech.glide.load.DataSource;
+import com.bumptech.glide.load.EncodeStrategy;
+import com.bumptech.glide.load.Key;
+import com.bumptech.glide.load.Options;
+import com.bumptech.glide.load.ResourceEncoder;
+import com.bumptech.glide.load.Transformation;
+import com.bumptech.glide.load.data.DataFetcher;
+import com.bumptech.glide.load.data.DataRewinder;
+import com.bumptech.glide.load.engine.cache.DiskCache;
+import com.bumptech.glide.load.resource.bitmap.Downsampler;
+import com.bumptech.glide.util.LogTime;
+import com.bumptech.glide.util.Preconditions;
+import com.bumptech.glide.util.Synthetic;
+import com.bumptech.glide.util.pool.FactoryPools.Poolable;
+import com.bumptech.glide.util.pool.StateVerifier;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * A class responsible for decoding resources either from cached data or from the original source
+ * and applying transformations and transcodes.
+ *
+ * &lt;p&gt;Note: this class has a natural ordering that is inconsistent with equals.
+ *
+ * @param &lt;R&gt; The type of resource that will be transcoded from the decoded and transformed
+ *            resource.
+ */
+class DecodeJob&lt;R&gt; implements DataFetcherGenerator.FetcherReadyCallback,
+    Runnable,
+    Comparable&lt;DecodeJob&lt;?&gt;&gt;,
+    Poolable {
+  private static final String TAG = &quot;DecodeJob&quot;;
+
+<span class="nc" id="L44">  @Synthetic final DecodeHelper&lt;R&gt; decodeHelper = new DecodeHelper&lt;&gt;();</span>
+<span class="nc" id="L45">  private final List&lt;Exception&gt; exceptions = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L46">  private final StateVerifier stateVerifier = StateVerifier.newInstance();</span>
+  private final DiskCacheProvider diskCacheProvider;
+  private final Pools.Pool&lt;DecodeJob&lt;?&gt;&gt; pool;
+<span class="nc" id="L49">  @Synthetic final DeferredEncodeManager&lt;?&gt; deferredEncodeManager = new DeferredEncodeManager&lt;&gt;();</span>
+<span class="nc" id="L50">  private final ReleaseManager releaseManager = new ReleaseManager();</span>
+
+  private GlideContext glideContext;
+  @Synthetic Key signature;
+  private Priority priority;
+  private EngineKey loadKey;
+  @Synthetic int width;
+  @Synthetic int height;
+  @Synthetic DiskCacheStrategy diskCacheStrategy;
+  @Synthetic Options options;
+  private Callback&lt;R&gt; callback;
+  private int order;
+  private Stage stage;
+  private RunReason runReason;
+  private long startFetchTime;
+  private boolean onlyRetrieveFromCache;
+
+  private Thread currentThread;
+  @Synthetic Key currentSourceKey;
+  private Key currentAttemptingKey;
+  private Object currentData;
+  private DataSource currentDataSource;
+  private DataFetcher&lt;?&gt; currentFetcher;
+
+  private volatile DataFetcherGenerator currentGenerator;
+  private volatile boolean isCallbackNotified;
+  private volatile boolean isCancelled;
+
+<span class="nc" id="L78">  DecodeJob(DiskCacheProvider diskCacheProvider, Pools.Pool&lt;DecodeJob&lt;?&gt;&gt; pool) {</span>
+<span class="nc" id="L79">    this.diskCacheProvider = diskCacheProvider;</span>
+<span class="nc" id="L80">    this.pool = pool;</span>
+<span class="nc" id="L81">  }</span>
+
+  DecodeJob&lt;R&gt; init(
+      GlideContext glideContext,
+      Object model,
+      EngineKey loadKey,
+      Key signature,
+      int width,
+      int height,
+      Class&lt;?&gt; resourceClass,
+      Class&lt;R&gt; transcodeClass,
+      Priority priority,
+      DiskCacheStrategy diskCacheStrategy,
+      Map&lt;Class&lt;?&gt;, Transformation&lt;?&gt;&gt; transformations,
+      boolean isTransformationRequired,
+      boolean isScaleOnlyOrNoTransform,
+      boolean onlyRetrieveFromCache,
+      Options options,
+      Callback&lt;R&gt; callback,
+      int order) {
+<span class="nc" id="L101">    decodeHelper.init(</span>
+        glideContext,
+        model,
+        signature,
+        width,
+        height,
+        diskCacheStrategy,
+        resourceClass,
+        transcodeClass,
+        priority,
+        options,
+        transformations,
+        isTransformationRequired,
+        isScaleOnlyOrNoTransform,
+        diskCacheProvider);
+<span class="nc" id="L116">    this.glideContext = glideContext;</span>
+<span class="nc" id="L117">    this.signature = signature;</span>
+<span class="nc" id="L118">    this.priority = priority;</span>
+<span class="nc" id="L119">    this.loadKey = loadKey;</span>
+<span class="nc" id="L120">    this.width = width;</span>
+<span class="nc" id="L121">    this.height = height;</span>
+<span class="nc" id="L122">    this.diskCacheStrategy = diskCacheStrategy;</span>
+<span class="nc" id="L123">    this.onlyRetrieveFromCache = onlyRetrieveFromCache;</span>
+<span class="nc" id="L124">    this.options = options;</span>
+<span class="nc" id="L125">    this.callback = callback;</span>
+<span class="nc" id="L126">    this.order = order;</span>
+<span class="nc" id="L127">    this.runReason = RunReason.INITIALIZE;</span>
+<span class="nc" id="L128">    return this;</span>
+  }
+
+  /**
+   * Returns true if this job will attempt to decode a resource from the disk cache, and false if it
+   * will always decode from source.
+   */
+  boolean willDecodeFromCache() {
+<span class="nc" id="L136">    Stage firstStage = getNextStage(Stage.INITIALIZE);</span>
+<span class="nc bnc" id="L137" title="All 4 branches missed.">    return firstStage == Stage.RESOURCE_CACHE || firstStage == Stage.DATA_CACHE;</span>
+  }
+
+  /**
+   * Called when this object is no longer in use externally.
+   *
+   * @param isRemovedFromQueue {@code true} if we've been removed from the queue and {@link #run}
+   *                           is neither in progress nor will ever be called again.
+   */
+  void release(boolean isRemovedFromQueue) {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">    if (releaseManager.release(isRemovedFromQueue)) {</span>
+<span class="nc" id="L148">      releaseInternal();</span>
+    }
+<span class="nc" id="L150">  }</span>
+
+  /**
+   * Called when we've finished encoding (either because the encode process is complete, or because
+   * we don't have anything to encode).
+   */
+  private void onEncodeComplete() {
+<span class="nc bnc" id="L157" title="All 2 branches missed.">    if (releaseManager.onEncodeComplete()) {</span>
+<span class="nc" id="L158">      releaseInternal();</span>
+    }
+<span class="nc" id="L160">  }</span>
+
+  /**
+   * Called when the load has failed due to a an error or a series of errors.
+   */
+  private void onLoadFailed() {
+<span class="nc bnc" id="L166" title="All 2 branches missed.">    if (releaseManager.onFailed()) {</span>
+<span class="nc" id="L167">      releaseInternal();</span>
+    }
+<span class="nc" id="L169">  }</span>
+
+  private void releaseInternal() {
+<span class="nc" id="L172">    releaseManager.reset();</span>
+<span class="nc" id="L173">    deferredEncodeManager.clear();</span>
+<span class="nc" id="L174">    decodeHelper.clear();</span>
+<span class="nc" id="L175">    isCallbackNotified = false;</span>
+<span class="nc" id="L176">    glideContext = null;</span>
+<span class="nc" id="L177">    signature = null;</span>
+<span class="nc" id="L178">    options = null;</span>
+<span class="nc" id="L179">    priority = null;</span>
+<span class="nc" id="L180">    loadKey = null;</span>
+<span class="nc" id="L181">    callback = null;</span>
+<span class="nc" id="L182">    stage = null;</span>
+<span class="nc" id="L183">    currentGenerator = null;</span>
+<span class="nc" id="L184">    currentThread = null;</span>
+<span class="nc" id="L185">    currentSourceKey = null;</span>
+<span class="nc" id="L186">    currentData = null;</span>
+<span class="nc" id="L187">    currentDataSource = null;</span>
+<span class="nc" id="L188">    currentFetcher = null;</span>
+<span class="nc" id="L189">    startFetchTime = 0L;</span>
+<span class="nc" id="L190">    isCancelled = false;</span>
+<span class="nc" id="L191">    exceptions.clear();</span>
+<span class="nc" id="L192">    pool.release(this);</span>
+<span class="nc" id="L193">  }</span>
+
+  @Override
+  public int compareTo(DecodeJob&lt;?&gt; other) {
+<span class="nc" id="L197">    int result = getPriority() - other.getPriority();</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">    if (result == 0) {</span>
+<span class="nc" id="L199">      result = order - other.order;</span>
+    }
+<span class="nc" id="L201">    return result;</span>
+  }
+
+  private int getPriority() {
+<span class="nc" id="L205">    return priority.ordinal();</span>
+  }
+
+  public void cancel() {
+<span class="nc" id="L209">    isCancelled = true;</span>
+<span class="nc" id="L210">    DataFetcherGenerator local = currentGenerator;</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">    if (local != null) {</span>
+<span class="nc" id="L212">      local.cancel();</span>
+    }
+<span class="nc" id="L214">  }</span>
+
+  @Override
+  public void run() {
+    // This should be much more fine grained, but since Java's thread pool implementation silently
+    // swallows all otherwise fatal exceptions, this will at least make it obvious to developers
+    // that something is failing.
+<span class="nc" id="L221">    TraceCompat.beginSection(&quot;DecodeJob#run&quot;);</span>
+    // Methods in the try statement can invalidate currentFetcher, so set a local variable here to
+    // ensure that the fetcher is cleaned up either way.
+<span class="nc" id="L224">    DataFetcher&lt;?&gt; localFetcher = currentFetcher;</span>
+    try {
+<span class="nc bnc" id="L226" title="All 2 branches missed.">      if (isCancelled) {</span>
+<span class="nc" id="L227">        notifyFailed();</span>
+<span class="nc" id="L228">        return;</span>
+      }
+<span class="nc" id="L230">      runWrapped();</span>
+<span class="nc" id="L231">    } catch (RuntimeException e) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.DEBUG)) {</span>
+<span class="nc" id="L233">        Log.d(TAG, &quot;DecodeJob threw unexpectedly&quot;</span>
+            + &quot;, isCancelled: &quot; + isCancelled
+            + &quot;, stage: &quot; + stage, e);
+      }
+      // When we're encoding we've already notified our callback and it isn't safe to do so again.
+<span class="nc bnc" id="L238" title="All 2 branches missed.">      if (stage != Stage.ENCODE) {</span>
+<span class="nc" id="L239">        notifyFailed();</span>
+      }
+<span class="nc bnc" id="L241" title="All 2 branches missed.">      if (!isCancelled) {</span>
+<span class="nc" id="L242">        throw e;</span>
+      }
+    } finally {
+<span class="nc bnc" id="L245" title="All 4 branches missed.">      Preconditions.checkArgument(</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">          localFetcher == null || currentFetcher == null || localFetcher.equals(currentFetcher),</span>
+          &quot;Fetchers don't match!, old: &quot; + localFetcher + &quot; new: &quot; + currentFetcher);
+<span class="nc bnc" id="L248" title="All 2 branches missed.">      if (localFetcher != null) {</span>
+<span class="nc" id="L249">        localFetcher.cleanup();</span>
+      }
+<span class="nc" id="L251">      TraceCompat.endSection();</span>
+    }
+<span class="nc" id="L253">  }</span>
+
+  private void runWrapped() {
+<span class="nc bnc" id="L256" title="All 4 branches missed.">     switch (runReason) {</span>
+      case INITIALIZE:
+<span class="nc" id="L258">        stage = getNextStage(Stage.INITIALIZE);</span>
+<span class="nc" id="L259">        currentGenerator = getNextGenerator();</span>
+<span class="nc" id="L260">        runGenerators();</span>
+<span class="nc" id="L261">        break;</span>
+      case SWITCH_TO_SOURCE_SERVICE:
+<span class="nc" id="L263">        runGenerators();</span>
+<span class="nc" id="L264">        break;</span>
+      case DECODE_DATA:
+<span class="nc" id="L266">        decodeFromRetrievedData();</span>
+<span class="nc" id="L267">        break;</span>
+      default:
+<span class="nc" id="L269">        throw new IllegalStateException(&quot;Unrecognized run reason: &quot; + runReason);</span>
+    }
+<span class="nc" id="L271">  }</span>
+
+  private DataFetcherGenerator getNextGenerator() {
+<span class="nc bnc" id="L274" title="All 5 branches missed.">    switch (stage) {</span>
+      case RESOURCE_CACHE:
+<span class="nc" id="L276">        return new ResourceCacheGenerator(decodeHelper, this);</span>
+      case DATA_CACHE:
+<span class="nc" id="L278">        return new DataCacheGenerator(decodeHelper, this);</span>
+      case SOURCE:
+<span class="nc" id="L280">        return new SourceGenerator(decodeHelper, this);</span>
+      case FINISHED:
+<span class="nc" id="L282">        return null;</span>
+      default:
+<span class="nc" id="L284">        throw new IllegalStateException(&quot;Unrecognized stage: &quot; + stage);</span>
+    }
+  }
+
+  private void runGenerators() {
+<span class="nc" id="L289">    currentThread = Thread.currentThread();</span>
+<span class="nc" id="L290">    startFetchTime = LogTime.getLogTime();</span>
+<span class="nc" id="L291">    boolean isStarted = false;</span>
+<span class="nc bnc" id="L292" title="All 4 branches missed.">    while (!isCancelled &amp;&amp; currentGenerator != null</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        &amp;&amp; !(isStarted = currentGenerator.startNext())) {</span>
+<span class="nc" id="L294">      stage = getNextStage(stage);</span>
+<span class="nc" id="L295">      currentGenerator = getNextGenerator();</span>
+
+<span class="nc bnc" id="L297" title="All 2 branches missed.">      if (stage == Stage.SOURCE) {</span>
+<span class="nc" id="L298">        reschedule();</span>
+<span class="nc" id="L299">        return;</span>
+      }
+    }
+    // We've run out of stages and generators, give up.
+<span class="nc bnc" id="L303" title="All 6 branches missed.">    if ((stage == Stage.FINISHED || isCancelled) &amp;&amp; !isStarted) {</span>
+<span class="nc" id="L304">      notifyFailed();</span>
+    }
+
+    // Otherwise a generator started a new load and we expect to be called back in
+    // onDataFetcherReady.
+<span class="nc" id="L309">  }</span>
+
+  private void notifyFailed() {
+<span class="nc" id="L312">    setNotifiedOrThrow();</span>
+<span class="nc" id="L313">    GlideException e = new GlideException(&quot;Failed to load resource&quot;, new ArrayList&lt;&gt;(exceptions));</span>
+<span class="nc" id="L314">    callback.onLoadFailed(e);</span>
+<span class="nc" id="L315">    onLoadFailed();</span>
+<span class="nc" id="L316">  }</span>
+
+  private void notifyComplete(Resource&lt;R&gt; resource, DataSource dataSource) {
+<span class="nc" id="L319">    setNotifiedOrThrow();</span>
+<span class="nc" id="L320">    callback.onResourceReady(resource, dataSource);</span>
+<span class="nc" id="L321">  }</span>
+
+  private void setNotifiedOrThrow() {
+<span class="nc" id="L324">    stateVerifier.throwIfRecycled();</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">    if (isCallbackNotified) {</span>
+<span class="nc" id="L326">      throw new IllegalStateException(&quot;Already notified&quot;);</span>
+    }
+<span class="nc" id="L328">    isCallbackNotified = true;</span>
+<span class="nc" id="L329">  }</span>
+
+  private Stage getNextStage(Stage current) {
+<span class="nc bnc" id="L332" title="All 5 branches missed.">    switch (current) {</span>
+      case INITIALIZE:
+<span class="nc bnc" id="L334" title="All 2 branches missed.">        return diskCacheStrategy.decodeCachedResource()</span>
+<span class="nc" id="L335">            ? Stage.RESOURCE_CACHE : getNextStage(Stage.RESOURCE_CACHE);</span>
+      case RESOURCE_CACHE:
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        return diskCacheStrategy.decodeCachedData()</span>
+<span class="nc" id="L338">            ? Stage.DATA_CACHE : getNextStage(Stage.DATA_CACHE);</span>
+      case DATA_CACHE:
+        // Skip loading from source if the user opted to only retrieve the resource from cache.
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        return onlyRetrieveFromCache ? Stage.FINISHED : Stage.SOURCE;</span>
+      case SOURCE:
+      case FINISHED:
+<span class="nc" id="L344">        return Stage.FINISHED;</span>
+      default:
+<span class="nc" id="L346">        throw new IllegalArgumentException(&quot;Unrecognized stage: &quot; + current);</span>
+    }
+  }
+
+  @Override
+  public void reschedule() {
+<span class="nc" id="L352">    runReason = RunReason.SWITCH_TO_SOURCE_SERVICE;</span>
+<span class="nc" id="L353">    callback.reschedule(this);</span>
+<span class="nc" id="L354">  }</span>
+
+  @Override
+  public void onDataFetcherReady(Key sourceKey, Object data, DataFetcher&lt;?&gt; fetcher,
+      DataSource dataSource, Key attemptedKey) {
+<span class="nc" id="L359">    this.currentSourceKey = sourceKey;</span>
+<span class="nc" id="L360">    this.currentData = data;</span>
+<span class="nc" id="L361">    this.currentFetcher = fetcher;</span>
+<span class="nc" id="L362">    this.currentDataSource = dataSource;</span>
+<span class="nc" id="L363">    this.currentAttemptingKey = attemptedKey;</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">    if (Thread.currentThread() != currentThread) {</span>
+<span class="nc" id="L365">      runReason = RunReason.DECODE_DATA;</span>
+<span class="nc" id="L366">      callback.reschedule(this);</span>
+    } else {
+<span class="nc" id="L368">      TraceCompat.beginSection(&quot;DecodeJob.decodeFromRetrievedData&quot;);</span>
+      try {
+<span class="nc" id="L370">        decodeFromRetrievedData();</span>
+      } finally {
+<span class="nc" id="L372">        TraceCompat.endSection();</span>
+      }
+    }
+<span class="nc" id="L375">  }</span>
+
+  @Override
+  public void onDataFetcherFailed(Key attemptedKey, Exception e, DataFetcher&lt;?&gt; fetcher,
+      DataSource dataSource) {
+<span class="nc" id="L380">    fetcher.cleanup();</span>
+<span class="nc" id="L381">    GlideException exception = new GlideException(&quot;Fetching data failed&quot;, e);</span>
+<span class="nc" id="L382">    exception.setLoggingDetails(attemptedKey, dataSource, fetcher.getDataClass());</span>
+<span class="nc" id="L383">    exceptions.add(exception);</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">    if (Thread.currentThread() != currentThread) {</span>
+<span class="nc" id="L385">      runReason = RunReason.SWITCH_TO_SOURCE_SERVICE;</span>
+<span class="nc" id="L386">      callback.reschedule(this);</span>
+    } else {
+<span class="nc" id="L388">      runGenerators();</span>
+    }
+<span class="nc" id="L390">  }</span>
+
+  private void decodeFromRetrievedData() {
+<span class="nc bnc" id="L393" title="All 2 branches missed.">    if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L394">      logWithTimeAndKey(&quot;Retrieved data&quot;, startFetchTime,</span>
+          &quot;data: &quot; + currentData
+          + &quot;, cache key: &quot; + currentSourceKey
+          + &quot;, fetcher: &quot; + currentFetcher);
+    }
+<span class="nc" id="L399">    Resource&lt;R&gt; resource = null;</span>
+    try {
+<span class="nc" id="L401">      resource = decodeFromData(currentFetcher, currentData, currentDataSource);</span>
+<span class="nc" id="L402">    } catch (GlideException e) {</span>
+<span class="nc" id="L403">      e.setLoggingDetails(currentAttemptingKey, currentDataSource);</span>
+<span class="nc" id="L404">      exceptions.add(e);</span>
+<span class="nc" id="L405">    }</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">    if (resource != null) {</span>
+<span class="nc" id="L407">      notifyEncodeAndRelease(resource, currentDataSource);</span>
+    } else {
+<span class="nc" id="L409">      runGenerators();</span>
+    }
+<span class="nc" id="L411">  }</span>
+
+  private void notifyEncodeAndRelease(Resource&lt;R&gt; resource, DataSource dataSource) {
+<span class="nc bnc" id="L414" title="All 2 branches missed.">    if (resource instanceof Initializable) {</span>
+<span class="nc" id="L415">      ((Initializable) resource).initialize();</span>
+    }
+
+<span class="nc" id="L418">    Resource&lt;R&gt; result = resource;</span>
+<span class="nc" id="L419">    LockedResource&lt;R&gt; lockedResource = null;</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">    if (deferredEncodeManager.hasResourceToEncode()) {</span>
+<span class="nc" id="L421">      lockedResource = LockedResource.obtain(resource);</span>
+<span class="nc" id="L422">      result = lockedResource;</span>
+    }
+
+<span class="nc" id="L425">    notifyComplete(result, dataSource);</span>
+
+<span class="nc" id="L427">    stage = Stage.ENCODE;</span>
+    try {
+<span class="nc bnc" id="L429" title="All 2 branches missed.">      if (deferredEncodeManager.hasResourceToEncode()) {</span>
+<span class="nc" id="L430">        deferredEncodeManager.encode(diskCacheProvider, options);</span>
+      }
+    } finally {
+<span class="nc bnc" id="L433" title="All 2 branches missed.">      if (lockedResource != null) {</span>
+<span class="nc" id="L434">        lockedResource.unlock();</span>
+      }
+<span class="nc" id="L436">      onEncodeComplete();</span>
+    }
+<span class="nc" id="L438">  }</span>
+
+  private &lt;Data&gt; Resource&lt;R&gt; decodeFromData(DataFetcher&lt;?&gt; fetcher, Data data,
+      DataSource dataSource) throws GlideException {
+    try {
+<span class="nc bnc" id="L443" title="All 2 branches missed.">      if (data == null) {</span>
+<span class="nc" id="L444">        return null;</span>
+      }
+<span class="nc" id="L446">      long startTime = LogTime.getLogTime();</span>
+<span class="nc" id="L447">      Resource&lt;R&gt; result = decodeFromFetcher(data, dataSource);</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">      if (Log.isLoggable(TAG, Log.VERBOSE)) {</span>
+<span class="nc" id="L449">        logWithTimeAndKey(&quot;Decoded result &quot; + result, startTime);</span>
+      }
+<span class="nc" id="L451">      return result;</span>
+    } finally {
+<span class="nc" id="L453">      fetcher.cleanup();</span>
+    }
+  }
+
+  @SuppressWarnings(&quot;unchecked&quot;)
+  private &lt;Data&gt; Resource&lt;R&gt; decodeFromFetcher(Data data, DataSource dataSource)
+      throws GlideException {
+<span class="nc" id="L460">    LoadPath&lt;Data, ?, R&gt; path = decodeHelper.getLoadPath((Class&lt;Data&gt;) data.getClass());</span>
+<span class="nc" id="L461">    return runLoadPath(data, dataSource, path);</span>
+  }
+
+  private Options getOptionsWithHardwareConfig(DataSource dataSource) {
+<span class="nc" id="L465">    Options options = this.options;</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">    if (Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.O) {</span>
+<span class="nc" id="L467">      return options;</span>
+    }
+
+<span class="nc bnc" id="L470" title="All 2 branches missed.">    if (options.get(Downsampler.ALLOW_HARDWARE_CONFIG) != null) {</span>
+<span class="nc" id="L471">      return options;</span>
+    }
+
+<span class="nc bnc" id="L474" title="All 2 branches missed.">    if (dataSource == DataSource.RESOURCE_DISK_CACHE</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        || decodeHelper.isScaleOnlyOrNoTransform()) {</span>
+<span class="nc" id="L476">      options = new Options();</span>
+<span class="nc" id="L477">      options.putAll(this.options);</span>
+<span class="nc" id="L478">      options.set(Downsampler.ALLOW_HARDWARE_CONFIG, true);</span>
+    }
+<span class="nc" id="L480">    return options;</span>
+  }
+
+  private &lt;Data, ResourceType&gt; Resource&lt;R&gt; runLoadPath(Data data, DataSource dataSource,
+      LoadPath&lt;Data, ResourceType, R&gt; path) throws GlideException {
+<span class="nc" id="L485">    Options options = getOptionsWithHardwareConfig(dataSource);</span>
+<span class="nc" id="L486">    DataRewinder&lt;Data&gt; rewinder = glideContext.getRegistry().getRewinder(data);</span>
+    try {
+      // ResourceType in DecodeCallback below is required for compilation to work with gradle.
+<span class="nc" id="L489">      return path.load(</span>
+          rewinder, options, width, height, new DecodeCallback&lt;ResourceType&gt;(dataSource));
+    } finally {
+<span class="nc" id="L492">      rewinder.cleanup();</span>
+    }
+  }
+
+  private void logWithTimeAndKey(String message, long startTime) {
+<span class="nc" id="L497">    logWithTimeAndKey(message, startTime, null /*extraArgs*/);</span>
+<span class="nc" id="L498">  }</span>
+
+  private void logWithTimeAndKey(String message, long startTime, String extraArgs) {
+<span class="nc bnc" id="L501" title="All 2 branches missed.">    Log.v(TAG, message + &quot; in &quot; + LogTime.getElapsedMillis(startTime) + &quot;, load key: &quot; + loadKey</span>
+        + (extraArgs != null ? &quot;, &quot; + extraArgs : &quot;&quot;) + &quot;, thread: &quot;
+<span class="nc" id="L503">        + Thread.currentThread().getName());</span>
+<span class="nc" id="L504">  }</span>
+
+  @Override
+  public StateVerifier getVerifier() {
+<span class="nc" id="L508">    return stateVerifier;</span>
+  }
+
+  private final class DecodeCallback&lt;Z&gt; implements DecodePath.DecodeCallback&lt;Z&gt; {
+
+    private final DataSource dataSource;
+
+    @Synthetic
+<span class="nc" id="L516">    DecodeCallback(DataSource dataSource) {</span>
+<span class="nc" id="L517">      this.dataSource = dataSource;</span>
+<span class="nc" id="L518">    }</span>
+
+    @Override
+    public Resource&lt;Z&gt; onResourceDecoded(Resource&lt;Z&gt; decoded) {
+<span class="nc" id="L522">      Class&lt;Z&gt; resourceSubClass = getResourceClass(decoded);</span>
+<span class="nc" id="L523">      Transformation&lt;Z&gt; appliedTransformation = null;</span>
+<span class="nc" id="L524">      Resource&lt;Z&gt; transformed = decoded;</span>
+<span class="nc bnc" id="L525" title="All 2 branches missed.">      if (dataSource != DataSource.RESOURCE_DISK_CACHE) {</span>
+<span class="nc" id="L526">        appliedTransformation = decodeHelper.getTransformation(resourceSubClass);</span>
+<span class="nc" id="L527">        transformed = appliedTransformation.transform(glideContext, decoded, width, height);</span>
+      }
+      // TODO: Make this the responsibility of the Transformation.
+<span class="nc bnc" id="L530" title="All 2 branches missed.">      if (!decoded.equals(transformed)) {</span>
+<span class="nc" id="L531">        decoded.recycle();</span>
+      }
+
+      final EncodeStrategy encodeStrategy;
+      final ResourceEncoder&lt;Z&gt; encoder;
+<span class="nc bnc" id="L536" title="All 2 branches missed.">      if (decodeHelper.isResourceEncoderAvailable(transformed)) {</span>
+<span class="nc" id="L537">        encoder = decodeHelper.getResultEncoder(transformed);</span>
+<span class="nc" id="L538">        encodeStrategy = encoder.getEncodeStrategy(options);</span>
+      } else {
+<span class="nc" id="L540">        encoder = null;</span>
+<span class="nc" id="L541">        encodeStrategy = EncodeStrategy.NONE;</span>
+      }
+
+<span class="nc" id="L544">      Resource&lt;Z&gt; result = transformed;</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">      boolean isFromAlternateCacheKey = !decodeHelper.isSourceKey(currentSourceKey);</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">      if (diskCacheStrategy.isResourceCacheable(isFromAlternateCacheKey, dataSource,</span>
+          encodeStrategy)) {
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (encoder == null) {</span>
+<span class="nc" id="L549">          throw new Registry.NoResultEncoderAvailableException(transformed.get().getClass());</span>
+        }
+        final Key key;
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        if (encodeStrategy == EncodeStrategy.SOURCE) {</span>
+<span class="nc" id="L553">          key = new DataCacheKey(currentSourceKey, signature);</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">        } else if (encodeStrategy == EncodeStrategy.TRANSFORMED) {</span>
+<span class="nc" id="L555">          key = new ResourceCacheKey(currentSourceKey, signature, width, height,</span>
+              appliedTransformation, resourceSubClass, options);
+        } else {
+<span class="nc" id="L558">          throw new IllegalArgumentException(&quot;Unknown strategy: &quot; + encodeStrategy);</span>
+        }
+
+<span class="nc" id="L561">        LockedResource&lt;Z&gt; lockedResult = LockedResource.obtain(transformed);</span>
+<span class="nc" id="L562">        deferredEncodeManager.init(key, encoder, lockedResult);</span>
+<span class="nc" id="L563">        result = lockedResult;</span>
+      }
+<span class="nc" id="L565">      return result;</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private Class&lt;Z&gt; getResourceClass(Resource&lt;Z&gt; resource) {
+<span class="nc" id="L570">      return (Class&lt;Z&gt;) resource.get().getClass();</span>
+    }
+  }
+
+  /**
+   * Responsible for indicating when it is safe for the job to be cleared and returned to the pool.
+   */
+  private static class ReleaseManager {
+    private boolean isReleased;
+    private boolean isEncodeComplete;
+    private boolean isFailed;
+
+    @Synthetic
+<span class="nc" id="L583">    ReleaseManager() { }</span>
+
+    synchronized boolean release(boolean isRemovedFromQueue) {
+<span class="nc" id="L586">      isReleased = true;</span>
+<span class="nc" id="L587">      return isComplete(isRemovedFromQueue);</span>
+    }
+
+    synchronized boolean onEncodeComplete() {
+<span class="nc" id="L591">      isEncodeComplete = true;</span>
+<span class="nc" id="L592">      return isComplete(false /*isRemovedFromQueue*/);</span>
+    }
+
+    synchronized boolean onFailed() {
+<span class="nc" id="L596">      isFailed = true;</span>
+<span class="nc" id="L597">      return isComplete(false /*isRemovedFromQueue*/);</span>
+    }
+
+    synchronized void reset() {
+<span class="nc" id="L601">      isEncodeComplete = false;</span>
+<span class="nc" id="L602">      isReleased = false;</span>
+<span class="nc" id="L603">      isFailed = false;</span>
+<span class="nc" id="L604">    }</span>
+
+    private boolean isComplete(boolean isRemovedFromQueue) {
+<span class="nc bnc" id="L607" title="All 8 branches missed.">      return (isFailed || isRemovedFromQueue || isEncodeComplete) &amp;&amp; isReleased;</span>
+    }
+  }
+
+  /**
+   * Allows transformed resources to be encoded after the transcoded result is already delivered
+   * to requestors.
+   */
+  private static class DeferredEncodeManager&lt;Z&gt; {
+    private Key key;
+    private ResourceEncoder&lt;Z&gt; encoder;
+    private LockedResource&lt;Z&gt; toEncode;
+
+    @Synthetic
+<span class="nc" id="L621">    DeferredEncodeManager() { }</span>
+
+    // We just need the encoder and resource type to match, which this will enforce.
+    @SuppressWarnings(&quot;unchecked&quot;)
+    &lt;X&gt; void init(Key key, ResourceEncoder&lt;X&gt; encoder, LockedResource&lt;X&gt; toEncode) {
+<span class="nc" id="L626">      this.key = key;</span>
+<span class="nc" id="L627">      this.encoder = (ResourceEncoder&lt;Z&gt;) encoder;</span>
+<span class="nc" id="L628">      this.toEncode = (LockedResource&lt;Z&gt;) toEncode;</span>
+<span class="nc" id="L629">    }</span>
+
+    void encode(DiskCacheProvider diskCacheProvider, Options options) {
+<span class="nc" id="L632">      TraceCompat.beginSection(&quot;DecodeJob.encode&quot;);</span>
+      try {
+<span class="nc" id="L634">        diskCacheProvider.getDiskCache().put(key,</span>
+            new DataCacheWriter&lt;&gt;(encoder, toEncode, options));
+      } finally {
+<span class="nc" id="L637">        toEncode.unlock();</span>
+<span class="nc" id="L638">        TraceCompat.endSection();</span>
+      }
+<span class="nc" id="L640">    }</span>
+
+    boolean hasResourceToEncode() {
+<span class="nc bnc" id="L643" title="All 2 branches missed.">      return toEncode != null;</span>
+    }
+
+    void clear() {
+<span class="nc" id="L647">      key = null;</span>
+<span class="nc" id="L648">      encoder = null;</span>
+<span class="nc" id="L649">      toEncode = null;</span>
+<span class="nc" id="L650">    }</span>
+  }
+
+  interface Callback&lt;R&gt; {
+
+    void onResourceReady(Resource&lt;R&gt; resource, DataSource dataSource);
+
+    void onLoadFailed(GlideException e);
+
+    void reschedule(DecodeJob&lt;?&gt; job);
+  }
+
+  interface DiskCacheProvider {
+    DiskCache getDiskCache();
+  }
+
+  /**
+   * Why we're being executed again.
+   */
+<span class="nc" id="L669">  private enum RunReason {</span>
+    /** The first time we've been submitted. */
+<span class="nc" id="L671">    INITIALIZE,</span>
+    /**
+     * We want to switch from the disk cache service to the source executor.
+     */
+<span class="nc" id="L675">    SWITCH_TO_SOURCE_SERVICE,</span>
+    /**
+     * We retrieved some data on a thread we don't own and want to switch back to our thread to
+     * process the data.
+     */
+<span class="nc" id="L680">    DECODE_DATA,</span>
+  }
+
+  /**
+   * Where we're trying to decode data from.
+   */
+<span class="nc" id="L686">  private enum Stage {</span>
+    /** The initial stage. */
+<span class="nc" id="L688">    INITIALIZE,</span>
+    /** Decode from a cached resource. */
+<span class="nc" id="L690">    RESOURCE_CACHE,</span>
+    /** Decode from cached source data. */
+<span class="nc" id="L692">    DATA_CACHE,</span>
+    /** Decode from retrieved source. */
+<span class="nc" id="L694">    SOURCE,</span>
+    /** Encoding transformed resources after a successful load. */
+<span class="nc" id="L696">    ENCODE,</span>
+    /** No more viable stages. */
+<span class="nc" id="L698">    FINISHED,</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

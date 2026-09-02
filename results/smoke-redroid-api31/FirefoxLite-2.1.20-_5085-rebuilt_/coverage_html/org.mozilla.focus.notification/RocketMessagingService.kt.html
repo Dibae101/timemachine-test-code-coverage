@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RocketMessagingService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE FirefoxLite</a> &gt; <a href="index.source.html" class="el_package">org.mozilla.focus.notification</a> &gt; <span class="el_source">RocketMessagingService.kt</span></div><h1>RocketMessagingService.kt</h1><pre class="source lang-java linenums">/* -*- Mode: Java; c-basic-offset: 4; tab-width: 4; indent-tabs-mode: nil; -*-
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+package org.mozilla.focus.notification
+
+import android.app.PendingIntent
+import android.content.Context
+import android.graphics.Bitmap
+import android.util.Log
+import android.webkit.URLUtil
+import androidx.annotation.WorkerThread
+import androidx.core.app.NotificationCompat
+import androidx.work.Data
+import androidx.work.OneTimeWorkRequest
+import androidx.work.WorkManager
+import com.bumptech.glide.Glide
+import com.bumptech.glide.request.target.SimpleTarget
+import com.bumptech.glide.request.transition.Transition
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import mozilla.components.concept.fetch.MutableHeaders
+import mozilla.components.concept.fetch.Request
+import mozilla.components.concept.fetch.interceptor.withInterceptors
+import mozilla.components.lib.fetch.httpurlconnection.HttpURLConnectionClient
+import org.mozilla.focus.telemetry.TelemetryWrapper
+import org.mozilla.focus.telemetry.TelemetryWrapper.isTelemetryEnabled
+import org.mozilla.focus.utils.FirebaseHelper
+import org.mozilla.focus.utils.IntentUtils
+import org.mozilla.focus.utils.Settings
+import org.mozilla.rocket.msrp.data.LoggingInterceptor
+import org.mozilla.telemetry.TelemetryHolder
+import org.mozilla.threadutils.ThreadUtils
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+
+/**
+ * Handle Notification &amp; Data Message from FCM
+ * */
+<span class="nc" id="L41">class RocketMessagingService : FirebaseMessagingServiceWrapper() {</span>
+
+    override fun onNotificationMessage(data: Map&lt;String, String&gt;, title: String?, body: String?, imageUrl: String?) {
+<span class="nc" id="L44">        val messageId = parseMessageId(data)</span>
+<span class="nc" id="L45">        val openUrl = parseOpenUrl(data)</span>
+<span class="nc" id="L46">        val pushCommand = parseCommand(data)</span>
+<span class="nc" id="L47">        val deepLink = parseDeepLink(data)</span>
+<span class="nc" id="L48">        Log.d(TAG, &quot;onNotificationMessage messageId:$$messageId &quot;)</span>
+
+<span class="nc" id="L50">        val link = parseLink(openUrl, pushCommand, deepLink)</span>
+<span class="nc" id="L51">        TelemetryWrapper.getNotification(link, messageId)</span>
+
+<span class="nc" id="L53">        handlePushMessage(applicationContext, messageId, openUrl, pushCommand, deepLink, title, body, imageUrl)</span>
+<span class="nc" id="L54">    }</span>
+
+    override fun onDataMessage(data: MutableMap&lt;String, String&gt;) {
+
+<span class="nc" id="L58">        val messageId = parseMessageId(data)</span>
+<span class="nc" id="L59">        val title = parseTitle(data)</span>
+<span class="nc" id="L60">        val body = parseBody(data)</span>
+<span class="nc" id="L61">        val openUrl = parseOpenUrl(data)</span>
+<span class="nc" id="L62">        val pushCommand = parseCommand(data)</span>
+<span class="nc" id="L63">        val deepLink = parseDeepLink(data)</span>
+<span class="nc" id="L64">        val displayType = parseDisplayType(data)</span>
+<span class="nc" id="L65">        val displayTimestamp = parseDisplayTimestamp(data)</span>
+
+<span class="nc" id="L67">        val link = parseLink(openUrl, pushCommand, deepLink)</span>
+<span class="nc" id="L68">        TelemetryWrapper.getNotification(link, messageId)</span>
+
+<span class="nc bnc" id="L70" title="All 10 branches missed.">        if (messageId == null || title == null || body == null || displayTimestamp == null || displayType == null) {</span>
+<span class="nc" id="L71">            Log.d(TAG, &quot;onDataMessage failed. Required field missing&quot;)</span>
+<span class="nc" id="L72">            return</span>
+        }
+
+<span class="nc" id="L75">        val serverPushEnabled = FirebaseHelper.getFirebase().getRcBoolean(BOOL_IS_SERVER_PUSH_ENABLED)</span>
+<span class="nc" id="L76">        val serverPushDebugging = Settings.getInstance(applicationContext).isServerPushDebugging</span>
+<span class="nc" id="L77">        Log.d(TAG, &quot;onDataMessage enabled:$serverPushEnabled &quot;)</span>
+<span class="nc bnc" id="L78" title="All 4 branches missed.">        if (!serverPushEnabled &amp;&amp; !serverPushDebugging) {</span>
+            // return early if we pref off this feature in Firebase Remote Config
+<span class="nc" id="L80">            return</span>
+        }
+
+<span class="nc" id="L83">        val imageUrl = parseImageUrl(data)</span>
+
+<span class="nc" id="L85">        scheduleNotification(applicationContext, messageId, imageUrl, title, body, openUrl, pushCommand, deepLink, displayTimestamp)</span>
+<span class="nc" id="L86">    }</span>
+
+    override fun onNewToken(token: String) {
+<span class="nc" id="L89">        super.onNewToken(token)</span>
+<span class="nc" id="L90">        Log.d(TAG, &quot;onNewToken&quot;)</span>
+<span class="nc" id="L91">        handleNewToken(applicationContext, token)</span>
+<span class="nc" id="L92">    }</span>
+
+    private fun parseMessageId(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L95">        return data[STR_MESSAGE_ID]</span>
+    }
+
+    private fun parseTitle(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L99">        return data[STR_DATA_MSG_TITLE]</span>
+    }
+
+    private fun parseBody(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L103">        return data[STR_DATA_MSG_BODY]</span>
+    }
+
+    private fun parseOpenUrl(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L107">        return data[STR_PUSH_OPEN_URL]</span>
+    }
+
+    private fun parseCommand(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L111">        return data[STR_PUSH_COMMAND]</span>
+    }
+
+    private fun parseDeepLink(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L115">        return data[STR_PUSH_DEEP_LINK]</span>
+    }
+
+    private fun parseDisplayType(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L119">        return data[STR_DATA_MSG_DISPLAY_TYPE]</span>
+    }
+
+    private fun parseDisplayTimestamp(data: Map&lt;String, String&gt;): Long? {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        return data[LONG_DATA_MSG_DISPLAY_TIMESTAMP]?.toLong()</span>
+    }
+
+    private fun parseImageUrl(data: Map&lt;String, String&gt;): String? {
+<span class="nc" id="L127">        return data[STR_DATA_MSG_IMAGE_URL]</span>
+    }
+
+<span class="nc" id="L130">    companion object {</span>
+        const val REQUEST_CODE_CLICK_NOTIFICATION = 1
+        const val REQUEST_CODE_DELETE_NOTIFICATION = 2
+
+        // shared between data and notification message
+        const val STR_MESSAGE_ID = &quot;message_id&quot;
+        const val STR_PUSH_OPEN_URL = &quot;push_open_url&quot;
+        const val STR_PUSH_COMMAND = &quot;push_command&quot;
+        const val STR_PUSH_DEEP_LINK = &quot;push_deep_link&quot;
+
+        // data message only
+        const val STR_DATA_MSG_TITLE = &quot;title&quot;
+        const val STR_DATA_MSG_BODY = &quot;body&quot;
+        const val STR_DATA_MSG_DISPLAY_TYPE = &quot;display_type&quot;
+        const val LONG_DATA_MSG_DISPLAY_TIMESTAMP = &quot;display_timestamp&quot;
+        const val STR_DATA_MSG_IMAGE_URL = &quot;image_url&quot;
+
+        private const val TAG = &quot;FCM_SERVICE&quot;
+        private const val STR_USER_TOKEN_API = &quot;str_user_token_api&quot;
+        private const val BOOL_IS_SERVER_PUSH_ENABLED = &quot;bool_is_server_push_enabled&quot;
+
+        fun scheduleNotification(applicationContext: Context, messageId: String, imageUrl: String?, title: String?, body: String?, openUrl: String?, pushCommand: String?, deepLink: String?, displayTimestamp: Long) {
+
+<span class="nc" id="L153">            val inputDataBuilder = Data.Builder()</span>
+<span class="nc" id="L154">                    .putString(STR_MESSAGE_ID, messageId)</span>
+<span class="nc" id="L155">                    .putString(STR_DATA_MSG_TITLE, title)</span>
+<span class="nc" id="L156">                    .putString(STR_DATA_MSG_BODY, body)</span>
+<span class="nc" id="L157">                    .putString(STR_PUSH_OPEN_URL, openUrl)</span>
+<span class="nc" id="L158">                    .putString(STR_PUSH_COMMAND, pushCommand)</span>
+<span class="nc" id="L159">                    .putString(STR_PUSH_DEEP_LINK, deepLink)</span>
+
+            // only allow valid urls
+<span class="nc bnc" id="L162" title="All 4 branches missed.">            if (imageUrl != null &amp;&amp; URLUtil.isValidUrl(imageUrl)) {</span>
+<span class="nc" id="L163">                Log.d(TAG, &quot;Setting imageUrl&quot;)</span>
+<span class="nc" id="L164">                inputDataBuilder.putString(STR_DATA_MSG_IMAGE_URL, imageUrl)</span>
+            }
+
+<span class="nc" id="L167">            val delay = displayTimestamp - System.currentTimeMillis()</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (delay &lt; 0) {</span>
+<span class="nc" id="L169">                Log.d(TAG, &quot;Request delay [$delay] ms was due&quot;)</span>
+<span class="nc" id="L170">                return // if the message comes late, ignore it.</span>
+            }
+
+<span class="nc" id="L173">            Log.d(TAG, &quot;Schedule display notification [$title] from server [$delay] ms later.&quot;)</span>
+<span class="nc" id="L174">            val request =</span>
+<span class="nc" id="L175">                    OneTimeWorkRequest.Builder(NotificationScheduleWorker::class.java)</span>
+<span class="nc" id="L176">                            .setInputData(inputDataBuilder.build())</span>
+<span class="nc" id="L177">                            .setInitialDelay(delay, TimeUnit.MILLISECONDS)</span>
+<span class="nc" id="L178">                            .addTag(messageId)</span>
+<span class="nc" id="L179">                            .build()</span>
+
+<span class="nc" id="L181">            WorkManager.getInstance(applicationContext).enqueue(request)</span>
+<span class="nc" id="L182">        }</span>
+
+        fun handlePushMessage(applicationContext: Context, messageId: String?, openUrl: String?, pushCommand: String?, deepLink: String?, title: String?, body: String?, imageUrl: String?) {
+
+<span class="nc" id="L186">            val pendingIntent = getClickPendingIntent(</span>
+<span class="nc" id="L187">                    applicationContext,</span>
+<span class="nc" id="L188">                    messageId,</span>
+<span class="nc" id="L189">                    openUrl,</span>
+<span class="nc" id="L190">                    pushCommand,</span>
+<span class="nc" id="L191">                    deepLink</span>
+            )
+<span class="nc" id="L193">            val builder = NotificationUtil.importantBuilder(applicationContext).setContentIntent(pendingIntent)</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            title?.let { builder.setContentTitle(it) }</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">            body?.let { builder.setContentText(it) }</span>
+
+<span class="nc" id="L197">            val link = parseLink(openUrl, pushCommand, deepLink)</span>
+
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            if (!isTelemetryEnabled(applicationContext)) {</span>
+<span class="nc" id="L200">                return</span>
+            }
+
+<span class="nc" id="L203">            addDeleteTelemetry(applicationContext, builder, messageId, link)</span>
+
+<span class="nc bnc" id="L205" title="All 6 branches missed.">            if (!imageUrl.isNullOrEmpty()) {</span>
+<span class="nc" id="L206">                ThreadUtils.postToMainThread {</span>
+<span class="nc" id="L207">                    Glide.with(applicationContext)</span>
+<span class="nc" id="L208">                            .asBitmap()</span>
+<span class="nc" id="L209">                            .load(imageUrl)</span>
+<span class="nc" id="L210">                            .into(object : SimpleTarget&lt;Bitmap?&gt;() {</span>
+                                override fun onResourceReady(resource: Bitmap?, transition: Transition&lt;in Bitmap?&gt;?) {
+<span class="nc" id="L212">                                    builder.setLargeIcon(resource)</span>
+<span class="nc" id="L213">                                    builder.setStyle(NotificationCompat.BigPictureStyle().bigPicture(resource))</span>
+
+<span class="nc" id="L215">                                    NotificationUtil.sendNotification(applicationContext, NotificationId.FIREBASE_AD_HOC, builder)</span>
+<span class="nc" id="L216">                                    TelemetryWrapper.showNotification(link, messageId)</span>
+<span class="nc" id="L217">                                }</span>
+                            })
+<span class="nc" id="L219">                }</span>
+            } else {
+<span class="nc" id="L221">                NotificationUtil.sendNotification(applicationContext, NotificationId.FIREBASE_AD_HOC, builder)</span>
+<span class="nc" id="L222">                TelemetryWrapper.showNotification(link, messageId)</span>
+            }
+<span class="nc" id="L224">        }</span>
+
+        private fun parseLink(openUrl: String?, pushCommand: String?, deepLink: String?): String? {
+<span class="nc" id="L227">            var link = openUrl</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            if (link == null) {</span>
+<span class="nc" id="L229">                link = pushCommand</span>
+            }
+<span class="nc bnc" id="L231" title="All 2 branches missed.">            if (link == null) {</span>
+<span class="nc" id="L232">                link = deepLink</span>
+            }
+<span class="nc" id="L234">            return link</span>
+        }
+
+        private fun getClickPendingIntent(appContext: Context, messageId: String?, openUrl: String?, command: String?, deepLink: String?): PendingIntent { // RocketLauncherActivity will handle this intent
+<span class="nc" id="L238">            val clickIntent = IntentUtils.genFirebaseNotificationClickForBroadcastReceiver(</span>
+<span class="nc" id="L239">                    appContext,</span>
+<span class="nc" id="L240">                    messageId,</span>
+<span class="nc" id="L241">                    openUrl,</span>
+<span class="nc" id="L242">                    command,</span>
+<span class="nc" id="L243">                    deepLink</span>
+            )
+<span class="nc" id="L245">            return PendingIntent.getBroadcast(appContext, RocketMessagingService.REQUEST_CODE_CLICK_NOTIFICATION, clickIntent, PendingIntent.FLAG_ONE_SHOT)</span>
+        }
+
+        private fun addDeleteTelemetry(appContext: Context, builder: NotificationCompat.Builder, messageId: String?, link: String?) {
+<span class="nc" id="L249">            val intent = IntentUtils.genDeleteFirebaseNotificationActionForBroadcastReceiver(appContext, messageId, link)</span>
+<span class="nc" id="L250">            val pendingIntent = PendingIntent.getBroadcast(appContext, RocketMessagingService.REQUEST_CODE_DELETE_NOTIFICATION, intent, PendingIntent.FLAG_ONE_SHOT)</span>
+<span class="nc" id="L251">            builder.setDeleteIntent(pendingIntent)</span>
+<span class="nc" id="L252">        }</span>
+
+        fun checkFcmTokenUploaded(applicationContext: Context) {
+<span class="nc" id="L255">            val hashedFcmToken = Settings.getInstance(applicationContext).hashedFcmToken</span>
+<span class="nc" id="L256">            val currentFcmToken = FirebaseHelper.getFirebase().getFcmToken()</span>
+
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            if (currentFcmToken == null) {</span>
+<span class="nc" id="L259">                Log.w(TAG, &quot;currentFcmToken is null. Wait for it and retry&quot;)</span>
+<span class="nc" id="L260">                return</span>
+            }
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            if (hashedFcmToken != currentFcmToken.hashCode()) {</span>
+<span class="nc" id="L263">                Log.d(TAG, &quot;handleNewToken....&quot;)</span>
+<span class="nc" id="L264">                handleNewToken(applicationContext, currentFcmToken)</span>
+            } else {
+<span class="nc" id="L266">                Log.w(TAG, &quot;token not changed&quot;)</span>
+            }
+<span class="nc" id="L268">        }</span>
+
+        private fun handleNewToken(applicationContext: Context, token: String) {
+<span class="nc" id="L271">            FirebaseHelper.getFirebase().getUserToken {</span>
+<span class="nc" id="L272">                runBlocking {</span>
+<span class="nc" id="L273">                    withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                        it?.apply {</span>
+<span class="nc" id="L275">                            sendRegistrationToServer(applicationContext, this, token)</span>
+<span class="nc" id="L276">                        }</span>
+<span class="nc" id="L277">                    }</span>
+                }
+<span class="nc" id="L279">            }</span>
+<span class="nc" id="L280">        }</span>
+
+        @WorkerThread
+        private fun sendRegistrationToServer(applicationContext: Context, fbUid: String, fcmToken: String) {
+<span class="nc" id="L284">            Log.d(TAG, &quot;sendRegistrationToServer with token&quot;)</span>
+<span class="nc" id="L285">            val telemetryClientId = TelemetryHolder.get().clientId</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">            if (telemetryClientId == null) {</span>
+<span class="nc" id="L287">                Log.w(TAG, &quot;telemetryClientId is null&quot;)</span>
+<span class="nc" id="L288">                return</span>
+            }
+
+            // something like //&quot;http://10.0.2.2:8080/api/v1/user/token&quot;
+<span class="nc" id="L292">            val userTokenApiUrl = FirebaseHelper.getFirebase().getRcString(STR_USER_TOKEN_API)</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">            if (userTokenApiUrl.isEmpty()) {</span>
+<span class="nc" id="L294">                Log.w(TAG, &quot;userTokenApiUrl is empty. Wait for RemoteConfig and retry&quot;)</span>
+<span class="nc" id="L295">                return</span>
+            }
+<span class="nc" id="L297">            Log.d(TAG, &quot;userTokenApiUrl = $userTokenApiUrl&quot;)</span>
+<span class="nc" id="L298">            val request = Request(</span>
+<span class="nc" id="L299">                    url = userTokenApiUrl,</span>
+<span class="nc" id="L300">                    headers = MutableHeaders(</span>
+<span class="nc" id="L301">                            &quot;Authorization&quot; to &quot;Bearer $fbUid&quot;</span>
+                    ),
+<span class="nc" id="L303">                    body = Request.Body.fromParamsForFormUrlEncoded(</span>
+<span class="nc" id="L304">                            &quot;telemetry_client_id&quot; to telemetryClientId,</span>
+<span class="nc" id="L305">                            &quot;fcm_token&quot; to fcmToken</span>
+                    )
+            )
+<span class="nc" id="L308">            try {</span>
+
+<span class="nc" id="L310">                HttpURLConnectionClient()</span>
+<span class="nc" id="L311">                        .withInterceptors(LoggingInterceptor())</span>
+<span class="nc" id="L312">                        .fetch(request).use {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                            if (it.status == 200) {</span>
+<span class="nc" id="L314">                                Settings.getInstance(applicationContext).setHashedFcmToken(fcmToken)</span>
+<span class="nc" id="L315">                                Log.d(TAG, &quot;FCM Token uploaded: ${fcmToken.hashCode()}&quot;)</span>
+                            } else {
+<span class="nc" id="L317">                                Log.d(TAG, &quot;FCM Token uploaded status[${it.status}]: [${it.body}]&quot;)</span>
+<span class="nc" id="L318">                            }</span>
+                        }
+<span class="nc" id="L320">            } catch (e: IOException) {</span>
+<span class="nc" id="L321">                Log.e(TAG, &quot;FCM Token upload ERROR: [${fcmToken.hashCode()}] with [${e.localizedMessage}]&quot;)</span>
+            }
+<span class="nc" id="L323">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

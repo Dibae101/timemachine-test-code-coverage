@@ -1,0 +1,2399 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlaybackService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vanilla-Music</a> &gt; <a href="index.source.html" class="el_package">ch.blinkenlights.android.vanilla</a> &gt; <span class="el_source">PlaybackService.java</span></div><h1>PlaybackService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2012-2019 Adrian Ulrich &lt;adrian@blinkenlights.ch&gt;
+ * Copyright (C) 2010, 2011 Christopher Eby &lt;kreed@kreed.org&gt;
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the &quot;Software&quot;), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+package ch.blinkenlights.android.vanilla;
+
+import ch.blinkenlights.android.medialibrary.MediaLibrary;
+import ch.blinkenlights.android.medialibrary.LibraryObserver;
+
+import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.app.backup.BackupManager;
+import android.appwidget.AppWidgetManager;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.Message;
+import android.os.PowerManager;
+import android.os.Process;
+import android.os.SystemClock;
+import android.util.Log;
+import android.view.View;
+import android.widget.Toast;
+import androidx.core.app.NotificationCompat;
+import java.lang.Math;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.File;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.ArrayList;
+
+
+/**
+ * Handles music playback and pretty much all the other work.
+ */
+<span class="fc" id="L76">public final class PlaybackService extends Service</span>
+	implements Handler.Callback
+			 , MediaPlayer.OnCompletionListener
+			 , MediaPlayer.OnErrorListener
+			 , SharedPreferences.OnSharedPreferenceChangeListener
+			 , SongTimeline.Callback
+			 , SensorEventListener
+			 , AudioManager.OnAudioFocusChangeListener
+{
+	/**
+	 * Name of the state file.
+	 */
+	private static final String STATE_FILE = &quot;state&quot;;
+	/**
+	 * Header for state file to help indicate if the file is in the right
+	 * format.
+	 */
+	private static final long STATE_FILE_MAGIC = 0x1533574DC74B6ECL;
+	/**
+	 * State file version that indicates data order.
+	 */
+	private static final int STATE_VERSION = 6;
+
+	private static final int NOTIFICATION_ID = 2;
+	private static final String NOTIFICATION_CHANNEL = &quot;Playback&quot;;
+
+	/**
+	 * Rewind song if we already played more than 2.5 sec
+	*/
+	private static final int REWIND_AFTER_PLAYED_MS = 2500;
+
+	/**
+	 * Action for startService: toggle playback on/off.
+	 */
+	public static final String ACTION_TOGGLE_PLAYBACK = &quot;ch.blinkenlights.android.vanilla.action.TOGGLE_PLAYBACK&quot;;
+	/**
+	 * Action for startService: start playback if paused.
+	 */
+	public static final String ACTION_PLAY = &quot;ch.blinkenlights.android.vanilla.action.PLAY&quot;;
+	/**
+	 * Action for startService: pause playback if playing.
+	 */
+	public static final String ACTION_PAUSE = &quot;ch.blinkenlights.android.vanilla.action.PAUSE&quot;;
+	/**
+	 * Action for startService: toggle playback on/off.
+	 *
+	 * Unlike {@link PlaybackService#ACTION_TOGGLE_PLAYBACK}, the toggle does
+	 * not occur immediately. Instead, it is delayed so that if two of these
+	 * actions are received within 400 ms, the playback activity is opened
+	 * instead.
+	 */
+	public static final String ACTION_TOGGLE_PLAYBACK_DELAYED = &quot;ch.blinkenlights.android.vanilla.action.TOGGLE_PLAYBACK_DELAYED&quot;;
+	/**
+	 * Action for startService: advance to the next song.
+	 */
+	public static final String ACTION_NEXT_SONG = &quot;ch.blinkenlights.android.vanilla.action.NEXT_SONG&quot;;
+	/**
+	 * Action for startService: advance to the next song.
+	 *
+	 * Unlike {@link PlaybackService#ACTION_NEXT_SONG}, the toggle does
+	 * not occur immediately. Instead, it is delayed so that if two of these
+	 * actions are received within 400 ms, the playback activity is opened
+	 * instead.
+	 */
+	public static final String ACTION_NEXT_SONG_DELAYED = &quot;ch.blinkenlights.android.vanilla.action.NEXT_SONG_DELAYED&quot;;
+	/**
+	 * Action for startService: advance to the next song.
+	 *
+	 * Like ACTION_NEXT_SONG, but starts playing automatically if paused
+	 * when this is called.
+	 */
+	public static final String ACTION_NEXT_SONG_AUTOPLAY = &quot;ch.blinkenlights.android.vanilla.action.NEXT_SONG_AUTOPLAY&quot;;
+	/**
+	 * Action for startService: go back to the previous song.
+	 */
+	public static final String ACTION_PREVIOUS_SONG = &quot;ch.blinkenlights.android.vanilla.action.PREVIOUS_SONG&quot;;
+	/**
+	 * Action for startService: go back to the previous song.
+	 *
+	 * Like ACTION_PREVIOUS_SONG, but starts playing automatically if paused
+	 * when this is called.
+	 */
+	public static final String ACTION_PREVIOUS_SONG_AUTOPLAY = &quot;ch.blinkenlights.android.vanilla.action.PREVIOUS_SONG_AUTOPLAY&quot;;
+	/**
+	 * Flushes the queue, switches to random mode and starts playing.
+	 */
+	public static final String ACTION_RANDOM_MIX_AUTOPLAY = &quot;ch.blinkenlights.android.vanilla.action.RANDOM_MIX_AUTOPLAY&quot;;
+	/**
+	 * Flushes the queue and plays everything of the passed type/id combination.
+	 */
+	public static final String ACTION_FROM_TYPE_ID_AUTOPLAY = &quot;ch.blinkenlights.android.vanilla.action.FROM_TYPE_ID_AUTOPLAY&quot;;
+	/**
+	 * Change the shuffle mode.
+	 */
+	public static final String ACTION_CYCLE_SHUFFLE = &quot;ch.blinkenlights.android.vanilla.CYCLE_SHUFFLE&quot;;
+	/**
+	 * Change the repeat mode.
+	 */
+	public static final String ACTION_CYCLE_REPEAT = &quot;ch.blinkenlights.android.vanilla.CYCLE_REPEAT&quot;;
+	/**
+	 * Whether we should create a foreground notification as early as possible.
+	 */
+	public static final String EXTRA_EARLY_NOTIFICATION = &quot;extra_early_notification&quot;;
+	/**
+	 * Keep notification forcefully around on stops if set.
+	 */
+	public static final String EXTRA_FORCE_NOTIFICATION = &quot;extra_force_notification&quot;;
+
+	/**
+	 * Visibility modes of the notification.
+	 */
+	public static final int VISIBILITY_WHEN_PLAYING = 0;
+	public static final int VISIBILITY_ALWAYS = 1;
+
+	/**
+	 * Notification click action: open LaunchActivity.
+	 */
+	private static final int NOT_ACTION_MAIN_ACTIVITY = 0;
+	/**
+	 * Notification click action: open MiniPlaybackActivity.
+	 */
+	private static final int NOT_ACTION_MINI_ACTIVITY = 1;
+	/**
+	 * Notification click action: open FullPlaybackActivity.
+	 */
+	private static final int NOT_ACTION_FULL_ACTIVITY = 2;
+	/**
+	 * Notification click action: skip to next song.
+	 */
+	private static final int NOT_ACTION_NEXT_SONG = 3;
+
+	/**
+	 * If a user action is triggered within this time (in ms) after the
+	 * idle time fade-out occurs, playback will be resumed.
+	 */
+	private static final long IDLE_GRACE_PERIOD = 60000;
+	/**
+	 * Minimum time in milliseconds between shake actions.
+	 */
+	private static final int MIN_SHAKE_PERIOD = 500;
+	/**
+	 * Defer entering deep sleep for this time (in ms).
+	 */
+	private static final int SLEEP_STATE_DELAY = 60000;
+	/**
+	 * Save the current playlist state on queue changes after this time (in ms).
+	 */
+	private static final int SAVE_STATE_DELAY = 5000;
+	/**
+	 * If set, music will play.
+	 */
+	public static final int FLAG_PLAYING = 0x1;
+	/**
+	 * Set when there is no media available on the device.
+	 */
+	public static final int FLAG_NO_MEDIA = 0x2;
+	/**
+	 * Set when the current song is unplayable.
+	 */
+	public static final int FLAG_ERROR = 0x4;
+	/**
+	 * Set when the user needs to select songs to play.
+	 */
+	public static final int FLAG_EMPTY_QUEUE = 0x8;
+	public static final int SHIFT_FINISH = 4;
+	/**
+	 * These three bits will be one of SongTimeline.FINISH_*.
+	 */
+	public static final int MASK_FINISH = 0x7 &lt;&lt; SHIFT_FINISH;
+	public static final int SHIFT_SHUFFLE = 7;
+	/**
+	 * These three bits will be one of SongTimeline.SHUFFLE_*.
+	 */
+	public static final int MASK_SHUFFLE = 0x7 &lt;&lt; SHIFT_SHUFFLE;
+	public static final int SHIFT_DUCKING = 10;
+	/**
+	 * Whether we're 'ducking' (lowering the playback volume temporarily due to a transient system
+	 * sound, such as a notification) or not
+	 */
+	public static final int FLAG_DUCKING = 0x1 &lt;&lt; SHIFT_DUCKING;
+
+	/**
+	 * The PlaybackService state, indicating if the service is playing,
+	 * repeating, etc.
+	 *
+	 * The format of this is 0b00000000_00000000_000000gff_feeedcba,
+	 * where each bit is:
+	 *     a:   {@link PlaybackService#FLAG_PLAYING}
+	 *     b:   {@link PlaybackService#FLAG_NO_MEDIA}
+	 *     c:   {@link PlaybackService#FLAG_ERROR}
+	 *     d:   {@link PlaybackService#FLAG_EMPTY_QUEUE}
+	 *     eee: {@link PlaybackService#MASK_FINISH}
+	 *     fff: {@link PlaybackService#MASK_SHUFFLE}
+	 *     g:   {@link PlaybackService#FLAG_DUCKING}
+	 */
+	int mState;
+
+	/**
+	 * How many broken songs we did already skip
+	 */
+	int mSkipBroken;
+
+	/**
+	 * Object used for state-related locking.
+	 */
+<span class="fc" id="L281">	final Object[] mStateLock = new Object[0];</span>
+	/**
+	 * Object used for PlaybackService startup waiting.
+	 */
+<span class="fc" id="L285">	private static final Object[] sWait = new Object[0];</span>
+	/**
+	 * The appplication-wide instance of the PlaybackService.
+	 */
+	public static PlaybackService sInstance;
+	/**
+	 * Static referenced-array to PlaybackActivities, used for callbacks
+	 */
+<span class="fc" id="L293">	private static final ArrayList&lt;TimelineCallback&gt; sCallbacks = new ArrayList&lt;TimelineCallback&gt;(5);</span>
+
+	boolean mHeadsetPause;
+	private boolean mScrobble;
+	/**
+	 * If true, emulate the music status broadcasts sent by the stock android
+	 * music player.
+	 */
+	private boolean mStockBroadcast;
+	/**
+	 * Behaviour of the notification
+	 */
+	private int mNotificationVisibility;
+	/**
+	 * If true, audio will not be played through the speaker.
+	 */
+	private boolean mHeadsetOnly;
+	/**
+	 * The time to wait before considering the player idle.
+	 */
+	private int mIdleTimeout;
+	/**
+	 * The intent for the notification to execute, created by
+	 * {@link PlaybackService#createNotificationAction(SharedPreferences)}.
+	 */
+	private PendingIntent mNotificationAction;
+	/**
+	 * Notification helper instance.
+	 */
+	private NotificationHelper mNotificationHelper;
+
+	private Looper mLooper;
+	private Handler mHandler;
+	VanillaMediaPlayer mMediaPlayer;
+	VanillaMediaPlayer mPreparedMediaPlayer;
+	private boolean mMediaPlayerInitialized;
+	private boolean mMediaPlayerAudioFxActive;
+	private PowerManager.WakeLock mWakeLock;
+	private AudioManager mAudioManager;
+	/**
+	 * The SensorManager service.
+	 */
+	private SensorManager mSensorManager;
+	/**
+	 * A remote control client implementation
+	 */
+	private RemoteControl.Client mRemoteControlClient;
+
+	/**
+	 * Media session state tracker for notification
+	 */
+	private MediaSessionTracker mMediaSessionTracker;
+
+	SongTimeline mTimeline;
+	private Song mCurrentSong;
+
+	/**
+	 * Stores the saved position in the current song from saved state. Should
+	 * be seeked to when the song is loaded into MediaPlayer. Used only during
+	 * initialization. The song that the saved position is for is stored in
+	 * {@link #mPendingSeekSong}.
+	 */
+	private int mPendingSeek;
+	/**
+	 * The id of the song that the mPendingSeek position is for. -1 indicates
+	 * an invalid song. Value is undefined when mPendingSeek is 0.
+	 */
+	private long mPendingSeekSong;
+	public Receiver mReceiver;
+	private String mErrorMessage;
+	/**
+	 * Current fade-out progress. 1.0f if we are not fading out
+	 */
+<span class="fc" id="L366">	private float mFadeOut = 1.0f;</span>
+	/**
+	 * Elapsed realtime at which playback was paused by idle timeout. -1
+	 * indicates that no timeout has occurred.
+	 */
+<span class="fc" id="L371">	private long mIdleStart = -1;</span>
+	/**
+	 * True if we encountered a transient audio loss
+	 */
+	private boolean mTransientAudioLoss;
+	/**
+	 * Magnitude of last sensed acceleration.
+	 */
+	private double mAccelLast;
+	/**
+	 * Filtered acceleration used for shake detection.
+	 */
+	private double mAccelFiltered;
+	/**
+	 * Elapsed realtime of last shake action.
+	 */
+	private long mLastShakeTime;
+	/**
+	 * Minimum jerk required for shake.
+	 */
+	private double mShakeThreshold;
+	/**
+	 * What to do when an accelerometer shake is detected.
+	 */
+	private Action mShakeAction;
+	/**
+	 * If true, the notification should not be hidden when pausing regardless
+	 * of user settings.
+	 */
+	private boolean mForceNotificationVisible;
+	/**
+	 * Amount of songs included in our auto playlist
+	 */
+	private int mAutoPlPlaycounts;
+	/**
+	 * Enables or disables Replay Gain
+	 */
+	private boolean mReplayGainTrackEnabled;
+	private boolean mReplayGainAlbumEnabled;
+	private int mReplayGainBump;
+	private int mReplayGainUntaggedDeBump;
+	/**
+	 * Percentage to set the volume as while a notification is playing (aka ducking)
+	 */
+	private int mVolumeDuringDucking;
+	/**
+	 *
+	 */
+	private boolean mIgnoreAudioFocusLoss;
+	/**
+	 * TRUE if the readahead feature is enabled
+	 */
+	private boolean mReadaheadEnabled;
+	/**
+	 * Reference to precreated ReadAhead thread
+	 */
+	private ReadaheadThread mReadahead;
+	/**
+	 * Referente to our playlist observer
+	 */
+	private PlaylistObserver mPlaylistObserver;
+	/**
+	 * Reference to precreated BASTP Object
+	 */
+	private BastpUtil mBastpUtil;
+	/**
+	 * Don't use gapless playback, useful for bug ridden devices.
+	 */
+	private boolean mDisableGaplessPlayback;
+
+	@Override
+	public void onCreate()
+	{
+<span class="fc" id="L444">		HandlerThread thread = new HandlerThread(&quot;PlaybackService&quot;, Process.THREAD_PRIORITY_DEFAULT);</span>
+<span class="fc" id="L445">		thread.start();</span>
+
+<span class="fc" id="L447">		mTimeline = new SongTimeline(this);</span>
+<span class="fc" id="L448">		mTimeline.setCallback(this);</span>
+<span class="fc" id="L449">		int state = loadState();</span>
+
+<span class="fc" id="L451">		mMediaPlayer = getNewMediaPlayer();</span>
+<span class="fc" id="L452">		mPreparedMediaPlayer = getNewMediaPlayer();</span>
+		// We only have a single audio session
+<span class="fc" id="L454">		mPreparedMediaPlayer.setAudioSessionId(mMediaPlayer.getAudioSessionId());</span>
+
+<span class="fc" id="L456">		mBastpUtil = new BastpUtil();</span>
+<span class="fc" id="L457">		mReadahead = new ReadaheadThread();</span>
+
+<span class="fc" id="L459">		mNotificationHelper = new NotificationHelper(this, NOTIFICATION_CHANNEL, getString(R.string.app_name));</span>
+<span class="fc" id="L460">		mAudioManager = (AudioManager)getSystemService(AUDIO_SERVICE);</span>
+
+<span class="fc" id="L462">		SharedPreferences settings = SharedPrefHelper.getSettings(this);</span>
+<span class="fc" id="L463">		settings.registerOnSharedPreferenceChangeListener(this);</span>
+<span class="fc" id="L464">		mNotificationVisibility = Integer.parseInt(settings.getString(PrefKeys.NOTIFICATION_VISIBILITY, PrefDefaults.NOTIFICATION_VISIBILITY));</span>
+<span class="fc" id="L465">		mScrobble = settings.getBoolean(PrefKeys.SCROBBLE, PrefDefaults.SCROBBLE);</span>
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">		mIdleTimeout = settings.getBoolean(PrefKeys.USE_IDLE_TIMEOUT, PrefDefaults.USE_IDLE_TIMEOUT) ? settings.getInt(PrefKeys.IDLE_TIMEOUT, PrefDefaults.IDLE_TIMEOUT) : 0;</span>
+
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">		CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_ANDROID, PrefDefaults.COVERLOADER_ANDROID) ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_ANDROID : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_ANDROID);</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">		CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_VANILLA, PrefDefaults.COVERLOADER_VANILLA) ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_VANILLA : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_VANILLA);</span>
+<span class="pc bpc" id="L470" title="1 of 2 branches missed.">		CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_SHADOW , PrefDefaults.COVERLOADER_SHADOW)  ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_SHADOW  : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_SHADOW);</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">		CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_INLINE , PrefDefaults.COVERLOADER_INLINE)  ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_INLINE  : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_INLINE);</span>
+
+<span class="fc" id="L473">		mHeadsetOnly = settings.getBoolean(PrefKeys.HEADSET_ONLY, PrefDefaults.HEADSET_ONLY);</span>
+<span class="fc" id="L474">		mStockBroadcast = settings.getBoolean(PrefKeys.STOCK_BROADCAST, PrefDefaults.STOCK_BROADCAST);</span>
+<span class="fc" id="L475">		mNotificationAction = createNotificationAction(settings);</span>
+<span class="fc" id="L476">		mHeadsetPause = SharedPrefHelper.getSettings(this).getBoolean(PrefKeys.HEADSET_PAUSE, PrefDefaults.HEADSET_PAUSE);</span>
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		mShakeAction = settings.getBoolean(PrefKeys.ENABLE_SHAKE, PrefDefaults.ENABLE_SHAKE) ? Action.getAction(settings, PrefKeys.SHAKE_ACTION, PrefDefaults.SHAKE_ACTION) : Action.Nothing;</span>
+<span class="fc" id="L478">		mShakeThreshold = settings.getInt(PrefKeys.SHAKE_THRESHOLD, PrefDefaults.SHAKE_THRESHOLD) / 10.0f;</span>
+
+<span class="fc" id="L480">		mReplayGainTrackEnabled = settings.getBoolean(PrefKeys.ENABLE_TRACK_REPLAYGAIN, PrefDefaults.ENABLE_TRACK_REPLAYGAIN);</span>
+<span class="fc" id="L481">		mReplayGainAlbumEnabled = settings.getBoolean(PrefKeys.ENABLE_ALBUM_REPLAYGAIN, PrefDefaults.ENABLE_ALBUM_REPLAYGAIN);</span>
+<span class="fc" id="L482">		mReplayGainBump = settings.getInt(PrefKeys.REPLAYGAIN_BUMP, PrefDefaults.REPLAYGAIN_BUMP);</span>
+<span class="fc" id="L483">		mReplayGainUntaggedDeBump = settings.getInt(PrefKeys.REPLAYGAIN_UNTAGGED_DEBUMP, PrefDefaults.REPLAYGAIN_UNTAGGED_DEBUMP);</span>
+<span class="fc" id="L484">		mDisableGaplessPlayback = settings.getBoolean(PrefKeys.DISABLE_GAPLESS_PLAYBACK, PrefDefaults.DISABLE_GAPLESS_PLAYBACK);</span>
+
+<span class="fc" id="L486">		mVolumeDuringDucking = settings.getInt(PrefKeys.VOLUME_DURING_DUCKING, PrefDefaults.VOLUME_DURING_DUCKING);</span>
+<span class="fc" id="L487">		mIgnoreAudioFocusLoss = settings.getBoolean(PrefKeys.IGNORE_AUDIOFOCUS_LOSS, PrefDefaults.IGNORE_AUDIOFOCUS_LOSS);</span>
+<span class="fc" id="L488">		refreshDuckingValues();</span>
+
+<span class="fc" id="L490">		mReadaheadEnabled = settings.getBoolean(PrefKeys.ENABLE_READAHEAD, PrefDefaults.ENABLE_READAHEAD);</span>
+
+<span class="fc" id="L492">		mAutoPlPlaycounts = settings.getInt(PrefKeys.AUTOPLAYLIST_PLAYCOUNTS, PrefDefaults.AUTOPLAYLIST_PLAYCOUNTS);</span>
+
+<span class="fc" id="L494">		PowerManager powerManager = (PowerManager)getSystemService(POWER_SERVICE);</span>
+<span class="fc" id="L495">		mWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, &quot;VanillaMusic:PlaybackService&quot;);</span>
+
+<span class="fc" id="L497">		mReceiver = new Receiver();</span>
+<span class="fc" id="L498">		IntentFilter filter = new IntentFilter();</span>
+<span class="fc" id="L499">		filter.addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY);</span>
+<span class="fc" id="L500">		filter.addAction(Intent.ACTION_SCREEN_ON);</span>
+<span class="fc" id="L501">		registerReceiver(mReceiver, filter);</span>
+
+<span class="fc" id="L503">		MediaLibrary.registerLibraryObserver(mObserver);</span>
+
+<span class="fc" id="L505">		mRemoteControlClient = new RemoteControl().getClient(this);</span>
+<span class="fc" id="L506">		mRemoteControlClient.initializeRemote();</span>
+
+<span class="fc" id="L508">		mMediaSessionTracker = new MediaSessionTracker(this);</span>
+
+<span class="fc" id="L510">		int syncMode = Integer.parseInt(settings.getString(PrefKeys.PLAYLIST_SYNC_MODE, PrefDefaults.PLAYLIST_SYNC_MODE));</span>
+<span class="fc" id="L511">		boolean exportRelativePaths = settings.getBoolean(PrefKeys.PLAYLIST_EXPORT_RELATIVE_PATHS, PrefDefaults.PLAYLIST_EXPORT_RELATIVE_PATHS);</span>
+<span class="fc" id="L512">		String syncFolder = settings.getString(PrefKeys.PLAYLIST_SYNC_FOLDER, PrefDefaults.PLAYLIST_SYNC_FOLDER);</span>
+<span class="fc" id="L513">		mPlaylistObserver = new PlaylistObserver(this, syncFolder, syncMode, exportRelativePaths);</span>
+
+<span class="fc" id="L515">		mLooper = thread.getLooper();</span>
+<span class="fc" id="L516">		mHandler = new Handler(mLooper, this);</span>
+
+<span class="fc" id="L518">		initWidgets();</span>
+
+<span class="fc" id="L520">		updateState(state);</span>
+<span class="fc" id="L521">		setCurrentSong(0);</span>
+
+<span class="fc" id="L523">		sInstance = this;</span>
+<span class="fc" id="L524">		synchronized (sWait) {</span>
+<span class="fc" id="L525">			sWait.notifyAll();</span>
+<span class="fc" id="L526">		}</span>
+
+<span class="fc" id="L528">		mAccelFiltered = 0.0f;</span>
+<span class="fc" id="L529">		mAccelLast = SensorManager.GRAVITY_EARTH;</span>
+<span class="fc" id="L530">		setupSensor();</span>
+
+<span class="fc" id="L532">		ScheduledLibraryUpdate.scheduleUpdate(this);</span>
+<span class="fc" id="L533">	}</span>
+
+	@Override
+	public int onStartCommand(Intent intent, int flags, int startId) {
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">		if (intent != null) {</span>
+<span class="fc" id="L538">			final String action = intent.getAction();</span>
+<span class="fc" id="L539">			final boolean earlyNotification = intent.hasExtra(EXTRA_EARLY_NOTIFICATION);</span>
+<span class="fc" id="L540">			final boolean forceNotification = intent.hasExtra(EXTRA_FORCE_NOTIFICATION);</span>
+
+<span class="pc bpc" id="L542" title="1 of 2 branches missed.">			if (earlyNotification) {</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">				Song song = mCurrentSong != null ? mCurrentSong : new Song(-1);</span>
+<span class="nc" id="L544">				startForeground(NOTIFICATION_ID, createNotification(song, mState));</span>
+			}
+
+<span class="pc bpc" id="L547" title="1 of 2 branches missed.">			if (ACTION_TOGGLE_PLAYBACK.equals(action)) {</span>
+<span class="nc" id="L548">				playPause(forceNotification);</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">			} else if (ACTION_TOGGLE_PLAYBACK_DELAYED.equals(action)) {</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">				if (mHandler.hasMessages(MSG_CALL_GO, Integer.valueOf(0))) {</span>
+<span class="nc" id="L551">					mHandler.removeMessages(MSG_CALL_GO, Integer.valueOf(0));</span>
+<span class="nc" id="L552">					Intent launch = new Intent(this, LibraryActivity.class);</span>
+<span class="nc" id="L553">					launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L554">					launch.setAction(Intent.ACTION_MAIN);</span>
+<span class="nc" id="L555">					startActivity(launch);</span>
+<span class="nc" id="L556">				} else {</span>
+<span class="nc" id="L557">					mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_CALL_GO, 0, 0, Integer.valueOf(0)), 400);</span>
+				}
+<span class="pc bpc" id="L559" title="1 of 2 branches missed.">			} else if (ACTION_NEXT_SONG.equals(action)) {</span>
+<span class="nc" id="L560">				shiftCurrentSong(SongTimeline.SHIFT_NEXT_SONG);</span>
+<span class="pc bpc" id="L561" title="1 of 2 branches missed.">			} else if (ACTION_NEXT_SONG_AUTOPLAY.equals(action)) {</span>
+<span class="nc" id="L562">				shiftCurrentSong(SongTimeline.SHIFT_NEXT_SONG);</span>
+<span class="nc" id="L563">				play();</span>
+<span class="pc bpc" id="L564" title="1 of 2 branches missed.">			} else if (ACTION_NEXT_SONG_DELAYED.equals(action)) {</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">				if (mHandler.hasMessages(MSG_CALL_GO, Integer.valueOf(1))) {</span>
+<span class="nc" id="L566">					mHandler.removeMessages(MSG_CALL_GO, Integer.valueOf(1));</span>
+<span class="nc" id="L567">					Intent launch = new Intent(this, LibraryActivity.class);</span>
+<span class="nc" id="L568">					launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L569">					launch.setAction(Intent.ACTION_MAIN);</span>
+<span class="nc" id="L570">					startActivity(launch);</span>
+<span class="nc" id="L571">				} else {</span>
+<span class="nc" id="L572">					mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_CALL_GO, 1, 0, Integer.valueOf(1)), 400);</span>
+				}
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">			} else if (ACTION_PREVIOUS_SONG.equals(action)) {</span>
+<span class="nc" id="L575">				rewindCurrentSong();</span>
+<span class="pc bpc" id="L576" title="1 of 2 branches missed.">			} else if (ACTION_PREVIOUS_SONG_AUTOPLAY.equals(action)) {</span>
+<span class="nc" id="L577">				rewindCurrentSong();</span>
+<span class="nc" id="L578">				play();</span>
+<span class="pc bpc" id="L579" title="1 of 2 branches missed.">			} else if (ACTION_PLAY.equals(action)) {</span>
+<span class="nc" id="L580">				play();</span>
+<span class="pc bpc" id="L581" title="1 of 2 branches missed.">			} else if (ACTION_PAUSE.equals(action)) {</span>
+<span class="nc" id="L582">				pause();</span>
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">			} else if (ACTION_CYCLE_REPEAT.equals(action)) {</span>
+<span class="nc" id="L584">				cycleFinishAction();</span>
+<span class="pc bpc" id="L585" title="1 of 2 branches missed.">			} else if (ACTION_CYCLE_SHUFFLE.equals(action)) {</span>
+<span class="nc" id="L586">				cycleShuffle();</span>
+<span class="pc bpc" id="L587" title="1 of 2 branches missed.">			} else if (ACTION_RANDOM_MIX_AUTOPLAY.equals(action)) {</span>
+<span class="nc" id="L588">				pause();</span>
+<span class="nc" id="L589">				emptyQueue();</span>
+<span class="nc" id="L590">				setFinishAction(SongTimeline.FINISH_RANDOM);</span>
+				// We can't use play() here as setFinishAction() is handled in the background.
+				// We therefore send a GO message to the same queue, so it will get handled as
+				// soon as the queue is ready.
+<span class="nc" id="L594">				mHandler.sendEmptyMessage(MSG_CALL_GO);</span>
+<span class="pc bpc" id="L595" title="1 of 2 branches missed.">			} else if (ACTION_FROM_TYPE_ID_AUTOPLAY.equals(action)) {</span>
+<span class="nc" id="L596">				int type = intent.getIntExtra(LibraryAdapter.DATA_TYPE, MediaUtils.TYPE_INVALID);</span>
+<span class="nc" id="L597">				long id = intent.getLongExtra(LibraryAdapter.DATA_ID, LibraryAdapter.INVALID_ID);</span>
+<span class="nc" id="L598">				QueryTask query = MediaUtils.buildQuery(type, id, Song.FILLED_PROJECTION, null);</span>
+				// Flush the queue and start playing:
+<span class="nc" id="L600">				query.mode = SongTimeline.MODE_PLAY;</span>
+<span class="nc" id="L601">				addSongs(query);</span>
+			}
+		}
+
+<span class="fc" id="L605">		return START_NOT_STICKY;</span>
+	}
+
+	@Override
+	public void onDestroy()
+	{
+<span class="nc" id="L611">		sInstance = null;</span>
+
+<span class="nc" id="L613">		mLooper.quit();</span>
+
+		// clear the notification
+<span class="nc" id="L616">		stopForeground(true);</span>
+
+		// defer wakelock and close audioFX
+<span class="nc" id="L619">		enterSleepState();</span>
+
+		// stop getting preference changes.
+<span class="nc" id="L622">		SharedPrefHelper.getSettings(this).unregisterOnSharedPreferenceChangeListener(this);</span>
+
+		// shutdown all observers.
+<span class="nc" id="L625">		MediaLibrary.unregisterLibraryObserver(mObserver);</span>
+<span class="nc" id="L626">		mPlaylistObserver.unregister();</span>
+
+<span class="nc bnc" id="L628" title="All 2 branches missed.">		if (mMediaPlayer != null) {</span>
+<span class="nc" id="L629">			mMediaPlayer.release();</span>
+<span class="nc" id="L630">			mMediaPlayer = null;</span>
+		}
+
+<span class="nc bnc" id="L633" title="All 2 branches missed.">		if (mPreparedMediaPlayer != null) {</span>
+<span class="nc" id="L634">			mPreparedMediaPlayer.release();</span>
+<span class="nc" id="L635">			mPreparedMediaPlayer = null;</span>
+		}
+
+		try {
+<span class="nc" id="L639">			unregisterReceiver(mReceiver);</span>
+<span class="nc" id="L640">		} catch (IllegalArgumentException e) {</span>
+			// we haven't registered the receiver yet
+<span class="nc" id="L642">		}</span>
+
+<span class="nc bnc" id="L644" title="All 2 branches missed.">		if (mSensorManager != null)</span>
+<span class="nc" id="L645">			mSensorManager.unregisterListener(this);</span>
+
+<span class="nc bnc" id="L647" title="All 2 branches missed.">		if (mRemoteControlClient != null)</span>
+<span class="nc" id="L648">			mRemoteControlClient.unregisterRemote();</span>
+
+<span class="nc bnc" id="L650" title="All 2 branches missed.">		if (mMediaSessionTracker != null)</span>
+<span class="nc" id="L651">			mMediaSessionTracker.release();</span>
+
+<span class="nc" id="L653">		super.onDestroy();</span>
+<span class="nc" id="L654">	}</span>
+
+	/**
+	 * Returns a new MediaPlayer object
+	 */
+	private VanillaMediaPlayer getNewMediaPlayer() {
+<span class="fc" id="L660">		VanillaMediaPlayer mp = new VanillaMediaPlayer(this);</span>
+<span class="fc" id="L661">		mp.setAudioStreamType(AudioManager.STREAM_MUSIC);</span>
+<span class="fc" id="L662">		mp.setOnCompletionListener(this);</span>
+<span class="fc" id="L663">		mp.setOnErrorListener(this);</span>
+<span class="fc" id="L664">		return mp;</span>
+	}
+
+	public void prepareMediaPlayer(VanillaMediaPlayer mp, String path) throws IOException{
+<span class="nc" id="L668">		mp.setDataSource(path);</span>
+<span class="nc" id="L669">		mp.prepare();</span>
+<span class="nc" id="L670">		applyReplayGain(mp);</span>
+<span class="nc" id="L671">	}</span>
+
+	/**
+	 * Checks if we need to update the play/skipcounter for this action
+	 *
+	 * @param delta One of the SongTimeline.SHIFT_*
+	 */
+	private void preparePlayCountsUpdate(int delta) {
+<span class="nc bnc" id="L679" title="All 2 branches missed.">		if (isPlaying()) {</span>
+<span class="nc" id="L680">			double pctPlayed = (double)getPosition()/getDuration();</span>
+<span class="nc" id="L681">			int action = 0;</span>
+
+<span class="nc bnc" id="L683" title="All 4 branches missed.">			if (delta == SongTimeline.SHIFT_KEEP_SONG &amp;&amp; pctPlayed &gt;= 0.8) {</span>
+<span class="nc" id="L684">				action = 1; // song is playing again and had more than 0.8pct -&gt; count this</span>
+<span class="nc bnc" id="L685" title="All 4 branches missed.">			} else if(delta == SongTimeline.SHIFT_NEXT_SONG &amp;&amp; pctPlayed &lt;= 0.5) {</span>
+<span class="nc" id="L686">				action = -1;</span>
+			}
+
+<span class="nc bnc" id="L689" title="All 2 branches missed.">			if (action != 0) {</span>
+<span class="nc" id="L690">				mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_UPDATE_PLAYCOUNTS, action, 0, mCurrentSong), 800);</span>
+			}
+		}
+<span class="nc" id="L693">	}</span>
+
+	/**
+	 * Make sure that the current ReplayGain volume matches
+	 * the (maybe just changed) user settings
+	*/
+	private void refreshReplayGainValues() {
+<span class="nc bnc" id="L700" title="All 2 branches missed.">		if (mMediaPlayer != null) {</span>
+<span class="nc" id="L701">			applyReplayGain(mMediaPlayer);</span>
+		}
+<span class="nc bnc" id="L703" title="All 2 branches missed.">		if (mPreparedMediaPlayer != null) {</span>
+<span class="nc" id="L704">			applyReplayGain(mPreparedMediaPlayer);</span>
+		}
+<span class="nc" id="L706">	}</span>
+
+	private void refreshDuckingValues() {
+<span class="fc" id="L709">		float duckingFactor = ((float) mVolumeDuringDucking)/100f;</span>
+<span class="pc bpc" id="L710" title="1 of 2 branches missed.">		if (mMediaPlayer != null) {</span>
+<span class="fc" id="L711">			mMediaPlayer.setDuckingFactor(duckingFactor);</span>
+		}
+<span class="pc bpc" id="L713" title="1 of 2 branches missed.">		if (mPreparedMediaPlayer != null) {</span>
+<span class="fc" id="L714">			mPreparedMediaPlayer.setDuckingFactor(duckingFactor);</span>
+		}
+<span class="fc" id="L716">	}</span>
+
+	/***
+	 * Reads the replay gain value of the media players data source
+	 * and adjusts the volume
+	 */
+	private void applyReplayGain(VanillaMediaPlayer mp) {
+
+<span class="nc" id="L724">		BastpUtil.GainValues rg = getReplayGainValues(mp.getDataSource());</span>
+<span class="nc" id="L725">		float adjust = 0f;</span>
+
+<span class="nc bnc" id="L727" title="All 2 branches missed.">		if (mReplayGainAlbumEnabled) {</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">			adjust = (rg.track != 0 ? rg.track : adjust); // Album gain enabled, but we use the track gain as a backup.</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">			adjust = (rg.album != 0 ? rg.album : adjust); // If album gain is present, we will prefer it.</span>
+		}
+
+<span class="nc bnc" id="L732" title="All 6 branches missed.">		if (mReplayGainTrackEnabled || (mReplayGainAlbumEnabled &amp;&amp; adjust == 0)) {</span>
+<span class="nc bnc" id="L733" title="All 2 branches missed.">			adjust = (rg.album != 0 ? rg.album : adjust); // Track gain enabled, but we use the album gain as a backup.</span>
+<span class="nc bnc" id="L734" title="All 2 branches missed.">			adjust = (rg.track != 0 ? rg.track : adjust); // If track gain is present, we will prefer it.</span>
+		}
+
+<span class="nc bnc" id="L737" title="All 2 branches missed.">		if (!rg.found) {</span>
+			// No replay gain information found: adjust volume if requested by user.
+<span class="nc" id="L739">			adjust = (mReplayGainUntaggedDeBump-150)/10f;</span>
+		} else {
+			// This song has some replay gain info, we are now going to apply the 'bump' value
+			// The preferences stores the raw value of the seekbar, that's 0-150
+			// But we want -15 &lt;-&gt; +15, so 75 shall be zero.
+<span class="nc" id="L744">			adjust += 2*(mReplayGainBump-75)/10f; // 2* -&gt; we want +-15, not +-7.5</span>
+		}
+
+<span class="nc bnc" id="L747" title="All 4 branches missed.">		if(mReplayGainAlbumEnabled == false &amp;&amp; mReplayGainTrackEnabled == false) {</span>
+			// Feature is disabled: Make sure that we are going to 100% volume.
+<span class="nc" id="L749">			adjust = 0f;</span>
+		}
+
+<span class="nc" id="L752">		float rg_result = ((float)Math.pow(10, (adjust/20) ))*mFadeOut;</span>
+<span class="nc bnc" id="L753" title="All 2 branches missed.">		if(rg_result &gt; 1.0f) {</span>
+<span class="nc" id="L754">			rg_result = 1.0f; // Android would IGNORE the change if this is &gt; 1 and we would end up with the wrong volume.</span>
+<span class="nc bnc" id="L755" title="All 2 branches missed.">		} else if (rg_result &lt; 0.0f) {</span>
+<span class="nc" id="L756">			rg_result = 0.0f;</span>
+		}
+<span class="nc" id="L758">		mp.setReplayGain(rg_result);</span>
+<span class="nc" id="L759">	}</span>
+
+	/**
+	 * Returns the (hopefully cached) replaygain
+	 * values of given file
+	 */
+	public BastpUtil.GainValues getReplayGainValues(String path) {
+<span class="nc" id="L766">		return mBastpUtil.getReplayGainValues(path);</span>
+	}
+
+	/**
+	 * Prepares PlaybackService to sleep / shutdown
+	 * Closes any open AudioFX session and releases
+	 * our wakelock if held
+	 */
+	private synchronized void enterSleepState()
+	{
+<span class="nc bnc" id="L776" title="All 2 branches missed.">		if (mMediaPlayer != null) {</span>
+<span class="nc bnc" id="L777" title="All 2 branches missed.">			if (mMediaPlayerAudioFxActive) {</span>
+<span class="nc" id="L778">				mMediaPlayer.closeAudioFx();</span>
+<span class="nc" id="L779">				mMediaPlayerAudioFxActive = false;</span>
+			}
+<span class="nc" id="L781">			saveState(mMediaPlayer.getCurrentPosition());</span>
+		}
+
+<span class="nc bnc" id="L784" title="All 4 branches missed.">		if (mWakeLock != null &amp;&amp; mWakeLock.isHeld())</span>
+<span class="nc" id="L785">			mWakeLock.release();</span>
+<span class="nc" id="L786">	}</span>
+
+	/**
+	 * Destroys any currently prepared MediaPlayer and
+	 * re-creates a newone if needed.
+	 */
+	private void triggerGaplessUpdate() {
+<span class="nc bnc" id="L793" title="All 2 branches missed.">		if(mMediaPlayerInitialized != true)</span>
+<span class="nc" id="L794">			return;</span>
+
+<span class="nc bnc" id="L796" title="All 2 branches missed.">		if(mDisableGaplessPlayback)</span>
+<span class="nc" id="L797">			return;</span>
+
+<span class="nc" id="L799">		boolean doGapless = false;</span>
+<span class="nc" id="L800">		int fa = finishAction(mState);</span>
+<span class="nc" id="L801">		Song nextSong = getSong(1);</span>
+
+<span class="nc bnc" id="L803" title="All 6 branches missed.">		if( nextSong != null</span>
+		 &amp;&amp; fa != SongTimeline.FINISH_REPEAT_CURRENT
+		 &amp;&amp; fa != SongTimeline.FINISH_STOP_CURRENT
+<span class="nc bnc" id="L806" title="All 2 branches missed.">		 &amp;&amp; !mTimeline.isEndOfQueue() ) {</span>
+<span class="nc" id="L807">			doGapless = true;</span>
+		}
+		else {
+<span class="nc" id="L810">			Log.d(&quot;VanillaMusic&quot;, &quot;Must not create new media player object&quot;);</span>
+		}
+
+<span class="nc bnc" id="L813" title="All 2 branches missed.">		if(doGapless == true) {</span>
+			try {
+<span class="nc bnc" id="L815" title="All 2 branches missed.">				if(nextSong.path.equals(mPreparedMediaPlayer.getDataSource()) == false) {</span>
+					// Prepared MP has a different data source: We need to re-initalize
+					// it and set it as the next MP for the active media player
+<span class="nc" id="L818">					mPreparedMediaPlayer.reset();</span>
+<span class="nc" id="L819">					prepareMediaPlayer(mPreparedMediaPlayer, nextSong.path);</span>
+<span class="nc" id="L820">					mMediaPlayer.setNextMediaPlayer(mPreparedMediaPlayer);</span>
+				}
+<span class="nc bnc" id="L822" title="All 2 branches missed.">				if(mMediaPlayer.hasNextMediaPlayer() == false) {</span>
+					// We can reuse the prepared MediaPlayer but the current instance lacks
+					// a link to it
+<span class="nc" id="L825">					mMediaPlayer.setNextMediaPlayer(mPreparedMediaPlayer);</span>
+				}
+<span class="nc" id="L827">			} catch (IOException | IllegalArgumentException e) {</span>
+<span class="nc" id="L828">				Log.e(&quot;VanillaMusic&quot;, &quot;Exception while preparing gapless media player: &quot; + e);</span>
+<span class="nc" id="L829">				mMediaPlayer.setNextMediaPlayer(null);</span>
+<span class="nc" id="L830">				mPreparedMediaPlayer.reset();</span>
+<span class="nc" id="L831">			}</span>
+		} else {
+<span class="nc bnc" id="L833" title="All 2 branches missed.">			if(mMediaPlayer.hasNextMediaPlayer()) {</span>
+<span class="nc" id="L834">				mMediaPlayer.setNextMediaPlayer(null);</span>
+				// There is no need to cleanup mPreparedMediaPlayer
+			}
+		}
+<span class="nc" id="L838">	}</span>
+
+	/**
+	 * Stops or starts the readahead thread
+	 */
+	private void triggerReadAhead() {
+<span class="nc" id="L844">		Song song = mCurrentSong;</span>
+<span class="nc bnc" id="L845" title="All 4 branches missed.">		if((mState &amp; FLAG_PLAYING) != 0 &amp;&amp; song != null) {</span>
+<span class="nc" id="L846">			mReadahead.setSong(song);</span>
+		} else {
+<span class="nc" id="L848">			mReadahead.pause();</span>
+		}
+<span class="nc" id="L850">	}</span>
+
+	/**
+	 * Setup the accelerometer.
+	 */
+	private void setupSensor()
+	{
+<span class="pc bpc" id="L857" title="1 of 2 branches missed.">		if (mShakeAction == Action.Nothing) {</span>
+<span class="pc bpc" id="L858" title="1 of 2 branches missed.">			if (mSensorManager != null)</span>
+<span class="nc" id="L859">				mSensorManager.unregisterListener(this);</span>
+		} else {
+<span class="nc bnc" id="L861" title="All 2 branches missed.">			if (mSensorManager == null)</span>
+<span class="nc" id="L862">				mSensorManager = (SensorManager)getSystemService(SENSOR_SERVICE);</span>
+<span class="nc" id="L863">			mSensorManager.registerListener(this, mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), SensorManager.SENSOR_DELAY_UI);</span>
+		}
+<span class="fc" id="L865">	}</span>
+
+
+	private void loadPreference(String key)
+	{
+<span class="fc" id="L870">		SharedPreferences settings = SharedPrefHelper.getSettings(this);</span>
+<span class="pc bpc" id="L871" title="1 of 2 branches missed.">		if (PrefKeys.HEADSET_PAUSE.equals(key)) {</span>
+<span class="nc" id="L872">			mHeadsetPause = settings.getBoolean(PrefKeys.HEADSET_PAUSE, PrefDefaults.HEADSET_PAUSE);</span>
+<span class="pc bpc" id="L873" title="1 of 2 branches missed.">		} else if (PrefKeys.NOTIFICATION_ACTION.equals(key)) {</span>
+<span class="nc" id="L874">			mNotificationAction = createNotificationAction(settings);</span>
+<span class="nc" id="L875">			updateNotification();</span>
+<span class="pc bpc" id="L876" title="1 of 2 branches missed.">		} else if (PrefKeys.NOTIFICATION_VISIBILITY.equals(key)){</span>
+<span class="nc" id="L877">			mNotificationVisibility = Integer.parseInt(settings.getString(PrefKeys.NOTIFICATION_VISIBILITY, PrefDefaults.NOTIFICATION_VISIBILITY));</span>
+			// This is the only way to remove a notification created by
+			// startForeground(), even if we are not currently in foreground
+			// mode.
+<span class="nc" id="L881">			stopForeground(true);</span>
+<span class="nc" id="L882">			updateNotification();</span>
+<span class="pc bpc" id="L883" title="1 of 2 branches missed.">		} else if (PrefKeys.SCROBBLE.equals(key)) {</span>
+<span class="nc" id="L884">			mScrobble = settings.getBoolean(PrefKeys.SCROBBLE, PrefDefaults.SCROBBLE);</span>
+<span class="pc bpc" id="L885" title="1 of 2 branches missed.">		} else if (PrefKeys.COVER_ON_LOCKSCREEN.equals(key)) {</span>
+<span class="nc" id="L886">			mRemoteControlClient.reloadPreference();</span>
+<span class="pc bpc" id="L887" title="2 of 4 branches missed.">		} else if (PrefKeys.USE_IDLE_TIMEOUT.equals(key) || PrefKeys.IDLE_TIMEOUT.equals(key)) {</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">			mIdleTimeout = settings.getBoolean(PrefKeys.USE_IDLE_TIMEOUT, PrefDefaults.USE_IDLE_TIMEOUT) ? settings.getInt(PrefKeys.IDLE_TIMEOUT, PrefDefaults.IDLE_TIMEOUT) : 0;</span>
+<span class="nc" id="L889">			userActionTriggered();</span>
+<span class="pc bpc" id="L890" title="1 of 2 branches missed.">		} else if (PrefKeys.COVERLOADER_ANDROID.equals(key)) {</span>
+<span class="nc bnc" id="L891" title="All 2 branches missed.">			CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_ANDROID, PrefDefaults.COVERLOADER_ANDROID) ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_ANDROID : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_ANDROID);</span>
+<span class="nc" id="L892">			CoverCache.evictAll();</span>
+<span class="pc bpc" id="L893" title="1 of 2 branches missed.">		} else if (PrefKeys.COVERLOADER_VANILLA.equals(key)) {</span>
+<span class="nc bnc" id="L894" title="All 2 branches missed.">			CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_VANILLA, PrefDefaults.COVERLOADER_VANILLA) ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_VANILLA : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_VANILLA);</span>
+<span class="nc" id="L895">			CoverCache.evictAll();</span>
+<span class="pc bpc" id="L896" title="1 of 2 branches missed.">		} else if (PrefKeys.COVERLOADER_SHADOW.equals(key)) {</span>
+<span class="nc bnc" id="L897" title="All 2 branches missed.">			CoverCache.mCoverLoadMode = settings.getBoolean(PrefKeys.COVERLOADER_SHADOW, PrefDefaults.COVERLOADER_SHADOW) ? CoverCache.mCoverLoadMode | CoverCache.COVER_MODE_SHADOW : CoverCache.mCoverLoadMode &amp; ~(CoverCache.COVER_MODE_SHADOW);</span>
+<span class="nc" id="L898">			CoverCache.evictAll();</span>
+<span class="pc bpc" id="L899" title="1 of 2 branches missed.">		} else if (PrefKeys.HEADSET_ONLY.equals(key)) {</span>
+<span class="nc" id="L900">			mHeadsetOnly = settings.getBoolean(key, PrefDefaults.HEADSET_ONLY);</span>
+<span class="nc bnc" id="L901" title="All 4 branches missed.">			if (mHeadsetOnly &amp;&amp; isSpeakerOn())</span>
+<span class="nc" id="L902">				unsetFlag(FLAG_PLAYING);</span>
+<span class="pc bpc" id="L903" title="1 of 2 branches missed.">		} else if (PrefKeys.STOCK_BROADCAST.equals(key)) {</span>
+<span class="nc" id="L904">			mStockBroadcast = settings.getBoolean(key, PrefDefaults.STOCK_BROADCAST);</span>
+<span class="pc bpc" id="L905" title="2 of 4 branches missed.">		} else if (PrefKeys.ENABLE_SHAKE.equals(key) || PrefKeys.SHAKE_ACTION.equals(key)) {</span>
+<span class="nc bnc" id="L906" title="All 2 branches missed.">			mShakeAction = settings.getBoolean(PrefKeys.ENABLE_SHAKE, PrefDefaults.ENABLE_SHAKE) ? Action.getAction(settings, PrefKeys.SHAKE_ACTION, PrefDefaults.SHAKE_ACTION) : Action.Nothing;</span>
+<span class="nc" id="L907">			setupSensor();</span>
+<span class="pc bpc" id="L908" title="1 of 2 branches missed.">		} else if (PrefKeys.SHAKE_THRESHOLD.equals(key)) {</span>
+<span class="nc" id="L909">			mShakeThreshold = settings.getInt(PrefKeys.SHAKE_THRESHOLD, PrefDefaults.SHAKE_THRESHOLD) / 10.0f;</span>
+<span class="pc bpc" id="L910" title="1 of 2 branches missed.">		} else if (PrefKeys.ENABLE_TRACK_REPLAYGAIN.equals(key)) {</span>
+<span class="nc" id="L911">			mReplayGainTrackEnabled = settings.getBoolean(PrefKeys.ENABLE_TRACK_REPLAYGAIN, PrefDefaults.ENABLE_TRACK_REPLAYGAIN);</span>
+<span class="nc" id="L912">			refreshReplayGainValues();</span>
+<span class="pc bpc" id="L913" title="1 of 2 branches missed.">		} else if (PrefKeys.ENABLE_ALBUM_REPLAYGAIN.equals(key)) {</span>
+<span class="nc" id="L914">			mReplayGainAlbumEnabled = settings.getBoolean(PrefKeys.ENABLE_ALBUM_REPLAYGAIN, PrefDefaults.ENABLE_ALBUM_REPLAYGAIN);</span>
+<span class="nc" id="L915">			refreshReplayGainValues();</span>
+<span class="pc bpc" id="L916" title="1 of 2 branches missed.">		} else if (PrefKeys.REPLAYGAIN_BUMP.equals(key)) {</span>
+<span class="nc" id="L917">			mReplayGainBump = settings.getInt(PrefKeys.REPLAYGAIN_BUMP, PrefDefaults.REPLAYGAIN_BUMP);</span>
+<span class="nc" id="L918">			refreshReplayGainValues();</span>
+<span class="pc bpc" id="L919" title="1 of 2 branches missed.">		} else if (PrefKeys.REPLAYGAIN_UNTAGGED_DEBUMP.equals(key)) {</span>
+<span class="nc" id="L920">			mReplayGainUntaggedDeBump = settings.getInt(PrefKeys.REPLAYGAIN_UNTAGGED_DEBUMP, PrefDefaults.REPLAYGAIN_UNTAGGED_DEBUMP);</span>
+<span class="nc" id="L921">			refreshReplayGainValues();</span>
+<span class="pc bpc" id="L922" title="1 of 2 branches missed.">		} else if (PrefKeys.VOLUME_DURING_DUCKING.equals(key)) {</span>
+<span class="nc" id="L923">			mVolumeDuringDucking = settings.getInt(PrefKeys.VOLUME_DURING_DUCKING, PrefDefaults.VOLUME_DURING_DUCKING);</span>
+<span class="nc" id="L924">			refreshDuckingValues();</span>
+<span class="pc bpc" id="L925" title="1 of 2 branches missed.">		} else if (PrefKeys.IGNORE_AUDIOFOCUS_LOSS.equals(key)) {</span>
+<span class="nc" id="L926">			mIgnoreAudioFocusLoss = settings.getBoolean(PrefKeys.IGNORE_AUDIOFOCUS_LOSS, PrefDefaults.IGNORE_AUDIOFOCUS_LOSS);</span>
+<span class="pc bpc" id="L927" title="1 of 2 branches missed.">		} else if (PrefKeys.ENABLE_READAHEAD.equals(key)) {</span>
+<span class="nc" id="L928">			mReadaheadEnabled = settings.getBoolean(PrefKeys.ENABLE_READAHEAD, PrefDefaults.ENABLE_READAHEAD);</span>
+<span class="pc bpc" id="L929" title="1 of 2 branches missed.">		} else if (PrefKeys.AUTOPLAYLIST_PLAYCOUNTS.equals(key)) {</span>
+<span class="nc" id="L930">			mAutoPlPlaycounts = settings.getInt(PrefKeys.AUTOPLAYLIST_PLAYCOUNTS, PrefDefaults.AUTOPLAYLIST_PLAYCOUNTS);</span>
+<span class="pc bpc" id="L931" title="3 of 6 branches missed.">		} else if (PrefKeys.PLAYLIST_SYNC_MODE.equals(key) || PrefKeys.PLAYLIST_SYNC_FOLDER.equals(key) || PrefKeys.PLAYLIST_EXPORT_RELATIVE_PATHS.equals(key)) {</span>
+<span class="nc" id="L932">			int syncMode = Integer.parseInt(settings.getString(PrefKeys.PLAYLIST_SYNC_MODE, PrefDefaults.PLAYLIST_SYNC_MODE));</span>
+<span class="nc" id="L933">			boolean exportRelativePaths = settings.getBoolean(PrefKeys.PLAYLIST_EXPORT_RELATIVE_PATHS, PrefDefaults.PLAYLIST_EXPORT_RELATIVE_PATHS);</span>
+<span class="nc" id="L934">			String syncFolder = settings.getString(PrefKeys.PLAYLIST_SYNC_FOLDER, PrefDefaults.PLAYLIST_SYNC_FOLDER);</span>
+
+<span class="nc" id="L936">			mPlaylistObserver.unregister();</span>
+<span class="nc" id="L937">			mPlaylistObserver = new PlaylistObserver(this, syncFolder, syncMode, exportRelativePaths);</span>
+<span class="pc bpc" id="L938" title="2 of 4 branches missed.">		} else if (PrefKeys.SELECTED_THEME.equals(key) || PrefKeys.DISPLAY_MODE.equals(key)) {</span>
+			// Theme changed: trigger a restart of all registered activites
+<span class="nc" id="L940">			ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">			for (int i = list.size(); --i != -1; )</span>
+<span class="nc" id="L942">				list.get(i).recreate();</span>
+<span class="pc bpc" id="L943" title="1 of 2 branches missed.">		} else if (PrefKeys.DISABLE_GAPLESS_PLAYBACK.equals(key)) {</span>
+<span class="nc" id="L944">			mDisableGaplessPlayback = settings.getBoolean(PrefKeys.DISABLE_GAPLESS_PLAYBACK, PrefDefaults.DISABLE_GAPLESS_PLAYBACK);</span>
+		}
+
+		/* Tell androids cloud-backup manager that we just changed our preferences */
+<span class="fc" id="L948">		(new BackupManager(this)).dataChanged();</span>
+<span class="fc" id="L949">	}</span>
+
+	/**
+	 * Set a state flag.
+	 */
+	public void setFlag(int flag)
+	{
+<span class="fc" id="L956">		synchronized (mStateLock) {</span>
+<span class="fc" id="L957">			updateState(mState | flag);</span>
+<span class="fc" id="L958">		}</span>
+<span class="fc" id="L959">	}</span>
+
+	/**
+	 * Unset a state flag.
+	 */
+	public void unsetFlag(int flag)
+	{
+<span class="nc" id="L966">		synchronized (mStateLock) {</span>
+<span class="nc" id="L967">			updateState(mState &amp; ~flag);</span>
+<span class="nc" id="L968">		}</span>
+<span class="nc" id="L969">	}</span>
+
+	/**
+	 * Return true if audio would play through the speaker.
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	private boolean isSpeakerOn()
+	{
+		// Devices we consider to not be speakers.
+<span class="nc" id="L978">		final Integer[] headsetTypes = { AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,</span>
+<span class="nc" id="L979">		                                 AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES,</span>
+<span class="nc" id="L980">		                                 AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE };</span>
+
+<span class="nc" id="L982">		boolean result = true;</span>
+<span class="nc" id="L983">		AudioDeviceInfo[] devices = mAudioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);</span>
+<span class="nc bnc" id="L984" title="All 2 branches missed.">		for (AudioDeviceInfo device: devices) {</span>
+<span class="nc" id="L985">			Log.v(&quot;VanillaMusic&quot;, &quot;AudioDeviceInfo type = &quot; + device.getType());</span>
+<span class="nc bnc" id="L986" title="All 2 branches missed.">			if (Arrays.asList(headsetTypes).contains(device.getType())) {</span>
+<span class="nc" id="L987">				result = false;</span>
+<span class="nc" id="L988">				break;</span>
+			}
+		}
+<span class="nc" id="L991">		return result;</span>
+	}
+
+	/**
+	 * Modify the service state.
+	 *
+	 * @param state Union of PlaybackService.STATE_* flags
+	 * @return The new state
+	 */
+	private int updateState(int state)
+	{
+<span class="pc bpc" id="L1002" title="3 of 6 branches missed.">		if ((state &amp; (FLAG_NO_MEDIA|FLAG_ERROR|FLAG_EMPTY_QUEUE)) != 0 || mHeadsetOnly &amp;&amp; isSpeakerOn())</span>
+<span class="fc" id="L1003">			state &amp;= ~FLAG_PLAYING;</span>
+
+<span class="fc" id="L1005">		int oldState = mState;</span>
+<span class="fc" id="L1006">		mState = state;</span>
+
+<span class="fc bfc" id="L1008" title="All 2 branches covered.">		if (state != oldState) {</span>
+<span class="fc" id="L1009">			mHandler.sendMessage(mHandler.obtainMessage(MSG_PROCESS_STATE, oldState, state));</span>
+<span class="fc" id="L1010">			mHandler.sendMessage(mHandler.obtainMessage(MSG_BROADCAST_CHANGE, state, 0, new TimestampedObject(null)));</span>
+		}
+
+<span class="fc" id="L1013">		return state;</span>
+	}
+
+	private void processNewState(int oldState, int state)
+	{
+<span class="fc" id="L1018">		int toggled = oldState ^ state;</span>
+
+<span class="pc bpc" id="L1020" title="3 of 4 branches missed.">		if ( ((toggled &amp; FLAG_PLAYING) != 0) &amp;&amp; mCurrentSong != null) { // user requested to start playback AND we have a song selected</span>
+<span class="nc bnc" id="L1021" title="All 2 branches missed.">			if ((state &amp; FLAG_PLAYING) != 0) {</span>
+
+				// We get noisy: Acquire a new AudioFX session if required
+<span class="nc bnc" id="L1024" title="All 2 branches missed.">				if (mMediaPlayerAudioFxActive == false) {</span>
+<span class="nc" id="L1025">					mMediaPlayer.openAudioFx();</span>
+<span class="nc" id="L1026">					mMediaPlayerAudioFxActive = true;</span>
+				}
+
+<span class="nc bnc" id="L1029" title="All 2 branches missed.">				if (mMediaPlayerInitialized)</span>
+<span class="nc" id="L1030">					mMediaPlayer.start();</span>
+
+				// Update the notification with the current song information.
+<span class="nc" id="L1033">				startForeground(NOTIFICATION_ID, createNotification(mCurrentSong, mState));</span>
+
+<span class="nc" id="L1035">				final int result = mAudioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);</span>
+<span class="nc bnc" id="L1036" title="All 2 branches missed.">				if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {</span>
+<span class="nc" id="L1037">					unsetFlag(FLAG_PLAYING);</span>
+				}
+
+<span class="nc" id="L1040">				mHandler.removeMessages(MSG_ENTER_SLEEP_STATE);</span>
+				try {
+<span class="nc bnc" id="L1042" title="All 4 branches missed.">					if (mWakeLock != null &amp;&amp; mWakeLock.isHeld() == false)</span>
+<span class="nc" id="L1043">						mWakeLock.acquire();</span>
+<span class="nc" id="L1044">				} catch (SecurityException e) {</span>
+					// Don't have WAKE_LOCK permission
+<span class="nc" id="L1046">				}</span>
+<span class="nc" id="L1047">			} else {</span>
+<span class="nc bnc" id="L1048" title="All 2 branches missed.">				if (mMediaPlayerInitialized)</span>
+<span class="nc" id="L1049">					mMediaPlayer.pause();</span>
+
+				// We are switching into background mode. The notification will be removed
+				// unless we forcefully show it (or the user selected to always show it)
+				// In both cases we will update the notification to reflect the
+				// actual playback state (or to hit cancel() as this is required to
+				// get rid of it if it was created via notify())
+<span class="nc bnc" id="L1056" title="All 4 branches missed.">				boolean removeNotification = (mForceNotificationVisible == false &amp;&amp; mNotificationVisibility != VISIBILITY_ALWAYS);</span>
+<span class="nc" id="L1057">				stopForeground(removeNotification);</span>
+<span class="nc" id="L1058">				updateNotification();</span>
+
+				// Delay entering deep sleep. This allows the headset
+				// button to continue to function for a short period after
+				// pausing and keeps the AudioFX session open
+<span class="nc" id="L1063">				mHandler.sendEmptyMessageDelayed(MSG_ENTER_SLEEP_STATE, SLEEP_STATE_DELAY);</span>
+			}
+
+<span class="nc" id="L1066">			setupSensor();</span>
+		}
+
+<span class="pc bpc" id="L1069" title="2 of 4 branches missed.">		if ((toggled &amp; FLAG_NO_MEDIA) != 0 &amp;&amp; (state &amp; FLAG_NO_MEDIA) != 0) {</span>
+<span class="fc" id="L1070">			Song song = mCurrentSong;</span>
+<span class="pc bpc" id="L1071" title="3 of 4 branches missed.">			if (song != null &amp;&amp; mMediaPlayerInitialized) {</span>
+<span class="nc" id="L1072">				mPendingSeek = mMediaPlayer.getCurrentPosition();</span>
+<span class="nc" id="L1073">				mPendingSeekSong = song.id;</span>
+			}
+		}
+
+<span class="pc bpc" id="L1077" title="1 of 2 branches missed.">		if ((toggled &amp; MASK_SHUFFLE) != 0)</span>
+<span class="nc" id="L1078">			mTimeline.setShuffleMode(shuffleMode(state));</span>
+<span class="pc bpc" id="L1079" title="1 of 2 branches missed.">		if ((toggled &amp; MASK_FINISH) != 0)</span>
+<span class="nc" id="L1080">			mTimeline.setFinishAction(finishAction(state));</span>
+
+<span class="pc bpc" id="L1082" title="1 of 2 branches missed.">		if((toggled &amp; FLAG_DUCKING) != 0) {</span>
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">			boolean isDucking = (state &amp; FLAG_DUCKING) != 0;</span>
+<span class="nc" id="L1084">			mMediaPlayer.setIsDucking(isDucking);</span>
+<span class="nc" id="L1085">			mPreparedMediaPlayer.setIsDucking(isDucking);</span>
+		}
+<span class="fc" id="L1087">	}</span>
+
+	private void broadcastChange(int state, Song song, long uptime)
+	{
+<span class="pc bpc" id="L1091" title="1 of 2 branches missed.">		if (state != -1) {</span>
+<span class="fc" id="L1092">			ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="fc bfc" id="L1093" title="All 2 branches covered.">			for (int i = list.size(); --i != -1; )</span>
+<span class="fc" id="L1094">				list.get(i).setState(uptime, state);</span>
+		}
+
+<span class="pc bpc" id="L1097" title="1 of 2 branches missed.">		if (song != null) {</span>
+<span class="nc" id="L1098">			ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="nc bnc" id="L1099" title="All 2 branches missed.">			for (int i = list.size(); --i != -1; )</span>
+<span class="nc" id="L1100">				list.get(i).setSong(uptime, song);</span>
+		}
+
+<span class="fc" id="L1103">		updateWidgets();</span>
+
+<span class="pc bpc" id="L1105" title="1 of 2 branches missed.">		if (mReadaheadEnabled)</span>
+<span class="nc" id="L1106">			triggerReadAhead();</span>
+
+<span class="fc" id="L1108">		mRemoteControlClient.updateRemote(mCurrentSong, mState, mForceNotificationVisible);</span>
+<span class="fc" id="L1109">		mMediaSessionTracker.updateSession(mCurrentSong, mState);</span>
+
+<span class="fc" id="L1111">		scrobbleBroadcast();</span>
+<span class="fc" id="L1112">	}</span>
+
+	/**
+	 * Check if there are any instances of each widget.
+	 */
+	private void initWidgets()
+	{
+<span class="fc" id="L1119">		AppWidgetManager manager = AppWidgetManager.getInstance(this);</span>
+<span class="fc" id="L1120">		OneCellWidget.checkEnabled(this, manager);</span>
+<span class="fc" id="L1121">		FourSquareWidget.checkEnabled(this, manager);</span>
+<span class="fc" id="L1122">		FourLongWidget.checkEnabled(this, manager);</span>
+<span class="fc" id="L1123">		FourWhiteWidget.checkEnabled(this, manager);</span>
+<span class="fc" id="L1124">		WidgetD.checkEnabled(this, manager);</span>
+<span class="fc" id="L1125">		WidgetE.checkEnabled(this, manager);</span>
+<span class="fc" id="L1126">	}</span>
+
+	/**
+	 * Update the widgets with the current song and state.
+	 */
+	private void updateWidgets()
+	{
+<span class="fc" id="L1133">		AppWidgetManager manager = AppWidgetManager.getInstance(this);</span>
+<span class="fc" id="L1134">		Song song = mCurrentSong;</span>
+<span class="fc" id="L1135">		int state = mState;</span>
+<span class="fc" id="L1136">		OneCellWidget.updateWidget(this, manager, song, state);</span>
+<span class="fc" id="L1137">		FourLongWidget.updateWidget(this, manager, song, state);</span>
+<span class="fc" id="L1138">		FourSquareWidget.updateWidget(this, manager, song, state);</span>
+<span class="fc" id="L1139">		FourWhiteWidget.updateWidget(this, manager, song, state);</span>
+<span class="fc" id="L1140">		WidgetD.updateWidget(this, manager, song, state);</span>
+<span class="fc" id="L1141">		WidgetE.updateWidget(this, manager, song, state);</span>
+<span class="fc" id="L1142">	}</span>
+
+	/**
+	 * Scrobbles and broadcasts the currently playing song
+	 */
+	private void scrobbleBroadcast() {
+<span class="fc" id="L1148">		Song song = mCurrentSong;</span>
+<span class="pc bpc" id="L1149" title="1 of 2 branches missed.">		if (song == null)</span>
+<span class="fc" id="L1150">			return;</span>
+
+<span class="nc bnc" id="L1152" title="All 4 branches missed.">		if (!mStockBroadcast &amp;&amp; !mScrobble)</span>
+<span class="nc" id="L1153">			return;</span>
+
+<span class="nc" id="L1155">		long[] androidIds = MediaUtils.getAndroidMediaIds(getApplicationContext(), song);</span>
+<span class="nc bnc" id="L1156" title="All 2 branches missed.">		if (mStockBroadcast) {</span>
+<span class="nc" id="L1157">			Intent intent = new Intent(&quot;com.android.music.playstatechanged&quot;);</span>
+<span class="nc bnc" id="L1158" title="All 2 branches missed.">			intent.putExtra(&quot;playing&quot;, (mState &amp; FLAG_PLAYING) != 0);</span>
+<span class="nc" id="L1159">			intent.putExtra(&quot;track&quot;, song.title);</span>
+<span class="nc" id="L1160">			intent.putExtra(&quot;album&quot;, song.album);</span>
+<span class="nc" id="L1161">			intent.putExtra(&quot;artist&quot;, song.artist);</span>
+<span class="nc bnc" id="L1162" title="All 2 branches missed.">			if (androidIds[0] != -1) {</span>
+<span class="nc" id="L1163">				intent.putExtra(&quot;songid&quot;, androidIds[0]);</span>
+<span class="nc" id="L1164">				intent.putExtra(&quot;albumid&quot;, androidIds[1]);</span>
+			}
+<span class="nc" id="L1166">			sendBroadcast(intent);</span>
+		}
+
+<span class="nc bnc" id="L1169" title="All 2 branches missed.">		if (mScrobble) {</span>
+<span class="nc" id="L1170">			Intent intent = new Intent(&quot;net.jjc1138.android.scrobbler.action.MUSIC_STATUS&quot;);</span>
+<span class="nc bnc" id="L1171" title="All 2 branches missed.">			intent.putExtra(&quot;playing&quot;, (mState &amp; FLAG_PLAYING) != 0);</span>
+<span class="nc bnc" id="L1172" title="All 2 branches missed.">			if (androidIds[0] != -1)</span>
+<span class="nc" id="L1173">				intent.putExtra(&quot;id&quot;, androidIds[0]);</span>
+<span class="nc" id="L1174">			sendBroadcast(intent);</span>
+		}
+<span class="nc" id="L1176">	}</span>
+
+	private void updateNotification()
+	{
+<span class="nc bnc" id="L1180" title="All 2 branches missed.">		if (mCurrentSong != null) {</span>
+			// We always update the notification, even if we are about to cancel it as it may still stick around
+			// for a few seconds and we want to ensure that we are showing the correct state.
+<span class="nc" id="L1183">			mNotificationHelper.notify(NOTIFICATION_ID, createNotification(mCurrentSong, mState));</span>
+		}
+<span class="nc bnc" id="L1185" title="All 8 branches missed.">		if (!(mForceNotificationVisible ||</span>
+			 mNotificationVisibility == VISIBILITY_ALWAYS ||
+			 mNotificationVisibility == VISIBILITY_WHEN_PLAYING &amp;&amp; (mState &amp; FLAG_PLAYING) != 0)) {
+<span class="nc" id="L1188">			mNotificationHelper.cancel(NOTIFICATION_ID);</span>
+		}
+<span class="nc" id="L1190">	}</span>
+
+	/**
+	 * Enqueues a Toast message to be shown.
+	 */
+	private void showToast(int resId, int duration) {
+<span class="nc" id="L1196">		mHandler.sendMessage(mHandler.obtainMessage(MSG_SHOW_TOAST, duration, resId));</span>
+<span class="nc" id="L1197">	}</span>
+
+	private void showToast(CharSequence text, int duration) {
+<span class="nc" id="L1200">		mHandler.sendMessage(mHandler.obtainMessage(MSG_SHOW_TOAST, duration, 0, text));</span>
+<span class="nc" id="L1201">	}</span>
+
+	/**
+	 * Start playing if currently paused.
+	 *
+	 * @return The new state after this is called.
+	 */
+	public int play()
+	{
+<span class="nc" id="L1210">		synchronized (mStateLock) {</span>
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">			if ((mState &amp; FLAG_EMPTY_QUEUE) != 0) {</span>
+<span class="nc" id="L1212">				setFinishAction(SongTimeline.FINISH_RANDOM);</span>
+<span class="nc" id="L1213">				showToast(R.string.random_enabling, Toast.LENGTH_SHORT);</span>
+			}
+
+<span class="nc" id="L1216">			int state = updateState(mState | FLAG_PLAYING);</span>
+<span class="nc" id="L1217">			userActionTriggered();</span>
+<span class="nc" id="L1218">			return state;</span>
+		}
+	}
+
+	/**
+	 * Pause if currently playing.
+	 *
+	 * @return The new state after this is called.
+	 */
+	public int pause()
+	{
+<span class="nc" id="L1229">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1230">			mTransientAudioLoss = false; // do not resume playback as this pause was user initiated</span>
+<span class="nc" id="L1231">			int state = updateState(mState &amp; ~FLAG_PLAYING &amp; ~FLAG_DUCKING);</span>
+<span class="nc" id="L1232">			userActionTriggered();</span>
+<span class="nc" id="L1233">			return state;</span>
+		}
+	}
+
+	/**
+	 * If playing, pause. If paused, play.
+	 *
+	 * @return The new state after this is called.
+	 */
+	public int playPause(boolean forceNotification)
+	{
+<span class="nc" id="L1244">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1245">			mForceNotificationVisible = forceNotification;</span>
+<span class="nc bnc" id="L1246" title="All 2 branches missed.">			if ((mState &amp; FLAG_PLAYING) != 0)</span>
+<span class="nc" id="L1247">				return pause();</span>
+			else
+<span class="nc" id="L1249">				return play();</span>
+		}
+	}
+
+
+	/**
+	 * Change the end action (e.g. repeat, random).
+	 *
+	 * @param action The new action. One of SongTimeline.FINISH_*.
+	 * @return The new state after this is called.
+	 */
+	public int setFinishAction(int action)
+	{
+<span class="nc" id="L1262">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1263">			return updateState(mState &amp; ~MASK_FINISH | action &lt;&lt; SHIFT_FINISH);</span>
+		}
+	}
+
+	/**
+	 * Cycle repeat mode. Disables random mode.
+	 *
+	 * @return The new state after this is called.
+	 */
+	public int cycleFinishAction()
+	{
+<span class="nc" id="L1274">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1275">			int mode = finishAction(mState) + 1;</span>
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">			if (mode &gt; SongTimeline.FINISH_RANDOM)</span>
+<span class="nc" id="L1277">				mode = SongTimeline.FINISH_STOP;</span>
+<span class="nc" id="L1278">			return setFinishAction(mode);</span>
+		}
+	}
+
+	/**
+	 * Change the shuffle mode.
+	 *
+	 * @param mode The new mode. One of SongTimeline.SHUFFLE_*.
+	 * @return The new state after this is called.
+	 */
+	public int setShuffleMode(int mode)
+	{
+<span class="nc" id="L1290">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1291">			return updateState(mState &amp; ~MASK_SHUFFLE | mode &lt;&lt; SHIFT_SHUFFLE);</span>
+		}
+	}
+
+	/**
+	 * Cycle shuffle mode.
+	 *
+	 * @return The new state after this is called.
+	 */
+	public int cycleShuffle()
+	{
+<span class="nc" id="L1302">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1303">			int mode = shuffleMode(mState) + 1;</span>
+<span class="nc bnc" id="L1304" title="All 2 branches missed.">			if (mode &gt; SongTimeline.SHUFFLE_ALBUMS)</span>
+<span class="nc" id="L1305">				mode = SongTimeline.SHUFFLE_NONE; // end reached: switch to none</span>
+<span class="nc" id="L1306">			return setShuffleMode(mode);</span>
+		}
+	}
+
+	/**
+	 * Move to the next or previous song or album in the timeline.
+	 *
+	 * @param delta One of SongTimeline.SHIFT_*. 0 can also be passed to
+	 * initialize the current song with media player, notification,
+	 * broadcasts, etc.
+	 * @return The new current song
+	 */
+	private Song setCurrentSong(int delta)
+	{
+<span class="pc bpc" id="L1320" title="1 of 2 branches missed.">		if (mMediaPlayer == null)</span>
+<span class="nc" id="L1321">			return null;</span>
+
+<span class="pc bpc" id="L1323" title="1 of 2 branches missed.">		if (mMediaPlayer.isPlaying())</span>
+<span class="nc" id="L1324">			mMediaPlayer.stop();</span>
+
+<span class="fc" id="L1326">		Song song = mTimeline.shiftCurrentSong(delta);</span>
+<span class="fc" id="L1327">		mCurrentSong = song;</span>
+<span class="pc bpc" id="L1328" title="1 of 2 branches missed.">		if (song == null) {</span>
+<span class="pc bpc" id="L1329" title="1 of 2 branches missed.">			if (MediaUtils.isSongAvailable(getApplicationContext())) {</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">				int flag = finishAction(mState) == SongTimeline.FINISH_RANDOM ? FLAG_ERROR : FLAG_EMPTY_QUEUE;</span>
+<span class="nc" id="L1331">				synchronized (mStateLock) {</span>
+<span class="nc" id="L1332">					updateState((mState | flag) &amp; ~FLAG_NO_MEDIA);</span>
+<span class="nc" id="L1333">				}</span>
+<span class="nc" id="L1334">				return null;</span>
+			} else {
+				// we don't have any songs : /
+<span class="fc" id="L1337">				synchronized (mStateLock) {</span>
+<span class="fc" id="L1338">					updateState((mState | FLAG_NO_MEDIA) &amp; ~FLAG_EMPTY_QUEUE);</span>
+<span class="fc" id="L1339">				}</span>
+<span class="fc" id="L1340">				return null;</span>
+			}
+<span class="nc bnc" id="L1342" title="All 2 branches missed.">		} else if ((mState &amp; (FLAG_NO_MEDIA|FLAG_EMPTY_QUEUE)) != 0) {</span>
+<span class="nc" id="L1343">			synchronized (mStateLock) {</span>
+<span class="nc" id="L1344">				updateState(mState &amp; ~(FLAG_EMPTY_QUEUE|FLAG_NO_MEDIA));</span>
+<span class="nc" id="L1345">			}</span>
+		}
+
+<span class="nc" id="L1348">		mHandler.removeMessages(MSG_PROCESS_SONG);</span>
+
+<span class="nc" id="L1350">		mMediaPlayerInitialized = false;</span>
+<span class="nc" id="L1351">		mHandler.sendMessage(mHandler.obtainMessage(MSG_PROCESS_SONG, song));</span>
+<span class="nc" id="L1352">		mHandler.sendMessage(mHandler.obtainMessage(MSG_BROADCAST_CHANGE, -1, 0, new TimestampedObject(song)));</span>
+<span class="nc" id="L1353">		return song;</span>
+	}
+
+	private void processSong(Song song)
+	{
+		/* Save our 'current' state as the try block may set the ERROR flag (which clears the PLAYING flag */
+<span class="nc bnc" id="L1359" title="All 2 branches missed.">		boolean playing = (mState &amp; FLAG_PLAYING) != 0;</span>
+
+		try {
+<span class="nc" id="L1362">			mMediaPlayerInitialized = false;</span>
+<span class="nc" id="L1363">			mMediaPlayer.reset();</span>
+
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">			if(mPreparedMediaPlayer.isPlaying()) {</span>
+				// The prepared media player is playing as the previous song
+				// reched its end 'naturally' (-&gt; gapless)
+				// We can now swap mPreparedMediaPlayer and mMediaPlayer
+<span class="nc" id="L1369">				VanillaMediaPlayer tmpPlayer = mMediaPlayer;</span>
+<span class="nc" id="L1370">				mMediaPlayer = mPreparedMediaPlayer;</span>
+<span class="nc" id="L1371">				mPreparedMediaPlayer = tmpPlayer; // this was mMediaPlayer and is in reset() state</span>
+<span class="nc" id="L1372">			}</span>
+			else {
+<span class="nc" id="L1374">				prepareMediaPlayer(mMediaPlayer, song.path);</span>
+			}
+
+
+<span class="nc" id="L1378">			mMediaPlayerInitialized = true;</span>
+			// Cancel any pending gapless updates and re-send them
+<span class="nc" id="L1380">			mHandler.removeMessages(MSG_GAPLESS_UPDATE);</span>
+<span class="nc" id="L1381">			mHandler.sendEmptyMessage(MSG_GAPLESS_UPDATE);</span>
+
+<span class="nc bnc" id="L1383" title="All 2 branches missed.">			if (mPendingSeek != 0) {</span>
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">				if (mPendingSeekSong == song.id)</span>
+<span class="nc" id="L1385">					mMediaPlayer.seekTo(mPendingSeek);</span>
+				// Clear this even if we did not seek:
+				// We somehow managed to play a different song, so
+				// whatever we were supposed to seek to, is invalid now.
+<span class="nc" id="L1389">				mPendingSeek = 0;</span>
+			}
+
+<span class="nc bnc" id="L1392" title="All 2 branches missed.">			if ((mState &amp; FLAG_PLAYING) != 0)</span>
+<span class="nc" id="L1393">				mMediaPlayer.start();</span>
+
+<span class="nc bnc" id="L1395" title="All 2 branches missed.">			if ((mState &amp; FLAG_ERROR) != 0) {</span>
+<span class="nc" id="L1396">				mErrorMessage = null;</span>
+<span class="nc" id="L1397">				updateState(mState &amp; ~FLAG_ERROR);</span>
+			}
+<span class="nc" id="L1399">			mSkipBroken = 0; /* File not broken, reset skip counter */</span>
+<span class="nc" id="L1400">		} catch (IOException e) {</span>
+<span class="nc" id="L1401">			mErrorMessage = getResources().getString(R.string.song_load_failed, song.path);</span>
+<span class="nc" id="L1402">			updateState(mState | FLAG_ERROR);</span>
+<span class="nc" id="L1403">			showToast(mErrorMessage, Toast.LENGTH_LONG);</span>
+<span class="nc" id="L1404">			Log.e(&quot;VanillaMusic&quot;, &quot;IOException&quot;, e);</span>
+
+			/* Automatically advance to next song IF we are currently playing or already did skip something
+			 * This will stop after skipping 10 songs to avoid endless loops (queue full of broken stuff */
+<span class="nc bnc" id="L1408" title="All 10 branches missed.">			if(!mTimeline.isEndOfQueue() &amp;&amp; getSong(1) != null &amp;&amp; (playing || (mSkipBroken &gt; 0 &amp;&amp; mSkipBroken &lt; 10))) {</span>
+<span class="nc" id="L1409">				mSkipBroken++;</span>
+<span class="nc" id="L1410">				mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_SKIP_BROKEN_SONG, getTimelinePosition(), 0), 1000);</span>
+			}
+
+<span class="nc" id="L1413">		}</span>
+
+<span class="nc" id="L1415">		updateNotification();</span>
+
+<span class="nc" id="L1417">	}</span>
+
+	@Override
+	public void onCompletion(MediaPlayer player)
+	{
+
+		// Count this song as played
+<span class="nc" id="L1424">		mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_UPDATE_PLAYCOUNTS, 1, 0, mCurrentSong), 800);</span>
+
+<span class="nc bnc" id="L1426" title="All 2 branches missed.">		if (finishAction(mState) == SongTimeline.FINISH_REPEAT_CURRENT) {</span>
+<span class="nc" id="L1427">			setCurrentSong(0);</span>
+<span class="nc bnc" id="L1428" title="All 2 branches missed.">		} else if (finishAction(mState) == SongTimeline.FINISH_STOP_CURRENT) {</span>
+<span class="nc" id="L1429">			unsetFlag(FLAG_PLAYING);</span>
+<span class="nc" id="L1430">			setCurrentSong(+1);</span>
+		} else {
+<span class="nc bnc" id="L1432" title="All 2 branches missed.">			if (mTimeline.isEndOfQueue()) {</span>
+<span class="nc" id="L1433">				unsetFlag(FLAG_PLAYING);</span>
+			}
+<span class="nc" id="L1435">			setCurrentSong(+1);</span>
+		}
+<span class="nc" id="L1437">	}</span>
+
+	@Override
+	public boolean onError(MediaPlayer player, int what, int extra)
+	{
+<span class="nc" id="L1442">		Log.e(&quot;VanillaMusic&quot;, &quot;MediaPlayer error: &quot; + what + ' ' + extra);</span>
+
+<span class="nc" id="L1444">		return true;</span>
+	}
+
+	/**
+	 * Returns the song &lt;code&gt;delta&lt;/code&gt; places away from the current
+	 * position.
+	 *
+	 * @see SongTimeline#getSong(int)
+	 */
+	public Song getSong(int delta)
+	{
+<span class="nc bnc" id="L1455" title="All 2 branches missed.">		if (mTimeline == null)</span>
+<span class="nc" id="L1456">			return null;</span>
+<span class="nc bnc" id="L1457" title="All 2 branches missed.">		if (delta == 0)</span>
+<span class="nc" id="L1458">			return mCurrentSong;</span>
+<span class="nc" id="L1459">		return mTimeline.getSong(delta);</span>
+	}
+
+<span class="fc" id="L1462">	private class Receiver extends BroadcastReceiver {</span>
+		@Override
+		public void onReceive(Context content, Intent intent)
+		{
+<span class="nc" id="L1466">			String action = intent.getAction();</span>
+
+<span class="nc bnc" id="L1468" title="All 2 branches missed.">			if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(action)) {</span>
+<span class="nc bnc" id="L1469" title="All 2 branches missed.">				if (mHeadsetPause) {</span>
+<span class="nc" id="L1470">					pause();</span>
+				}
+<span class="nc bnc" id="L1472" title="All 2 branches missed.">			} else if (Intent.ACTION_SCREEN_ON.equals(action)) {</span>
+<span class="nc" id="L1473">				userActionTriggered();</span>
+			}
+<span class="nc" id="L1475">		}</span>
+	}
+
+	public void onMediaChange()
+	{
+<span class="pc bpc" id="L1480" title="1 of 2 branches missed.">		if (MediaUtils.isSongAvailable(getApplicationContext())) {</span>
+<span class="nc bnc" id="L1481" title="All 2 branches missed.">			if ((mState &amp; FLAG_NO_MEDIA) != 0)</span>
+<span class="nc" id="L1482">				setCurrentSong(0);</span>
+		} else {
+<span class="fc" id="L1484">			setFlag(FLAG_NO_MEDIA);</span>
+		}
+
+<span class="fc" id="L1487">		ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="fc bfc" id="L1488" title="All 2 branches covered.">		for (int i = list.size(); --i != -1; )</span>
+<span class="fc" id="L1489">			list.get(i).onMediaChange();</span>
+
+<span class="fc" id="L1491">	}</span>
+
+	@Override
+	public void onSharedPreferenceChanged(SharedPreferences settings, String key)
+	{
+<span class="fc" id="L1496">		loadPreference(key);</span>
+<span class="fc" id="L1497">	}</span>
+
+	/**
+	 * Releases mWakeLock and closes any open AudioFx sessions
+	 */
+	private static final int MSG_ENTER_SLEEP_STATE = 1;
+	/**
+	 * Run the given query and add the results to the timeline.
+	 *
+	 * obj is the QueryTask. arg1 is the add mode (one of SongTimeline.MODE_*)
+	 */
+	private static final int MSG_QUERY = 2;
+	/**
+	 * This message is sent with a delay specified by a user preference. After
+	 * this delay, assuming no new IDLE_TIMEOUT messages cancel it, playback
+	 * will be stopped.
+	 */
+	private static final int MSG_IDLE_TIMEOUT = 4;
+	/**
+	 * Decrease the volume gradually over five seconds, pausing when 0 is
+	 * reached.
+	 *
+	 * arg1 should be the progress in the fade as a percentage, 1-100.
+	 */
+	private static final int MSG_FADE_OUT = 7;
+	/**
+	 * If arg1 is 0, calls {@link PlaybackService#playPause()}.
+	 * Otherwise, calls {@link PlaybackService#setCurrentSong(int)} with arg1.
+	 */
+	private static final int MSG_CALL_GO = 8;
+	/**
+	 * The combination of (current song, current playback state) changed.
+	 */
+	private static final int MSG_BROADCAST_CHANGE = 10;
+	private static final int MSG_SAVE_STATE = 12;
+	private static final int MSG_PROCESS_SONG = 13;
+	private static final int MSG_PROCESS_STATE = 14;
+	private static final int MSG_SKIP_BROKEN_SONG = 15;
+	private static final int MSG_GAPLESS_UPDATE = 16;
+	private static final int MSG_UPDATE_PLAYCOUNTS = 17;
+	private static final int MSG_SHOW_TOAST = 18;
+	/**
+	 * The current song's playback position changed.
+	 */
+	private static final int MSG_BROADCAST_SEEK = 19;
+
+	@Override
+	public boolean handleMessage(Message message)
+	{
+<span class="pc bpc" id="L1546" title="13 of 15 branches missed.">		switch (message.what) {</span>
+		case MSG_CALL_GO:
+<span class="nc bnc" id="L1548" title="All 2 branches missed.">			if (message.arg1 == 0)</span>
+<span class="nc" id="L1549">				playPause(false);</span>
+			else
+<span class="nc" id="L1551">				setCurrentSong(message.arg1);</span>
+<span class="nc" id="L1552">			break;</span>
+		case MSG_SAVE_STATE:
+			// For unexpected terminations: crashes, task killers, etc.
+			// In most cases onDestroy will handle this
+<span class="nc" id="L1556">			saveState(0);</span>
+<span class="nc" id="L1557">			break;</span>
+		case MSG_PROCESS_SONG:
+<span class="nc" id="L1559">			processSong((Song)message.obj);</span>
+<span class="nc" id="L1560">			break;</span>
+		case MSG_QUERY:
+<span class="nc" id="L1562">			runQuery((QueryTask)message.obj);</span>
+<span class="nc" id="L1563">			break;</span>
+		case MSG_IDLE_TIMEOUT:
+<span class="nc bnc" id="L1565" title="All 2 branches missed.">			if ((mState &amp; FLAG_PLAYING) != 0) {</span>
+<span class="nc" id="L1566">				mHandler.sendMessage(mHandler.obtainMessage(MSG_FADE_OUT, 0));</span>
+			}
+			break;
+		case MSG_FADE_OUT:
+<span class="nc bnc" id="L1570" title="All 2 branches missed.">			if (mFadeOut &lt;= 0.0f) {</span>
+<span class="nc" id="L1571">				mIdleStart = SystemClock.elapsedRealtime();</span>
+<span class="nc" id="L1572">				unsetFlag(FLAG_PLAYING);</span>
+			} else {
+<span class="nc" id="L1574">				mFadeOut -= 0.01f;</span>
+<span class="nc" id="L1575">				mHandler.sendMessageDelayed(mHandler.obtainMessage(MSG_FADE_OUT, 0), 50);</span>
+			}
+<span class="nc" id="L1577">			refreshReplayGainValues(); /* Updates the volume using the new mFadeOut value */</span>
+<span class="nc" id="L1578">			break;</span>
+		case MSG_PROCESS_STATE:
+<span class="fc" id="L1580">			processNewState(message.arg1, message.arg2);</span>
+<span class="fc" id="L1581">			break;</span>
+		case MSG_BROADCAST_CHANGE:
+<span class="fc" id="L1583">			TimestampedObject tso = (TimestampedObject)message.obj;</span>
+<span class="fc" id="L1584">			broadcastChange(message.arg1, (Song)tso.object, tso.uptime);</span>
+<span class="fc" id="L1585">			break;</span>
+		case MSG_ENTER_SLEEP_STATE:
+<span class="nc" id="L1587">			enterSleepState();</span>
+<span class="nc" id="L1588">			break;</span>
+		case MSG_SKIP_BROKEN_SONG:
+			/* Advance to next song if the user didn't already change.
+			 * But we are restoring the Playing state in ANY case as we are most
+			 * likely still stopped due to the error
+			 * Note: This is somewhat racy with user input but also is the - by far - simplest
+			 *       solution */
+<span class="nc bnc" id="L1595" title="All 2 branches missed.">			if(getTimelinePosition() == message.arg1) {</span>
+<span class="nc" id="L1596">				setCurrentSong(1);</span>
+			}
+			// Optimistically claim to have recovered from this error
+<span class="nc" id="L1599">			mErrorMessage = null;</span>
+<span class="nc" id="L1600">			unsetFlag(FLAG_ERROR);</span>
+<span class="nc" id="L1601">			mHandler.sendMessage(mHandler.obtainMessage(MSG_CALL_GO, 0, 0));</span>
+<span class="nc" id="L1602">			break;</span>
+		case MSG_GAPLESS_UPDATE:
+<span class="nc" id="L1604">			triggerGaplessUpdate();</span>
+<span class="nc" id="L1605">			break;</span>
+		case MSG_UPDATE_PLAYCOUNTS:
+<span class="nc" id="L1607">			Song song = (Song)message.obj;</span>
+<span class="nc bnc" id="L1608" title="All 2 branches missed.">			boolean played = message.arg1 == 1;</span>
+<span class="nc" id="L1609">			PlayCountsHelper.countSong(getApplicationContext(), song, played);</span>
+			// Update the playcounts playlist in ~20% of all cases if enabled
+<span class="nc bnc" id="L1611" title="All 4 branches missed.">			if (mAutoPlPlaycounts &gt; 0 &amp;&amp; Math.random() &gt; 0.8) {</span>
+<span class="nc" id="L1612">				Context context = getApplicationContext();</span>
+				// Add an invisible whitespace to adjust our sorting
+<span class="nc" id="L1614">				String playlistName = getString(R.string.autoplaylist_playcounts_name, mAutoPlPlaycounts);</span>
+<span class="nc" id="L1615">				long id = Playlist.createPlaylist(context, playlistName);</span>
+<span class="nc" id="L1616">				ArrayList&lt;Long&gt; items = PlayCountsHelper.getTopSongs(context, mAutoPlPlaycounts);</span>
+<span class="nc" id="L1617">				Playlist.addToPlaylist(context, id, items);</span>
+<span class="nc" id="L1618">			}</span>
+			break;
+		case MSG_SHOW_TOAST:
+<span class="nc" id="L1621">			CharSequence text = (CharSequence)message.obj;</span>
+<span class="nc" id="L1622">			int duration = message.arg1;</span>
+<span class="nc" id="L1623">			int resId = message.arg2;</span>
+<span class="nc bnc" id="L1624" title="All 2 branches missed.">			if (text != null) {</span>
+<span class="nc" id="L1625">				Toast.makeText(this, text, duration).show();</span>
+			} else {
+<span class="nc" id="L1627">				Toast.makeText(this, resId, duration).show();</span>
+			}
+<span class="nc" id="L1629">			break;</span>
+		case MSG_BROADCAST_SEEK:
+<span class="nc" id="L1631">			mRemoteControlClient.updateRemote(mCurrentSong, mState, mForceNotificationVisible);</span>
+<span class="nc" id="L1632">			mMediaSessionTracker.updateSession(mCurrentSong, mState);</span>
+<span class="nc" id="L1633">			break;</span>
+		default:
+<span class="nc" id="L1635">			return false;</span>
+		}
+
+<span class="fc" id="L1638">		return true;</span>
+	}
+
+	/**
+	 * Returns the current service state. The state comprises several individual
+	 * flags.
+	 */
+	public int getState()
+	{
+<span class="nc" id="L1647">		synchronized (mStateLock) {</span>
+<span class="nc" id="L1648">			return mState;</span>
+		}
+	}
+
+	/**
+	 * Returns the current position in current song in milliseconds.
+	 */
+	public int getPosition()
+	{
+<span class="pc bpc" id="L1657" title="1 of 2 branches missed.">		if (!mMediaPlayerInitialized)</span>
+<span class="fc" id="L1658">			return 0;</span>
+<span class="nc" id="L1659">		return mMediaPlayer.getCurrentPosition();</span>
+	}
+
+	/**
+	 * Returns the song duration in milliseconds.
+	*/
+	public int getDuration()
+	{
+<span class="nc bnc" id="L1667" title="All 2 branches missed.">		if (!mMediaPlayerInitialized)</span>
+<span class="nc" id="L1668">			return 0;</span>
+<span class="nc" id="L1669">		return mMediaPlayer.getDuration();</span>
+	}
+
+	/**
+	 * Returns the global audio session
+	 */
+	public int getAudioSession() {
+		// Must not be 'ready' or initialized: the audio session
+		// is set on object creation
+<span class="nc" id="L1678">		return mMediaPlayer.getAudioSessionId();</span>
+	}
+
+	/**
+	 * Seek to a position in the current song.
+	 *
+	 * @param progress Proportion of song completed (where 1000 is the end of the song)
+	 */
+	public void seekToProgress(int progress)
+	{
+<span class="nc bnc" id="L1688" title="All 2 branches missed.">		if (!mMediaPlayerInitialized)</span>
+<span class="nc" id="L1689">			return;</span>
+<span class="nc" id="L1690">		long position = (long)mMediaPlayer.getDuration() * progress / 1000;</span>
+<span class="nc" id="L1691">		seekToPosition((int) position);</span>
+<span class="nc" id="L1692">	}</span>
+
+	/**
+	 * Seeks to the given position in the current song.
+	 *
+	 * @param msec the offset in milliseconds from the start to seek to
+	 */
+	public void seekToPosition(int msec) {
+<span class="nc bnc" id="L1700" title="All 2 branches missed.">		if (!mMediaPlayerInitialized) {</span>
+<span class="nc" id="L1701">			return;</span>
+		}
+<span class="nc" id="L1703">		mMediaPlayer.seekTo(msec);</span>
+<span class="nc" id="L1704">		mHandler.sendEmptyMessage(MSG_BROADCAST_SEEK);</span>
+<span class="nc" id="L1705">	}</span>
+
+	@Override
+	public IBinder onBind(Intent intents)
+	{
+<span class="nc" id="L1710">		return null;</span>
+	}
+
+	@Override
+	public void activeSongReplaced(int delta, Song song)
+	{
+<span class="nc" id="L1716">		ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="nc bnc" id="L1717" title="All 2 branches missed.">		for (int i = list.size(); --i != -1; )</span>
+<span class="nc" id="L1718">			list.get(i).replaceSong(delta, song);</span>
+
+<span class="nc bnc" id="L1720" title="All 2 branches missed.">		if (delta == 0)</span>
+<span class="nc" id="L1721">			setCurrentSong(0);</span>
+<span class="nc" id="L1722">	}</span>
+
+	/**
+	 * Delete all the songs in the given media set. Should be run on a
+	 * background thread.
+	 *
+	 * @param type One of the TYPE_* constants, excluding playlists.
+	 * @param id The MediaStore id of the media to delete.
+	 * @return The number of songs deleted.
+	 */
+	public int deleteMedia(int type, long id)
+	{
+<span class="nc" id="L1734">		int count = 0;</span>
+<span class="nc" id="L1735">		String[] projection = new String [] { MediaLibrary.SongColumns._ID, MediaLibrary.SongColumns.PATH };</span>
+<span class="nc" id="L1736">		Cursor cursor = MediaUtils.buildQuery(type, id, projection, null).runQuery(getApplicationContext());</span>
+
+<span class="nc bnc" id="L1738" title="All 2 branches missed.">		if (cursor != null) {</span>
+<span class="nc bnc" id="L1739" title="All 2 branches missed.">			while (cursor.moveToNext()) {</span>
+<span class="nc bnc" id="L1740" title="All 2 branches missed.">				if (new File(cursor.getString(1)).delete()) {</span>
+<span class="nc" id="L1741">					long songId = cursor.getLong(0);</span>
+<span class="nc" id="L1742">					MediaLibrary.removeSong(getApplicationContext(), songId);</span>
+<span class="nc" id="L1743">					mTimeline.removeSong(songId);</span>
+<span class="nc" id="L1744">					++count;</span>
+<span class="nc" id="L1745">				}</span>
+			}
+<span class="nc" id="L1747">			cursor.close();</span>
+		}
+<span class="nc" id="L1749">		return count;</span>
+	}
+
+	/**
+	 * Move to next or previous song or album in the queue.
+	 *
+	 * @param delta One of SongTimeline.SHIFT_*.
+	 * @return The new current song.
+	 */
+	public Song shiftCurrentSong(int delta)
+	{
+<span class="nc" id="L1760">		preparePlayCountsUpdate(delta);</span>
+<span class="nc" id="L1761">		Song song = setCurrentSong(delta);</span>
+<span class="nc" id="L1762">		userActionTriggered();</span>
+<span class="nc" id="L1763">		return song;</span>
+	}
+
+	/**
+	 * Skips to the previous song OR rewinds the currently playing track, depending
+	 * on the current position.
+	 *
+	 * @return The new current song
+	 */
+	public Song rewindCurrentSong() {
+<span class="nc" id="L1773">		int delta = SongTimeline.SHIFT_PREVIOUS_SONG;</span>
+<span class="nc bnc" id="L1774" title="All 4 branches missed.">		if(getPosition() &gt; REWIND_AFTER_PLAYED_MS &amp;&amp; getDuration() &gt; REWIND_AFTER_PLAYED_MS*2) {</span>
+<span class="nc" id="L1775">			delta = SongTimeline.SHIFT_KEEP_SONG;</span>
+		}
+<span class="nc" id="L1777">		return shiftCurrentSong(delta);</span>
+	}
+
+	/**
+	 * Resets the idle timeout countdown. Should be called by a user action
+	 * has been triggered (new song chosen or playback toggled).
+	 *
+	 * If an idle fade out is actually in progress, aborts it and resets the
+	 * volume.
+	 */
+	public void userActionTriggered()
+	{
+<span class="fc" id="L1789">		mHandler.removeMessages(MSG_FADE_OUT);</span>
+<span class="fc" id="L1790">		mHandler.removeMessages(MSG_IDLE_TIMEOUT);</span>
+<span class="pc bpc" id="L1791" title="1 of 2 branches missed.">		if (mIdleTimeout != 0)</span>
+<span class="nc" id="L1792">			mHandler.sendEmptyMessageDelayed(MSG_IDLE_TIMEOUT, mIdleTimeout * 1000);</span>
+
+<span class="pc bpc" id="L1794" title="1 of 2 branches missed.">		if (mFadeOut != 1.0f) {</span>
+<span class="nc" id="L1795">			mFadeOut = 1.0f;</span>
+<span class="nc" id="L1796">			refreshReplayGainValues();</span>
+		}
+
+<span class="fc" id="L1799">		long idleStart = mIdleStart;</span>
+<span class="pc bpc" id="L1800" title="3 of 4 branches missed.">		if (idleStart != -1 &amp;&amp; SystemClock.elapsedRealtime() - idleStart &lt; IDLE_GRACE_PERIOD) {</span>
+<span class="nc" id="L1801">			mIdleStart = -1;</span>
+<span class="nc" id="L1802">			setFlag(FLAG_PLAYING);</span>
+		}
+<span class="fc" id="L1804">	}</span>
+
+	/**
+	 * Run the query and add the results to the timeline. Should be called in the
+	 * worker thread.
+	 *
+	 * @param query The query to run.
+	 */
+	private void runQuery(QueryTask query)
+	{
+<span class="nc" id="L1814">		int count = mTimeline.addSongs(this, query);</span>
+
+		int text;
+
+<span class="nc bnc" id="L1818" title="All 3 branches missed.">		switch (query.mode) {</span>
+		case SongTimeline.MODE_PLAY:
+		case SongTimeline.MODE_PLAY_POS_FIRST:
+		case SongTimeline.MODE_PLAY_ID_FIRST:
+<span class="nc" id="L1822">			text = R.plurals.playing;</span>
+<span class="nc bnc" id="L1823" title="All 4 branches missed.">			if (count != 0 &amp;&amp; (mState &amp; FLAG_PLAYING) == 0)</span>
+<span class="nc" id="L1824">				setFlag(FLAG_PLAYING);</span>
+			break;
+		case SongTimeline.MODE_FLUSH_AND_PLAY_NEXT:
+		case SongTimeline.MODE_ENQUEUE:
+		case SongTimeline.MODE_ENQUEUE_ID_FIRST:
+		case SongTimeline.MODE_ENQUEUE_POS_FIRST:
+		case SongTimeline.MODE_ENQUEUE_AS_NEXT:
+<span class="nc" id="L1831">			text = R.plurals.enqueued;</span>
+<span class="nc" id="L1832">			break;</span>
+		default:
+<span class="nc" id="L1834">			throw new IllegalArgumentException(&quot;Invalid add mode: &quot; + query.mode);</span>
+		}
+<span class="nc" id="L1836">		showToast(getResources().getQuantityString(text, count, count), Toast.LENGTH_SHORT);</span>
+<span class="nc" id="L1837">	}</span>
+
+	/**
+	 * Run the query in the background and add the results to the timeline.
+	 *
+	 * @param query The query.
+	 */
+	public void addSongs(QueryTask query)
+	{
+<span class="nc" id="L1846">		mHandler.sendMessage(mHandler.obtainMessage(MSG_QUERY, query));</span>
+<span class="nc" id="L1847">	}</span>
+
+
+	/**
+	 * Enqueues all the songs with the same album/artist/genre as the passed
+	 * song.
+	 *
+	 * This will clear the queue and place the first song from the group after
+	 * the playing song.
+	 *
+	 * @param song The song to base the query on
+	 * @param type The media type, one of MediaUtils.TYPE_ALBUM, TYPE_ARTIST,
+	 * or TYPE_GENRE
+	 */
+	public void enqueueFromSong(Song song, int type)
+	{
+<span class="nc bnc" id="L1863" title="All 2 branches missed.">		if (song == null)</span>
+<span class="nc" id="L1864">			return;</span>
+
+		long id;
+<span class="nc bnc" id="L1867" title="All 4 branches missed.">		switch (type) {</span>
+		case MediaUtils.TYPE_ARTIST:
+<span class="nc" id="L1869">			id = song.artistId;</span>
+<span class="nc" id="L1870">			break;</span>
+		case MediaUtils.TYPE_ALBUM:
+<span class="nc" id="L1872">			id = song.albumId;</span>
+<span class="nc" id="L1873">			break;</span>
+		case MediaUtils.TYPE_GENRE:
+<span class="nc" id="L1875">			id = MediaUtils.queryGenreForSong(getApplicationContext(), song.id);</span>
+<span class="nc" id="L1876">			break;</span>
+		default:
+<span class="nc" id="L1878">			throw new IllegalArgumentException(&quot;Unsupported media type: &quot; + type);</span>
+		}
+
+<span class="nc" id="L1881">		String selection = &quot;_id!=&quot; + song.id;</span>
+<span class="nc" id="L1882">		QueryTask query = MediaUtils.buildQuery(type, id, Song.FILLED_PROJECTION, selection);</span>
+<span class="nc" id="L1883">		query.mode = SongTimeline.MODE_FLUSH_AND_PLAY_NEXT;</span>
+<span class="nc" id="L1884">		addSongs(query);</span>
+<span class="nc" id="L1885">	}</span>
+
+	/**
+	 * Clear the song queue.
+	 */
+	public void clearQueue()
+	{
+<span class="nc" id="L1892">		mTimeline.clearQueue();</span>
+<span class="nc" id="L1893">	}</span>
+
+	/**
+	 * Empty the song queue.
+	 */
+	public void emptyQueue()
+	{
+<span class="nc" id="L1900">		pause();</span>
+<span class="nc" id="L1901">		setFlag(FLAG_EMPTY_QUEUE);</span>
+<span class="nc" id="L1902">		mTimeline.emptyQueue();</span>
+<span class="nc" id="L1903">	}</span>
+
+	/**
+	 * Return the error message set when FLAG_ERROR is set.
+	 */
+	public String getErrorMessage()
+	{
+<span class="nc" id="L1910">		return mErrorMessage;</span>
+	}
+
+	@Override
+	public void timelineChanged()
+	{
+<span class="nc" id="L1916">		mHandler.removeMessages(MSG_SAVE_STATE);</span>
+<span class="nc" id="L1917">		mHandler.sendEmptyMessageDelayed(MSG_SAVE_STATE, SAVE_STATE_DELAY);</span>
+
+		// Trigger a gappless update for the new timeline
+		// This might get canceled if setCurrentSong() also fired a call
+		// to processSong();
+<span class="nc" id="L1922">		mHandler.removeMessages(MSG_GAPLESS_UPDATE);</span>
+<span class="nc" id="L1923">		mHandler.sendEmptyMessageDelayed(MSG_GAPLESS_UPDATE, 100);</span>
+
+<span class="nc" id="L1925">		ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="nc bnc" id="L1926" title="All 2 branches missed.">		for (int i = list.size(); --i != -1; )</span>
+<span class="nc" id="L1927">			list.get(i).onTimelineChanged();</span>
+
+<span class="nc" id="L1929">	}</span>
+
+	@Override
+	public void positionInfoChanged()
+	{
+<span class="nc" id="L1934">		ArrayList&lt;TimelineCallback&gt; list = sCallbacks;</span>
+<span class="nc bnc" id="L1935" title="All 2 branches missed.">		for (int i = list.size(); --i != -1; )</span>
+<span class="nc" id="L1936">			list.get(i).onPositionInfoChanged();</span>
+<span class="nc" id="L1937">		mRemoteControlClient.updateRemote(mCurrentSong, mState, mForceNotificationVisible);</span>
+<span class="nc" id="L1938">		mMediaSessionTracker.updateSession(mCurrentSong, mState);</span>
+<span class="nc" id="L1939">	}</span>
+
+<span class="fc" id="L1941">	private final LibraryObserver mObserver = new LibraryObserver() {</span>
+		@Override
+		public void onChange(LibraryObserver.Type type, long id, boolean ongoing)
+		{
+<span class="fc bfc" id="L1945" title="All 4 branches covered.">			if (type != LibraryObserver.Type.SONG &amp;&amp; type != LibraryObserver.Type.PLAYLIST)</span>
+<span class="fc" id="L1946">				return;</span>
+
+<span class="fc" id="L1948">			MediaUtils.onMediaChange();</span>
+<span class="fc" id="L1949">			onMediaChange();</span>
+<span class="fc" id="L1950">		}</span>
+	};
+
+	/**
+	 * Return the PlaybackService instance, creating one if needed.
+	 */
+	public static PlaybackService get(Context context)
+	{
+<span class="pc bpc" id="L1958" title="1 of 2 branches missed.">		if (sInstance == null) {</span>
+<span class="nc" id="L1959">			context.startService(new Intent(context, PlaybackService.class));</span>
+
+<span class="nc bnc" id="L1961" title="All 2 branches missed.">			while (sInstance == null) {</span>
+				try {
+<span class="nc" id="L1963">					synchronized (sWait) {</span>
+<span class="nc" id="L1964">						sWait.wait();</span>
+<span class="nc" id="L1965">					}</span>
+<span class="nc" id="L1966">				} catch (InterruptedException ignored) {</span>
+<span class="nc" id="L1967">				}</span>
+			}
+		}
+
+<span class="fc" id="L1971">		return sInstance;</span>
+	}
+
+	/**
+	 * Returns true if a PlaybackService instance is active.
+	 */
+	public static boolean hasInstance()
+	{
+<span class="fc bfc" id="L1979" title="All 2 branches covered.">		return sInstance != null;</span>
+	}
+
+	/**
+	 * Add an Activity to the registered PlaybackActivities.
+	 */
+	public static void addTimelineCallback(TimelineCallback consumer)
+	{
+<span class="fc" id="L1987">		sCallbacks.add(consumer);</span>
+<span class="fc" id="L1988">	}</span>
+
+	/**
+	 * Remove an Activity from the registered PlaybackActivities
+	 */
+	public static void removeTimelineCallback(TimelineCallback consumer)
+	{
+<span class="nc" id="L1995">		sCallbacks.remove(consumer);</span>
+<span class="nc" id="L1996">	}</span>
+
+	/**
+	 * Initializes the service state, loading songs saved from the disk into the
+	 * song timeline.
+	 *
+	 * @return The loaded value for mState.
+	 */
+	public int loadState()
+	{
+<span class="fc" id="L2006">		int state = 0;</span>
+
+		try {
+<span class="nc" id="L2009">			DataInputStream in = new DataInputStream(openFileInput(STATE_FILE));</span>
+
+<span class="nc bnc" id="L2011" title="All 4 branches missed.">			if (in.readLong() == STATE_FILE_MAGIC &amp;&amp; in.readInt() == STATE_VERSION) {</span>
+<span class="nc" id="L2012">				mPendingSeek = in.readInt();</span>
+<span class="nc" id="L2013">				mPendingSeekSong = in.readLong();</span>
+<span class="nc" id="L2014">				mTimeline.readState(in);</span>
+<span class="nc" id="L2015">				state |= mTimeline.getShuffleMode() &lt;&lt; SHIFT_SHUFFLE;</span>
+<span class="nc" id="L2016">				state |= mTimeline.getFinishAction() &lt;&lt; SHIFT_FINISH;</span>
+			}
+
+<span class="nc" id="L2019">			in.close();</span>
+<span class="nc" id="L2020">		} catch (EOFException e) {</span>
+<span class="nc" id="L2021">			Log.w(&quot;VanillaMusic&quot;, &quot;Failed to load state&quot;, e);</span>
+<span class="fc" id="L2022">		} catch (IOException e) {</span>
+<span class="fc" id="L2023">			Log.w(&quot;VanillaMusic&quot;, &quot;Failed to load state&quot;, e);</span>
+<span class="nc" id="L2024">		}</span>
+
+<span class="fc" id="L2026">		return state;</span>
+	}
+
+	/**
+	 * Save the service state to disk.
+	 *
+	 * @param pendingSeek The pendingSeek to store. Should be the current
+	 * MediaPlayer position or 0.
+	 */
+	public void saveState(int pendingSeek)
+	{
+		try {
+<span class="nc" id="L2038">			DataOutputStream out = new DataOutputStream(openFileOutput(STATE_FILE, 0));</span>
+<span class="nc" id="L2039">			Song song = mCurrentSong;</span>
+<span class="nc" id="L2040">			out.writeLong(STATE_FILE_MAGIC);</span>
+<span class="nc" id="L2041">			out.writeInt(STATE_VERSION);</span>
+<span class="nc" id="L2042">			out.writeInt(pendingSeek);</span>
+<span class="nc bnc" id="L2043" title="All 2 branches missed.">			out.writeLong(song == null ? -1 : song.id);</span>
+<span class="nc" id="L2044">			mTimeline.writeState(out);</span>
+<span class="nc" id="L2045">			out.close();</span>
+<span class="nc" id="L2046">		} catch (IOException e) {</span>
+<span class="nc" id="L2047">			Log.w(&quot;VanillaMusic&quot;, &quot;Failed to save state&quot;, e);</span>
+<span class="nc" id="L2048">		}</span>
+<span class="nc" id="L2049">	}</span>
+
+	/**
+	 * Returns the shuffle mode for the given state.
+	 *
+	 * @param state The PlaybackService state to process.
+	 * @return The shuffle mode. One of SongTimeline.SHUFFLE_*.
+	 */
+	public static int shuffleMode(int state)
+	{
+<span class="nc" id="L2059">		return (state &amp; MASK_SHUFFLE) &gt;&gt; SHIFT_SHUFFLE;</span>
+	}
+
+	/**
+	 * Returns the finish action for the given state.
+	 *
+	 * @param state The PlaybackService state to process.
+	 * @return The finish action. One of SongTimeline.FINISH_*.
+	 */
+	public static int finishAction(int state)
+	{
+<span class="nc" id="L2070">		return (state &amp; MASK_FINISH) &gt;&gt; SHIFT_FINISH;</span>
+	}
+
+	/**
+	 * Create a PendingIntent for use with the notification.
+	 *
+	 * @param prefs Where to load the action preference from.
+	 */
+	public PendingIntent createNotificationAction(SharedPreferences prefs)
+	{
+<span class="pc bpc" id="L2080" title="4 of 5 branches missed.">		switch (Integer.parseInt(prefs.getString(PrefKeys.NOTIFICATION_ACTION, PrefDefaults.NOTIFICATION_ACTION))) {</span>
+		case NOT_ACTION_NEXT_SONG: {
+<span class="nc" id="L2082">			Intent intent = new Intent(this, PlaybackService.class);</span>
+<span class="nc" id="L2083">			intent.setAction(PlaybackService.ACTION_NEXT_SONG_AUTOPLAY);</span>
+<span class="nc" id="L2084">			return PendingIntent.getService(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);</span>
+		}
+		case NOT_ACTION_MINI_ACTIVITY: {
+<span class="nc" id="L2087">			Intent intent = new Intent(this, MiniPlaybackActivity.class);</span>
+<span class="nc" id="L2088">			return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);</span>
+		}
+		default:
+<span class="nc" id="L2091">			Log.w(&quot;VanillaMusic&quot;, &quot;Unknown value for notification_action. Defaulting to 0.&quot;);</span>
+			// fall through
+		case NOT_ACTION_MAIN_ACTIVITY: {
+<span class="fc" id="L2094">			Intent intent = new Intent(this, LibraryActivity.class);</span>
+<span class="fc" id="L2095">			intent.setAction(Intent.ACTION_MAIN);</span>
+<span class="fc" id="L2096">			return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);</span>
+		}
+		case NOT_ACTION_FULL_ACTIVITY: {
+<span class="nc" id="L2099">			Intent intent = new Intent(this, FullPlaybackActivity.class);</span>
+<span class="nc" id="L2100">			intent.setAction(Intent.ACTION_MAIN);</span>
+<span class="nc" id="L2101">			return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);</span>
+		}
+		}
+	}
+
+	/**
+	 * Create a song notification. Call through the NotificationHelper to
+	 * display it.
+	 *
+	 * @param song The Song to display information about.
+	 * @param state The state. Determines whether to show paused or playing icon.
+	 */
+	public Notification createNotification(Song song, int state)
+	{
+<span class="nc bnc" id="L2115" title="All 2 branches missed.">		final boolean playing = (state &amp; FLAG_PLAYING) != 0;</span>
+
+<span class="nc" id="L2117">		ComponentName service = new ComponentName(this, PlaybackService.class);</span>
+
+<span class="nc" id="L2119">		int playButton = ThemeHelper.getPlayButtonResource(playing);</span>
+<span class="nc" id="L2120">		Intent playPause = new Intent(PlaybackService.ACTION_TOGGLE_PLAYBACK)</span>
+<span class="nc" id="L2121">			.putExtra(PlaybackService.EXTRA_FORCE_NOTIFICATION, true)</span>
+<span class="nc" id="L2122">			.setComponent(service);</span>
+
+<span class="nc" id="L2124">		Intent next = new Intent(PlaybackService.ACTION_NEXT_SONG)</span>
+<span class="nc" id="L2125">			.setComponent(service);</span>
+
+<span class="nc" id="L2127">		Intent previous = new Intent(PlaybackService.ACTION_PREVIOUS_SONG)</span>
+<span class="nc" id="L2128">			.setComponent(service);</span>
+
+<span class="nc" id="L2130">		NotificationCompat.Builder n = mNotificationHelper.getNewBuilder(getApplicationContext())</span>
+<span class="nc" id="L2131">			.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)</span>
+<span class="nc" id="L2132">			.setSmallIcon(R.drawable.status_icon)</span>
+<span class="nc" id="L2133">			.setContentTitle(song.title)</span>
+<span class="nc" id="L2134">			.setContentText(song.album)</span>
+<span class="nc" id="L2135">			.setSubText(song.artist)</span>
+<span class="nc" id="L2136">			.setContentIntent(mNotificationAction)</span>
+<span class="nc" id="L2137">			.addAction(new NotificationCompat.Action(R.drawable.previous,</span>
+<span class="nc" id="L2138">													 getString(R.string.previous_song), PendingIntent.getService(this, 0, previous, PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT)))</span>
+<span class="nc" id="L2139">			.addAction(new NotificationCompat.Action(playButton,</span>
+<span class="nc" id="L2140">													 getString(R.string.play_pause), PendingIntent.getService(this, 0, playPause, PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT)))</span>
+<span class="nc" id="L2141">			.addAction(new NotificationCompat.Action(R.drawable.next,</span>
+<span class="nc" id="L2142">													 getString(R.string.next_song), PendingIntent.getService(this, 0, next, PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT)))</span>
+<span class="nc" id="L2143">			.setStyle(new androidx.media.app.NotificationCompat.MediaStyle()</span>
+<span class="nc" id="L2144">					  .setMediaSession(mMediaSessionTracker.getSessionToken())</span>
+<span class="nc" id="L2145">					  .setShowActionsInCompactView(0, 1, 2))</span>
+<span class="nc" id="L2146">			.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE);</span>
+
+<span class="nc bnc" id="L2148" title="All 2 branches missed.">		if (Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.TIRAMISU) {</span>
+			// Only set the cover for android &lt; 13 since newer versions display the cover from the media session anyway.
+<span class="nc" id="L2150">			Bitmap cover = song.getMediumCover(this);</span>
+<span class="nc bnc" id="L2151" title="All 2 branches missed.">			if (cover == null) {</span>
+<span class="nc" id="L2152">				cover = BitmapFactory.decodeResource(getResources(), R.drawable.fallback_cover_large);</span>
+			}
+<span class="nc" id="L2154">			n.setLargeIcon(cover);</span>
+		}
+
+<span class="nc" id="L2157">		return n.build();</span>
+	}
+
+	public void onAudioFocusChange(int type)
+	{
+<span class="nc" id="L2162">		Log.d(&quot;VanillaMusic&quot;, &quot;audio focus change: &quot; + type);</span>
+
+		// Rewrite permanent focus loss into can_duck
+<span class="nc bnc" id="L2165" title="All 2 branches missed.">		if (mIgnoreAudioFocusLoss) {</span>
+<span class="nc bnc" id="L2166" title="All 2 branches missed.">			switch (type) {</span>
+				case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+				case AudioManager.AUDIOFOCUS_LOSS:
+<span class="nc" id="L2169">					type = AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK;</span>
+			}
+		}
+
+<span class="nc bnc" id="L2173" title="All 4 branches missed.">		switch (type) {</span>
+		case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+		case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+<span class="nc" id="L2176">			synchronized (mStateLock) {</span>
+<span class="nc bnc" id="L2177" title="All 2 branches missed.">				if((mState &amp; FLAG_PLAYING) != 0) {</span>
+<span class="nc" id="L2178">					mTransientAudioLoss = true;</span>
+
+<span class="nc bnc" id="L2180" title="All 2 branches missed.">					if(type == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {</span>
+<span class="nc" id="L2181">						setFlag(FLAG_DUCKING);</span>
+					} else {
+<span class="nc" id="L2183">						mForceNotificationVisible = true;</span>
+<span class="nc" id="L2184">						unsetFlag(FLAG_PLAYING);</span>
+					}
+				}
+<span class="nc" id="L2187">				break;</span>
+			}
+		case AudioManager.AUDIOFOCUS_LOSS:
+<span class="nc" id="L2190">			mTransientAudioLoss = false;</span>
+<span class="nc" id="L2191">			mForceNotificationVisible = true;</span>
+<span class="nc" id="L2192">			unsetFlag(FLAG_PLAYING);</span>
+<span class="nc" id="L2193">			break;</span>
+		case AudioManager.AUDIOFOCUS_GAIN:
+<span class="nc bnc" id="L2195" title="All 2 branches missed.">			if (mTransientAudioLoss) {</span>
+<span class="nc" id="L2196">				mTransientAudioLoss = false;</span>
+				// Restore all flags possibly changed by AUDIOFOCUS_LOSS_TRANSIENT_*
+<span class="nc" id="L2198">				unsetFlag(FLAG_DUCKING);</span>
+<span class="nc" id="L2199">				setFlag(FLAG_PLAYING);</span>
+			}
+			break;
+		}
+<span class="nc" id="L2203">	}</span>
+
+	@Override
+	public void onSensorChanged(SensorEvent se)
+	{
+<span class="nc" id="L2208">		double x = se.values[0];</span>
+<span class="nc" id="L2209">		double y = se.values[1];</span>
+<span class="nc" id="L2210">		double z = se.values[2];</span>
+
+<span class="nc" id="L2212">		double accel = Math.sqrt(x*x + y*y + z*z);</span>
+<span class="nc" id="L2213">		double delta = accel - mAccelLast;</span>
+<span class="nc" id="L2214">		mAccelLast = accel;</span>
+
+<span class="nc" id="L2216">		double filtered = mAccelFiltered * 0.9f + delta;</span>
+<span class="nc" id="L2217">		mAccelFiltered = filtered;</span>
+
+<span class="nc bnc" id="L2219" title="All 2 branches missed.">		if (filtered &gt; mShakeThreshold) {</span>
+<span class="nc" id="L2220">			long now = SystemClock.elapsedRealtime();</span>
+<span class="nc bnc" id="L2221" title="All 2 branches missed.">			if (now - mLastShakeTime &gt; MIN_SHAKE_PERIOD) {</span>
+<span class="nc" id="L2222">				mLastShakeTime = now;</span>
+<span class="nc" id="L2223">				performAction(mShakeAction, null);</span>
+			}
+		}
+<span class="nc" id="L2226">	}</span>
+
+	@Override
+	public void onAccuracyChanged(Sensor sensor, int accuracy)
+	{
+<span class="nc" id="L2231">	}</span>
+
+	/**
+	 * Execute the given action.
+	 *
+	 * @param action The action to execute.
+	 * @param receiver Optional. If non-null, update the PlaybackActivity with
+	 * new song or state from the executed action. The activity will still be
+	 * updated by the broadcast if not passed here; passing it just makes the
+	 * update immediate.
+	 */
+	public void performAction(Action action, PlaybackActivity receiver)
+	{
+<span class="nc bnc" id="L2244" title="All 17 branches missed.">		switch (action) {</span>
+		case Nothing:
+<span class="nc" id="L2246">			break;</span>
+		case Library:
+<span class="nc" id="L2248">			Intent intent = new Intent(this, LibraryActivity.class);</span>
+<span class="nc" id="L2249">			intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);</span>
+<span class="nc" id="L2250">			startActivity(intent);</span>
+<span class="nc" id="L2251">			break;</span>
+		case PlayPause: {
+<span class="nc" id="L2253">			int state = playPause(false);</span>
+<span class="nc bnc" id="L2254" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2255">				receiver.setState(state);</span>
+			break;
+		}
+		case NextSong: {
+<span class="nc" id="L2259">			Song song = shiftCurrentSong(SongTimeline.SHIFT_NEXT_SONG);</span>
+<span class="nc bnc" id="L2260" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2261">				receiver.setSong(song);</span>
+			break;
+		}
+		case PreviousSong: {
+<span class="nc" id="L2265">			Song song = shiftCurrentSong(SongTimeline.SHIFT_PREVIOUS_SONG);</span>
+<span class="nc bnc" id="L2266" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2267">				receiver.setSong(song);</span>
+			break;
+		}
+		case NextAlbum: {
+<span class="nc" id="L2271">			Song song = shiftCurrentSong(SongTimeline.SHIFT_NEXT_ALBUM);</span>
+<span class="nc bnc" id="L2272" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2273">				receiver.setSong(song);</span>
+			break;
+		}
+		case PreviousAlbum: {
+<span class="nc" id="L2277">			Song song = shiftCurrentSong(SongTimeline.SHIFT_PREVIOUS_ALBUM);</span>
+<span class="nc bnc" id="L2278" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2279">				receiver.setSong(song);</span>
+			break;
+		}
+		case Repeat: {
+<span class="nc" id="L2283">			int state = cycleFinishAction();</span>
+<span class="nc bnc" id="L2284" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2285">				receiver.setState(state);</span>
+			break;
+		}
+		case Shuffle: {
+<span class="nc" id="L2289">			int state = cycleShuffle();</span>
+<span class="nc bnc" id="L2290" title="All 2 branches missed.">			if (receiver != null)</span>
+<span class="nc" id="L2291">				receiver.setState(state);</span>
+			break;
+		}
+		case EnqueueAlbum:
+<span class="nc" id="L2295">			enqueueFromSong(mCurrentSong, MediaUtils.TYPE_ALBUM);</span>
+<span class="nc" id="L2296">			break;</span>
+		case EnqueueArtist:
+<span class="nc" id="L2298">			enqueueFromSong(mCurrentSong, MediaUtils.TYPE_ARTIST);</span>
+<span class="nc" id="L2299">			break;</span>
+		case EnqueueGenre:
+<span class="nc" id="L2301">			enqueueFromSong(mCurrentSong, MediaUtils.TYPE_GENRE);</span>
+<span class="nc" id="L2302">			break;</span>
+		case ClearQueue:
+<span class="nc" id="L2304">			clearQueue();</span>
+<span class="nc" id="L2305">			showToast(R.string.queue_cleared, Toast.LENGTH_SHORT);</span>
+<span class="nc" id="L2306">			break;</span>
+		case ToggleControls:
+		case ShowQueue:
+			// These are NOOPs here and should be handled in FullPlaybackActivity
+<span class="nc" id="L2310">			break;</span>
+		case SeekForward:
+<span class="nc bnc" id="L2312" title="All 2 branches missed.">			if (mCurrentSong != null) {</span>
+<span class="nc" id="L2313">				mPendingSeekSong = mCurrentSong.id;</span>
+<span class="nc" id="L2314">				mPendingSeek = getPosition() + 10000;</span>
+				// We 'abuse' setCurrentSong as it will stop the playback and restart it
+				// at the new position, taking care of the ui update
+<span class="nc" id="L2317">				setCurrentSong(0);</span>
+			}
+			break;
+		case SeekBackward:
+<span class="nc bnc" id="L2321" title="All 2 branches missed.">			if (mCurrentSong != null) {</span>
+<span class="nc" id="L2322">				mPendingSeekSong = mCurrentSong.id;</span>
+<span class="nc" id="L2323">				mPendingSeek = getPosition() - 10000;</span>
+<span class="nc bnc" id="L2324" title="All 2 branches missed.">				if (mPendingSeek &lt; 1) mPendingSeek = 1; // must at least be 1</span>
+<span class="nc" id="L2325">				setCurrentSong(0);</span>
+			}
+			break;
+		default:
+<span class="nc" id="L2329">			throw new IllegalArgumentException(&quot;Invalid action: &quot; + action);</span>
+		}
+<span class="nc" id="L2331">	}</span>
+
+	/**
+	 * Returns the playing status of the current song
+	 */
+	public boolean isPlaying() {
+<span class="nc bnc" id="L2337" title="All 2 branches missed.">		return (mState &amp; FLAG_PLAYING) != 0;</span>
+	}
+
+	/**
+	 * Returns the position of the current song in the song timeline.
+	 */
+	public int getTimelinePosition()
+	{
+<span class="fc" id="L2345">		return mTimeline.getPosition();</span>
+	}
+
+	/**
+	 * Returns the number of songs in the song timeline.
+	 */
+	public int getTimelineLength()
+	{
+<span class="fc" id="L2353">		return mTimeline.getLength();</span>
+	}
+
+	/**
+	 * Returns {@link Song} with given position from timeline or null if nothing found
+	*/
+	public Song getSongByQueuePosition(int pos) {
+<span class="nc" id="L2360">		return mTimeline.getSongByQueuePosition(pos);</span>
+	}
+
+	/**
+	 * Retrieve song position in timeline
+	 * @param id song id as defined in {@link Song#id}
+	 * @return absolute position in song timeline or -1 if song currently not in timeline
+	 */
+	public int getQueuePositionForSongId(long id) {
+<span class="nc" id="L2369">		return mTimeline.getQueuePositionForSongId(id);</span>
+	}
+
+	/**
+	 * Do a 'hard' jump to given queue position
+	*/
+	public void jumpToQueuePosition(int pos) {
+<span class="nc" id="L2376">		mTimeline.setCurrentQueuePosition(pos);</span>
+<span class="nc" id="L2377">		play();</span>
+<span class="nc" id="L2378">	}</span>
+
+	/**
+	 * Moves a songs position in the queue
+	 *
+	 * @param from the index of the song to be moved
+	 * @param to the new index position of the song
+	 */
+	public void moveSongPosition(int from, int to) {
+<span class="nc" id="L2387">		mTimeline.moveSongPosition(from, to);</span>
+<span class="nc" id="L2388">	}</span>
+
+	/**
+	 * Removes a song from the queue
+	 * @param which index to remove
+	 */
+	public void removeSongPosition(int which) {
+<span class="nc" id="L2395">		mTimeline.removeSongPosition(which);</span>
+<span class="nc" id="L2396">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

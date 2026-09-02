@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MemCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vinyl-Music-Player</a> &gt; <a href="index.source.html" class="el_package">com.poupa.vinylmusicplayer.discog</a> &gt; <span class="el_source">MemCache.java</span></div><h1>MemCache.java</h1><pre class="source lang-java linenums">package com.poupa.vinylmusicplayer.discog;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.poupa.vinylmusicplayer.model.Album;
+import com.poupa.vinylmusicplayer.model.Artist;
+import com.poupa.vinylmusicplayer.model.Genre;
+import com.poupa.vinylmusicplayer.model.Song;
+import com.poupa.vinylmusicplayer.sort.AlbumSortOrder;
+import com.poupa.vinylmusicplayer.sort.SongSortOrder;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+/**
+ * @author SC (soncaokim)
+ */
+
+<span class="fc" id="L31">class MemCache {</span>
+<span class="fc" id="L32">    enum ConsistencyState {</span>
+<span class="fc" id="L33">        UNINITIALIZED,</span>
+<span class="fc" id="L34">        RESETTING,</span>
+<span class="fc" id="L35">        REFRESHING,</span>
+<span class="fc" id="L36">        OK</span>
+    };
+<span class="fc" id="L38">    ConsistencyState consistencyState = ConsistencyState.UNINITIALIZED;</span>
+
+<span class="fc" id="L40">    final Map&lt;Long, Song&gt; songsById = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L42">    final Map&lt;String, Artist&gt; artistsByName = new TreeMap&lt;&gt;(String.CASE_INSENSITIVE_ORDER);</span>
+<span class="fc" id="L43">    final Map&lt;Long, Artist&gt; artistsById = new HashMap&lt;&gt;();</span>
+
+    // internal implementation class, to make explicit that we are dealing with slices of album, not the full one
+<span class="nc" id="L46">    static class AlbumSlice extends Album {</span>
+    }
+
+<span class="fc" id="L49">    final Map&lt;Long, Map&lt;Long, AlbumSlice&gt;&gt; albumsByAlbumIdAndArtistId = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L50">    final Map&lt;String, Set&lt;Long&gt;&gt; albumsByName = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L52">    final Map&lt;String, Genre&gt; genresByName = new TreeMap&lt;&gt;(String.CASE_INSENSITIVE_ORDER);</span>
+<span class="fc" id="L53">    final Map&lt;Long, ArrayList&lt;Song&gt;&gt; songsByGenreId = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L54">    private float maxReplayGain = Float.NaN; // Computed lazily when it's needed, since it's used only on some android versions</span>
+
+    synchronized void addSong(@NonNull final Song song) {
+<span class="nc" id="L57">        Map&lt;Long, AlbumSlice&gt; albums = getOrCreateAlbum(song);</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">        for (Album album : albums.values()) {</span>
+<span class="nc" id="L59">            album.songs.add(song);</span>
+<span class="nc" id="L60">        }</span>
+
+        // Update genre cache
+<span class="nc" id="L63">        addSongToGenres(song);</span>
+
+        // Update the overall max replay gain value, if it's been computed already
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (!Float.isNaN(maxReplayGain)) {</span>
+<span class="nc" id="L67">            float songMaxReplayGain = computeSongMaxReplayGain(song);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if (maxReplayGain &lt; songMaxReplayGain){</span>
+<span class="nc" id="L69">                maxReplayGain = songMaxReplayGain;</span>
+            }
+        }
+
+<span class="nc" id="L73">        songsById.put(song.id, song);</span>
+
+        // Only sort albums after the song has been added
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        for (Long artistId : albums.keySet()) {</span>
+<span class="nc" id="L77">            Artist artist = artistsById.get(artistId);</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (artist == null) continue;</span>
+<span class="nc" id="L79">            Collections.sort(artist.albums, AlbumSortOrder.BY_YEAR_DESC);</span>
+<span class="nc" id="L80">        }</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        for (Album album : albums.values()) {</span>
+<span class="nc" id="L82">            Collections.sort(album.songs, SongSortOrder.BY_DISC_TRACK);</span>
+<span class="nc" id="L83">        }</span>
+<span class="nc" id="L84">    }</span>
+
+    synchronized void removeSongById(long songId) {
+<span class="nc" id="L87">        final Song song = songsById.get(songId);</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        if (song != null) {</span>
+            // ---- Remove the song from linked Album cache
+<span class="nc" id="L90">            final Collection&lt;Long&gt; orphanArtists = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L91">            final Map&lt;Long, AlbumSlice&gt; impactedAlbumsByArtist = albumsByAlbumIdAndArtistId.get(song.albumId);</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            if (impactedAlbumsByArtist != null) {</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">                for (final Map.Entry&lt;Long, AlbumSlice&gt; pair : impactedAlbumsByArtist.entrySet()) {</span>
+<span class="nc" id="L94">                    final Album album = pair.getValue();</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                    if (album.songs.remove(song)) {</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                        if (album.songs.isEmpty()) {</span>
+<span class="nc" id="L97">                            orphanArtists.add(pair.getKey());</span>
+                        }
+                    }
+<span class="nc" id="L100">                }</span>
+            }
+
+            // ---- Check the Artist/Album link
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            for (final Long artistId : orphanArtists) {</span>
+<span class="nc" id="L105">                final Artist artist = artistsById.get(artistId);</span>
+
+<span class="nc" id="L107">                final Album album = impactedAlbumsByArtist.get(artistId);</span>
+<span class="nc" id="L108">                impactedAlbumsByArtist.remove(artistId);</span>
+
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                if (artist == null) {continue;}</span>
+
+<span class="nc" id="L112">                artist.albums.remove(album);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                if (artist.albums.isEmpty()) {</span>
+<span class="nc" id="L114">                    artistsById.remove(artist.id);</span>
+<span class="nc" id="L115">                    artistsByName.remove(artist.name);</span>
+                }
+<span class="nc" id="L117">            }</span>
+<span class="nc bnc" id="L118" title="All 4 branches missed.">            if (impactedAlbumsByArtist != null &amp;&amp; impactedAlbumsByArtist.isEmpty()) {</span>
+<span class="nc" id="L119">                albumsByAlbumIdAndArtistId.remove(song.albumId);</span>
+
+<span class="nc" id="L121">                @Nullable final Set&lt;Long&gt; albumsId = albumsByName.get(song.albumName);</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                if (albumsId != null) {</span>
+<span class="nc" id="L123">                    albumsId.remove(song.albumId);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">                    if (albumsId.isEmpty()) {</span>
+<span class="nc" id="L125">                        albumsByName.remove(song.albumName);</span>
+                    }
+                }
+            }
+
+            // ---- Remove song from Genre cache
+<span class="nc" id="L131">            removeSongFromGenreCache(song);</span>
+
+            // Update the overall max replay gain value, if it's been computed already
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (!Float.isNaN(maxReplayGain)) {</span>
+<span class="nc" id="L135">                float songMaxReplayGain = computeSongMaxReplayGain(song);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                if (maxReplayGain == songMaxReplayGain){</span>
+<span class="nc" id="L137">                    maxReplayGain = Float.NaN; // Will be recomputed next time it's needed</span>
+                }
+            }
+
+            // ---- Remove the song from the memory cache
+<span class="nc" id="L142">            songsById.remove(songId);</span>
+        }
+<span class="nc" id="L144">    }</span>
+
+    synchronized void clear() {
+<span class="nc" id="L147">        songsById.clear();</span>
+
+<span class="nc" id="L149">        artistsByName.clear();</span>
+<span class="nc" id="L150">        artistsById.clear();</span>
+
+<span class="nc" id="L152">        albumsByAlbumIdAndArtistId.clear();</span>
+<span class="nc" id="L153">        albumsByName.clear();</span>
+
+<span class="nc" id="L155">        genresByName.clear();</span>
+<span class="nc" id="L156">        songsByGenreId.clear();</span>
+<span class="nc" id="L157">    }</span>
+
+    private float computeSongMaxReplayGain(Song song) {
+<span class="nc bnc" id="L160" title="All 4 branches missed.">        if (Float.isNaN(song.replayGainAlbum) &amp;&amp; Float.isNaN(song.replayGainTrack)) {</span>
+<span class="nc" id="L161">            return 0.0f;</span>
+        }
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (Float.isNaN(song.replayGainAlbum)) {</span>
+<span class="nc" id="L164">            return song.replayGainTrack;</span>
+        }
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (Float.isNaN(song.replayGainTrack)) {</span>
+<span class="nc" id="L167">            return song.replayGainAlbum;</span>
+        }
+<span class="nc" id="L169">        return Math.max(song.replayGainAlbum, song.replayGainTrack);</span>
+    }
+
+    synchronized float getMaxReplayGain() {
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        if (Float.isNaN(maxReplayGain)) {</span>
+<span class="nc" id="L174">            maxReplayGain = songsById.values().stream()</span>
+<span class="nc" id="L175">                    .map(this::computeSongMaxReplayGain)</span>
+<span class="nc" id="L176">                    .max(Float::compareTo)</span>
+<span class="nc" id="L177">                    .orElse(0.0f);</span>
+        }
+
+<span class="nc" id="L180">        return maxReplayGain;</span>
+    }
+
+    @NonNull
+    private synchronized List&lt;Artist&gt; getOrCreateArtistByName(@NonNull final Song song) {
+<span class="nc" id="L185">        Function&lt;String, Artist&gt; getOrCreateArtist = (@NonNull final String artistName) -&gt; {</span>
+<span class="nc" id="L186">            Artist artist = artistsByName.get(artistName);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (artist == null) {</span>
+<span class="nc" id="L188">                long artistId = artistsByName.size();</span>
+<span class="nc" id="L189">                artist = new Artist(artistId, artistName);</span>
+
+<span class="nc" id="L191">                artistsByName.put(artistName, artist);</span>
+<span class="nc" id="L192">                artistsById.put(artistId, artist);</span>
+            }
+<span class="nc" id="L194">            return artist;</span>
+        };
+
+<span class="nc" id="L197">        final LinkedHashSet&lt;String&gt; names = new LinkedHashSet&lt;&gt;(); // ordered and unique list of names</span>
+<span class="nc" id="L198">        names.addAll(song.artistNames);</span>
+<span class="nc" id="L199">        names.addAll(song.albumArtistNames);</span>
+<span class="nc" id="L200">        final List&lt;Artist&gt; artists = new ArrayList&lt;&gt;(names.size());</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        for (final String name : names) {</span>
+<span class="nc" id="L202">            final Artist artist = getOrCreateArtist.apply(name);</span>
+<span class="nc" id="L203">            artists.add(artist);</span>
+<span class="nc" id="L204">        }</span>
+
+<span class="nc" id="L206">        return artists;</span>
+    }
+
+    @NonNull
+    private synchronized Map&lt;Long, AlbumSlice&gt; getOrCreateAlbum(@NonNull final Song song) {
+<span class="nc" id="L211">        final List&lt;Artist&gt; artists = getOrCreateArtistByName(song);</span>
+
+        // Try reusing an existing album with same name
+<span class="nc" id="L214">        final Set&lt;Long&gt; albumIdsSameName = albumsByName.get(song.albumName);</span>
+<span class="nc bnc" id="L215" title="All 4 branches missed.">        if ((albumIdsSameName != null) &amp;&amp; !artists.isEmpty()) {</span>
+<span class="nc" id="L216">            final Artist mainArtist = artists.get(0);</span>
+
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            for (final long id : albumIdsSameName) {</span>
+<span class="nc" id="L219">                final AlbumSlice byMainArtist = albumsByAlbumIdAndArtistId.get(id).get(mainArtist.id);</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                if (byMainArtist != null) {</span>
+<span class="nc" id="L221">                    song.albumId = byMainArtist.getId();</span>
+<span class="nc" id="L222">                    break;</span>
+                }
+<span class="nc" id="L224">            }</span>
+        }
+
+        // Now search by ID
+<span class="nc" id="L228">        Map&lt;Long, AlbumSlice&gt; albumsByArtist = albumsByAlbumIdAndArtistId.get(song.albumId);</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (albumsByArtist == null) {</span>
+<span class="nc" id="L230">            albumsByArtist = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L231">            albumsByAlbumIdAndArtistId.put(song.albumId, albumsByArtist);</span>
+        }
+
+<span class="nc" id="L234">        final Map&lt;Long, AlbumSlice&gt; result = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        for (final Artist artist : artists) {</span>
+            // Attach to the artists if needed
+<span class="nc bnc" id="L237" title="All 2 branches missed.">            if (!albumsByArtist.containsKey(artist.id)) {</span>
+<span class="nc" id="L238">                final AlbumSlice album = new AlbumSlice();</span>
+<span class="nc" id="L239">                albumsByArtist.put(artist.id, album);</span>
+
+<span class="nc" id="L241">                Set&lt;Long&gt; albumsId = albumsByName.get(song.albumName);</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">                if (albumsId == null) {</span>
+<span class="nc" id="L243">                    albumsByName.put(song.albumName, new HashSet&lt;&gt;());</span>
+<span class="nc" id="L244">                    albumsId = albumsByName.get(song.albumName);</span>
+                }
+<span class="nc" id="L246">                Objects.requireNonNull(albumsId);</span>
+<span class="nc" id="L247">                albumsId.add(song.albumId);</span>
+
+<span class="nc" id="L249">                artist.albums.add(album);</span>
+            }
+
+            // Filter by concerned artists
+<span class="nc" id="L253">            result.put(artist.id, albumsByArtist.get(artist.id));</span>
+<span class="nc" id="L254">        }</span>
+
+<span class="nc" id="L256">        return result;</span>
+    }
+
+    private synchronized void removeSongFromGenreCache(@NonNull final Song song) {
+<span class="nc" id="L260">        song.genres.stream().forEach(genreName -&gt; {</span>
+<span class="nc" id="L261">            final Genre genre = genresByName.get(genreName);</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">            if (genre != null) {</span>
+<span class="nc" id="L263">                final ArrayList&lt;Song&gt; songs = songsByGenreId.get(genre.id);</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                if (songs != null) {</span>
+<span class="nc" id="L265">                    songs.remove(song);</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                    if (songs.isEmpty()) {</span>
+<span class="nc" id="L267">                        genresByName.remove(genre.name);</span>
+<span class="nc" id="L268">                        songsByGenreId.remove(genre.id);</span>
+                    } else {
+<span class="nc" id="L270">                        genre.songCount = songs.size();</span>
+                    }
+                }
+            }
+<span class="nc" id="L274">        });</span>
+<span class="nc" id="L275">    }</span>
+
+    private synchronized void addSongToGenres(@NonNull final Song song) {
+<span class="nc" id="L278">        List&lt;Genre&gt; genres = getOrCreateGenresBySong(song);</span>
+<span class="nc" id="L279">        genres.stream().forEach(genre-&gt;{</span>
+<span class="nc" id="L280">            this.addSongToGenreAndUpdateCount(song, genre);</span>
+<span class="nc" id="L281">        });</span>
+<span class="nc" id="L282">    }</span>
+
+    private synchronized void addSongToGenreAndUpdateCount(@NonNull final Song song, @NonNull final Genre genre) {
+<span class="nc" id="L285">        ArrayList&lt;Song&gt; songs = songsByGenreId.get(genre.id);</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        if (songs != null) {</span>
+<span class="nc" id="L287">            songs.add(song);</span>
+<span class="nc" id="L288">            genre.songCount = songs.size();</span>
+        }
+<span class="nc" id="L290">    }</span>
+
+    @NonNull
+    private synchronized List&lt;Genre&gt; getOrCreateGenresBySong(@NonNull final Song song) {
+        // If a song has no genres, empty string is the &quot;unknown&quot; genre
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        final List&lt;String&gt; genres = song.genres.isEmpty() ? List.of(&quot;&quot;) : song.genres;</span>
+
+<span class="nc" id="L297">        return genres.stream().map(this::getOrCreateGenreByName).collect(Collectors.toList());</span>
+    }
+
+    @NonNull
+    private synchronized Genre getOrCreateGenreByName(@NonNull final String genreName) {
+<span class="nc" id="L302">        Genre genre = genresByName.get(genreName);</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (genre == null) {</span>
+<span class="nc" id="L304">            genre = new Genre(genresByName.size(), genreName, 0);</span>
+
+<span class="nc" id="L306">            genresByName.put(genreName, genre);</span>
+<span class="nc" id="L307">            songsByGenreId.put(genre.id, new ArrayList&lt;&gt;());</span>
+        }
+<span class="nc" id="L309">        return genre;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

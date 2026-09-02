@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PuzzleListRecyclerAdapter.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE OpenSudoku</a> &gt; <a href="index.source.html" class="el_package">org.moire.opensudoku.gui.screen.puzzle_list</a> &gt; <span class="el_source">PuzzleListRecyclerAdapter.kt</span></div><h1>PuzzleListRecyclerAdapter.kt</h1><pre class="source lang-java linenums">/*
+ * This file is part of Open Sudoku - an open-source Sudoku game.
+ * Copyright (C) 2009-2025 by Open Sudoku authors.
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the
+ * Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.
+ */
+
+package org.moire.opensudoku.gui.screen.puzzle_list
+
+import android.R.attr.colorError
+import android.annotation.SuppressLint
+import android.content.Context
+import android.database.Cursor
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
+import android.widget.Toast
+import androidx.recyclerview.widget.RecyclerView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.moire.opensudoku.R
+import org.moire.opensudoku.db.RawGameData
+import org.moire.opensudoku.db.SudokuDatabase
+import org.moire.opensudoku.db.extractSudokuGameFromRawData
+import org.moire.opensudoku.db.getRawGameData
+import org.moire.opensudoku.game.SudokuGame
+import org.moire.opensudoku.game.WrongValueHighlightMode
+import org.moire.opensudoku.game.nextstep.StrategyLevelIds
+import org.moire.opensudoku.gui.screen.game_play.PlayingDurationFormat
+import org.moire.opensudoku.gui.SudokuBoardView
+import org.moire.opensudoku.gui.SuidGenerator3F
+import org.moire.opensudoku.utils.Colors
+import org.moire.opensudoku.utils.ThemeUtils
+import org.moire.opensudoku.utils.ThemeUtils.dimmedColor
+import org.moire.opensudoku.utils.addAll
+import java.io.Closeable
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+
+<span class="nc" id="L57">internal class PuzzleListRecyclerAdapter(</span>
+<span class="nc" id="L58">	private val context: Context,</span>
+<span class="nc" id="L59">	private var puzzlesCursor: Cursor,</span>
+<span class="nc" id="L60">	private val onClickListener: (Long) -&gt; Unit,</span>
+<span class="nc" id="L61">	private var isShowTime: Boolean,</span>
+<span class="nc" id="L62">	private var isShowMistakesCount: Boolean,</span>
+<span class="nc" id="L63">	private var highlightWrongValuesMode: WrongValueHighlightMode,</span>
+<span class="nc" id="L64">	private val db: SudokuDatabase? = null,</span>
+<span class="nc" id="L65">) : RecyclerView.Adapter&lt;PuzzleListRecyclerAdapter.ViewHolder?&gt;(), Closeable {</span>
+<span class="nc" id="L66">	private val adapterScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)</span>
+<span class="nc" id="L67">	private val suidCache = mutableMapOf&lt;Long, String?&gt;()</span>
+
+	override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+<span class="nc" id="L70">		val view = LayoutInflater.from(parent.context).inflate(R.layout.sudoku_list_item, parent, false)</span>
+<span class="nc" id="L71">		return ViewHolder(view)</span>
+	}
+
+<span class="nc" id="L74">	override fun getItemCount(): Int = puzzlesCursor.count</span>
+
+	@SuppressLint(&quot;NotifyDataSetChanged&quot;)
+	fun updateGameList(newGames: Cursor, isShowTime: Boolean, isShowMistakesCount: Boolean, wrongValuesHighlightMode: WrongValueHighlightMode) {
+<span class="nc" id="L78">		this.isShowTime = isShowTime</span>
+<span class="nc" id="L79">		this.isShowMistakesCount = isShowMistakesCount</span>
+<span class="nc" id="L80">		highlightWrongValuesMode = wrongValuesHighlightMode</span>
+<span class="nc" id="L81">		puzzlesCursor.close()</span>
+<span class="nc" id="L82">		puzzlesCursor = newGames</span>
+<span class="nc" id="L83">		suidCache.clear()</span>
+<span class="nc" id="L84">		notifyDataSetChanged()</span>
+<span class="nc" id="L85">	}</span>
+
+	override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+<span class="nc" id="L88">		holder.itemView.contentDescription = context.getString(R.string.puzzle_selection_position, position)</span>
+
+		//          R.id.board_view
+<span class="nc" id="L91">		holder.boardView.isReadOnlyPreview = true</span>
+<span class="nc" id="L92">		holder.boardView.isFocusable = false</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">		holder.boardView.highlightDirectlyWrongValues = highlightWrongValuesMode != WrongValueHighlightMode.OFF</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">		holder.boardView.highlightIndirectlyWrongValues = highlightWrongValuesMode == WrongValueHighlightMode.INDIRECT</span>
+<span class="nc" id="L95">		ThemeUtils.applyConfiguredThemeToSudokuBoardView(holder.boardView, context)</span>
+
+<span class="nc" id="L97">		puzzlesCursor.moveToPosition(position)</span>
+<span class="nc" id="L98">		backgroundViewUpdates(holder, getRawGameData(puzzlesCursor))</span>
+<span class="nc" id="L99">	}</span>
+
+	override fun onViewRecycled(holder: ViewHolder) {
+<span class="nc" id="L102">		super.onViewRecycled(holder)</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">		holder.job?.cancel()</span>
+<span class="nc" id="L104">		holder.job = null</span>
+<span class="nc" id="L105">	}</span>
+
+	@SuppressLint(&quot;SetTextI18n&quot;)
+	fun backgroundViewUpdates(holder: ViewHolder, rawGameData: RawGameData?) {
+<span class="nc bnc" id="L109" title="All 2 branches missed.">		holder.job?.cancel()</span>
+<span class="nc" id="L110">		holder.job = adapterScope.launch {</span>
+			// data processing
+<span class="nc" id="L112">			val game: SudokuGame? = withContext(Dispatchers.Default) {</span>
+<span class="nc" id="L113">				extractSudokuGameFromRawData(rawGameData, false)</span>
+			}
+<span class="nc bnc" id="L115" title="All 2 branches missed.">			if (game == null) {</span>
+<span class="nc" id="L116">				Toast.makeText(context, R.string.error_could_not_find_puzzle_in_database, Toast.LENGTH_LONG).show()</span>
+<span class="nc" id="L117">				return@launch</span>
+			}
+
+			// precalculate SUID out of UI scope for slow devices
+<span class="nc bnc" id="L121" title="All 2 branches missed.">			val suid = if (game.suid != null) {</span>
+<span class="nc" id="L122">				&quot;SUID: ${game.suid}&quot;</span>
+			} else {
+<span class="nc bnc" id="L124" title="All 2 branches missed.">				suidCache[game.id] ?: withContext(Dispatchers.Default) {</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">					if (game.solutionCount == 1) {</span>
+<span class="nc" id="L126">						val encoded = SuidGenerator3F().encode(game.board)</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">						db?.updatePuzzleSuid(game.id, encoded)</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">						if (game.solution == null) {</span>
+<span class="nc" id="L129">							val sol = game.board.serializeSolution()</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">							db?.updatePuzzleSolution(game.id, sol)</span>
+<span class="nc" id="L131">							game.solution = sol</span>
+						}
+<span class="nc" id="L133">						&quot;SUID: $encoded&quot;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">					} else if (game.solutionCount == 0) {</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">						if (game.solution == null) {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">							db?.updatePuzzleSolution(game.id, &quot;none&quot;)</span>
+<span class="nc" id="L137">							game.solution = &quot;none&quot;</span>
+						}
+<span class="nc" id="L139">						null</span>
+<span class="nc" id="L140">					} else null</span>
+<span class="nc" id="L141">				}.also { suidCache[game.id] = it }</span>
+			}
+
+<span class="nc" id="L144">			holder.itemView.setOnClickListener { onClickListener(game.id) }</span>
+<span class="nc" id="L145">			holder.itemView.setOnCreateContextMenuListener { menu, _, _ -&gt;</span>
+<span class="nc" id="L146">				selectedGameId = game.id</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">				menu?.run { addAll(PuzzleListActivity.ContextMenuItems.entries) }</span>
+<span class="nc" id="L148">			}</span>
+
+<span class="nc" id="L150">			holder.boardView.board = game.board</span>
+
+			//          R.id.state
+<span class="nc" id="L153">			holder.state.apply {</span>
+<span class="nc bnc" id="L154" title="All 3 branches missed.">				when (game.state) {</span>
+					SudokuGame.GAME_STATE_COMPLETED -&gt; {
+<span class="nc" id="L156">						text = context.getString(R.string.solved)</span>
+<span class="nc" id="L157">						setTextColor(ThemeUtils.getContextThemeColor(holder.userNote.context, Colors.GIVEN_VALUE_TEXT.attr))</span>
+					}
+
+					SudokuGame.GAME_STATE_PLAYING -&gt; {
+<span class="nc" id="L161">						text = context.getString(R.string.playing)</span>
+<span class="nc" id="L162">						setTextColor(ThemeUtils.getContextThemeColor(holder.userNote.context, Colors.LINE.attr))</span>
+					}
+
+					else -&gt; {
+<span class="nc" id="L166">						text = context.getString(R.string.not_started)</span>
+<span class="nc" id="L167">						setTextColor(ThemeUtils.getContextThemeColor(holder.userNote.context, Colors.VALUE_TEXT.attr))</span>
+					}
+				}
+<span class="nc" id="L170">			}</span>
+
+<span class="nc bnc" id="L172" title="All 2 branches missed.">			holder.mistakesAndDuration.text = if (game.playingDuration != 0L) {</span>
+<span class="nc" id="L173">				val durationText = playingDurationFormatter.format(game.playingDuration)</span>
+<span class="nc bnc" id="L174" title="All 8 branches missed.">				(if (isShowMistakesCount) &quot;\u270B${game.hintUsage ?: &quot;?&quot;}\t\u2757${game.mistakeCounter ?: &quot;?&quot;}\t&quot; else &quot;&quot;) + (if (isShowTime) &quot;\u231A${durationText}&quot; else &quot;&quot;)</span>
+<span class="nc" id="L175">			} else &quot;&quot;</span>
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">			holder.lastPlayed.text = if (game.lastPlayed != 0L) context.getString(R.string.last_played_at, getDateAndTimeForHumans(game.lastPlayed)) else &quot;&quot;</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">			holder.created.text = if (game.created != 0L) context.getString(R.string.created_at, getDateAndTimeForHumans(game.created)) else &quot;&quot;</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">			holder.userNote.text = if (game.userNote != &quot;&quot;) context.getString(R.string.note) + &quot; &quot; + game.userNote else &quot;&quot;</span>
+<span class="nc" id="L180">			holder.suid.apply {</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">				if (suid != null) {</span>
+<span class="nc" id="L182">					text = suid</span>
+<span class="nc" id="L183">					setTextColor(dimmedColor(ThemeUtils.getContextThemeColor(holder.userNote.context, android.R.attr.textColor)))</span>
+				} else {
+<span class="nc" id="L185">					text = context.getString(R.string.invalid_puzzle)</span>
+<span class="nc" id="L186">					setTextColor(ThemeUtils.getContextThemeColor(holder.userNote.context, colorError))</span>
+				}
+<span class="nc" id="L188">			}</span>
+			// rating
+<span class="nc bnc" id="L190" title="All 2 branches missed.">			if (game.ratingLevel &lt; 1) {</span>
+<span class="nc" id="L191">				holder.rating.text = &quot;&quot;</span>
+			} else {
+<span class="nc" id="L193">				var ratingText = context.getString(R.string.rating) + &quot;:  &quot;</span>
+<span class="nc" id="L194">				val ratingLevelText = StrategyLevelIds</span>
+<span class="nc" id="L195">					.getStrategyLevel(game.ratingLevel)</span>
+<span class="nc" id="L196">					.getStrategyLevelName(context)</span>
+<span class="nc" id="L197">				ratingText += ratingLevelText</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">				if (game.ratingValue &gt; 0) {</span>
+<span class="nc" id="L199">					ratingText += &quot;  ...  ${game.ratingValue}&quot;</span>
+				}
+<span class="nc" id="L201">				holder.rating.text = ratingText</span>
+			}
+<span class="nc" id="L203">		}</span>
+<span class="nc" id="L204">	}</span>
+
+	private fun getDateAndTimeForHumans(epochMilliseconds: Long): String {
+<span class="nc" id="L207">		val dateTime = LocalDateTime.ofEpochSecond(epochMilliseconds / 1000, 0, localZoneOffset)</span>
+<span class="nc" id="L208">		val today = LocalDate.now()</span>
+<span class="nc" id="L209">		val yesterday = today.minusDays(1)</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">		return if (dateTime.isAfter(today.atStartOfDay())) {</span>
+<span class="nc" id="L211">			context.getString(R.string.today_at_time, dateTime.toLocalTime().format(timeFormatter))</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">		} else if (dateTime.isAfter(yesterday.atStartOfDay())) {</span>
+<span class="nc" id="L213">			context.getString(R.string.yesterday_at_time, dateTime.toLocalTime().format(timeFormatter))</span>
+<span class="nc" id="L214">		} else {</span>
+<span class="nc" id="L215">			context.getString(R.string.on_date, dateTime.format(dateTimeFormatter))</span>
+		}
+	}
+
+<span class="nc" id="L219">	internal class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {</span>
+<span class="nc" id="L220">		val boardView: SudokuBoardView = itemView.findViewById(R.id.board_view)</span>
+<span class="nc" id="L221">		val state: TextView = itemView.findViewById(R.id.state)</span>
+<span class="nc" id="L222">		val mistakesAndDuration: TextView = itemView.findViewById(R.id.mistakes_and_time)</span>
+<span class="nc" id="L223">		val lastPlayed: TextView = itemView.findViewById(R.id.last_played)</span>
+<span class="nc" id="L224">		val created: TextView = itemView.findViewById(R.id.created)</span>
+<span class="nc" id="L225">		val rating: TextView = itemView.findViewById(R.id.rating)</span>
+<span class="nc" id="L226">		val userNote: TextView = itemView.findViewById(R.id.user_note)</span>
+<span class="nc" id="L227">		val suid: TextView = itemView.findViewById(R.id.suid)</span>
+<span class="nc" id="L228">		var job: Job? = null</span>
+	}
+
+	override fun close() {
+<span class="nc" id="L232">		adapterScope.cancel()</span>
+<span class="nc" id="L233">		puzzlesCursor.close()</span>
+<span class="nc" id="L234">	}</span>
+
+	companion object {
+<span class="nc" id="L237">		var selectedGameId: Long = 0</span>
+
+<span class="nc" id="L239">		private val localZoneOffset: ZoneOffset = ZoneId.systemDefault().rules.getOffset(Instant.now())</span>
+<span class="nc" id="L240">		private val playingDurationFormatter = PlayingDurationFormat()</span>
+<span class="nc" id="L241">		private val dateTimeFormatter = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)</span>
+<span class="nc" id="L242">		private val timeFormatter = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)</span>
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepoEditViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.compose.repoEdit</a> &gt; <span class="el_source">RepoEditViewModel.kt</span></div><h1>RepoEditViewModel.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.compose.repoEdit
+
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.runtime.snapshotFlow
+import androidx.core.net.toUri
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.looker.droidify.data.RepoRepository
+import com.looker.droidify.network.Downloader
+import com.looker.droidify.network.NetworkResponse
+import com.looker.droidify.network.header.authentication
+import com.looker.droidify.utility.common.extension.asStateFlow
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.URI
+import java.net.URISyntaxException
+import java.net.URL
+import java.net.URLDecoder
+import javax.inject.Inject
+
+<span class="nc" id="L27">@HiltViewModel</span>
+<span class="nc" id="L28">class RepoEditViewModel @Inject constructor(</span>
+<span class="nc" id="L29">    private val repoRepository: RepoRepository,</span>
+<span class="nc" id="L30">    private val downloader: Downloader,</span>
+) : ViewModel() {
+
+<span class="nc" id="L33">    val addressState = TextFieldState(&quot;&quot;)</span>
+<span class="nc" id="L34">    val fingerprintState = TextFieldState(&quot;&quot;)</span>
+<span class="nc" id="L35">    val usernameState = TextFieldState(&quot;&quot;)</span>
+<span class="nc" id="L36">    val passwordState = TextFieldState(&quot;&quot;)</span>
+
+<span class="nc" id="L38">    private val _repoId = MutableStateFlow&lt;Int?&gt;(null)</span>
+<span class="nc" id="L39">    val repoId: StateFlow&lt;Int?&gt; = _repoId</span>
+
+<span class="nc" id="L41">    private val _authEnabled = MutableStateFlow(false)</span>
+<span class="nc" id="L42">    val authEnabled: StateFlow&lt;Boolean&gt; = _authEnabled</span>
+
+<span class="nc" id="L44">    private val _syncError = MutableStateFlow&lt;RepoEditErrorState?&gt;(null)</span>
+
+<span class="nc" id="L46">    private val _isLoading = MutableStateFlow(false)</span>
+<span class="nc" id="L47">    val isLoading: StateFlow&lt;Boolean&gt; = _isLoading</span>
+
+<span class="nc" id="L49">    private val takenAddresses: StateFlow&lt;Set&lt;String&gt;&gt; = repoRepository.addresses.map {</span>
+<span class="nc" id="L50">        it.map { address -&gt; stripPathSuffix(address) }.toSet()</span>
+<span class="nc" id="L51">    }.asStateFlow(emptySet())</span>
+
+<span class="nc" id="L53">    private val addressFlow = snapshotFlow { addressState.text.toString() }</span>
+<span class="nc" id="L54">    private val fingerprintFlow = snapshotFlow { fingerprintState.text.toString() }</span>
+<span class="nc" id="L55">    private val usernameFlow = snapshotFlow { usernameState.text.toString() }</span>
+<span class="nc" id="L56">    private val passwordFlow = snapshotFlow { passwordState.text.toString() }</span>
+
+<span class="nc" id="L58">    val errorState = combine(</span>
+<span class="nc" id="L59">        addressFlow,</span>
+<span class="nc" id="L60">        fingerprintFlow,</span>
+<span class="nc" id="L61">        usernameFlow,</span>
+<span class="nc" id="L62">        passwordFlow,</span>
+<span class="nc" id="L63">        _syncError,</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">    ) { address, fingerprint, username, password, syncError -&gt;</span>
+<span class="nc" id="L65">        RepoEditErrorState(</span>
+<span class="nc bnc" id="L66" title="All 4 branches missed.">            addressError = addressError(address) ?: syncError?.addressError,</span>
+<span class="nc bnc" id="L67" title="All 4 branches missed.">            fingerprintError = fingerprintError(fingerprint) ?: syncError?.fingerprintError,</span>
+<span class="nc bnc" id="L68" title="All 4 branches missed.">            usernameError = usernameError(username, password) ?: syncError?.usernameError,</span>
+<span class="nc bnc" id="L69" title="All 4 branches missed.">            passwordError = passwordError(username, password) ?: syncError?.passwordError,</span>
+<span class="nc" id="L70">        )</span>
+<span class="nc" id="L71">    }.asStateFlow(RepoEditErrorState())</span>
+
+<span class="nc" id="L73">    private val addressSuffixes = arrayOf(&quot;fdroid/repo&quot;, &quot;repo&quot;)</span>
+
+    fun loadRepo(repoId: Int) {
+<span class="nc" id="L76">        viewModelScope.launch {</span>
+<span class="nc" id="L77">            _repoId.value = repoId</span>
+<span class="nc" id="L78">            val repo = repoRepository.getRepo(repoId)</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            repo?.let {</span>
+<span class="nc" id="L80">                addressState.edit { this.append(it.address) }</span>
+<span class="nc bnc" id="L81" title="All 4 branches missed.">                it.fingerprint?.let { fingerprint -&gt;</span>
+<span class="nc" id="L82">                    fingerprintState.edit { this.append(formatFingerprint(fingerprint.value)) }</span>
+<span class="nc" id="L83">                }</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                it.authentication?.let { auth -&gt;</span>
+<span class="nc" id="L85">                    _authEnabled.value = true</span>
+<span class="nc" id="L86">                    usernameState.edit { this.append(auth.username) }</span>
+<span class="nc" id="L87">                    passwordState.edit { this.append(auth.password) }</span>
+<span class="nc" id="L88">                }</span>
+<span class="nc" id="L89">            }</span>
+<span class="nc" id="L90">        }</span>
+<span class="nc" id="L91">    }</span>
+
+    fun setAuthEnabled(enabled: Boolean) {
+<span class="nc" id="L94">        _authEnabled.value = enabled</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (!enabled) {</span>
+<span class="nc" id="L96">            usernameState.edit { replace(0, length, &quot;&quot;) }</span>
+<span class="nc" id="L97">            passwordState.edit { replace(0, length, &quot;&quot;) }</span>
+        }
+<span class="nc" id="L99">    }</span>
+
+    fun parseAndSetUrl(text: String) {
+<span class="nc" id="L102">        val (address, fingerprint) = parseRepoUrl(text)</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        address?.let { addressState.edit { replace(0, length, it) } }</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">        fingerprint?.let { fingerprintState.edit { replace(0, length, formatFingerprint(it)) } }</span>
+<span class="nc" id="L105">    }</span>
+
+    private fun parseRepoUrl(text: String): Pair&lt;String?, String?&gt; {
+<span class="nc" id="L108">        return try {</span>
+<span class="nc" id="L109">            val uri = URL(text).toString().toUri()</span>
+<span class="nc bnc" id="L110" title="All 8 branches missed.">            val repoUri = if (uri.host?.contains(&quot;fdroid.link&quot;) == true &amp;&amp; uri.fragment != null) {</span>
+<span class="nc" id="L111">                val decodedFragment = URLDecoder.decode(uri.fragment, &quot;UTF-8&quot;)</span>
+<span class="nc" id="L112">                URL(decodedFragment).toString().toUri()</span>
+            } else {
+<span class="nc" id="L114">                uri</span>
+            }
+<span class="nc bnc" id="L116" title="All 8 branches missed.">            val fingerprint = repoUri.getQueryParameter(&quot;fingerprint&quot;)?.takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L117" title="All 6 branches missed.">                ?: repoUri.getQueryParameter(&quot;FINGERPRINT&quot;)?.takeIf { it.isNotEmpty() }</span>
+<span class="nc" id="L118">            val address = repoUri.buildUpon()</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                .path(repoUri.path?.removeSuffix(&quot;/&quot;))</span>
+<span class="nc" id="L120">                .query(null)</span>
+<span class="nc" id="L121">                .fragment(null)</span>
+<span class="nc" id="L122">                .build()</span>
+<span class="nc" id="L123">                .toString()</span>
+<span class="nc" id="L124">            Pair(address, fingerprint)</span>
+<span class="nc" id="L125">        } catch (_: Exception) {</span>
+<span class="nc" id="L126">            Pair(null, null)</span>
+        }
+    }
+
+<span class="nc" id="L130">    fun saveRepository(skipCheck: Boolean = false) {</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (_isLoading.value) return</span>
+
+<span class="nc" id="L133">        val address = addressState.text.toString()</span>
+<span class="nc" id="L134">        val fingerprint = fingerprintState.text.toString().replace(&quot; &quot;, &quot;&quot;)</span>
+<span class="nc bnc" id="L135" title="All 4 branches missed.">        val username = usernameState.text.toString().takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L136" title="All 4 branches missed.">        val password = passwordState.text.toString().takeIf { it.isNotEmpty() }</span>
+
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        if (skipCheck) {</span>
+<span class="nc" id="L139">            saveRepositoryToDatabase(address, fingerprint, username, password)</span>
+        } else {
+<span class="nc" id="L141">            checkAndSaveRepository(address, fingerprint, username, password)</span>
+        }
+<span class="nc" id="L143">    }</span>
+
+    private fun checkAndSaveRepository(
+        address: String,
+        fingerprint: String,
+        username: String?,
+        password: String?,
+    ) {
+<span class="nc" id="L151">        viewModelScope.launch {</span>
+<span class="nc" id="L152">            _isLoading.value = true</span>
+<span class="nc" id="L153">            try {</span>
+<span class="nc" id="L154">                val resultAddress = checkAddress(address, username, password)</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                if (resultAddress != null) {</span>
+<span class="nc" id="L156">                    saveRepositoryToDatabase(resultAddress, fingerprint, username, password)</span>
+                } else {
+<span class="nc" id="L158">                    _syncError.value = _syncError.value.copy(addressError = &quot;Repository not found&quot;)</span>
+                }
+<span class="nc" id="L160">            } catch (e: Exception) {</span>
+<span class="nc" id="L161">                _syncError.value =</span>
+<span class="nc" id="L162">                    _syncError.value.copy(addressError = &quot;Error checking repository: ${e.message}&quot;)</span>
+            } finally {
+<span class="nc" id="L164">                _isLoading.value = false</span>
+            }
+<span class="nc" id="L166">        }</span>
+<span class="nc" id="L167">    }</span>
+
+    private suspend fun checkAddress(
+        rawAddress: String,
+        username: String?,
+        password: String?,
+<span class="nc" id="L173">    ): String? = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L174">        val allAddresses = addressSuffixes.map { &quot;$rawAddress/$it&quot; } + rawAddress</span>
+
+<span class="nc" id="L176">        allAddresses</span>
+<span class="nc" id="L177">            .sortedBy { it.length }</span>
+<span class="nc" id="L178">            .forEach { address -&gt;</span>
+<span class="nc" id="L179">                val response = downloader.headCall(</span>
+<span class="nc" id="L180">                    url = &quot;$address/index-v1.jar&quot;,</span>
+                    headers = {
+<span class="nc bnc" id="L182" title="All 4 branches missed.">                        if (username != null &amp;&amp; password != null) {</span>
+<span class="nc" id="L183">                            authentication(username, password)</span>
+                        }
+<span class="nc" id="L185">                    },</span>
+                )
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                if (response is NetworkResponse.Success) return@withContext address</span>
+<span class="nc" id="L188">            }</span>
+<span class="nc" id="L189">        null</span>
+<span class="nc" id="L190">    }</span>
+
+    private fun saveRepositoryToDatabase(
+        address: String,
+        fingerprint: String,
+        username: String?,
+        password: String?,
+    ) {
+<span class="nc" id="L198">        viewModelScope.launch {</span>
+<span class="nc" id="L199">            repoRepository.insertRepo(</span>
+<span class="nc" id="L200">                address = address,</span>
+<span class="nc bnc" id="L201" title="All 4 branches missed.">                fingerprint = fingerprint.ifEmpty { null },</span>
+<span class="nc" id="L202">                username = username,</span>
+<span class="nc" id="L203">                password = password,</span>
+            )
+<span class="nc" id="L205">        }</span>
+<span class="nc" id="L206">    }</span>
+
+    private fun addressError(address: String): String? {
+<span class="nc" id="L209">        val normalizedAddress = normalizeAddress(address)</span>
+<span class="nc" id="L210">        return when {</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            normalizedAddress == null -&gt; &quot;Invalid address&quot;</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            stripPathSuffix(normalizedAddress) in takenAddresses.value -&gt; &quot;Address already exists&quot;</span>
+<span class="nc" id="L213">            else -&gt; null</span>
+        }
+    }
+
+    private fun fingerprintError(fingerprint: String): String? {
+<span class="nc" id="L218">        val fin = fingerprint.replace(&quot; &quot;, &quot;&quot;)</span>
+<span class="nc bnc" id="L219" title="All 6 branches missed.">        return if (fin.isNotEmpty() &amp;&amp; fin.length != 64) {</span>
+<span class="nc" id="L220">            &quot;Invalid fingerprint format&quot;</span>
+        } else {
+<span class="nc" id="L222">            null</span>
+        }
+    }
+
+<span class="nc" id="L226">    private fun usernameError(username: String, password: String): String? = when {</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        username.contains(':') -&gt; &quot;Username cannot contain ':'&quot;</span>
+<span class="nc bnc" id="L228" title="All 8 branches missed.">        username.isEmpty() &amp;&amp; password.isNotEmpty() -&gt; &quot;Username is required&quot;</span>
+<span class="nc" id="L229">        else -&gt; null</span>
+<span class="nc" id="L230">    }</span>
+
+<span class="nc" id="L232">    private fun passwordError(username: String, password: String): String? = when {</span>
+<span class="nc bnc" id="L233" title="All 8 branches missed.">        username.isNotEmpty() &amp;&amp; password.isEmpty() -&gt; &quot;Password is required&quot;</span>
+<span class="nc" id="L234">        else -&gt; null</span>
+<span class="nc" id="L235">    }</span>
+
+    private fun normalizeAddress(address: String): String? {
+<span class="nc" id="L238">        val uri = try {</span>
+<span class="nc" id="L239">            val uri = URI(address)</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">            if (uri.isAbsolute) uri.normalize() else null</span>
+<span class="nc" id="L241">        } catch (_: URISyntaxException) {</span>
+<span class="nc" id="L242">            return null</span>
+        }
+<span class="nc" id="L244">        return try {</span>
+<span class="nc bnc" id="L245" title="All 8 branches missed.">            uri?.toURL()?.toURI()?.toString()?.removeSuffix(&quot;/&quot;)</span>
+<span class="nc" id="L246">        } catch (_: Exception) {</span>
+<span class="nc" id="L247">            null</span>
+        }
+    }
+
+    private fun formatFingerprint(fingerprint: String): String {
+<span class="nc" id="L252">        return fingerprint.uppercase()</span>
+<span class="nc" id="L253">            .windowed(2, 2, true)</span>
+<span class="nc" id="L254">            .take(32)</span>
+<span class="nc" id="L255">            .joinToString(separator = &quot; &quot;)</span>
+    }
+
+    private fun stripPathSuffix(address: String): String {
+<span class="nc" id="L259">        val cropped = address.removeSuffix(&quot;/&quot;)</span>
+<span class="nc" id="L260">        val endsWith = addressSuffixes</span>
+<span class="nc" id="L261">            .sortedByDescending { it.length }</span>
+<span class="nc bnc" id="L262" title="All 4 branches missed.">            .find { cropped.endsWith(&quot;/$it&quot;) }</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        return if (endsWith != null) {</span>
+<span class="nc" id="L264">            cropped.substring(</span>
+<span class="nc" id="L265">                0,</span>
+<span class="nc" id="L266">                cropped.length - endsWith.length - 1,</span>
+            )
+        } else {
+<span class="nc" id="L269">            cropped</span>
+        }
+    }
+}
+
+<span class="nc" id="L274">class RepoEditErrorState(</span>
+<span class="nc" id="L275">    val addressError: String? = null,</span>
+<span class="nc" id="L276">    val fingerprintError: String? = null,</span>
+<span class="nc" id="L277">    val usernameError: String? = null,</span>
+<span class="nc" id="L278">    val passwordError: String? = null,</span>
+<span class="nc" id="L279">) {</span>
+<span class="nc" id="L280">    val hasError: Boolean =</span>
+<span class="nc bnc" id="L281" title="All 8 branches missed.">        (addressError != null) || (fingerprintError != null) || (usernameError != null) || (passwordError != null)</span>
+}
+
+<span class="nc" id="L284">private fun RepoEditErrorState?.copy(</span>
+<span class="nc" id="L285">    addressError: String? = null,</span>
+<span class="nc" id="L286">    fingerprintError: String? = null,</span>
+<span class="nc" id="L287">    usernameError: String? = null,</span>
+<span class="nc" id="L288">    passwordError: String? = null,</span>
+<span class="nc" id="L289">) = RepoEditErrorState(</span>
+<span class="nc bnc" id="L290" title="All 4 branches missed.">    addressError = addressError ?: this?.addressError,</span>
+<span class="nc bnc" id="L291" title="All 4 branches missed.">    fingerprintError = fingerprintError ?: this?.fingerprintError,</span>
+<span class="nc bnc" id="L292" title="All 4 branches missed.">    usernameError = usernameError ?: this?.usernameError,</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">    passwordError = passwordError ?: this?.passwordError,</span>
+<span class="nc" id="L294">)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

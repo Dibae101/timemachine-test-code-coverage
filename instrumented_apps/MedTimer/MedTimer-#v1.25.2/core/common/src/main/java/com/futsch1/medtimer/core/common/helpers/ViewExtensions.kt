@@ -1,0 +1,12 @@
+package com.futsch1.medtimer.core.common.helpers
+
+import android.view.View
+import android.view.inputmethod.InputMethodManager
+
+fun View.showSoftKeyboard() {
+    if (requestFocus()) {
+        val imm =
+            this.context.getSystemService(InputMethodManager::class.java) as InputMethodManager
+        imm.showSoftInput(this, 0)
+    }
+}

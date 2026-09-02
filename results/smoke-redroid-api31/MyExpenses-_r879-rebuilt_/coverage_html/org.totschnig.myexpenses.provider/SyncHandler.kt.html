@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncHandler.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.provider</a> &gt; <span class="el_source">SyncHandler.kt</span></div><h1>SyncHandler.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.provider
+
+import android.content.ContentProviderOperation
+import android.content.ContentUris
+import android.content.ContentValues
+import org.totschnig.myexpenses.db2.CategoryHelper
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.ensureCategoryPath
+import org.totschnig.myexpenses.db2.extractTagIds
+import org.totschnig.myexpenses.db2.extractTagIdsV2
+import org.totschnig.myexpenses.db2.findAccountByUuid
+import org.totschnig.myexpenses.db2.findByAccountAndUuid
+import org.totschnig.myexpenses.db2.findPaymentMethod
+import org.totschnig.myexpenses.db2.requireParty
+import org.totschnig.myexpenses.db2.writePaymentMethod
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.provider.TransactionProvider.TRANSACTIONS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.UNSPLIT_URI
+import org.totschnig.myexpenses.sync.SyncAdapter
+import org.totschnig.myexpenses.sync.json.TransactionChange
+import java.io.IOException
+
+<span class="nc" id="L25">class SyncHandler(</span>
+<span class="nc" id="L26">    val accountId: Long,</span>
+<span class="nc" id="L27">    val currency: CurrencyUnit,</span>
+<span class="nc" id="L28">    val type: Long,</span>
+<span class="nc" id="L29">    val repository: Repository,</span>
+<span class="nc" id="L30">    val currencyContext: CurrencyContext,</span>
+<span class="nc" id="L31">    val resolver: (accountId: Long, transactionUUid: String) -&gt; Long = repository.contentResolver::findByAccountAndUuid,</span>
+<span class="nc" id="L32">) {</span>
+
+<span class="nc" id="L34">    val homeCurrency = currencyContext.homeCurrencyUnit</span>
+
+<span class="nc" id="L36">    private val categoryToId: MutableMap&lt;String, Long&gt; = HashMap()</span>
+<span class="nc" id="L37">    private val payeeToId: MutableMap&lt;String, Long&gt; = HashMap()</span>
+<span class="nc" id="L38">    private val methodToId: MutableMap&lt;String, Long&gt; = HashMap()</span>
+<span class="nc" id="L39">    private val tagToId: MutableMap&lt;String, Long&gt; = HashMap()</span>
+<span class="nc" id="L40">    private val accountUuidToId: MutableMap&lt;String, Long&gt; = HashMap()</span>
+
+<span class="nc" id="L42">    fun collectOperations(</span>
+        change: TransactionChange,
+<span class="nc" id="L44">        parentOffset: Int = -1,</span>
+    ): ArrayList&lt;ContentProviderOperation&gt; {
+<span class="nc" id="L46">        val ops = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc" id="L47">        val uri = TRANSACTIONS_URI.fromSyncAdapter()</span>
+<span class="nc" id="L48">        var skipped = false</span>
+<span class="nc" id="L49">        val tagIds: List&lt;Long&gt;? = buildList {</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">            change.tags?.let { addAll(repository.extractTagIds(it, tagToId)) }</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">            change.tagsV2?.let { addAll(repository.extractTagIdsV2(it, tagToId)) }</span>
+<span class="nc bnc" id="L52" title="All 4 branches missed.">        }.takeIf { it.isNotEmpty() }</span>
+<span class="nc bnc" id="L53" title="All 7 branches missed.">        when (change.type) {</span>
+            TransactionChange.Type.created -&gt; {
+<span class="nc" id="L55">                val transactionId = resolver(accountId, change.uuid)</span>
+<span class="nc bnc" id="L56" title="All 2 branches missed.">                if (transactionId &gt; -1) {</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">                    if (parentOffset &gt; -1) {</span>
+                        //if we find a split part that already exists, we need to assume that it has already been synced
+                        //by a previous sync of its transfer account, so all we do here is reparent it as child
+                        //of the split transaction we currently ingest
+<span class="nc" id="L61">                        ops.add(</span>
+<span class="nc" id="L62">                            ContentProviderOperation.newUpdate(uri)</span>
+<span class="nc" id="L63">                                .withValues(change.toContentValues(false))</span>
+<span class="nc" id="L64">                                .withSelection(</span>
+<span class="nc" id="L65">                                    &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L66">                                    arrayOf(transactionId.toString())</span>
+                                )
+<span class="nc" id="L68">                                .withValueBackReference(KEY_PARENTID, parentOffset)</span>
+<span class="nc" id="L69">                                .build()</span>
+                        )
+<span class="nc bnc" id="L71" title="All 2 branches missed.">                        tagIds?.let {</span>
+<span class="nc" id="L72">                            ops.addAll(saveTagLinks(it, null, 0))</span>
+                        }
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">                        change.attachments?.let {</span>
+<span class="nc" id="L76">                            ops.addAll(saveAttachmentLinks(it, null, 0))</span>
+                        }
+                    } else {
+<span class="nc" id="L79">                        skipped = true</span>
+<span class="nc" id="L80">                        SyncAdapter.log()</span>
+<span class="nc" id="L81">                            .i(&quot;Uuid found in changes already exists locally, likely a transfer implicitly created from its peer&quot;)</span>
+                    }
+                } else {
+<span class="nc" id="L84">                    ops.add(</span>
+<span class="nc" id="L85">                        ContentProviderOperation.newInsert(uri)</span>
+<span class="nc" id="L86">                            .withValues(change.toContentValues(true).apply {</span>
+<span class="nc" id="L87">                                put(KEY_ACCOUNTID, accountId)</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                                if (parentOffset == -1) {</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                                    change.parentUuid?.let {</span>
+<span class="nc" id="L90">                                        val parentId = resolver(accountId, it)</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                                        if (parentId != -1L) {</span>
+<span class="nc" id="L92">                                            put(KEY_PARENTID, parentId)</span>
+                                        }
+<span class="nc" id="L94">                                    }</span>
+                                }
+<span class="nc" id="L96">                            }).apply {</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                                if (parentOffset != -1) {</span>
+<span class="nc" id="L98">                                    withValueBackReference(KEY_PARENTID, parentOffset)</span>
+                                }
+<span class="nc" id="L100">                            }</span>
+<span class="nc" id="L101">                            .build()</span>
+                    )
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                    tagIds?.let {</span>
+<span class="nc" id="L104">                        ops.addAll(saveTagLinks(it, null, 0))</span>
+                    }
+
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                    change.attachments?.let {</span>
+<span class="nc" id="L108">                        ops.addAll(saveAttachmentLinks(it, null, 0))</span>
+                    }
+                }
+            }
+
+            TransactionChange.Type.updated -&gt; {
+<span class="nc" id="L114">                val values: ContentValues = change.toContentValues(false)</span>
+<span class="nc" id="L115">                val transactionId = resolver(accountId, change.uuid)</span>
+<span class="nc bnc" id="L116" title="All 4 branches missed.">                if (transactionId != -1L || parentOffset != -1) {</span>
+<span class="nc bnc" id="L117" title="All 4 branches missed.">                    if (values.size() &gt; 0 || parentOffset != -1) {</span>
+<span class="nc" id="L118">                        val builder = ContentProviderOperation.newUpdate(uri)</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                        if (transactionId != -1L) {</span>
+<span class="nc" id="L120">                            builder.withSelection(</span>
+<span class="nc" id="L121">                                &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L122">                                arrayOf(transactionId.toString())</span>
+                            )
+                            //Make sure we set the parent, in case the change is caused by &quot;Transform to split&quot;
+                        } else {
+<span class="nc" id="L126">                            builder.withSelection(</span>
+<span class="nc" id="L127">                                &quot;$KEY_UUID = ?&quot;,</span>
+<span class="nc" id="L128">                                arrayOf(change.uuid)</span>
+                            )
+                        }
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                        if (parentOffset != -1) {</span>
+<span class="nc" id="L132">                            builder.withValueBackReference(KEY_PARENTID, parentOffset)</span>
+                        }
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                        if (values.size() &gt; 0) {</span>
+<span class="nc" id="L135">                            builder.withValues(values)</span>
+                        }
+<span class="nc" id="L137">                        ops.add(builder.build())</span>
+                    }
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                    tagIds?.let { list -&gt;</span>
+<span class="nc" id="L140">                        ops.addAll(</span>
+<span class="nc" id="L141">                            saveTagLinks(</span>
+<span class="nc" id="L142">                                list,</span>
+<span class="nc bnc" id="L143" title="All 4 branches missed.">                                transactionId.takeIf { it != -1L },</span>
+<span class="nc bnc" id="L144" title="All 4 branches missed.">                                parentOffset.takeIf { it != -1 })</span>
+<span class="nc" id="L145">                        )</span>
+                    }
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                    change.attachments?.let { set -&gt;</span>
+<span class="nc" id="L148">                        ops.addAll(</span>
+<span class="nc" id="L149">                            saveAttachmentLinks(</span>
+<span class="nc" id="L150">                                set,</span>
+<span class="nc bnc" id="L151" title="All 4 branches missed.">                                transactionId.takeIf { it != -1L },</span>
+<span class="nc bnc" id="L152" title="All 4 branches missed.">                                parentOffset.takeIf { it != -1 }</span>
+                            )
+<span class="nc" id="L154">                        )</span>
+                    }
+                }
+            }
+
+            TransactionChange.Type.deleted -&gt; {
+<span class="nc" id="L160">                val transactionId = resolver(accountId, change.uuid)</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (transactionId != -1L) {</span>
+<span class="nc" id="L162">                    ops.add(</span>
+<span class="nc" id="L163">                        ContentProviderOperation.newDelete(</span>
+<span class="nc" id="L164">                            ContentUris.withAppendedId(</span>
+<span class="nc" id="L165">                                uri,</span>
+<span class="nc" id="L166">                                transactionId</span>
+                            )
+<span class="nc" id="L168">                        ).build()</span>
+                    )
+                }
+            }
+
+            TransactionChange.Type.unsplit -&gt; {
+<span class="nc" id="L174">                ops.add(</span>
+<span class="nc" id="L175">                    ContentProviderOperation.newUpdate(UNSPLIT_URI.fromSyncAdapter())</span>
+<span class="nc" id="L176">                        .withValue(KEY_UUID, change.uuid)</span>
+<span class="nc" id="L177">                        .build()</span>
+                )
+            }
+
+            TransactionChange.Type.unarchive -&gt; {
+<span class="nc" id="L182">                ops.add(</span>
+<span class="nc" id="L183">                    ContentProviderOperation.newAssertQuery(TRANSACTIONS_URI)</span>
+<span class="nc" id="L184">                        .withSelection(</span>
+<span class="nc" id="L185">                            &quot;$KEY_UUID = ? AND $KEY_STATUS == $STATUS_ARCHIVE&quot;,</span>
+<span class="nc" id="L186">                            arrayOf(change.uuid)</span>
+                        )
+<span class="nc" id="L188">                        .withExpectedCount(1).build()</span>
+                )
+<span class="nc" id="L190">                ops.add(</span>
+<span class="nc" id="L191">                    ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L192">                        uri.buildUpon()</span>
+<span class="nc" id="L193">                            .appendPath(TransactionProvider.URI_SEGMENT_UNARCHIVE).build()</span>
+                    )
+<span class="nc" id="L195">                        .withValue(KEY_UUID, change.uuid)</span>
+<span class="nc" id="L196">                        .build()</span>
+                )
+            }
+
+            TransactionChange.Type.link -&gt; {
+<span class="nc" id="L201">                ops.add(</span>
+<span class="nc" id="L202">                    ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L203">                        uri.buildUpon()</span>
+<span class="nc" id="L204">                            .appendPath(TransactionProvider.URI_SEGMENT_LINK_TRANSFER)</span>
+<span class="nc" id="L205">                            .appendPath(change.uuid).build()</span>
+                    )
+<span class="nc" id="L207">                        .withValue(KEY_UUID, change.referenceNumber)</span>
+<span class="nc" id="L208">                        .build()</span>
+                )
+            }
+
+            else -&gt; {}
+        }
+<span class="nc bnc" id="L214" title="All 4 branches missed.">        if (change.isCreateOrUpdate &amp;&amp; !skipped) {</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            change.splitParts?.let { splitParts -&gt;</span>
+<span class="nc" id="L216">                splitParts.forEach { splitChange: TransactionChange -&gt;</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                    require(change.uuid == splitChange.parentUuid)</span>
+                    //back reference is only used when we insert a new split,
+                    //for updating an existing split we search for its _id via its uuid
+<span class="nc" id="L220">                    ops.addAll(</span>
+<span class="nc" id="L221">                        collectOperations(</span>
+<span class="nc" id="L222">                            splitChange,</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                            if (change.isCreate) 0 else -1</span>
+                        )
+                    )
+<span class="nc" id="L226">                }</span>
+<span class="nc" id="L227">            }</span>
+        }
+<span class="nc" id="L229">        return ops</span>
+    }
+
+    private fun TransactionChange.toContentValues(forInsert: Boolean): ContentValues {
+<span class="nc" id="L233">        val values = ContentValues()</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (forInsert) {</span>
+<span class="nc" id="L235">            values.put(KEY_UUID, uuid)</span>
+        }
+<span class="nc bnc" id="L237" title="All 2 branches missed.">        amount?.let {</span>
+<span class="nc" id="L238">            values.put(KEY_AMOUNT, Money(currency, it).amountMinor)</span>
+<span class="nc" id="L239">        }</span>
+<span class="nc" id="L240">        transferAccount</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            ?.let { findTransferAccount(it) }</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">            ?.let { transferAccountId -&gt;</span>
+<span class="nc" id="L243">                values.put(KEY_TRANSFER_ACCOUNT, transferAccountId)</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                if (forInsert) {</span>
+<span class="nc bnc" id="L245" title="All 6 branches missed.">                    resolver(transferAccountId, uuid).takeIf { peer -&gt; peer != -1L }?.let {</span>
+<span class="nc" id="L246">                        values.put(KEY_TRANSFER_PEER, it)</span>
+<span class="nc" id="L247">                    }</span>
+                }
+<span class="nc" id="L249">            }</span>
+
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        comment?.let {</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">            if (it.isEmpty()) {</span>
+<span class="nc" id="L253">                values.putNull(KEY_COMMENT)</span>
+            } else {
+<span class="nc" id="L255">                values.put(KEY_COMMENT, it)</span>
+            }
+<span class="nc" id="L257">        }</span>
+<span class="nc bnc" id="L258" title="All 4 branches missed.">        if (date != null || forInsert) {</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">            values.put(KEY_DATE, date ?: System.currentTimeMillis())</span>
+        }
+
+<span class="nc bnc" id="L262" title="All 4 branches missed.">        if (valueDate != null || forInsert) {</span>
+<span class="nc bnc" id="L263" title="All 4 branches missed.">            values.put(KEY_VALUE_DATE, valueDate ?: date ?: System.currentTimeMillis())</span>
+        }
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        amount?.let { values.put(KEY_AMOUNT, it) }</span>
+<span class="nc bnc" id="L266" title="All 8 branches missed.">        if (splitParts?.isNotEmpty() == true) {</span>
+<span class="nc" id="L267">            values.put(KEY_CATID, SPLIT_CATID)</span>
+<span class="nc bnc" id="L268" title="All 6 branches missed.">        } else if (categoryInfo?.firstOrNull()?.uuid == NULL_CHANGE_INDICATOR) {</span>
+<span class="nc" id="L269">            values.putNull(KEY_CATID)</span>
+        } else {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            this.extractCatId()?.let { values.put(KEY_CATID, it) }</span>
+        }
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (payeeName == NULL_CHANGE_INDICATOR) {</span>
+<span class="nc" id="L274">            values.putNull(KEY_PAYEEID)</span>
+        } else {
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            payeeName?.let { name -&gt;</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                extractParty(name)?.let {</span>
+<span class="nc" id="L278">                    values.put(KEY_PAYEEID, it)</span>
+<span class="nc" id="L279">                }</span>
+            }
+        }
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (methodLabel == NULL_CHANGE_INDICATOR) {</span>
+<span class="nc" id="L283">            values.putNull(KEY_METHODID)</span>
+        } else {
+<span class="nc bnc" id="L285" title="All 2 branches missed.">            methodLabel?.let { label -&gt;</span>
+<span class="nc" id="L286">                values.put(KEY_METHODID, extractMethodId(label))</span>
+<span class="nc" id="L287">            }</span>
+        }
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        crStatus?.let { values.put(KEY_CR_STATUS, it) }</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        status?.let { values.put(KEY_STATUS, it) }</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        referenceNumber?.let { values.put(KEY_REFERENCE_NUMBER, it) }</span>
+<span class="nc bnc" id="L292" title="All 4 branches missed.">        if (originalAmount != null &amp;&amp; originalCurrency != null) {</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">            if (originalAmount == Long.MIN_VALUE) {</span>
+<span class="nc" id="L294">                values.putNull(KEY_ORIGINAL_AMOUNT)</span>
+<span class="nc" id="L295">                values.putNull(KEY_ORIGINAL_CURRENCY)</span>
+            } else {
+<span class="nc" id="L297">                values.put(KEY_ORIGINAL_AMOUNT, originalAmount)</span>
+<span class="nc" id="L298">                values.put(KEY_ORIGINAL_CURRENCY, originalCurrency)</span>
+            }
+        }
+<span class="nc bnc" id="L301" title="All 4 branches missed.">        if (equivalentAmount!= null &amp;&amp; equivalentCurrency != null) {</span>
+<span class="nc bnc" id="L302" title="All 6 branches missed.">            if (equivalentAmount == Long.MIN_VALUE || equivalentCurrency != homeCurrency.code) {</span>
+<span class="nc" id="L303">                values.putNull(KEY_EQUIVALENT_AMOUNT)</span>
+            } else {
+<span class="nc" id="L305">                values.put(KEY_EQUIVALENT_AMOUNT, equivalentAmount)</span>
+            }
+        }
+<span class="nc" id="L308">        return values</span>
+    }
+
+<span class="nc" id="L311">    private fun saveTagLinks(</span>
+        tagIds: List&lt;Long&gt;,
+        transactionId: Long?,
+<span class="nc" id="L314">        backReference: Int? = null,</span>
+<span class="nc" id="L315">    ) = buildList {</span>
+<span class="nc" id="L316">        val uri = TransactionProvider.TRANSACTIONS_TAGS_URI.fromSyncAdapter()</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        transactionId?.let {</span>
+<span class="nc" id="L318">            add(</span>
+<span class="nc" id="L319">                ContentProviderOperation.newDelete(uri)</span>
+<span class="nc" id="L320">                    .withSelection(&quot;$KEY_TRANSACTIONID = ?&quot;, arrayOf(it.toString())).build()</span>
+<span class="nc" id="L321">            )</span>
+        }
+<span class="nc" id="L323">        tagIds.forEach { tagId -&gt;</span>
+<span class="nc" id="L324">            val insert =</span>
+<span class="nc" id="L325">                ContentProviderOperation.newInsert(uri)</span>
+<span class="nc" id="L326">                    .withValue(KEY_TAGID, tagId)</span>
+<span class="nc bnc" id="L327" title="All 6 branches missed.">            transactionId?.let {</span>
+<span class="nc" id="L328">                insert.withValue(KEY_TRANSACTIONID, it)</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            } ?: backReference?.let {</span>
+<span class="nc" id="L330">                insert.withValueBackReference(KEY_TRANSACTIONID, it)</span>
+<span class="nc" id="L331">            } ?: throw IllegalArgumentException(&quot;neither id nor backReference provided&quot;)</span>
+<span class="nc" id="L332">            add(insert.build())</span>
+<span class="nc" id="L333">        }</span>
+<span class="nc" id="L334">    }</span>
+
+    private fun saveAttachmentLinks(
+        attachments: Set&lt;String&gt;,
+        transactionId: Long?,
+        backReference: Int?,
+<span class="nc" id="L340">    ) = buildList {</span>
+<span class="nc" id="L341">        attachments.forEach { uuid -&gt;</span>
+<span class="nc" id="L342">            val insert =</span>
+<span class="nc" id="L343">                ContentProviderOperation.newInsert(TransactionProvider.TRANSACTIONS_ATTACHMENTS_URI)</span>
+<span class="nc" id="L344">                    .withValue(KEY_UUID, uuid)</span>
+<span class="nc bnc" id="L345" title="All 6 branches missed.">            transactionId?.let {</span>
+<span class="nc" id="L346">                insert.withValue(KEY_TRANSACTIONID, it)</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            } ?: backReference?.let {</span>
+<span class="nc" id="L348">                insert.withValueBackReference(KEY_TRANSACTIONID, it)</span>
+<span class="nc" id="L349">            } ?: throw IllegalArgumentException(&quot;neither id nor backReference provided&quot;)</span>
+<span class="nc" id="L350">            add(insert.build())</span>
+<span class="nc" id="L351">        }</span>
+<span class="nc" id="L352">    }</span>
+
+    private fun TransactionChange.extractCatId(): Long? {
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        return label?.let {</span>
+<span class="nc" id="L356">            CategoryHelper.insert(repository, it, categoryToId, false)</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">            categoryToId[it] ?: throw IOException(&quot;Saving category $it failed&quot;)</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">        } ?: categoryInfo?.let { repository.ensureCategoryPath(it) }</span>
+    }
+
+    private fun extractParty(party: String): Long? =
+<span class="nc bnc" id="L362" title="All 4 branches missed.">        payeeToId[party] ?: repository.requireParty(party)?.also {</span>
+<span class="nc" id="L363">            payeeToId[party] = it</span>
+<span class="nc" id="L364">        }</span>
+
+    private fun extractMethodId(methodLabel: String): Long =
+<span class="nc bnc" id="L367" title="All 10 branches missed.">        methodToId[methodLabel] ?: (repository.findPaymentMethod(methodLabel).takeIf { it != -1L }</span>
+<span class="nc" id="L368">            ?: repository.writePaymentMethod(methodLabel, type)).also {</span>
+<span class="nc" id="L369">            methodToId[methodLabel] = it</span>
+<span class="nc" id="L370">        }</span>
+
+    private fun findTransferAccount(uuid: String): Long? =
+<span class="nc bnc" id="L373" title="All 4 branches missed.">        accountUuidToId[uuid] ?: repository.findAccountByUuid(uuid)?.also {</span>
+<span class="nc" id="L374">            accountUuidToId[uuid] = it</span>
+<span class="nc" id="L375">        }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

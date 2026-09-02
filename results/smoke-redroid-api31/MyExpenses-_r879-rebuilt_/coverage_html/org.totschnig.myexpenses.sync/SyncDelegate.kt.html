@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncDelegate.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.sync</a> &gt; <span class="el_source">SyncDelegate.kt</span></div><h1>SyncDelegate.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.sync
+
+import android.content.ContentProviderClient
+import android.content.Context
+import android.content.OperationApplicationException
+import android.os.Bundle
+import android.os.RemoteException
+import androidx.annotation.VisibleForTesting
+import kotlinx.serialization.json.Json
+import org.totschnig.myexpenses.db2.Repository
+import org.totschnig.myexpenses.db2.findByAccountAndUuid
+import org.totschnig.myexpenses.feature.Feature
+import org.totschnig.myexpenses.feature.FeatureManager
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.provider.KEY_ACCOUNTID
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_TYPE
+import org.totschnig.myexpenses.provider.SyncContract
+import org.totschnig.myexpenses.provider.SyncContract.KEY_EXCEPTION
+import org.totschnig.myexpenses.provider.SyncContract.KEY_RESULT
+import org.totschnig.myexpenses.provider.SyncContract.METHOD_APPLY_CHANGES
+import org.totschnig.myexpenses.sync.json.TransactionChange
+import timber.log.Timber
+
+<span class="nc" id="L27">class SyncDelegate(</span>
+<span class="nc" id="L28">    val currencyContext: CurrencyContext,</span>
+<span class="nc" id="L29">    val featureManager: FeatureManager,</span>
+<span class="nc" id="L30">    val repository: Repository,</span>
+<span class="nc" id="L31">    val homeCurrency: CurrencyUnit,</span>
+<span class="nc" id="L32">    val resolver: (accountId: Long, transactionUUid: String) -&gt; Long = repository.contentResolver::findByAccountAndUuid,</span>
+<span class="nc" id="L33">) {</span>
+
+<span class="nc" id="L35">    lateinit var account: Account</span>
+
+<span class="nc" id="L37">    private val json = Json { ignoreUnknownKeys = true }</span>
+
+    @Throws(RemoteException::class, OperationApplicationException::class)
+    fun writeRemoteChangesToDb(
+        context: Context,
+        provider: ContentProviderClient,
+        remoteChanges: List&lt;TransactionChange&gt;,
+    ) {
+<span class="nc bnc" id="L45" title="All 4 branches missed.">        if (remoteChanges.isNotEmpty()) {</span>
+<span class="nc" id="L46">            SyncContract.getSyncFile(context).writer().use { writer -&gt;</span>
+<span class="nc" id="L47">                writer.write(json.encodeToString(remoteChanges).also {</span>
+<span class="nc" id="L48">                    Timber.d(&quot;Remote changes :\n%s&quot;, it)</span>
+<span class="nc" id="L49">                })</span>
+<span class="nc" id="L50">            }</span>
+<span class="nc" id="L51">            val result = provider.call(</span>
+<span class="nc" id="L52">                METHOD_APPLY_CHANGES,</span>
+<span class="nc" id="L53">                null, Bundle(3).apply {</span>
+<span class="nc" id="L54">                    putLong(KEY_ACCOUNTID, account.id)</span>
+<span class="nc" id="L55">                    putString(KEY_CURRENCY, account.currency)</span>
+<span class="nc" id="L56">                    putLong(KEY_TYPE, account.type!!.id)</span>
+<span class="nc" id="L57">                }</span>
+            )
+<span class="nc bnc" id="L59" title="All 6 branches missed.">            if (result?.getBoolean(KEY_RESULT) != true) {</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">                throw OperationApplicationException(result?.getString(KEY_EXCEPTION))</span>
+            }
+        }
+<span class="nc" id="L63">    }</span>
+
+    /**
+     * @param changeList
+     * @return the same list with split parts moved as parts to their parents. If there are multiple parents
+     * for the same uuid, the splits will appear under each of them
+     */
+    fun collectSplits(changeList: MutableList&lt;TransactionChange&gt;): List&lt;TransactionChange&gt; {
+<span class="nc" id="L71">        val splitsPerUuid = HashMap&lt;String, MutableList&lt;TransactionChange&gt;&gt;()</span>
+<span class="nc" id="L72">        val i = changeList.iterator()</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        while (i.hasNext()) {</span>
+<span class="nc" id="L74">            val change = i.next()</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            change.parentUuid?.let {</span>
+<span class="nc" id="L76">                ensureList(splitsPerUuid, it).add(change)</span>
+<span class="nc" id="L77">                i.remove()</span>
+<span class="nc" id="L78">            }</span>
+        }
+
+        //When a split transaction is changed, we do not necessarily have an entry for the parent, so we
+        //create one here
+<span class="nc" id="L83">        splitsPerUuid.keys.forEach { uuid: String -&gt;</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (!changeList.any { change: TransactionChange -&gt; change.uuid == uuid }) {</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                splitsPerUuid[uuid]?.let { list -&gt;</span>
+<span class="nc" id="L86">                    changeList.add(</span>
+<span class="nc" id="L87">                        TransactionChange(</span>
+<span class="nc" id="L88">                            type = TransactionChange.Type.updated,</span>
+<span class="nc" id="L89">                            timeStamp = list[0].timeStamp,</span>
+<span class="nc" id="L90">                            uuid = uuid</span>
+                        )
+                    )
+<span class="nc" id="L93">                }</span>
+            }
+<span class="nc" id="L95">        }</span>
+<span class="nc" id="L96">        return changeList.map { change: TransactionChange -&gt;</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            if (change.type == TransactionChange.Type.unsplit) change else</span>
+<span class="nc bnc" id="L98" title="All 4 branches missed.">                splitsPerUuid[change.uuid]?.let { parts -&gt;</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                    if (parts.all { it.parentUuid == change.uuid }) {</span>
+<span class="nc" id="L100">                        change.copy(splitParts = parts)</span>
+                    } else {
+<span class="nc" id="L102">                        throw IllegalStateException(&quot;parts parentUuid does not match parents uuid&quot;)</span>
+<span class="nc" id="L103">                    }</span>
+<span class="nc" id="L104">                } ?: change</span>
+        }
+    }
+
+
+    fun mergeChangeSets(
+        first: List&lt;TransactionChange&gt;, second: List&lt;TransactionChange&gt;,
+    ): Pair&lt;List&lt;TransactionChange&gt;, List&lt;TransactionChange&gt;&gt; {
+
+        //filter out changes made obsolete by later delete
+<span class="nc" id="L114">        val deletedUuids = findDeletedUuids(first + second)</span>
+<span class="nc" id="L115">        var firstResult: List&lt;TransactionChange&gt; = filterDeleted(first, deletedUuids)</span>
+<span class="nc" id="L116">        var secondResult: List&lt;TransactionChange&gt; = filterDeleted(second, deletedUuids)</span>
+
+        //merge update changes
+<span class="nc" id="L119">        val updatesPerUuid = HashMap&lt;String, MutableList&lt;TransactionChange&gt;&gt;()</span>
+<span class="nc" id="L120">        val mergesPerUuid = HashMap&lt;String, TransactionChange&gt;()</span>
+<span class="nc" id="L121">        (firstResult + secondResult)</span>
+<span class="nc" id="L122">            .filter { obj: TransactionChange -&gt; obj.isCreateOrUpdate }</span>
+<span class="nc" id="L123">            .forEach { change: TransactionChange -&gt;</span>
+<span class="nc" id="L124">                ensureList(updatesPerUuid, change.uuid).add(</span>
+<span class="nc" id="L125">                    change</span>
+                )
+<span class="nc" id="L127">            }</span>
+<span class="nc" id="L128">        val uuidsRequiringMerge = updatesPerUuid.keys</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">            .filter { uuid: String -&gt; updatesPerUuid[uuid]!!.size &gt; 1 }</span>
+<span class="nc" id="L130">        uuidsRequiringMerge.forEach { uuid: String -&gt;</span>
+<span class="nc" id="L131">            mergesPerUuid[uuid] = mergeUpdates(updatesPerUuid[uuid]!!)</span>
+<span class="nc" id="L132">        }</span>
+<span class="nc" id="L133">        firstResult = mergeChanges(replaceByMerged(firstResult, mergesPerUuid))</span>
+<span class="nc" id="L134">        secondResult = mergeChanges(replaceByMerged(secondResult, mergesPerUuid))</span>
+<span class="nc" id="L135">        return firstResult to secondResult</span>
+    }
+
+    private fun ensureList(
+        map: HashMap&lt;String, MutableList&lt;TransactionChange&gt;&gt;,
+        uuid: String,
+    ): MutableList&lt;TransactionChange&gt; {
+<span class="nc" id="L142">        var changesForUuid = map[uuid]</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (changesForUuid == null) {</span>
+<span class="nc" id="L144">            changesForUuid = ArrayList()</span>
+<span class="nc" id="L145">            map[uuid] = changesForUuid</span>
+        }
+<span class="nc" id="L147">        return changesForUuid</span>
+    }
+
+    private fun replaceByMerged(
+        input: List&lt;TransactionChange&gt;,
+        mergedMap: HashMap&lt;String, TransactionChange&gt;,
+    ): List&lt;TransactionChange&gt; {
+<span class="nc" id="L154">        return input.map { change -&gt;</span>
+<span class="nc bnc" id="L155" title="All 6 branches missed.">            change.takeIf { it.isCreateOrUpdate }?.nullifyIfNeeded(mergedMap[change.uuid])</span>
+<span class="nc" id="L156">                ?: change</span>
+<span class="nc" id="L157">        }.distinct()</span>
+    }
+
+    /**
+     * For all fields in a give change log entry, we compare if the final merged change has a different
+     * non-null value, in which case we set the field to null. This prevents a value that has already
+     * been overwritten from being written again either remotely or locally
+     */
+    private fun TransactionChange.nullifyIfNeeded(merged: TransactionChange?): TransactionChange {
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (merged == null) return this</span>
+<span class="nc" id="L167">        return this.copy(</span>
+<span class="nc bnc" id="L168" title="All 6 branches missed.">            comment = if (comment != null &amp;&amp; merged.comment != null &amp;&amp; merged.comment != comment) null else comment,</span>
+<span class="nc bnc" id="L169" title="All 6 branches missed.">            date = if (date != null &amp;&amp; merged.date != null &amp;&amp; merged.date != date) null else date,</span>
+<span class="nc bnc" id="L170" title="All 6 branches missed.">            valueDate = if (valueDate != null &amp;&amp; merged.valueDate != null &amp;&amp; merged.valueDate != valueDate) null else valueDate,</span>
+<span class="nc bnc" id="L171" title="All 6 branches missed.">            amount = if (amount != null &amp;&amp; merged.amount != null &amp;&amp; merged.amount != amount) null else amount,</span>
+<span class="nc bnc" id="L172" title="All 12 branches missed.">            label = if ((label != null || categoryInfo != null) &amp;&amp; (merged.label != null || merged.categoryInfo != null) &amp;&amp; (merged.label != label || merged.categoryInfo != categoryInfo)) null else label,</span>
+<span class="nc bnc" id="L173" title="All 12 branches missed.">            categoryInfo = if ((label != null || categoryInfo != null) &amp;&amp; (merged.label != null || merged.categoryInfo != null) &amp;&amp; (merged.label != label || merged.categoryInfo != categoryInfo)) null else categoryInfo,</span>
+<span class="nc bnc" id="L174" title="All 6 branches missed.">            payeeName = if (payeeName != null &amp;&amp; merged.payeeName != null &amp;&amp; merged.payeeName != payeeName) null else payeeName,</span>
+<span class="nc bnc" id="L175" title="All 6 branches missed.">            transferAccount = if (transferAccount != null &amp;&amp; merged.transferAccount != null &amp;&amp; merged.transferAccount != transferAccount) null else transferAccount,</span>
+<span class="nc bnc" id="L176" title="All 6 branches missed.">            methodLabel = if (methodLabel != null &amp;&amp; merged.methodLabel != null &amp;&amp; merged.methodLabel != methodLabel) null else methodLabel,</span>
+<span class="nc bnc" id="L177" title="All 6 branches missed.">            crStatus = if (crStatus != null &amp;&amp; merged.crStatus != null &amp;&amp; merged.crStatus != crStatus) null else crStatus,</span>
+<span class="nc bnc" id="L178" title="All 6 branches missed.">            status = if (status != null &amp;&amp; merged.status != null &amp;&amp; merged.status != status) null else status,</span>
+<span class="nc bnc" id="L179" title="All 6 branches missed.">            referenceNumber = if (referenceNumber != null &amp;&amp; merged.referenceNumber != null &amp;&amp; merged.referenceNumber != referenceNumber) null else referenceNumber,</span>
+<span class="nc bnc" id="L180" title="All 12 branches missed.">            pictureUri = if ((pictureUri != null || attachments != null) &amp;&amp; (merged.pictureUri != null || merged.attachments != null) &amp;&amp; (merged.pictureUri != pictureUri || merged.attachments != attachments)) null else pictureUri,</span>
+<span class="nc bnc" id="L181" title="All 12 branches missed.">            attachments = if ((pictureUri != null || attachments != null) &amp;&amp; (merged.pictureUri != null || merged.attachments != null) &amp;&amp; (merged.pictureUri != pictureUri || merged.attachments != attachments)) null else attachments,</span>
+<span class="nc bnc" id="L182" title="All 4 branches missed.">            splitParts = if (splitParts != null &amp;&amp; merged.splitParts != null) {</span>
+<span class="nc" id="L183">                splitParts.map { part -&gt;</span>
+<span class="nc bnc" id="L184" title="All 8 branches missed.">                    merged.splitParts.find { it.uuid == part.uuid }?.let { mergedPart -&gt;</span>
+<span class="nc" id="L185">                        part.nullifyIfNeeded(mergedPart)</span>
+<span class="nc" id="L186">                    } ?: part</span>
+                }
+<span class="nc" id="L188">            } else splitParts,</span>
+<span class="nc bnc" id="L189" title="All 12 branches missed.">            tags = if ((tags != null || tagsV2 != null) &amp;&amp; (merged.tags != null || merged.tagsV2 != null) &amp;&amp; (merged.tags != tags || merged.tagsV2 != tagsV2)) null else tags,</span>
+<span class="nc bnc" id="L190" title="All 12 branches missed.">            tagsV2 = if ((tags != null || tagsV2 != null) &amp;&amp; (merged.tags != null || merged.tagsV2 != null) &amp;&amp; (merged.tags != tags || merged.tagsV2 != tagsV2)) null else tagsV2</span>
+        )
+    }
+
+    private fun mergeChanges(input: List&lt;TransactionChange&gt;): List&lt;TransactionChange&gt; =
+<span class="nc" id="L195">        input.groupBy(TransactionChange::uuid).flatMap { entry -&gt;</span>
+<span class="nc" id="L196">            val (cudItems, specials) = entry.value.partition { it.isCUD }</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            if (cudItems.isEmpty()) specials else</span>
+<span class="nc" id="L198">                listOf(mergeUpdates(cudItems)) + specials</span>
+<span class="nc" id="L199">        }</span>
+
+
+    @VisibleForTesting
+    fun mergeUpdates(changeList: List&lt;TransactionChange&gt;): TransactionChange {
+<span class="nc bnc" id="L204" title="All 4 branches missed.">        check(changeList.isNotEmpty()) { &quot;nothing to merge&quot; }</span>
+<span class="nc" id="L205">        return changeList</span>
+<span class="nc" id="L206">            .sortedBy { if (it.isCreate) 0L else it.timeStamp }</span>
+<span class="nc" id="L207">            .reduce { initial: TransactionChange, change: TransactionChange -&gt;</span>
+<span class="nc" id="L208">                mergeUpdate(</span>
+<span class="nc" id="L209">                    initial,</span>
+<span class="nc" id="L210">                    change</span>
+<span class="nc" id="L211">                )</span>
+            }
+    }
+
+    private fun mergeUpdate(
+        initial: TransactionChange,
+        change: TransactionChange,
+    ): TransactionChange {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        check(initial.uuid == change.uuid) { &quot;Can only merge changes with same uuid&quot; }</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (initial.isDelete) return initial</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        if (change.isDelete) return change</span>
+
+<span class="nc" id="L223">        var result = initial</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (change.parentUuid != null) result = result.copy(parentUuid = change.parentUuid)</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (change.comment != null) result = result.copy(comment = change.comment)</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">        if (change.date != null) result = result.copy(date = change.date)</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if (change.valueDate != null) result = result.copy(valueDate = change.valueDate)</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        if (change.amount != null) result = result.copy(amount = change.amount)</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (change.label != null) result = result.copy(label = change.label)</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (change.payeeName != null) result = result.copy(payeeName = change.payeeName)</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if (change.transferAccount != null) result =</span>
+<span class="nc" id="L232">            result.copy(transferAccount = change.transferAccount)</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (change.methodLabel != null) result = result.copy(methodLabel = change.methodLabel)</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (change.crStatus != null) result = result.copy(crStatus = change.crStatus)</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        if (change.status != null) result = result.copy(status = change.status)</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (change.referenceNumber != null) result =</span>
+<span class="nc" id="L237">            result.copy(referenceNumber = change.referenceNumber)</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (change.pictureUri != null) result = result.copy(pictureUri = change.pictureUri)</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        if (change.splitParts != null) {</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">            val merged = mergeChanges((initial.splitParts ?: emptyList()) + change.splitParts)</span>
+<span class="nc" id="L241">            result = result.copy(splitParts = merged)</span>
+        }
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (change.tags != null) result = result.copy(tags = change.tags)</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (change.tagsV2 != null) result = result.copy(tagsV2 = change.tagsV2)</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        if (change.attachments != null) result = result.copy(attachments = change.attachments)</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (change.categoryInfo != null) result = result.copy(categoryInfo = change.categoryInfo)</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">        if (change.equivalentAmount != null) result = result.copy(equivalentAmount = change.equivalentAmount)</span>
+
+<span class="nc" id="L249">        return result.withCurrentTimeStamp()</span>
+    }
+
+    private fun findDeletedUuids(list: List&lt;TransactionChange&gt;): List&lt;String&gt; =
+<span class="nc" id="L253">        list.filter { it.isDelete }.map { it.uuid }</span>
+
+    private fun filterDeleted(
+        input: List&lt;TransactionChange&gt;,
+        deletedUuids: List&lt;String&gt;,
+    ): List&lt;TransactionChange&gt; {
+<span class="nc" id="L259">        return input.filter { change: TransactionChange -&gt;</span>
+<span class="nc bnc" id="L260" title="All 4 branches missed.">            change.isDelete || !deletedUuids.contains(change.uuid)</span>
+        }
+    }
+
+    fun findMetadataChange(input: List&lt;TransactionChange&gt;) =
+<span class="nc bnc" id="L265" title="All 6 branches missed.">        input.findLast { it.type == TransactionChange.Type.metadata }</span>
+
+    fun removeMetadataChange(input: List&lt;TransactionChange&gt;) =
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        input.filter { it.type != TransactionChange.Type.metadata }</span>
+
+    fun requireFeatureForAccount(context: Context, name: String): Feature? {
+<span class="nc bnc" id="L271" title="All 6 branches missed.">        BackendService.forAccount(name).getOrNull()?.feature?.let {</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (!featureManager.isFeatureInstalled(it, context)) {</span>
+<span class="nc" id="L273">                featureManager.requestFeature(it, context)</span>
+<span class="nc" id="L274">                return it</span>
+            }
+<span class="nc" id="L276">        }</span>
+<span class="nc" id="L277">        return null</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

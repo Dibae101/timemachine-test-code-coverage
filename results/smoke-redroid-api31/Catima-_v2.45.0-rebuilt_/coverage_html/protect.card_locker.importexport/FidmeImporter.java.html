@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FidmeImporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Catima</a> &gt; <a href="index.source.html" class="el_package">protect.card_locker.importexport</a> &gt; <span class="el_source">FidmeImporter.java</span></div><h1>FidmeImporter.java</h1><pre class="source lang-java linenums">package protect.card_locker.importexport;
+
+import android.content.Context;
+import android.database.sqlite.SQLiteDatabase;
+
+import net.lingala.zip4j.io.inputstream.ZipInputStream;
+import net.lingala.zip4j.model.LocalFileHeader;
+
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
+import org.json.JSONException;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.List;
+
+import protect.card_locker.CatimaBarcode;
+import protect.card_locker.DBHelper;
+import protect.card_locker.FormatException;
+import protect.card_locker.LoyaltyCard;
+import protect.card_locker.Utils;
+
+/**
+ * Class for importing a database from CSV (Comma Separate Values)
+ * formatted data.
+ * &lt;p&gt;
+ * The database's loyalty cards are expected to appear in the CSV data.
+ * A header is expected for the each table showing the names of the columns.
+ */
+<span class="nc" id="L38">public class FidmeImporter implements Importer {</span>
+    public static class ImportedData {
+        public final List&lt;LoyaltyCard&gt; cards;
+
+<span class="nc" id="L42">        ImportedData(final List&lt;LoyaltyCard&gt; cards) {</span>
+<span class="nc" id="L43">            this.cards = cards;</span>
+<span class="nc" id="L44">        }</span>
+    }
+
+    public void importData(Context context, SQLiteDatabase database, File inputFile, char[] password) throws IOException, FormatException, JSONException, ParseException {
+<span class="nc" id="L48">        InputStream input = new FileInputStream(inputFile);</span>
+        // We actually retrieve a .zip file
+<span class="nc" id="L50">        ZipInputStream zipInputStream = new ZipInputStream(input, password);</span>
+
+<span class="nc" id="L52">        StringBuilder loyaltyCards = new StringBuilder();</span>
+<span class="nc" id="L53">        byte[] buffer = new byte[1024];</span>
+<span class="nc" id="L54">        int read = 0;</span>
+
+        LocalFileHeader localFileHeader;
+
+<span class="nc bnc" id="L58" title="All 2 branches missed.">        while ((localFileHeader = zipInputStream.getNextEntry()) != null) {</span>
+<span class="nc bnc" id="L59" title="All 2 branches missed.">            if (localFileHeader.getFileName().equals(&quot;loyalty_programs.csv&quot;)) {</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">                while ((read = zipInputStream.read(buffer, 0, 1024)) &gt;= 0) {</span>
+<span class="nc" id="L61">                    loyaltyCards.append(new String(buffer, 0, read, StandardCharsets.UTF_8));</span>
+                }
+            }
+        }
+
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (loyaltyCards.length() == 0) {</span>
+<span class="nc" id="L67">            throw new FormatException(&quot;Couldn't find loyalty_programs.csv in zip file or it is empty&quot;);</span>
+        }
+
+<span class="nc" id="L70">        final CSVParser fidmeParser = new CSVParser(new StringReader(loyaltyCards.toString()), CSVFormat.RFC4180.builder().setDelimiter(';').setHeader().build());</span>
+<span class="nc" id="L71">        ImportedData importedData = new ImportedData(new ArrayList&lt;&gt;());</span>
+
+        try {
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            for (CSVRecord record : fidmeParser) {</span>
+<span class="nc" id="L75">                LoyaltyCard card = importLoyaltyCard(context, record);</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">                if (card != null) {</span>
+<span class="nc" id="L77">                    importedData.cards.add(card);</span>
+                }
+
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                if (Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L81">                    throw new InterruptedException();</span>
+                }
+<span class="nc" id="L83">            }</span>
+<span class="nc" id="L84">        } catch (IllegalArgumentException | IllegalStateException | InterruptedException e) {</span>
+<span class="nc" id="L85">            throw new FormatException(&quot;Issue parsing CSV data&quot;, e);</span>
+        } finally {
+<span class="nc" id="L87">            fidmeParser.close();</span>
+        }
+
+<span class="nc" id="L90">        zipInputStream.close();</span>
+<span class="nc" id="L91">        input.close();</span>
+
+<span class="nc" id="L93">        saveAndDeduplicate(database, importedData);</span>
+<span class="nc" id="L94">    }</span>
+
+    /**
+     * Import a single loyalty card into the database using the given
+     * session.
+     */
+    private LoyaltyCard importLoyaltyCard(Context context, CSVRecord record) throws FormatException {
+        // A loyalty card export from Fidme contains the following fields:
+        // Retailer (store name)
+        // Program (program name)
+        // Added at (YYYY-MM-DD HH:MM:SS UTC)
+        // Reference (card ID)
+        // Firstname (card holder first name)
+        // Lastname (card holder last name)
+
+        // The store is called Retailer
+<span class="nc" id="L110">        String store = CSVHelpers.extractString(&quot;Retailer&quot;, record, &quot;&quot;);</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (store.isEmpty()) {</span>
+<span class="nc" id="L113">            throw new FormatException(&quot;No store listed, but is required&quot;);</span>
+        }
+
+        // There seems to be no note field in the CSV? So let's combine other fields instead...
+<span class="nc" id="L117">        String program = CSVHelpers.extractString(&quot;Program&quot;, record, &quot;&quot;).trim();</span>
+<span class="nc" id="L118">        String addedAt = CSVHelpers.extractString(&quot;Added At&quot;, record, &quot;&quot;).trim();</span>
+<span class="nc" id="L119">        String firstName = CSVHelpers.extractString(&quot;Firstname&quot;, record, &quot;&quot;).trim();</span>
+<span class="nc" id="L120">        String lastName = CSVHelpers.extractString(&quot;Lastname&quot;, record, &quot;&quot;).trim();</span>
+
+<span class="nc" id="L122">        String combinedName = String.format(&quot;%s %s&quot;, firstName, lastName).trim();</span>
+
+<span class="nc" id="L124">        StringBuilder noteBuilder = new StringBuilder();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (!program.isEmpty()) noteBuilder.append(program).append('\n');</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (!addedAt.isEmpty()) noteBuilder.append(addedAt).append('\n');</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (!combinedName.isEmpty()) noteBuilder.append(combinedName).append('\n');</span>
+<span class="nc" id="L128">        String note = noteBuilder.toString().trim();</span>
+
+        // The ID is called reference
+<span class="nc" id="L131">        String cardId = CSVHelpers.extractString(&quot;Reference&quot;, record, &quot;&quot;);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (cardId.isEmpty()) {</span>
+            // Fidme deletes the card id if a card is expired
+            // Because Catima considers the card id a required field, we ignore these expired cards
+            // https://github.com/CatimaLoyalty/Android/issues/1005
+<span class="nc" id="L136">            return null;</span>
+        }
+
+        // Sadly, Fidme exports don't contain the card type
+        // I guess they have an online DB of all the different companies and what type they use
+        // TODO: Hook this into our own loyalty card DB if we ever get one
+<span class="nc" id="L142">        CatimaBarcode barcodeType = null;</span>
+
+        // No favourite data or colour in the export either
+<span class="nc" id="L145">        int starStatus = 0;</span>
+<span class="nc" id="L146">        int archiveStatus = 0;</span>
+<span class="nc" id="L147">        int headerColor = Utils.getRandomHeaderColor(context);</span>
+
+        // TODO: Front and back image
+
+        // use -1 for the ID, it will be ignored when inserting the card into the DB
+<span class="nc" id="L152">        return new LoyaltyCard(</span>
+                -1,
+                store,
+                note,
+                null,
+                null,
+<span class="nc" id="L158">                BigDecimal.valueOf(0),</span>
+                null,
+                cardId,
+                null,
+                barcodeType,
+                StandardCharsets.ISO_8859_1,
+<span class="nc" id="L164">                headerColor,</span>
+                starStatus,
+<span class="nc" id="L166">                Utils.getUnixTime(),</span>
+                DBHelper.DEFAULT_ZOOM_LEVEL,
+                DBHelper.DEFAULT_ZOOM_LEVEL_WIDTH,
+                archiveStatus,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    public void saveAndDeduplicate(SQLiteDatabase database, final ImportedData data) {
+        // This format does not have IDs that can cause conflicts
+        // Proper deduplication for all formats will be implemented later
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        for (LoyaltyCard card : data.cards) {</span>
+            // Do not use card.id which is set to -1
+<span class="nc" id="L184">            DBHelper.insertLoyaltyCard(database, card.store, card.note, card.validFrom, card.expiry, card.balance, card.balanceType,</span>
+<span class="nc" id="L185">                    card.cardId, card.barcodeId, card.barcodeType, card.barcodeEncoding, card.headerColor, card.starStatus, card.lastUsed, card.archiveStatus);</span>
+<span class="nc" id="L186">        }</span>
+<span class="nc" id="L187">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

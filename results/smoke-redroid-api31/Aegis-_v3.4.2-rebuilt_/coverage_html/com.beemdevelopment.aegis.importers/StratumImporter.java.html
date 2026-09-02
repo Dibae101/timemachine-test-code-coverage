@@ -1,0 +1,381 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StratumImporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Aegis</a> &gt; <a href="index.source.html" class="el_package">com.beemdevelopment.aegis.importers</a> &gt; <span class="el_source">StratumImporter.java</span></div><h1>StratumImporter.java</h1><pre class="source lang-java linenums">package com.beemdevelopment.aegis.importers;
+
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
+
+import androidx.lifecycle.Lifecycle;
+
+import com.beemdevelopment.aegis.R;
+import com.beemdevelopment.aegis.encoding.Base32;
+import com.beemdevelopment.aegis.encoding.EncodingException;
+import com.beemdevelopment.aegis.helpers.ContextHelper;
+import com.beemdevelopment.aegis.otp.HotpInfo;
+import com.beemdevelopment.aegis.otp.OtpInfo;
+import com.beemdevelopment.aegis.otp.OtpInfoException;
+import com.beemdevelopment.aegis.otp.SteamInfo;
+import com.beemdevelopment.aegis.otp.TotpInfo;
+import com.beemdevelopment.aegis.ui.dialogs.Dialogs;
+import com.beemdevelopment.aegis.ui.tasks.Argon2Task;
+import com.beemdevelopment.aegis.ui.tasks.PBKDFTask;
+import com.beemdevelopment.aegis.util.IOUtils;
+import com.beemdevelopment.aegis.vault.VaultEntry;
+import com.topjohnwu.superuser.io.SuFile;
+
+import org.bouncycastle.crypto.params.Argon2Parameters;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UTFDataFormatException;
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.util.List;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.IvParameterSpec;
+
+public class StratumImporter extends DatabaseImporter {
+    private static final String HEADER = &quot;AUTHENTICATORPRO&quot;;
+    private static final String HEADER_LEGACY = &quot;AuthenticatorPro&quot;;
+    private static final String PKG_NAME = &quot;com.stratumauth.app&quot;;
+    private static final String PKG_DB_PATH = &quot;databases/authenticator.db3&quot;;
+
+<span class="nc" id="L54">    private enum Algorithm {</span>
+<span class="nc" id="L55">        SHA1,</span>
+<span class="nc" id="L56">        SHA256,</span>
+<span class="nc" id="L57">        SHA512</span>
+    }
+
+    public StratumImporter(Context context) {
+<span class="nc" id="L61">        super(context);</span>
+<span class="nc" id="L62">    }</span>
+
+    @Override
+    protected SuFile getAppPath() throws DatabaseImporterException, PackageManager.NameNotFoundException {
+<span class="nc" id="L66">        return getAppPath(PKG_NAME, PKG_DB_PATH);</span>
+    }
+
+    @Override
+    protected State read(InputStream stream, boolean isInternal) throws DatabaseImporterException {
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        return isInternal ? readInternal(stream) : readExternal(stream);</span>
+    }
+
+    private State readInternal(InputStream stream) throws DatabaseImporterException {
+<span class="nc" id="L75">        List&lt;SqlEntry&gt; entries = new SqlImporterHelper(requireContext()).read(SqlEntry.class, stream, &quot;authenticator&quot;);</span>
+<span class="nc" id="L76">        return new SqlState(entries);</span>
+    }
+
+    private static State readExternal(InputStream stream) throws DatabaseImporterException {
+        byte[] data;
+        try {
+<span class="nc" id="L82">            data = IOUtils.readAll(stream);</span>
+<span class="nc" id="L83">        } catch (IOException e) {</span>
+<span class="nc" id="L84">            throw new DatabaseImporterException(e);</span>
+<span class="nc" id="L85">        }</span>
+
+        try {
+<span class="nc" id="L88">            return new JsonState(new JSONObject(new String(data, StandardCharsets.UTF_8)));</span>
+<span class="nc" id="L89">        } catch (JSONException e) {</span>
+<span class="nc" id="L90">            return readEncrypted(new DataInputStream(new ByteArrayInputStream(data)));</span>
+        }
+    }
+
+    private static State readEncrypted(DataInputStream stream) throws DatabaseImporterException {
+        try {
+<span class="nc" id="L96">            byte[] headerBytes = new byte[HEADER.getBytes(StandardCharsets.UTF_8).length];</span>
+<span class="nc" id="L97">            stream.readFully(headerBytes);</span>
+<span class="nc" id="L98">            String header = new String(headerBytes, StandardCharsets.UTF_8);</span>
+<span class="nc bnc" id="L99" title="All 3 branches missed.">            switch (header) {</span>
+                case HEADER:
+<span class="nc" id="L101">                    return EncryptedState.parseHeader(stream);</span>
+                case HEADER_LEGACY:
+<span class="nc" id="L103">                    return LegacyEncryptedState.parseHeader(stream);</span>
+                default:
+<span class="nc" id="L105">                    throw new DatabaseImporterException(&quot;Invalid file header&quot;);</span>
+            }
+<span class="nc" id="L107">        } catch (UTFDataFormatException e) {</span>
+<span class="nc" id="L108">            throw new DatabaseImporterException(&quot;Invalid file header&quot;);</span>
+<span class="nc" id="L109">        } catch (IOException | NoSuchPaddingException | NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L110">            throw new DatabaseImporterException(e);</span>
+        }
+    }
+
+    private static OtpInfo parseOtpInfo(int type, byte[] secret, Algorithm algo, int digits, int period, int counter)
+            throws OtpInfoException, DatabaseImporterEntryException {
+<span class="nc bnc" id="L116" title="All 4 branches missed.">        switch (type) {</span>
+            case 1:
+<span class="nc" id="L118">                return new HotpInfo(secret, algo.name(), digits, counter);</span>
+            case 2:
+<span class="nc" id="L120">                return new TotpInfo(secret, algo.name(), digits, period);</span>
+            case 4:
+<span class="nc" id="L122">                return new SteamInfo(secret, algo.name(), digits, period);</span>
+            default:
+<span class="nc" id="L124">                throw new DatabaseImporterEntryException(String.format(&quot;Unsupported otp type: %d&quot;, type), null);</span>
+        }
+    }
+
+    static class EncryptedState extends State {
+        private static final int KEY_SIZE = 32;
+        private static final int MEMORY_COST = 16; // 2^16 KiB = 64 MiB
+        private static final int PARALLELISM = 4;
+        private static final int ITERATIONS = 3;
+        private static final int SALT_SIZE = 16;
+        private static final int IV_SIZE = 12;
+
+        private final Cipher _cipher;
+        private final byte[] _salt;
+        private final byte[] _iv;
+        private final byte[] _data;
+
+        public EncryptedState(Cipher cipher, byte[] salt, byte[] iv, byte[] data) {
+<span class="nc" id="L142">            super(true);</span>
+<span class="nc" id="L143">            _cipher = cipher;</span>
+<span class="nc" id="L144">            _salt = salt;</span>
+<span class="nc" id="L145">            _iv = iv;</span>
+<span class="nc" id="L146">            _data = data;</span>
+<span class="nc" id="L147">        }</span>
+
+        public JsonState decrypt(char[] password) throws DatabaseImporterException {
+<span class="nc" id="L150">            Argon2Task.Params params = getKeyDerivationParams(password);</span>
+<span class="nc" id="L151">            SecretKey key = Argon2Task.deriveKey(params);</span>
+<span class="nc" id="L152">            return decrypt(key);</span>
+        }
+
+        public JsonState decrypt(SecretKey key) throws DatabaseImporterException {
+            try {
+<span class="nc" id="L157">                _cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(_iv));</span>
+<span class="nc" id="L158">                byte[] decrypted = _cipher.doFinal(_data);</span>
+<span class="nc" id="L159">                return new JsonState(new JSONObject(new String(decrypted, StandardCharsets.UTF_8)));</span>
+<span class="nc" id="L160">            } catch (InvalidAlgorithmParameterException | IllegalBlockSizeException</span>
+                     | JSONException | InvalidKeyException | BadPaddingException e) {
+<span class="nc" id="L162">                throw new DatabaseImporterException(e);</span>
+            }
+        }
+
+        @Override
+        public void decrypt(Context context, DecryptListener listener) throws DatabaseImporterException {
+<span class="nc" id="L168">            Dialogs.showPasswordInputDialog(context, R.string.enter_password_aegis_title, 0, (Dialogs.TextInputListener) password -&gt; {</span>
+<span class="nc" id="L169">                Argon2Task.Params params = getKeyDerivationParams(password);</span>
+<span class="nc" id="L170">                Argon2Task task = new Argon2Task(context, key -&gt; {</span>
+                    try {
+<span class="nc" id="L172">                        StratumImporter.JsonState state = decrypt(key);</span>
+<span class="nc" id="L173">                        listener.onStateDecrypted(state);</span>
+<span class="nc" id="L174">                    } catch (DatabaseImporterException e) {</span>
+<span class="nc" id="L175">                        listener.onError(e);</span>
+<span class="nc" id="L176">                    }</span>
+<span class="nc" id="L177">                });</span>
+<span class="nc" id="L178">                Lifecycle lifecycle = ContextHelper.getLifecycle(context);</span>
+<span class="nc" id="L179">                task.execute(lifecycle, params);</span>
+<span class="nc" id="L180">            }, dialog -&gt; listener.onCanceled());</span>
+<span class="nc" id="L181">        }</span>
+
+        private Argon2Task.Params getKeyDerivationParams(char[] password) {
+<span class="nc" id="L184">            Argon2Parameters argon2Params = new Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)</span>
+<span class="nc" id="L185">                    .withIterations(ITERATIONS)</span>
+<span class="nc" id="L186">                    .withParallelism(PARALLELISM)</span>
+<span class="nc" id="L187">                    .withMemoryPowOfTwo(MEMORY_COST)</span>
+<span class="nc" id="L188">                    .withSalt(_salt)</span>
+<span class="nc" id="L189">                    .build();</span>
+<span class="nc" id="L190">            return new Argon2Task.Params(password, argon2Params, KEY_SIZE);</span>
+        }
+
+        private static EncryptedState parseHeader(DataInputStream stream)
+            throws IOException, NoSuchPaddingException, NoSuchAlgorithmException {
+<span class="nc" id="L195">            byte[] salt = new byte[SALT_SIZE];</span>
+<span class="nc" id="L196">            stream.readFully(salt);</span>
+
+<span class="nc" id="L198">            byte[] iv = new byte[IV_SIZE];</span>
+<span class="nc" id="L199">            stream.readFully(iv);</span>
+
+<span class="nc" id="L201">            Cipher cipher = Cipher.getInstance(&quot;AES/GCM/NoPadding&quot;);</span>
+<span class="nc" id="L202">            return new EncryptedState(cipher, salt, iv, IOUtils.readAll(stream));</span>
+        }
+    }
+
+    static class LegacyEncryptedState extends State {
+        private static final int ITERATIONS = 64000;
+        private static final int KEY_SIZE = 32 * Byte.SIZE;
+        private static final int SALT_SIZE = 20;
+
+        private final Cipher _cipher;
+        private final byte[] _salt;
+        private final byte[] _iv;
+        private final byte[] _data;
+
+        public LegacyEncryptedState(Cipher cipher, byte[] salt, byte[] iv, byte[] data) {
+<span class="nc" id="L217">            super(true);</span>
+<span class="nc" id="L218">            _cipher = cipher;</span>
+<span class="nc" id="L219">            _salt = salt;</span>
+<span class="nc" id="L220">            _iv = iv;</span>
+<span class="nc" id="L221">            _data = data;</span>
+<span class="nc" id="L222">        }</span>
+
+        public JsonState decrypt(char[] password) throws DatabaseImporterException {
+<span class="nc" id="L225">            PBKDFTask.Params params = getKeyDerivationParams(password);</span>
+<span class="nc" id="L226">            SecretKey key = PBKDFTask.deriveKey(params);</span>
+<span class="nc" id="L227">            return decrypt(key);</span>
+        }
+
+        public JsonState decrypt(SecretKey key) throws DatabaseImporterException {
+            try {
+<span class="nc" id="L232">                _cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(_iv));</span>
+<span class="nc" id="L233">                byte[] decrypted = _cipher.doFinal(_data);</span>
+<span class="nc" id="L234">                return new JsonState(new JSONObject(new String(decrypted, StandardCharsets.UTF_8)));</span>
+<span class="nc" id="L235">            } catch (InvalidAlgorithmParameterException | IllegalBlockSizeException</span>
+                     | JSONException | InvalidKeyException | BadPaddingException e) {
+<span class="nc" id="L237">                throw new DatabaseImporterException(e);</span>
+            }
+        }
+
+        @Override
+        public void decrypt(Context context, DecryptListener listener) throws DatabaseImporterException {
+<span class="nc" id="L243">            Dialogs.showPasswordInputDialog(context, R.string.enter_password_aegis_title, 0, (Dialogs.TextInputListener) password -&gt; {</span>
+<span class="nc" id="L244">                PBKDFTask.Params params = getKeyDerivationParams(password);</span>
+<span class="nc" id="L245">                PBKDFTask task = new PBKDFTask(context, key -&gt; {</span>
+                    try {
+<span class="nc" id="L247">                        StratumImporter.JsonState state = decrypt(key);</span>
+<span class="nc" id="L248">                        listener.onStateDecrypted(state);</span>
+<span class="nc" id="L249">                    } catch (DatabaseImporterException e) {</span>
+<span class="nc" id="L250">                        listener.onError(e);</span>
+<span class="nc" id="L251">                    }</span>
+<span class="nc" id="L252">                });</span>
+<span class="nc" id="L253">                Lifecycle lifecycle = ContextHelper.getLifecycle(context);</span>
+<span class="nc" id="L254">                task.execute(lifecycle, params);</span>
+<span class="nc" id="L255">            }, dialog -&gt; listener.onCanceled());</span>
+<span class="nc" id="L256">        }</span>
+
+        private PBKDFTask.Params getKeyDerivationParams(char[] password) {
+<span class="nc" id="L259">            return new PBKDFTask.Params(&quot;PBKDF2WithHmacSHA1&quot;, KEY_SIZE, password, _salt, ITERATIONS);</span>
+        }
+
+        private static LegacyEncryptedState parseHeader(DataInputStream stream)
+            throws IOException, NoSuchPaddingException, NoSuchAlgorithmException {
+<span class="nc" id="L264">            byte[] salt = new byte[SALT_SIZE];</span>
+<span class="nc" id="L265">            stream.readFully(salt);</span>
+
+<span class="nc" id="L267">            Cipher cipher = Cipher.getInstance(&quot;AES/CBC/PKCS5Padding&quot;);</span>
+<span class="nc" id="L268">            int ivSize = cipher.getBlockSize();</span>
+<span class="nc" id="L269">            byte[] iv = new byte[ivSize];</span>
+<span class="nc" id="L270">            stream.readFully(iv);</span>
+<span class="nc" id="L271">            return new LegacyEncryptedState(cipher, salt, iv, IOUtils.readAll(stream));</span>
+        }
+    }
+
+    private static class JsonState extends State {
+        private final JSONObject _obj;
+
+        public JsonState(JSONObject obj) {
+<span class="nc" id="L279">            super(false);</span>
+<span class="nc" id="L280">            _obj = obj;</span>
+<span class="nc" id="L281">        }</span>
+
+        @Override
+        public Result convert() throws DatabaseImporterException {
+<span class="nc" id="L285">            Result res = new Result();</span>
+
+            try {
+<span class="nc" id="L288">                JSONArray array = _obj.getJSONArray(&quot;Authenticators&quot;);</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                for (int i = 0; i &lt; array.length(); i++) {</span>
+<span class="nc" id="L290">                    JSONObject obj = array.getJSONObject(i);</span>
+                    try {
+<span class="nc" id="L292">                        res.addEntry(convertEntry(obj));</span>
+<span class="nc" id="L293">                    } catch (DatabaseImporterEntryException e) {</span>
+<span class="nc" id="L294">                        res.addError(e);</span>
+<span class="nc" id="L295">                    }</span>
+                }
+<span class="nc" id="L297">            } catch (JSONException e) {</span>
+<span class="nc" id="L298">                throw new DatabaseImporterException(e);</span>
+<span class="nc" id="L299">            }</span>
+
+<span class="nc" id="L301">            return res;</span>
+        }
+
+        private static VaultEntry convertEntry(JSONObject obj) throws DatabaseImporterEntryException {
+            try {
+<span class="nc" id="L306">                int type = obj.getInt(&quot;Type&quot;);</span>
+<span class="nc" id="L307">                String issuer = obj.getString(&quot;Issuer&quot;);</span>
+<span class="nc" id="L308">                Object nullableUsername = obj.get(&quot;Username&quot;);</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                String username = nullableUsername == JSONObject.NULL ? &quot;&quot; : nullableUsername.toString();</span>
+<span class="nc" id="L310">                byte[] secret = Base32.decode(obj.getString(&quot;Secret&quot;));</span>
+<span class="nc" id="L311">                Algorithm algo = Algorithm.values()[obj.getInt(&quot;Algorithm&quot;)];</span>
+<span class="nc" id="L312">                int digits = obj.getInt(&quot;Digits&quot;);</span>
+<span class="nc" id="L313">                int period = obj.getInt(&quot;Period&quot;);</span>
+<span class="nc" id="L314">                int counter = obj.getInt(&quot;Counter&quot;);</span>
+
+<span class="nc" id="L316">                OtpInfo info = parseOtpInfo(type, secret, algo, digits, period, counter);</span>
+<span class="nc" id="L317">                return new VaultEntry(info, username, issuer);</span>
+<span class="nc" id="L318">            } catch (OtpInfoException | EncodingException | JSONException e) {</span>
+<span class="nc" id="L319">                throw new DatabaseImporterEntryException(e, null);</span>
+            }
+        }
+    }
+
+    private static class SqlState extends State {
+        private final List&lt;SqlEntry&gt; _entries;
+
+        public SqlState(List&lt;SqlEntry&gt; entries) {
+<span class="nc" id="L328">            super(false);</span>
+<span class="nc" id="L329">            _entries = entries;</span>
+<span class="nc" id="L330">        }</span>
+
+        @Override
+        public Result convert() throws DatabaseImporterException {
+<span class="nc" id="L334">            Result res = new Result();</span>
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            for (SqlEntry entry : _entries) {</span>
+                try {
+<span class="nc" id="L338">                    res.addEntry(entry.convert());</span>
+<span class="nc" id="L339">                } catch (DatabaseImporterEntryException e) {</span>
+<span class="nc" id="L340">                    res.addError(e);</span>
+<span class="nc" id="L341">                }</span>
+<span class="nc" id="L342">            }</span>
+
+<span class="nc" id="L344">            return res;</span>
+        }
+    }
+
+    private static class SqlEntry extends SqlImporterHelper.Entry {
+        private final int _type;
+        private final String _issuer;
+        private final String _username;
+        private final String _secret;
+        private final Algorithm _algo;
+        private final int _digits;
+        private final int _period;
+        private final int _counter;
+
+        public SqlEntry(Cursor cursor) {
+<span class="nc" id="L359">            super(cursor);</span>
+<span class="nc" id="L360">            _type = SqlImporterHelper.getInt(cursor, &quot;type&quot;);</span>
+<span class="nc" id="L361">            _issuer = SqlImporterHelper.getString(cursor, &quot;issuer&quot;);</span>
+<span class="nc" id="L362">            _username = SqlImporterHelper.getString(cursor, &quot;username&quot;);</span>
+<span class="nc" id="L363">            _secret = SqlImporterHelper.getString(cursor, &quot;secret&quot;);</span>
+<span class="nc" id="L364">            _algo = Algorithm.values()[SqlImporterHelper.getInt(cursor, &quot;algorithm&quot;)];</span>
+<span class="nc" id="L365">            _digits = SqlImporterHelper.getInt(cursor, &quot;digits&quot;);</span>
+<span class="nc" id="L366">            _period = SqlImporterHelper.getInt(cursor, &quot;period&quot;);</span>
+<span class="nc" id="L367">            _counter = SqlImporterHelper.getInt(cursor, &quot;counter&quot;);</span>
+<span class="nc" id="L368">        }</span>
+
+        public VaultEntry convert() throws DatabaseImporterEntryException {
+            try {
+<span class="nc" id="L372">                byte[] secret = Base32.decode(_secret);</span>
+<span class="nc" id="L373">                OtpInfo info = parseOtpInfo(_type, secret, _algo, _digits, _period, _counter);</span>
+<span class="nc" id="L374">                return new VaultEntry(info, _username, _issuer);</span>
+<span class="nc" id="L375">            } catch (EncodingException | OtpInfoException e) {</span>
+<span class="nc" id="L376">                throw new DatabaseImporterEntryException(e, null);</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

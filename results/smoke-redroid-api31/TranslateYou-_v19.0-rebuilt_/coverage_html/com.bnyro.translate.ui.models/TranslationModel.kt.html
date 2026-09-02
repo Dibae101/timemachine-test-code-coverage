@@ -1,0 +1,457 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TranslationModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE TranslateYou</a> &gt; <a href="index.source.html" class="el_package">com.bnyro.translate.ui.models</a> &gt; <span class="el_source">TranslationModel.kt</span></div><h1>TranslationModel.kt</h1><pre class="source lang-java linenums">/*
+ * Copyright (c) 2023 You Apps
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.
+ */
+
+package com.bnyro.translate.ui.models
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Rect
+import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.bnyro.translate.App
+import com.bnyro.translate.DatabaseHolder.Companion.Db
+import com.bnyro.translate.R
+import com.bnyro.translate.db.obj.DbLanguage
+import com.bnyro.translate.db.obj.HistoryItem
+import com.bnyro.translate.db.obj.HistoryItemType
+import com.bnyro.translate.ext.toastFromMainThread
+import com.bnyro.translate.util.JsonHelper
+import com.bnyro.translate.util.Preferences
+import com.bnyro.translate.util.TessHelper
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import net.youapps.translation_engines.Language
+import net.youapps.translation_engines.Translation
+import net.youapps.translation_engines.TranslationEngine
+
+<span class="fc" id="L55">class TranslationModel : ViewModel() {</span>
+<span class="pc" id="L56">    var engine by mutableStateOf(getCurrentEngine())</span>
+
+<span class="fc" id="L58">    var simTranslationEnabled by mutableStateOf(</span>
+<span class="fc" id="L59">        Preferences.get(Preferences.simultaneousTranslationKey, false)</span>
+    )
+<span class="pc" id="L61">    var enabledSimEngines = getEnabledEngines()</span>
+
+<span class="fc" id="L63">    var availableLanguages: List&lt;Language&gt; by mutableStateOf(emptyList())</span>
+
+<span class="fc" id="L65">    var sourceLanguage by mutableStateOf(</span>
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">        getLanguageByPrefKey(Preferences.sourceLanguage) ?: Language(&quot;&quot;, &quot;Auto&quot;)</span>
+    )
+
+<span class="fc" id="L69">    var targetLanguage by mutableStateOf(</span>
+<span class="pc bpc" id="L70" title="1 of 2 branches missed.">        getLanguageByPrefKey(Preferences.targetLanguage) ?: Language(&quot;en&quot;, &quot;English&quot;)</span>
+    )
+
+<span class="pc" id="L73">    var insertedText by mutableStateOf(&quot;&quot;)</span>
+
+<span class="pc" id="L75">    var translation by mutableStateOf(Translation(&quot;&quot;))</span>
+
+<span class="pc" id="L77">    var translatedTexts by mutableStateOf(</span>
+<span class="fc" id="L78">        App.translationEngines</span>
+<span class="fc" id="L79">            .associate { it.name to Translation(&quot;&quot;) }</span>
+    )
+
+<span class="fc" id="L82">    var bookmarkedLanguages by mutableStateOf(listOf&lt;Language&gt;())</span>
+
+<span class="pc" id="L84">    var translating by mutableStateOf(false)</span>
+<span class="pc" id="L85">    var languagesLoadInProgress by mutableStateOf(false)</span>
+
+    // make sure to not display error messages multiple times by setting replay to 0
+<span class="fc" id="L88">    private val _apiError = MutableSharedFlow&lt;Exception?&gt;(replay = 0)</span>
+<span class="fc" id="L89">    val apiError = _apiError.asSharedFlow()</span>
+
+<span class="fc" id="L91">    private var simTranslationJobs = emptyList&lt;Job&gt;()</span>
+
+    private var mediaPlayer: MediaPlayer? = null
+    private var audioFile: File? = null
+
+<span class="pc" id="L96">    var annotatedBitmap: AnnotatedBitmap? by mutableStateOf(null)</span>
+<span class="pc" id="L97">    var annotatedBitmapTranslationsLoading by mutableStateOf(false)</span>
+
+    // used to auto-focus the translation input field on initial app startup
+<span class="fc" id="L100">    var alreadyAutoFocusedInputField = false</span>
+
+    /**
+     * A cache of audio data that contains at most [MAX_AUDIO_CACHE_SIZE] elements
+     *
+     * The key is the hash of the triple (TranslationEngine, LanguageCode, Text)
+     */
+<span class="fc" id="L107">    private val audioFileCache = object : LinkedHashMap&lt;Int, ByteArray&gt;() {</span>
+        override fun removeEldestEntry(eldest: Map.Entry&lt;Int?, ByteArray?&gt;?): Boolean {
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            return size &gt; MAX_AUDIO_CACHE_SIZE</span>
+        }
+    }
+
+    fun mostDetectedLanguage(): Language? {
+<span class="pc bpc" id="L114" title="2 of 6 branches missed.">        if (!simTranslationEnabled) return availableLanguages.find { it.code == translation.detectedLanguage }</span>
+
+<span class="nc" id="L116">        val mostDetectedLangCode = translatedTexts.values</span>
+<span class="nc bnc" id="L117" title="All 6 branches missed.">            .filter { !it.detectedLanguage.isNullOrEmpty() }</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            .ifEmpty { return null }</span>
+<span class="nc" id="L119">            .groupBy { it.detectedLanguage }</span>
+<span class="nc bnc" id="L120" title="All 8 branches missed.">            .maxBy { it.value.size }</span>
+<span class="nc" id="L121">            .key</span>
+
+<span class="nc bnc" id="L123" title="All 4 branches missed.">        return availableLanguages.find { it.code == mostDetectedLangCode }</span>
+    }
+
+    private fun getLanguageByPrefKey(key: String): Language? {
+<span class="pc" id="L127">        return runCatching {</span>
+<span class="pc" id="L128">            JsonHelper.json.decodeFromString&lt;Language&gt;(Preferences.get(key, &quot;&quot;))</span>
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">        }.getOrNull()</span>
+    }
+
+    fun enqueueTranslation() {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (!Preferences.get(Preferences.translateAutomatically, true)) return</span>
+
+<span class="nc" id="L135">        val insertedTextTemp = insertedText</span>
+<span class="nc" id="L136">        Handler(</span>
+<span class="nc" id="L137">            Looper.getMainLooper()</span>
+<span class="nc" id="L138">        ).postDelayed(</span>
+<span class="nc" id="L139">            {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                if (insertedTextTemp == insertedText) translateNow()</span>
+<span class="nc" id="L141">            },</span>
+<span class="nc" id="L142">            Preferences.get(</span>
+<span class="nc" id="L143">                Preferences.fetchDelay,</span>
+<span class="nc" id="L144">                800f</span>
+<span class="nc" id="L145">            ).toLong()</span>
+        )
+<span class="nc" id="L147">    }</span>
+
+<span class="nc" id="L149">    fun translateNow(cancelOnUnsupportedLanguages: Boolean = true) {</span>
+<span class="nc bnc" id="L150" title="All 6 branches missed.">        if (insertedText.isEmpty() || targetLanguage == sourceLanguage) {</span>
+<span class="nc" id="L151">            translation = Translation(&quot;&quot;)</span>
+<span class="nc" id="L152">            return</span>
+        }
+<span class="nc" id="L154">        saveSelectedLanguages()</span>
+
+        // check if engine supports the provided language
+        // only run if languages were already loaded from the engine
+<span class="nc bnc" id="L158" title="All 4 branches missed.">        if (cancelOnUnsupportedLanguages &amp;&amp; !languagesLoadInProgress) {</span>
+<span class="nc bnc" id="L159" title="All 6 branches missed.">            if ((sourceLanguage.code.isEmpty() &amp;&amp; engine.autoLanguageCode == null) ||</span>
+<span class="nc bnc" id="L160" title="All 6 branches missed.">                (!sourceLanguage.code.isEmpty() &amp;&amp; availableLanguages.none { it.code == sourceLanguage.code })</span>
+            ) {
+<span class="nc" id="L162">                viewModelScope.launch {</span>
+<span class="nc" id="L163">                    _apiError.emit(UnsupportedLanguageException(sourceLanguage))</span>
+<span class="nc" id="L164">                }</span>
+<span class="nc" id="L165">                return</span>
+            }
+
+            // target language is not supported
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (availableLanguages.none { it.code == targetLanguage.code }) {</span>
+<span class="nc" id="L170">                viewModelScope.launch {</span>
+<span class="nc" id="L171">                    _apiError.emit(UnsupportedLanguageException(targetLanguage))</span>
+<span class="nc" id="L172">                }</span>
+<span class="nc" id="L173">                return</span>
+            }
+        }
+
+<span class="nc" id="L177">        translating = true</span>
+
+        // reset translations
+<span class="nc" id="L180">        translatedTexts = App.translationEngines</span>
+<span class="nc" id="L181">            .associate { it.name to Translation(&quot;&quot;) }</span>
+
+<span class="nc" id="L183">        viewModelScope.launch(Dispatchers.IO) {</span>
+<span class="nc" id="L184">            val translation = try {</span>
+<span class="nc" id="L185">                engine.translate(</span>
+<span class="nc" id="L186">                    insertedText,</span>
+<span class="nc" id="L187">                    sourceLanguage.code,</span>
+<span class="nc" id="L188">                    targetLanguage.code</span>
+                )
+<span class="nc" id="L190">            } catch (e: Exception) {</span>
+<span class="nc" id="L191">                Log.e(&quot;error&quot;, e.message.toString())</span>
+<span class="nc" id="L192">                _apiError.emit(e)</span>
+<span class="nc" id="L193">                translating = false</span>
+<span class="nc" id="L194">                return@launch</span>
+            }
+<span class="nc" id="L196">            translating = false</span>
+
+<span class="nc bnc" id="L198" title="All 4 branches missed.">            if (insertedText.isNotEmpty()) {</span>
+<span class="nc" id="L199">                this@TranslationModel.translation = translation</span>
+<span class="nc" id="L200">                translatedTexts = translatedTexts.toMutableMap().also {</span>
+<span class="nc" id="L201">                    it[engine.name] = translation</span>
+<span class="nc" id="L202">                }.toMap()</span>
+<span class="nc" id="L203">                saveToHistory()</span>
+            }
+<span class="nc" id="L205">        }</span>
+
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if (simTranslationEnabled) simTranslation()</span>
+<span class="nc" id="L208">    }</span>
+
+<span class="nc bnc" id="L210" title="All 2 branches missed.">    private fun simTranslation() = viewModelScope.launch(Dispatchers.IO) {</span>
+        // cancel old jobs from previous translation
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        simTranslationJobs.forEach { if (it.isActive) it.cancel() }</span>
+
+<span class="nc" id="L214">        simTranslationJobs = enabledSimEngines</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            .filter { it != engine }</span>
+<span class="nc" id="L216">            .map {</span>
+<span class="nc bnc" id="L217" title="All 3 branches missed.">                async {</span>
+<span class="nc" id="L218">                    runCatching {</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">                        val translation = it.translate(</span>
+<span class="nc" id="L220">                            insertedText,</span>
+<span class="nc" id="L221">                            sourceLanguage.code,</span>
+<span class="nc" id="L222">                            targetLanguage.code</span>
+                        )
+<span class="nc" id="L224">                        translatedTexts = translatedTexts.toMutableMap().also { translations -&gt;</span>
+<span class="nc" id="L225">                            translations[it.name] = translation</span>
+<span class="nc" id="L226">                        }.toMap()</span>
+<span class="nc" id="L227">                    }</span>
+<span class="nc" id="L228">                }</span>
+            }
+<span class="nc" id="L230">    }</span>
+
+    private fun saveToHistory() {
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (!Preferences.get(Preferences.historyEnabledKey, true)) {</span>
+<span class="nc" id="L234">            return</span>
+        }
+
+<span class="nc" id="L237">        save(HistoryItemType.HISTORY)</span>
+<span class="nc" id="L238">    }</span>
+
+<span class="nc" id="L240">    fun saveToFavorites() = save(HistoryItemType.FAVORITE)</span>
+
+    private fun save(itemType: HistoryItemType) {
+<span class="nc" id="L243">        val historyItem = HistoryItem(</span>
+<span class="nc" id="L244">            sourceLanguageCode = sourceLanguage.code,</span>
+<span class="nc" id="L245">            sourceLanguageName = sourceLanguage.name,</span>
+<span class="nc" id="L246">            targetLanguageCode = targetLanguage.code,</span>
+<span class="nc" id="L247">            targetLanguageName = targetLanguage.name,</span>
+<span class="nc" id="L248">            insertedText = insertedText,</span>
+<span class="nc" id="L249">            translatedText = translation.translatedText,</span>
+<span class="nc" id="L250">            itemType = itemType</span>
+        )
+
+<span class="nc" id="L253">        viewModelScope.launch(Dispatchers.IO) {</span>
+            // don't create new entry if a similar one exists
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            if (Preferences.get(Preferences.skipSimilarHistoryKey, true) &amp;&amp; Db.historyDao()</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                    .existsSimilar(</span>
+<span class="nc" id="L257">                        historyItem.insertedText,</span>
+<span class="nc" id="L258">                        historyItem.sourceLanguageCode,</span>
+<span class="nc" id="L259">                        historyItem.targetLanguageCode,</span>
+<span class="nc" id="L260">                        itemType = itemType</span>
+                    )
+<span class="nc" id="L262">            ) return@launch</span>
+
+<span class="nc" id="L264">            Db.historyDao().insertAll(historyItem)</span>
+<span class="nc" id="L265">        }</span>
+<span class="nc" id="L266">    }</span>
+
+    fun clearTranslation() {
+<span class="nc" id="L269">        insertedText = &quot;&quot;</span>
+<span class="nc" id="L270">        translation = Translation(&quot;&quot;)</span>
+<span class="nc" id="L271">        translating = false</span>
+<span class="nc" id="L272">    }</span>
+
+    private fun fetchLanguages() {
+<span class="fc" id="L275">        languagesLoadInProgress = true</span>
+
+<span class="fc" id="L277">        viewModelScope.launch {</span>
+<span class="fc" id="L278">            val languages = try {</span>
+<span class="fc" id="L279">                Log.e(&quot;engine&quot;, engine.name)</span>
+<span class="fc" id="L280">                engine.getLanguages().sortedBy { it.name }</span>
+<span class="fc" id="L281">                    .also { Log.d(&quot;languages by ${engine.name}&quot;, it.toString()) }</span>
+<span class="nc" id="L282">            } catch (e: Exception) {</span>
+<span class="nc" id="L283">                Log.e(&quot;Fetching languages&quot;, e.toString())</span>
+<span class="nc" id="L284">                _apiError.emit(e)</span>
+<span class="nc" id="L285">                return@launch</span>
+            }
+<span class="fc" id="L287">            this@TranslationModel.availableLanguages = languages</span>
+<span class="fc" id="L288">            sourceLanguage = replaceLanguageName(sourceLanguage)</span>
+<span class="fc" id="L289">            targetLanguage = replaceLanguageName(targetLanguage)</span>
+
+<span class="fc" id="L291">            languagesLoadInProgress = false</span>
+<span class="fc" id="L292">        }</span>
+<span class="fc" id="L293">    }</span>
+
+    private fun replaceLanguageName(language: Language): Language {
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        return availableLanguages.firstOrNull { it.code == language.code } ?: language</span>
+    }
+
+<span class="pc bpc" id="L299" title="3 of 6 branches missed.">    private fun getCurrentEngine() = App.translationEngines.find {</span>
+<span class="fc" id="L300">        it.name == Preferences.get(</span>
+<span class="fc" id="L301">            Preferences.selectedEngineKey,</span>
+<span class="fc" id="L302">            App.translationEngines.first().name</span>
+<span class="fc" id="L303">        )</span>
+<span class="pc" id="L304">    } ?: App.translationEngines.first()</span>
+
+    fun setCurrentEngine(engine: TranslationEngine) {
+<span class="nc" id="L307">        Preferences.put(Preferences.selectedEngineKey, engine.name)</span>
+<span class="nc" id="L308">        this.engine = engine</span>
+<span class="nc" id="L309">    }</span>
+
+<span class="fc" id="L311">    private fun getEnabledEngines() = App.translationEngines.filter {</span>
+<span class="fc" id="L312">        Preferences.isSimultaneousTranslationEnabled(it)</span>
+<span class="fc" id="L313">    }</span>
+
+    fun refresh() {
+<span class="fc" id="L316">        val newSelectedEngine = getCurrentEngine()</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">        if (newSelectedEngine != engine) {</span>
+<span class="nc" id="L318">            engine = newSelectedEngine</span>
+<span class="nc" id="L319">            enqueueTranslation()</span>
+        }
+
+<span class="fc" id="L322">        enabledSimEngines = getEnabledEngines()</span>
+<span class="fc" id="L323">        simTranslationEnabled = Preferences.get(Preferences.simultaneousTranslationKey, false)</span>
+
+<span class="fc" id="L325">        fetchLanguages()</span>
+
+<span class="fc" id="L327">        fetchBookmarkedLanguages()</span>
+<span class="fc" id="L328">    }</span>
+
+<span class="fc" id="L330">    private fun fetchBookmarkedLanguages() = viewModelScope.launch(Dispatchers.IO) {</span>
+<span class="pc" id="L331">        bookmarkedLanguages = Db.languageBookmarksDao().getAll().map(DbLanguage::toLanguage)</span>
+<span class="fc" id="L332">    }</span>
+
+<span class="nc" id="L334">    fun processImage(context: Context, image: Bitmap) = viewModelScope.launch {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (!TessHelper.areLanguagesDownloaded(context)) {</span>
+<span class="nc" id="L336">            context.toastFromMainThread(R.string.init_tess_first)</span>
+<span class="nc" id="L337">            return@launch</span>
+        }
+
+<span class="nc bnc" id="L340" title="All 3 branches missed.">        withContext(Dispatchers.IO) {</span>
+            // in the beginning, only show the detected texts and not its translation
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            annotatedBitmap = TessHelper.getText(context, image)?.let { (text, components) -&gt;</span>
+<span class="nc" id="L343">                AnnotatedBitmap(</span>
+<span class="nc" id="L344">                    image = image,</span>
+<span class="nc" id="L345">                    components = components,</span>
+<span class="nc" id="L346">                    fullText = text</span>
+<span class="nc" id="L347">                )</span>
+            }
+
+            // asynchronously translate the image components
+<span class="nc" id="L351">            annotatedBitmapTranslationsLoading = true</span>
+<span class="nc bnc" id="L352" title="All 4 branches missed.">            val translatedComponents = annotatedBitmap?.components.orEmpty().map { (rect, text) -&gt;</span>
+<span class="nc bnc" id="L353" title="All 3 branches missed.">                async {</span>
+<span class="nc" id="L354">                    runCatching {</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">                        rect to engine.translate(</span>
+<span class="nc" id="L356">                            text,</span>
+<span class="nc" id="L357">                            sourceLanguage.code,</span>
+<span class="nc" id="L358">                            targetLanguage.code</span>
+<span class="nc" id="L359">                        ).translatedText</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                    }.getOrNull()</span>
+<span class="nc" id="L361">                }</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">            }.awaitAll().filterNotNull().toMap()</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">            annotatedBitmap = annotatedBitmap?.copy(components = translatedComponents)</span>
+<span class="nc" id="L364">             annotatedBitmapTranslationsLoading = false</span>
+<span class="nc" id="L365">        }</span>
+<span class="nc" id="L366">    }</span>
+
+    fun saveSelectedLanguages() {
+<span class="nc" id="L369">        Preferences.put(</span>
+<span class="nc" id="L370">            Preferences.sourceLanguage,</span>
+<span class="nc" id="L371">            JsonHelper.json.encodeToString(sourceLanguage)</span>
+        )
+<span class="nc" id="L373">        Preferences.put(</span>
+<span class="nc" id="L374">            Preferences.targetLanguage,</span>
+<span class="nc" id="L375">            JsonHelper.json.encodeToString(targetLanguage)</span>
+        )
+<span class="nc" id="L377">    }</span>
+
+    fun swapLanguages() {
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (availableLanguages.isEmpty()) return</span>
+
+<span class="nc bnc" id="L382" title="All 4 branches missed.">        val temp = if (sourceLanguage.code.isEmpty()) {</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">            mostDetectedLanguage() ?: return</span>
+        } else {
+<span class="nc" id="L385">            sourceLanguage</span>
+        }
+<span class="nc" id="L387">        sourceLanguage = targetLanguage</span>
+<span class="nc" id="L388">        targetLanguage = temp</span>
+
+<span class="nc bnc" id="L390" title="All 4 branches missed.">        if (translation.translatedText.isNotEmpty()) {</span>
+<span class="nc" id="L391">            insertedText = translation.translatedText</span>
+<span class="nc" id="L392">            translation = Translation(&quot;&quot;)</span>
+        }
+
+<span class="nc" id="L395">        translateNow()</span>
+<span class="nc" id="L396">    }</span>
+
+    fun playAudio(languageCode: String, text: String) {
+<span class="nc" id="L399">        releaseMediaPlayer()</span>
+
+<span class="nc bnc" id="L401" title="All 4 branches missed.">        viewModelScope.launch {</span>
+<span class="nc" id="L402">            val requestId = Triple(engine, languageCode, text).hashCode()</span>
+
+<span class="nc bnc" id="L404" title="All 2 branches missed.">            val rawAudioBytes = if (audioFileCache.containsKey(requestId)) {</span>
+<span class="nc" id="L405">                audioFileCache[requestId]!!</span>
+            } else {
+<span class="nc bnc" id="L407" title="All 2 branches missed.">                runCatching {</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                    withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L409">                        engine.getAudioFile(languageCode, text)</span>
+<span class="nc" id="L410">                    }</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                }.getOrNull() ?: return@launch</span>
+            }
+<span class="nc" id="L413">            audioFileCache[requestId] = rawAudioBytes</span>
+
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            audioFile = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L416">                File.createTempFile(&quot;tts-voice&quot;, &quot;.mp3&quot;)</span>
+<span class="nc" id="L417">            }.apply {</span>
+<span class="nc" id="L418">                writeBytes(rawAudioBytes)</span>
+<span class="nc" id="L419">            }</span>
+
+<span class="nc bnc" id="L421" title="All 2 branches missed.">            val audioFile = audioFile ?: return@launch</span>
+<span class="nc" id="L422">            mediaPlayer = MediaPlayer().apply {</span>
+<span class="nc" id="L423">                setOnCompletionListener {</span>
+<span class="nc" id="L424">                    releaseMediaPlayer()</span>
+<span class="nc" id="L425">                }</span>
+
+<span class="nc" id="L427">                setDataSource(audioFile.absolutePath)</span>
+
+<span class="nc" id="L429">                runCatching {</span>
+<span class="nc" id="L430">                    prepare()</span>
+<span class="nc" id="L431">                    start()</span>
+<span class="nc" id="L432">                }</span>
+<span class="nc" id="L433">            }</span>
+<span class="nc" id="L434">        }</span>
+<span class="nc" id="L435">    }</span>
+
+    private fun releaseMediaPlayer() {
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        audioFile?.delete()</span>
+<span class="nc" id="L439">        audioFile = null</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">        mediaPlayer?.release()</span>
+<span class="nc" id="L441">        mediaPlayer = null</span>
+<span class="nc" id="L442">    }</span>
+
+    companion object {
+        private const val MAX_AUDIO_CACHE_SIZE = 10
+    }
+}
+
+<span class="nc" id="L449">class UnsupportedLanguageException(val language: Language) :</span>
+<span class="nc" id="L450">    Exception(&quot;Language $language not supported by currently selected translation engine&quot;)</span>
+
+<span class="nc" id="L452">data class AnnotatedBitmap(</span>
+<span class="nc" id="L453">    val image: Bitmap,</span>
+<span class="nc" id="L454">    val components: Map&lt;Rect, String&gt;,</span>
+<span class="nc" id="L455">    val fullText: String,</span>
+)
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

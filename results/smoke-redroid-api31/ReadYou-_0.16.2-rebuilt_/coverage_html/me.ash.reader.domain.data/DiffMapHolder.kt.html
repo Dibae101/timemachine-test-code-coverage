@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DiffMapHolder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ReadYou</a> &gt; <a href="index.source.html" class="el_package">me.ash.reader.domain.data</a> &gt; <span class="el_source">DiffMapHolder.kt</span></div><h1>DiffMapHolder.kt</h1><pre class="source lang-java linenums">package me.ash.reader.domain.data
+
+import android.content.Context
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.snapshotFlow
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
+import me.ash.reader.domain.model.account.Account
+import me.ash.reader.domain.model.account.AccountType
+import me.ash.reader.domain.model.article.ArticleWithFeed
+import me.ash.reader.domain.service.AccountService
+import me.ash.reader.domain.service.RssService
+import me.ash.reader.infrastructure.di.ApplicationScope
+import me.ash.reader.infrastructure.di.IODispatcher
+import java.io.File
+import javax.inject.Inject
+
+private const val TAG = &quot;DiffMapHolder&quot;
+
+@OptIn(FlowPreview::class)
+<span class="fc" id="L36">class DiffMapHolder @Inject constructor(</span>
+<span class="fc" id="L37">    @ApplicationContext private val context: Context,</span>
+<span class="fc" id="L38">    @ApplicationScope private val applicationScope: CoroutineScope,</span>
+<span class="fc" id="L39">    @IODispatcher private val ioDispatcher: CoroutineDispatcher,</span>
+<span class="fc" id="L40">    private val accountService: AccountService,</span>
+<span class="fc" id="L41">    private val rssService: RssService,</span>
+) {
+<span class="fc" id="L43">    val diffMap = mutableStateMapOf&lt;String, Diff&gt;()</span>
+
+<span class="fc" id="L45">    private val pendingSyncDiffs = mutableStateMapOf&lt;String, Diff&gt;()</span>
+<span class="fc" id="L46">    private val syncedDiffs = mutableMapOf&lt;String, Diff&gt;()</span>
+
+<span class="fc" id="L48">    val diffMapSnapshotFlow = snapshotFlow { diffMap.toMap() }.stateIn(</span>
+<span class="fc" id="L49">        applicationScope, SharingStarted.Eagerly, emptyMap()</span>
+    )
+
+<span class="fc" id="L52">    private val pendingSyncDiffsSnapshotFlow = snapshotFlow { pendingSyncDiffs.toMap() }.stateIn(</span>
+<span class="fc" id="L53">        applicationScope, SharingStarted.Eagerly, emptyMap()</span>
+    )
+
+<span class="pc bpc" id="L56" title="2 of 4 branches missed.">    val shouldSyncWithRemote get() = currentAccount?.type != AccountType.Local</span>
+
+<span class="fc" id="L58">    private val gson = Gson()</span>
+
+<span class="fc" id="L60">    private val cacheDir = context.cacheDir.resolve(&quot;diff&quot;)</span>
+<span class="fc" id="L61">    private var userCacheDir = cacheDir</span>
+
+    private var currentAccount: Account? = null
+
+<span class="fc" id="L65">    private val cacheFile: File get() = userCacheDir.resolve(&quot;diff_map.json&quot;)</span>
+
+<span class="nc" id="L67">    var dbJob: Job? = null</span>
+<span class="nc" id="L68">    var remoteJob: Job? = null</span>
+
+<span class="fc" id="L70">    init {</span>
+<span class="fc" id="L71">        applicationScope.launch {</span>
+<span class="fc" id="L72">            accountService.currentAccountFlow.mapNotNull { it }.collect { account -&gt;</span>
+<span class="fc" id="L73">                val previousAccount = currentAccount</span>
+<span class="pc bpc" id="L74" title="1 of 4 branches missed.">                if (previousAccount != null &amp;&amp; previousAccount != account) {</span>
+<span class="fc" id="L75">                    cleanup(previousAccount)</span>
+                }
+<span class="fc" id="L77">                currentAccount = account</span>
+<span class="fc" id="L78">                init(account)</span>
+<span class="fc" id="L79">            }</span>
+<span class="nc" id="L80">        }</span>
+<span class="fc" id="L81">    }</span>
+
+    private fun init(account: Account) {
+<span class="fc" id="L84">        userCacheDir = cacheDir.resolve(account.id.toString())</span>
+<span class="fc" id="L85">        commitDiffsFromCache()</span>
+<span class="fc" id="L86">        commitOnChange()</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">        if (account.type != AccountType.Local) {</span>
+<span class="fc" id="L88">            syncOnChange()</span>
+        }
+<span class="fc" id="L90">    }</span>
+
+    private fun cleanup(account: Account) {
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">        dbJob?.cancel()</span>
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">        remoteJob?.cancel()</span>
+<span class="fc" id="L95">        writeDiffsToCache()</span>
+<span class="fc" id="L96">        diffMap.clear()</span>
+<span class="fc" id="L97">        pendingSyncDiffs.clear()</span>
+<span class="fc" id="L98">        syncedDiffs.clear()</span>
+<span class="fc" id="L99">    }</span>
+
+    private fun commitOnChange() {
+<span class="fc" id="L102">        dbJob = applicationScope.launch(ioDispatcher) {</span>
+<span class="fc" id="L103">            diffMapSnapshotFlow.debounce(2_000).collect {</span>
+<span class="pc bpc" id="L104" title="2 of 4 branches missed.">                if (it.isNotEmpty()) {</span>
+<span class="nc" id="L105">                    writeDiffsToCache()</span>
+                }
+<span class="fc" id="L107">            }</span>
+<span class="nc" id="L108">        }</span>
+<span class="fc" id="L109">    }</span>
+
+    private fun syncOnChange() {
+<span class="fc" id="L112">        remoteJob = applicationScope.launch(ioDispatcher) {</span>
+<span class="fc" id="L113">            pendingSyncDiffsSnapshotFlow.debounce(2_000).collect {</span>
+<span class="fc" id="L114">                withContext(ioDispatcher) {</span>
+<span class="fc" id="L115">                    syncDiffsWithRemote(it)</span>
+<span class="fc" id="L116">                }</span>
+<span class="fc" id="L117">            }</span>
+<span class="nc" id="L118">        }</span>
+<span class="fc" id="L119">    }</span>
+
+    fun checkIfUnread(articleWithFeed: ArticleWithFeed): Boolean {
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        return diffMap[articleWithFeed.article.id]?.isUnread ?: articleWithFeed.article.isUnread</span>
+    }
+
+    /**
+     * Updates the diff map with changes to an article's read/unread status.
+     *
+     * This function manages a map (`diffMap`) that tracks pending changes (diffs) to the
+     * read/unread status of articles. These changes are not immediately applied to the
+     * underlying data store but are held in `diffMap` until a later commit operation.
+     *
+     * The function supports three modes of updating:
+     *
+     * 1. **Toggle:** If `isUnread` is `null`, the function toggles the current read/unread
+     *    status of the article.  If the article is currently unread, it will be marked as read,
+     *    and vice-versa.
+     * 2. **Mark as Unread:** If `isUnread` is `true`, the article will be marked as unread,
+     *    regardless of its current status.
+     * 3. **Mark as Read:** If `isUnread` is `false`, the article will be marked as read,
+     *    regardless of its current status.
+     *
+     * The function determines if a change needs to be tracked based on the current status and desired status:
+     *  - If the requested change matches the article's current status, the diff is removed from the map, if it exists. (No change is needed.)
+     *  - Otherwise, the diff is added to or updated in the map.
+     *
+     * @param articleWithFeed The article and its associated feed data. This is used to identify the article
+     *                        and access its current read/unread state.
+     * @param isUnread An optional boolean indicating the desired read/unread status of the article.
+     *                 - `null`: Toggles the current read/unread status.
+     *                 - `true`: Marks the article as unread.
+     *                 - `false`: Marks the article as read.
+     *
+     * @return A [Diff] object representing the changes made to the article.
+     *
+     * @see Diff
+     */
+<span class="nc" id="L157">    private fun updateDiffInternal(</span>
+<span class="nc" id="L158">        articleWithFeed: ArticleWithFeed, isUnread: Boolean? = null</span>
+    ): Diff? {
+<span class="nc" id="L160">        val articleId = articleWithFeed.article.id</span>
+
+<span class="nc" id="L162">        val diff = diffMap[articleId]</span>
+
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (diff == null) {</span>
+<span class="nc bnc" id="L165" title="All 4 branches missed.">            val isUnread = isUnread ?: !articleWithFeed.article.isUnread</span>
+<span class="nc" id="L166">            val diff = Diff(</span>
+<span class="nc" id="L167">                isUnread = isUnread, articleWithFeed = articleWithFeed</span>
+            )
+<span class="nc" id="L169">            diffMap[articleId] = diff</span>
+<span class="nc" id="L170">            return diff</span>
+        } else {
+<span class="nc bnc" id="L172" title="All 4 branches missed.">            if (isUnread == null || diff.isUnread != isUnread) {</span>
+<span class="nc" id="L173">                val diff = diffMap.remove(articleId)</span>
+<span class="nc bnc" id="L174" title="All 4 branches missed.">                return diff?.copy(isUnread = !diff.isUnread)</span>
+            }
+        }
+<span class="nc" id="L177">        return null</span>
+    }
+
+<span class="nc" id="L180">    fun updateDiff(</span>
+<span class="nc" id="L181">        vararg articleWithFeed: ArticleWithFeed, isUnread: Boolean? = null</span>
+    ) {
+<span class="nc" id="L183">        val appliedDiffs = articleWithFeed.mapNotNull {</span>
+<span class="nc" id="L184">            updateDiffInternal(it, isUnread)</span>
+        }
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        if (shouldSyncWithRemote) {</span>
+<span class="nc" id="L187">            appliedDiffs.forEach {</span>
+<span class="nc" id="L188">                appendDiffToSync(it)</span>
+<span class="nc" id="L189">            }</span>
+        }
+<span class="nc" id="L191">    }</span>
+
+    private fun appendDiffToSync(diff: Diff) {
+<span class="nc" id="L194">        val syncedDiff = syncedDiffs[diff.articleId]</span>
+<span class="nc bnc" id="L195" title="All 4 branches missed.">        if (syncedDiff == null || syncedDiff.isUnread != diff.isUnread) {</span>
+<span class="nc" id="L196">            pendingSyncDiffs[diff.articleId] = diff</span>
+        }
+<span class="nc" id="L198">    }</span>
+
+    fun commitDiffsToDb() {
+<span class="fc" id="L201">        applicationScope.launch(ioDispatcher) {</span>
+<span class="pc bnc" id="L202" title="All 2 branches missed.">            val markAsReadArticles = diffMap.filter { !it.value.isUnread }.map { it.key }.toSet()</span>
+<span class="pc" id="L203">            val markAsUnreadArticles = diffMap.filter { it.value.isUnread }.map { it.key }.toSet()</span>
+<span class="fc" id="L204">            clearDiffs()</span>
+<span class="fc" id="L205">            rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)</span>
+<span class="fc" id="L206">            rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)</span>
+<span class="fc" id="L207">        }</span>
+<span class="fc" id="L208">    }</span>
+
+    private fun writeDiffsToCache() {
+<span class="fc" id="L211">        applicationScope.launch(ioDispatcher) {</span>
+<span class="fc" id="L212">            try {</span>
+<span class="fc" id="L213">                val tmpJson = gson.toJson(diffMap)</span>
+<span class="fc" id="L214">                userCacheDir.mkdirs()</span>
+<span class="fc" id="L215">                cacheFile.createNewFile()</span>
+<span class="pc bpc" id="L216" title="2 of 4 branches missed.">                if (cacheFile.exists() &amp;&amp; cacheFile.canWrite()) {</span>
+<span class="fc" id="L217">                    cacheFile.writeText(tmpJson)</span>
+                }
+<span class="nc" id="L219">            } catch (_: Exception) {</span>
+
+            }
+<span class="fc" id="L222">        }</span>
+<span class="fc" id="L223">    }</span>
+
+<span class="nc" id="L225">    private suspend fun syncDiffsWithRemote(diffs: Map&lt;String, Diff&gt;) {</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">        if (!shouldSyncWithRemote) return</span>
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">        if (diffs.isEmpty()) return</span>
+<span class="nc" id="L228">        val toBeSync = diffs</span>
+<span class="nc" id="L229">        val markAsReadArticles =</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            toBeSync.filter { !it.value.isUnread }.map { it.key }.toSet()</span>
+<span class="nc" id="L231">        val markAsUnreadArticles =</span>
+<span class="nc" id="L232">            toBeSync.filter { it.value.isUnread }.map { it.key }.toSet()</span>
+
+<span class="nc" id="L234">        val rssService = rssService.get()</span>
+
+<span class="nc bnc" id="L236" title="All 4 branches missed.">        val synced = supervisorScope {</span>
+<span class="nc" id="L237">            val read = async {</span>
+<span class="nc" id="L238">                rssService.syncReadStatus(</span>
+<span class="nc" id="L239">                    articleIds = markAsReadArticles,</span>
+<span class="nc" id="L240">                    isUnread = false</span>
+<span class="nc" id="L241">                )</span>
+            }
+<span class="nc" id="L243">            val unread = async {</span>
+<span class="nc" id="L244">                rssService.syncReadStatus(</span>
+<span class="nc" id="L245">                    articleIds = markAsUnreadArticles,</span>
+<span class="nc" id="L246">                    isUnread = true</span>
+<span class="nc" id="L247">                )</span>
+            }
+<span class="nc bnc" id="L249" title="All 4 branches missed.">            runCatching { read.await() }.getOrElse { emptySet() } +</span>
+<span class="nc bnc" id="L250" title="All 4 branches missed.">                    runCatching { unread.await() }.getOrElse { emptySet() }</span>
+        }
+
+<span class="nc" id="L253">        pendingSyncDiffs -= synced</span>
+<span class="nc" id="L254">        syncedDiffs += diffs.filter { synced.contains(it.key) }</span>
+<span class="nc" id="L255">    }</span>
+
+    private fun commitDiffsFromCache() {
+<span class="fc" id="L258">        applicationScope.launch(ioDispatcher) {</span>
+<span class="pc bpc" id="L259" title="3 of 4 branches missed.">            if (cacheFile.exists() &amp;&amp; cacheFile.canRead()) {</span>
+<span class="nc" id="L260">                val tmpJson = cacheFile.readText()</span>
+<span class="nc" id="L261">                val mapType = object : TypeToken&lt;Map&lt;String, Diff&gt;&gt;() {}.type</span>
+<span class="nc" id="L262">                val diffMapFromCache = gson.fromJson&lt;Map&lt;String, Diff&gt;&gt;(</span>
+<span class="nc" id="L263">                    tmpJson, mapType</span>
+                )
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                diffMapFromCache?.let {</span>
+<span class="nc" id="L266">                    diffMap.clear()</span>
+<span class="nc" id="L267">                    diffMap.putAll(it)</span>
+<span class="nc" id="L268">                }</span>
+            }
+<span class="fc" id="L270">        }.invokeOnCompletion {</span>
+<span class="fc" id="L271">            commitDiffsToDb()</span>
+<span class="fc" id="L272">        }</span>
+<span class="fc" id="L273">    }</span>
+
+    private fun clearDiffs() {
+<span class="fc" id="L276">        applicationScope.launch(ioDispatcher) {</span>
+<span class="pc bpc" id="L277" title="3 of 4 branches missed.">            if (cacheFile.exists() &amp;&amp; cacheFile.canWrite()) {</span>
+<span class="nc" id="L278">                cacheFile.delete()</span>
+            }
+<span class="fc" id="L280">            diffMap.clear()</span>
+<span class="fc" id="L281">        }</span>
+<span class="fc" id="L282">    }</span>
+}
+
+<span class="nc" id="L285">data class Diff(</span>
+<span class="nc" id="L286">    val isUnread: Boolean, val articleId: String, val feedId: String</span>
+) {
+<span class="nc" id="L288">    constructor(isUnread: Boolean, articleWithFeed: ArticleWithFeed) : this(</span>
+<span class="nc" id="L289">        isUnread = isUnread,</span>
+<span class="nc" id="L290">        articleId = articleWithFeed.article.id,</span>
+<span class="nc" id="L291">        feedId = articleWithFeed.feed.id,</span>
+<span class="nc" id="L292">    )</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

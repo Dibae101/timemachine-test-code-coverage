@@ -1,0 +1,660 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlaylistObserver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Vanilla-Music</a> &gt; <a href="index.source.html" class="el_package">ch.blinkenlights.android.vanilla</a> &gt; <span class="el_source">PlaylistObserver.java</span></div><h1>PlaylistObserver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright (C) 2018 Adrian Ulrich &lt;adrian@blinkenlights.ch&gt;
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see &lt;http://www.gnu.org/licenses/&gt;.
+ */
+
+package ch.blinkenlights.android.vanilla;
+
+import ch.blinkenlights.android.medialibrary.MediaLibrary;
+import ch.blinkenlights.android.medialibrary.LibraryObserver;
+
+import android.content.Context;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
+import android.os.Build;
+import android.os.FileObserver;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Message;
+import android.os.Process;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.PrintWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.zip.CRC32;
+
+import android.util.Log;
+
+
+public class PlaylistObserver extends SQLiteOpenHelper implements Handler.Callback {
+	/**
+	 * Whether or not to write debug logs.
+	 */
+	private static final boolean DEBUG = false;
+	/**
+	 * Bits for mSyncMode
+	 */
+	public static final int SYNC_MODE_IMPORT = (1 &lt;&lt; 0);
+	public static final int SYNC_MODE_EXPORT = (1 &lt;&lt; 1);
+	public static final int SYNC_MODE_PURGE  = (1 &lt;&lt; 2);
+	/**
+	 * Timeout to coalesce duplicate messages, ~2.3 sec because no real reason.
+	 */
+	private static final int COALESCE_EVENTS_DELAY_MS = 2345;
+	/**
+	 * Extension to use for M3U files
+	 */
+	private static final String M3U_EXT = &quot;.m3u&quot;;
+	/**
+	 * Line comment prefix for M3U files
+	 */
+	private static final String M3U_LINE_COMMENT_PREFIX = &quot;#&quot;;
+	/**
+	 * Context to use.
+	 */
+	private Context mContext;
+	/**
+	 * Thread used for execution.
+	 */
+	private HandlerThread mHandlerThread;
+	/**
+	 * Handler thread used to perform playlist sync.
+	 */
+	private Handler mHandler;
+	/**
+	 * Observer which watches the playlist directory.
+	 */
+	private FileObserver mFileObserver;
+	/**
+	 * Directory which holds observed playlists.
+	 */
+	private File mPlaylists;
+	/**
+	 * What kind of synching to perform, bitmask of PlaylistObserver.SYNC_MODE_*
+	 */
+	private int mSyncMode;
+	/**
+	 * Whether to export playlists using relative file paths.
+	 */
+	private boolean mExportRelativePaths;
+	/**
+	 * Database fields
+	 */
+	private static class Database {
+		static final String TABLE_NAME = &quot;playlist_metadata&quot;;
+		static final String _ID = &quot;_id&quot;;
+		static final String NAME = &quot;name&quot;;
+		static final String HASH = &quot;hash&quot;;
+<span class="fc" id="L107">		static final String[] FILLED_PROJECTION = {</span>
+			_ID,
+			NAME,
+			HASH,
+		};
+	}
+
+
+	public PlaylistObserver(Context context, String folder, int mode, boolean exportRelativePaths) {
+<span class="fc" id="L116">		super(context, &quot;playlist_observer.db&quot;, null, 1 /* version */);</span>
+<span class="fc" id="L117">		mContext = context;</span>
+<span class="fc" id="L118">		mSyncMode = mode;</span>
+<span class="fc" id="L119">		mPlaylists = new File(folder);</span>
+<span class="fc" id="L120">		mExportRelativePaths = exportRelativePaths;</span>
+
+		// Launch new thread for background execution
+<span class="fc" id="L123">		mHandlerThread= new HandlerThread(&quot;PlaylisObserverHandler&quot;, Process.THREAD_PRIORITY_LOWEST);</span>
+<span class="fc" id="L124">		mHandlerThread.start();</span>
+<span class="fc" id="L125">		mHandler = new Handler(mHandlerThread.getLooper(), this);</span>
+
+		// Create playlists directory if not existing.
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">		if ((mSyncMode &amp; SYNC_MODE_EXPORT) != 0) {</span>
+			try {
+<span class="nc" id="L130">				mPlaylists.mkdir();</span>
+<span class="nc" id="L131">			} catch (Exception e) {</span>
+				// don't care: code will ignore events
+				// if mPlaylists is not a (writable) dir.
+<span class="nc" id="L134">			}</span>
+		}
+
+		// Register to receive media library events.
+<span class="fc" id="L138">		MediaLibrary.registerLibraryObserver(mLibraryObserver);</span>
+		// Create and start directory observer.
+<span class="fc" id="L140">		mFileObserver = getFileObserver(mPlaylists);</span>
+<span class="fc" id="L141">		mFileObserver.startWatching();</span>
+
+<span class="fc" id="L143">		XT(&quot;Object created, trigger FULL_SYNC_SCAN&quot;);</span>
+<span class="fc" id="L144">		sendUniqueMessage(MSG_FULL_SYNC_SCAN, 0);</span>
+<span class="fc" id="L145">	}</span>
+
+	/**
+	 * Unregisters this observer, the object must not be used anymore
+	 * after this function was called.
+	 */
+	public void unregister() {
+<span class="nc" id="L152">		MediaLibrary.unregisterLibraryObserver(mLibraryObserver);</span>
+<span class="nc" id="L153">		mFileObserver.stopWatching();</span>
+
+<span class="nc" id="L155">		mHandlerThread.quitSafely();</span>
+<span class="nc" id="L156">		mHandlerThread = null;</span>
+<span class="nc" id="L157">		mHandler = null;</span>
+<span class="nc" id="L158">	}</span>
+
+	/**
+	 * Whether or not to handle (or drop) any events received.
+	 * This has the same effect as unregistering, without actually
+	 * unregistering. The function prevents false events from
+	 * being handled if our playlists folder becomes 'suspect'.
+	 */
+	private boolean shouldDispatch() {
+		// This is so sad, but java.nio.file is only available since API 26,
+		// so we are stuck with java being java.
+<span class="fc" id="L169">		boolean deny = false;</span>
+		try {
+<span class="nc" id="L171">			File f = File.createTempFile(&quot;vanilla-write-check&quot;, null, mPlaylists);</span>
+<span class="nc" id="L172">			f.delete();</span>
+<span class="fc" id="L173">		} catch (Exception e) {</span>
+			// don't care about the exact error: as long as the write failed,
+			// we should not assume that we could write anything else.
+<span class="fc" id="L176">			deny = true;</span>
+<span class="nc" id="L177">		}</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">		return !deny;</span>
+	}
+
+	/**
+	 * SQLiteHelper onCreate
+	 */
+	@Override
+	public void onCreate(SQLiteDatabase dbh) {
+<span class="fc" id="L186">		dbh.execSQL(&quot;CREATE TABLE &quot;+Database.TABLE_NAME+&quot; ( &quot;</span>
+					+ Database._ID  + &quot; INTEGER PRIMARY KEY, &quot;
+					+ Database.HASH + &quot; INTEGER NOT NULL, &quot;
+					+ Database.NAME + &quot; TEXT NOT NULL )&quot;
+					);
+<span class="fc" id="L191">	}</span>
+
+	/**
+	 * SQLiteHelper onUpgrade
+	 */
+	@Override
+	public void onUpgrade(SQLiteDatabase dbh, int oldVersion, int newVersion) {
+		// No updates so far.
+<span class="nc" id="L199">	}</span>
+
+	/**
+	 * Message handler, used to dedupe messages and perform
+	 * background work.
+	 */
+	private static final int MSG_DUMP_M3U = 1;
+	private static final int MSG_DUMP_ALL_M3U = 2;
+	private static final int MSG_IMPORT_M3U = 3;
+	private static final int MSG_FORCE_M3U_IMPORT = 4;
+	private static final int MSG_FULL_SYNC_SCAN = 5;
+<span class="fc" id="L210">	ArrayList&lt;Integer&gt; msgDedupe = new ArrayList&lt;&gt;();</span>
+	@Override
+	public boolean handleMessage(Message message) {
+<span class="fc" id="L213">		msgDedupe.remove(0);</span>
+
+<span class="pc bpc" id="L215" title="5 of 6 branches missed.">		switch (message.what) {</span>
+		case MSG_DUMP_M3U:
+<span class="nc" id="L217">			Long id = (Long)message.obj;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">			if (Playlist.getPlaylist(mContext, id) != null) {</span>
+<span class="nc" id="L219">				XT(&quot;DUMP_M3U: source of id &quot;+id+&quot; exists, dumping&quot;);</span>
+<span class="nc" id="L220">				dumpAsM3uPlaylist(id);</span>
+			} else {
+<span class="nc" id="L222">				XT(&quot;DUMP_M3U: source of id &quot;+id+&quot; vanished, scanning all&quot;);</span>
+<span class="nc" id="L223">				sendUniqueMessage(MSG_FULL_SYNC_SCAN, 0);</span>
+			}
+<span class="nc" id="L225">			break;</span>
+		case MSG_DUMP_ALL_M3U:
+<span class="nc" id="L227">			dumpAllAsM3uPlaylist();</span>
+<span class="nc" id="L228">			break;</span>
+		case MSG_IMPORT_M3U:
+<span class="nc" id="L230">			File f = (File)(message.obj);</span>
+<span class="nc" id="L231">			importM3uPlaylist(f);</span>
+<span class="nc" id="L232">			break;</span>
+		case MSG_FORCE_M3U_IMPORT:
+<span class="nc" id="L234">			forceM3uImport();</span>
+<span class="nc" id="L235">			break;</span>
+		case MSG_FULL_SYNC_SCAN:
+<span class="fc" id="L237">			fullSyncScan();</span>
+<span class="fc" id="L238">			break;</span>
+		default:
+<span class="nc" id="L240">			throw new IllegalArgumentException(&quot;Invalid message type received&quot;);</span>
+		}
+<span class="fc" id="L242">		return true;</span>
+	}
+
+	/**
+	 * Forcefully re-imports all M3U files, even if we think that
+	 * our information is up-to-date.
+	 */
+	private void forceM3uImport() {
+<span class="nc" id="L250">		Cursor cursor = queryDatabase(null);</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">		if (cursor != null) {</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">			while (cursor.moveToNext()) {</span>
+<span class="nc" id="L253">				deletePlaylistMetadata(cursor.getLong(0));</span>
+			}
+<span class="nc" id="L255">			cursor.close();</span>
+		}
+		// run this ASAP to ensure that no other message re-populates
+		// metadata.
+<span class="nc" id="L259">		XT(&quot;forceM3uImport: metadata cleared, calling fullSyncScan&quot;);</span>
+<span class="nc" id="L260">		fullSyncScan();</span>
+<span class="nc" id="L261">	}</span>
+
+	/**
+	 * Dumps all playlist to stable storage.
+	 */
+	private void dumpAllAsM3uPlaylist() {
+<span class="nc" id="L267">		XT(&quot;dumpAllAsM3uPlaylist: called&quot;);</span>
+<span class="nc" id="L268">		Cursor cursor = Playlist.queryPlaylists(mContext);</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">		if (cursor != null) {</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">			while(cursor.moveToNext()) {</span>
+<span class="nc" id="L271">				final long id = cursor.getLong(0);</span>
+<span class="nc" id="L272">				XT(&quot;dumpAllAsM3uPlaylist: Dumping ID &quot;+id);</span>
+<span class="nc" id="L273">				sendUniqueMessage(MSG_DUMP_M3U, id);</span>
+<span class="nc" id="L274">			}</span>
+<span class="nc" id="L275">			cursor.close();</span>
+		}
+<span class="nc" id="L277">	}</span>
+
+	/**
+	 * Adds a new message to the queue. Ignores call if a duplicate
+	 * message is already pending.
+	 *
+	 * @param type the type of the message
+	 * @param obj object payload of this message.
+	 */
+	private void sendUniqueMessage(int type, Object obj) {
+<span class="fc" id="L287">		int fprint = (type &lt;&lt; 10) + obj.hashCode();</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">		if (!msgDedupe.contains(fprint)) {</span>
+<span class="fc" id="L289">			msgDedupe.add(fprint);</span>
+<span class="fc" id="L290">			mHandler.sendMessageDelayed(mHandler.obtainMessage(type, obj), COALESCE_EVENTS_DELAY_MS);</span>
+		}
+<span class="fc" id="L292">	}</span>
+
+
+	/**
+	 * Imports an M3U formatted file into our native media library.
+	 *
+	 * @param m3u the file to import
+	 */
+	private void importM3uPlaylist(File m3u) {;
+<span class="nc" id="L301">		XT(&quot;importM3uPlaylist(&quot;+m3u+&quot;)&quot;);</span>
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">		if ((mSyncMode &amp; SYNC_MODE_IMPORT) == 0)</span>
+<span class="nc" id="L304">			return;</span>
+
+<span class="nc bnc" id="L306" title="All 2 branches missed.">		if (!m3u.exists())</span>
+<span class="nc" id="L307">			return;</span>
+
+<span class="nc" id="L309">		final long hash = getHash(m3u);</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">		if (hash == -1)</span>
+<span class="nc" id="L311">			return;</span>
+
+<span class="nc" id="L313">		boolean must_import = true;</span>
+<span class="nc" id="L314">		String import_as = fromM3u(m3u.getName());</span>
+<span class="nc" id="L315">		Cursor cursor = queryDatabase(null);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">		if (cursor != null) {</span>
+			// Try to find an existing playlist where the constructed path
+			// would match given input file.
+<span class="nc bnc" id="L319" title="All 2 branches missed.">			while(cursor.moveToNext()) {</span>
+<span class="nc" id="L320">				File tmp = getFileForName(mPlaylists, asM3u(cursor.getString(1)));</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">				if (m3u.equals(tmp)) {</span>
+					// Found a matching playlist: this will be our import target
+					// if the hash indicates that our version is outdated.
+<span class="nc" id="L324">					import_as = cursor.getString(1);</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">					must_import = (hash != cursor.getLong(2));</span>
+<span class="nc" id="L326">					XT(&quot;importM3uPlaylist(): hash=&quot;+hash+&quot;, import=&quot;+must_import+&quot;, import_as=&quot;+import_as);</span>
+<span class="nc" id="L327">					break;</span>
+				}
+<span class="nc" id="L329">			}</span>
+<span class="nc" id="L330">			cursor.close();</span>
+		}
+
+<span class="nc bnc" id="L333" title="All 2 branches missed.">		if (must_import) {</span>
+<span class="nc" id="L334">			MediaLibrary.unregisterLibraryObserver(mLibraryObserver);</span>
+<span class="nc" id="L335">			long import_id = Playlist.createPlaylist(mContext, import_as);</span>
+<span class="nc" id="L336">			try (BufferedReader br = new BufferedReader(new FileReader(m3u))) {</span>
+				String line;
+<span class="nc bnc" id="L338" title="All 2 branches missed.">				while ((line = br.readLine()) != null) {</span>
+<span class="nc bnc" id="L339" title="All 4 branches missed.">					if (!(line.isEmpty() || line.startsWith(M3U_LINE_COMMENT_PREFIX))) {</span>
+						// Handle relative paths and Windows directory separators.
+<span class="nc" id="L341">						final String mediaPath = FileUtils.resolve(mPlaylists,</span>
+<span class="nc" id="L342">							new File(FileUtils.normalizeDirectorySeparators(line)));</span>
+<span class="nc" id="L343">						Playlist.addToPlaylist(mContext,</span>
+							import_id,
+<span class="nc" id="L345">							MediaUtils.buildFileQuery(mediaPath, Song.FILLED_PROJECTION,  false /* recursive */));</span>
+<span class="nc" id="L346">					}</span>
+				}
+<span class="nc" id="L348">				updatePlaylistMetadata(import_id, import_as, hash);</span>
+<span class="nc" id="L349">			} catch(IOException e) {</span>
+<span class="nc" id="L350">				Log.e(&quot;VanillaMusic&quot;, &quot;Error while parsing m3u: &quot;+e);</span>
+<span class="nc" id="L351">			}</span>
+<span class="nc" id="L352">			MediaLibrary.registerLibraryObserver(mLibraryObserver);</span>
+		}
+<span class="nc" id="L354">	}</span>
+
+	/**
+	 * Exports a single playlist ad M3U(8).
+	 *
+	 * @param id the playlist id to export.
+	 * @return the newly written playlist, null if nothing was done.
+	 */
+	private File dumpAsM3uPlaylist(long id) {
+<span class="nc" id="L363">		XT(&quot;dumpM3uPlaylist(&quot;+id+&quot;)&quot;);</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">		if (id &lt; 0)</span>
+<span class="nc" id="L365">			throw new IllegalArgumentException(&quot;Called with negative id!&quot;);</span>
+
+<span class="nc bnc" id="L367" title="All 2 branches missed.">		if ((mSyncMode &amp; SYNC_MODE_EXPORT) == 0)</span>
+<span class="nc" id="L368">			return null;</span>
+
+<span class="nc" id="L370">		final String name = Playlist.getPlaylist(mContext, id);</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">		if (name == null)</span>
+<span class="nc" id="L372">			return null;</span>
+
+<span class="nc" id="L374">		final File m3u = getFileForName(mPlaylists, asM3u(name));</span>
+
+<span class="nc" id="L376">		PrintWriter pw = null;</span>
+<span class="nc" id="L377">		QueryTask query = MediaUtils.buildPlaylistQuery(id, Song.FILLED_PLAYLIST_PROJECTION);</span>
+<span class="nc" id="L378">		Cursor cursor = query.runQuery(mContext);</span>
+		try {
+<span class="nc bnc" id="L380" title="All 2 branches missed.">			if (cursor != null) {</span>
+<span class="nc" id="L381">				pw = new PrintWriter(m3u);</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">				while (cursor.moveToNext()) {</span>
+					// Write paths relative to the playlist export directory, if enabled.
+<span class="nc" id="L384">					String path = cursor.getString(1);</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">					if (mExportRelativePaths) {</span>
+<span class="nc" id="L386">						path = FileUtils.relativize(mPlaylists, new File(path));</span>
+					}
+<span class="nc" id="L388">					pw.println(path);</span>
+<span class="nc" id="L389">				}</span>
+<span class="nc" id="L390">				pw.flush();</span>
+<span class="nc" id="L391">				long hash_new = getHash(m3u);</span>
+<span class="nc" id="L392">				updatePlaylistMetadata(id, name, hash_new);</span>
+			}
+<span class="nc" id="L394">		} catch (IOException e) {</span>
+<span class="nc" id="L395">			Log.v(&quot;VanillaMusic&quot;, &quot;IOException while writing:&quot;, e);</span>
+		} finally {
+<span class="nc bnc" id="L397" title="All 2 branches missed.">			if (cursor != null) cursor.close();</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">			if (pw != null) pw.close();</span>
+		}
+<span class="nc" id="L400">		return m3u;</span>
+	}
+
+	/**
+	 * Identify (and remove) playlist items which do not exist anymore
+	 * and pick up any new M3U files.
+	 */
+	private void fullSyncScan() {
+<span class="fc" id="L408">		XT(&quot;fullSyncScan() running...&quot;);</span>
+<span class="fc" id="L409">		ArrayList&lt;File&gt; knownM3u = new ArrayList&lt;&gt;();</span>
+
+		// First step is to check all known playlist metadata entries
+		// and check whether their native or M3U copy was purged.
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">		final boolean do_purge = (mSyncMode &amp; SYNC_MODE_PURGE) != 0;</span>
+<span class="fc" id="L414">		Cursor cursor = queryDatabase(null);</span>
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">		if (cursor != null) {</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">			while (cursor.moveToNext()) {</span>
+<span class="nc" id="L417">				final long id = cursor.getLong(0);</span>
+<span class="nc" id="L418">				final String name = cursor.getString(1);</span>
+				// generates possible names of this playlist as M3U.
+<span class="nc" id="L420">				final File src_m3u = getFileForName(mPlaylists, asM3u(name));</span>
+<span class="nc" id="L421">				final File bak_m3u = getFileForName(mPlaylists, name + &quot;.backup&quot;);</span>
+
+<span class="nc bnc" id="L423" title="All 2 branches missed.">				if (Playlist.getPlaylist(mContext, id) == null) {</span>
+					// Native version of this playlist is gone, rename M3U variant:
+<span class="nc bnc" id="L425" title="All 2 branches missed.">					if (do_purge) {</span>
+<span class="nc" id="L426">						src_m3u.renameTo(bak_m3u);</span>
+					}
+<span class="nc" id="L428">					deletePlaylistMetadata(id);</span>
+<span class="nc" id="L429">					XT(&quot;fullSyncScan(): renamed old M3U -&gt; &quot;+bak_m3u);</span>
+<span class="nc bnc" id="L430" title="All 4 branches missed.">				} else if (do_purge &amp;&amp; !src_m3u.exists()) {</span>
+					// Source vanished, write one last dump and remove it.
+<span class="nc" id="L432">					File dump = dumpAsM3uPlaylist(id);</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">					if (dump != null) {</span>
+<span class="nc" id="L434">						dump.renameTo(bak_m3u);</span>
+					}
+<span class="nc" id="L436">					Playlist.deletePlaylist(mContext, id);</span>
+<span class="nc" id="L437">					deletePlaylistMetadata(id);</span>
+<span class="nc" id="L438">					XT(&quot;fullSyncScan(): killed native playlist with id &quot;+id);</span>
+				}
+				// If this M3U exists, record it so that we don't try to re-import.
+<span class="nc bnc" id="L441" title="All 2 branches missed.">				if (src_m3u.exists()) {</span>
+<span class="nc" id="L442">					knownM3u.add(src_m3u);</span>
+				}
+<span class="nc" id="L444">			}</span>
+<span class="fc" id="L445">			cursor.close();</span>
+		}
+
+		// Now list all M3U files in the playlists dir and import newly seen files.
+<span class="fc" id="L449">		File[] files = mPlaylists.listFiles();</span>
+<span class="pc bpc" id="L450" title="1 of 2 branches missed.">		if (files != null) {</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">			for (File f : files) {</span>
+<span class="nc" id="L452">				final String fname = f.getName();</span>
+<span class="nc bnc" id="L453" title="All 4 branches missed.">				if (isM3uFilename(fname) &amp;&amp; !knownM3u.contains(f)) {</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">					if (Playlist.getPlaylist(mContext, fromM3u(fname)) == -1) {</span>
+<span class="nc" id="L455">						XT(&quot;fullSyncScan(): new M3U discovered, must import &quot;+f);</span>
+<span class="nc" id="L456">						sendUniqueMessage(MSG_IMPORT_M3U, f);</span>
+					} else {
+<span class="nc" id="L458">						XT(&quot;fullSyncScan(): native version for &quot;+f+&quot; exists without metadata. Won't touch.&quot;);</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L463">	}</span>
+
+	/**
+	 * Returns a file object for given name
+	 *
+	 * @param name name of playlist to use.
+	 * @return file object for given name
+	 */
+	private File getFileForName(File parent, String name) {
+<span class="nc" id="L472">		name = name.replaceAll(&quot;/&quot;, &quot;_&quot;);</span>
+<span class="nc" id="L473">		File f = new File(parent, name);</span>
+<span class="nc" id="L474">		return f;</span>
+	}
+
+	/**
+	 * Updates the metadata of given playlist name
+	 *
+	 * @param id the id to update.
+	 * @param name the name to register for this id.
+	 */
+	private void updatePlaylistMetadata(long id, String name, long hash) {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">		if (hash &lt; 0)</span>
+<span class="nc" id="L485">			throw new IllegalArgumentException(&quot;hash can not be negative&quot;);</span>
+
+<span class="nc" id="L487">		XT(&quot;updatePlaylistMetadata of &quot;+name+&quot; to hash &quot;+hash);</span>
+<span class="nc" id="L488">		SQLiteDatabase dbh = getWritableDatabase();</span>
+<span class="nc" id="L489">		ContentValues values = new ContentValues();</span>
+<span class="nc" id="L490">		values.put(Database._ID, id);</span>
+<span class="nc" id="L491">		values.put(Database.NAME, name);</span>
+<span class="nc" id="L492">		values.put(Database.HASH, hash);</span>
+
+<span class="nc" id="L494">		deletePlaylistMetadata(id);</span>
+<span class="nc" id="L495">		dbh.insert(Database.TABLE_NAME, null, values);</span>
+<span class="nc" id="L496">	}</span>
+
+	/**
+	 * Removes all known metadata of given id.
+	 *
+	 * @param id the id to purge.
+	 */
+	private void deletePlaylistMetadata(long id) {
+<span class="nc" id="L504">		SQLiteDatabase dbh = getWritableDatabase();</span>
+<span class="nc" id="L505">		dbh.delete(Database.TABLE_NAME, Database._ID+&quot;=?&quot;, new String[] { Long.valueOf(id).toString() });</span>
+<span class="nc" id="L506">	}</span>
+
+	/**
+	 * Returns true if the filename looks like an m3u file
+	 *
+	 * @param name the name to check
+	 * @return true if file appears to be an M3U
+	 */
+	private boolean isM3uFilename(String name) {
+<span class="nc bnc" id="L515" title="All 2 branches missed.">		if (name.length() &lt; M3U_EXT.length())</span>
+<span class="nc" id="L516">			return false;</span>
+<span class="nc" id="L517">		final int offset = name.length() - M3U_EXT.length();</span>
+<span class="nc" id="L518">		return name.toLowerCase().substring(offset).equals(M3U_EXT.toLowerCase());</span>
+	}
+
+	/**
+	 * Returns the m3u-filename of name
+	 *
+	 * @param name the name to use
+	 * @return the m3u name
+	 */
+	private String asM3u(String name) {
+<span class="nc" id="L528">		return name + M3U_EXT;</span>
+	}
+
+	/**
+	 * Returns the name of an m3u file
+	 *
+	 * @param name the m3u filename
+	 * @return the non-m3u name
+	 */
+	private String fromM3u(String name) {
+<span class="nc bnc" id="L538" title="All 2 branches missed.">		if (!isM3uFilename(name))</span>
+<span class="nc" id="L539">			throw new IllegalArgumentException(&quot;Not an M3U filename: &quot;+name);</span>
+<span class="nc" id="L540">		return name.substring(0, name.length() - M3U_EXT.length());</span>
+	}
+
+	/**
+	 * Hashes the contents of given file
+	 *
+	 * @param f the file to hash
+	 * @return the calculated hash, -1 on error.
+	 */
+	private long getHash(File f) {
+<span class="nc" id="L550">		long hash = -1;</span>
+<span class="nc" id="L551">		byte[] buff = new byte[4096];</span>
+<span class="nc" id="L552">		try(FileInputStream fis = new FileInputStream(f)) {</span>
+<span class="nc" id="L553">			CRC32 crc = new CRC32();</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">			while(fis.read(buff) != -1) {</span>
+<span class="nc" id="L555">				crc.update(buff);</span>
+			}
+<span class="nc" id="L557">			hash = crc.getValue();</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">			if (hash &lt; 0)</span>
+<span class="nc" id="L559">				hash = hash * -1;</span>
+<span class="nc" id="L560">		} catch(IOException e) {</span>
+			// hash will be -1 which signals failure.
+<span class="nc" id="L562">		}</span>
+<span class="nc" id="L563">		return hash;</span>
+	}
+
+	/**
+	 * Obtain a cursor to our metadaata database.
+	 *
+	 * @param selection selection for query
+	 * @return cursor with results.
+	 */
+	private Cursor queryDatabase(String selection) {
+<span class="fc" id="L573">		return getReadableDatabase().query(Database.TABLE_NAME, Database.FILLED_PROJECTION, selection, null, null, null, null);</span>
+	}
+
+	/**
+	 * Library observer callback which notifies us about media library
+	 * events.
+	 *
+	 * @param type the event type
+	 * @param id the id of given type which had a change
+	 * @param ongoing whether or not to expect more of these events
+	 */
+<span class="fc" id="L584">	private final LibraryObserver mLibraryObserver = new LibraryObserver() {</span>
+		@Override
+		public void onChange(LibraryObserver.Type type, long id, boolean ongoing) {
+<span class="pc bpc" id="L587" title="1 of 4 branches missed.">			if (type != LibraryObserver.Type.PLAYLIST || ongoing)</span>
+<span class="fc" id="L588">				return;</span>
+
+<span class="pc bpc" id="L590" title="1 of 2 branches missed.">			if (!shouldDispatch())</span>
+<span class="fc" id="L591">				return;</span>
+
+<span class="nc" id="L593">			int msg = MSG_DUMP_M3U; // Default: export this playlist ID.</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">			if (id == LibraryObserver.Value.UNKNOWN) {</span>
+				// An unknown (all?) playlist was modified: dump all to M3U
+<span class="nc" id="L596">				msg = MSG_DUMP_ALL_M3U;</span>
+			}
+<span class="nc bnc" id="L598" title="All 2 branches missed.">			if (id == LibraryObserver.Value.OUTDATED) {</span>
+				// Our data is wrong, reimport all M3Us
+<span class="nc" id="L600">				msg = MSG_FORCE_M3U_IMPORT;</span>
+			}
+
+<span class="nc" id="L603">			XT(&quot;LibraryObserver::onChange id=&quot;+id+&quot;, msg=&quot;+msg);</span>
+<span class="nc" id="L604">			sendUniqueMessage(msg, id);</span>
+<span class="nc" id="L605">		}</span>
+	};
+
+	/**
+	 * Returns a new observer which monitors the playlists directory.
+	 *
+	 * @param target The target playlists directory.
+	 * @return A new observer for the playlists directory.
+	 */
+	private FileObserver getFileObserver(File target) {
+<span class="fc" id="L615">		final int mask = FileObserver.CLOSE_WRITE | FileObserver.MOVED_FROM | FileObserver.MOVED_TO | FileObserver.DELETE;</span>
+<span class="fc" id="L616">		XT(&quot;new file observer at &quot;+target+&quot; with mask &quot;+mask);</span>
+
+<span class="fc" id="L618">		return new FileObserver(target.getAbsolutePath(), mask) {</span>
+			/**
+			 * Observer which monitors the playlists directory.
+			 *
+			 * @param event the event type
+			 * @param dirent the filename which triggered the event.
+			 */
+			@Override
+			public void onEvent(int event, String dirent) {
+				// Events such as IN_IGNORED pass dirent = null.
+<span class="nc bnc" id="L628" title="All 2 branches missed.">				if (dirent == null)</span>
+<span class="nc" id="L629">					return;</span>
+
+<span class="nc bnc" id="L631" title="All 2 branches missed.">				if (!isM3uFilename(dirent))</span>
+<span class="nc" id="L632">					return;</span>
+
+<span class="nc bnc" id="L634" title="All 2 branches missed.">				if (!shouldDispatch())</span>
+<span class="nc" id="L635">					return;</span>
+
+<span class="nc bnc" id="L637" title="All 2 branches missed.">				if ((event &amp; (FileObserver.MOVED_FROM | FileObserver.DELETE)) != 0) {</span>
+					// A M3U vanished, do a full scan.
+<span class="nc" id="L639">					XT(&quot;FileObserver::onEvent DELETE of &quot;+dirent+&quot; triggers FULL_SYNC_SCAN&quot;);</span>
+<span class="nc" id="L640">					sendUniqueMessage(MSG_FULL_SYNC_SCAN, 0);</span>
+				}
+<span class="nc bnc" id="L642" title="All 2 branches missed.">				if ((event &amp; (FileObserver.MOVED_TO | FileObserver.CLOSE_WRITE)) != 0) {</span>
+					// Single file was created, import it.
+<span class="nc" id="L644">					XT(&quot;FileObserver::onEvent WRITE of &quot;+dirent+&quot; triggers IMPORT_M3U&quot;);</span>
+<span class="nc" id="L645">					sendUniqueMessage(MSG_IMPORT_M3U, new File(mPlaylists, dirent));</span>
+				}
+<span class="nc" id="L647">			}</span>
+		};
+	}
+
+	private void XT(String s) {
+		if (DEBUG) {
+			try(PrintWriter pw = new PrintWriter(new FileOutputStream(new File(&quot;/sdcard/playlist-observer.txt&quot;), true))) {
+				pw.println(System.currentTimeMillis()/1000+&quot;: &quot;+s);
+				Log.v(&quot;VanillaMusic&quot;, &quot;XTRACE: &quot;+s);
+			} catch(Exception e) {}
+		}
+<span class="fc" id="L658">	}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

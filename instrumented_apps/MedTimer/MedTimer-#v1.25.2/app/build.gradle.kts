@@ -1,0 +1,338 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.triplet.play)
+    id("jacoco")
+    alias(libs.plugins.sonarqube)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = "com.futsch1.medtimer"
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "com.futsch1.medtimer"
+        minSdk = 28
+        multiDexEnabled = true
+        targetSdk = 36
+        versionCode = 185
+        versionName = "1.25.2"
+        base.archivesName = "MedTimer"
+        // Use this deprecated setting because Android Lint will not pick up androidResources.localeFilters correctly
+        @Suppress("DEPRECATION")
+        resConfigs("en,ar,bg,cs,da,de,el,es,fi,fr,hu,it,iw,nl,pl,pt,ru,sv,ta,tr,uk,zh-rCN,zh-rTW")
+
+        testInstrumentationRunner = "com.futsch1.medtimer.harness.MedTimerHiltTestRunner"
+        testInstrumentationRunnerArguments.putAll(
+            mapOf(
+                "clearPackageData" to "true",
+                "useTestStorageService" to "true"
+            )
+        )
+    }
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("full") {
+            dimension = "distribution"
+            isDefault = true
+        }
+        create("foss") {
+            dimension = "distribution"
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+        debug {
+            enableUnitTestCoverage = true
+            enableAndroidTestCoverage = true
+        }
+    }
+    testCoverage {
+        jacocoVersion = "0.8.15"
+    }
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+    buildFeatures {
+        buildConfig = true
+        compose = true
+        viewBinding = true
+    }
+    @Suppress("UnstableApiUsage")
+    androidResources {
+        generateLocaleConfig = true
+        localeFilters += listOf(
+            "en",
+            "ar",
+            "bg",
+            "cs",
+            "da",
+            "de",
+            "el",
+            "es",
+            "fi",
+            "fr",
+            "hu",
+            "it",
+            "iw",
+            "nl",
+            "pl",
+            "pt-rBR",
+            "ru",
+            "sv",
+            "ta",
+            "tr",
+            "uk",
+            "zh-rCN",
+            "zh-rTW"
+        )
+    }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+            all {
+                it.jvmArgs("-Duser.timezone=Europe/Berlin")
+                it.systemProperty("user.language", "en")
+                it.systemProperty("user.country", "US")
+            }
+        }
+        animationsDisabled = true
+        execution = "ANDROIDX_TEST_ORCHESTRATOR"
+    }
+    lint {
+        abortOnError = true
+        warningsAsErrors = true
+        disable.add("IconLocation")
+        disable.add("GradleDependency")
+        disable.add("AndroidGradlePluginVersion")
+        disable.add("OldTargetApi")
+    }
+}
+
+dependencies {
+    implementation(project(":core:domain"))
+    implementation(project(":core:database"))
+    implementation(project(":core:common"))
+    implementation(project(":core:datastore"))
+    implementation(project(":core:ui"))
+    implementation(project(":core:location"))
+    implementation(project(":feature:reminders"))
+    implementation(project(":feature:ui"))
+    // Compose
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material3.adaptive)
+    implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
+    implementation(libs.androidx.compose.ui.viewbinding)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.lifecycle.service)
+    implementation(libs.material)
+    implementation(libs.androidx.constraintlayout)
+    implementation(libs.androidx.navigation.fragment.ktx)
+    implementation(libs.androidx.navigation.ui.ktx)
+    implementation(libs.androidx.preference.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.color.picker)
+    implementation(libs.simply.pdf)
+    implementation(libs.gson)
+    implementation(libs.appintro)
+    implementation(libs.calendar)
+    implementation(libs.icondialog)
+    implementation(libs.espresso.idling.resource)
+    implementation(libs.espresso.idling.concurrent)
+    implementation(libs.flexbox)
+    implementation(libs.androidx.biometric)
+    implementation(libs.preferencex.ringtone)
+    implementation(libs.preferencex)
+    implementation(libs.androidx.documentfile)
+    implementation(libs.hilt.android)
+
+    testImplementation(libs.junit4)
+    testImplementation(kotlin("test-junit"))
+    testImplementation(libs.mockito.core)
+    testImplementation(libs.mockito.kotlin)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.hilt.android.testing)
+    "testFullImplementation"(libs.play.services.location)
+
+    androidTestImplementation(kotlin("test-junit"))
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(libs.espresso.contrib)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.screengrab)
+    androidTestImplementation(libs.uiautomator)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.barista)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    androidTestImplementation(libs.hilt.android.testing)
+    androidTestUtil(libs.androidx.test.orchestrator)
+
+    ksp(libs.androidx.room.compiler)
+    ksp(libs.hilt.compiler)
+    kspTest(libs.hilt.compiler)
+    kspAndroidTest(libs.hilt.compiler)
+
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+}
+
+play {
+    track.set("internal")
+    defaultToAppBundles.set(true)
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+tasks.withType<JavaCompile> {
+    options.compilerArgs.addAll(listOf("-Xlint:unchecked", "-Xlint:deprecation"))
+}
+sonar {
+    properties {
+        property("sonar.projectName", "MedTimer")
+        property("sonar.projectKey", "Futsch1_medTimer")
+        property("sonar.organization", "futsch1")
+        property("sonar.host.url", "https://sonarcloud.io")
+        property("sonar.gradle.skipCompile", "true")
+        property("sonar.android.lint.report", "build/reports/lint-results-fullDebug.xml")
+        property(
+            "sonar.coverage.jacoco.xmlReportPaths",
+            "build/reports/jacoco/jacocoFullDebugCodeCoverage/jacocoFullDebugCodeCoverage.xml"
+        )
+    }
+}
+
+tasks.withType(Test::class) {
+    configure<JacocoTaskExtension> {
+        isIncludeNoLocationClasses = true
+        excludes = listOf("jdk.internal.*")
+    }
+    if (System.getProperty("fuzzing") != "true")
+        exclude("**/*FuzzTest.class")
+    else
+        include("**/*FuzzTest.class")
+}
+
+// Define task names for unit tests and Android tests
+val androidTests = "connectedFullDebugAndroidTest"
+val exclusions = listOf(
+    "**/R.class",
+    "**/R$*.class",
+    "**/BuildConfig.*",
+    "**/Manifest*.*",
+    "**/*Test*.*",
+    "**/*Args.*",
+    "**/*Args$*.class",
+    "**/*Directions.*",
+    "**/*Directions$*.class",
+    // Dagger / Hilt generated code
+    "**/*_Factory*.class",
+    "**/*_Factory_Impl*.class",
+    "**/*_MembersInjector*.class",
+    "**/*_GeneratedInjector*.class",
+    "**/Hilt_*.class",
+    "**/*_HiltModules*.class",
+    "**/*Module_Provide*Factory*.class",
+    "**/*Module_Companion_Provide*Factory*.class",
+    "**/hilt_aggregated_deps/**",
+    "**/dagger/hilt/internal/aggregatedroot/codegen/**",
+    // Room generated code
+    "**/*_Impl*.class",
+    "**/*Dao_Impl*.class",
+    "**/*Database_Impl*.class",
+    // Data binding generated code
+    "**/databinding/**",
+    // Kotlin compiler-synthetic classes from inlined stdlib functions
+    // (sourcefilename points to non-existent files like Emitters.kt, Comparisons.kt, etc.)
+    "**/*\$\$inlined*.class",
+    "**/*\$\$special\$*.class"
+)
+
+// Modules included in the aggregated coverage report. The variant is the one built
+// when running the full-flavor test tasks; modules without flavors use the debug variant.
+val coverageModules = mapOf(
+    project(":app") to "fullDebug",
+    project(":core:common") to "debug",
+    project(":core:domain") to "debug",
+    project(":core:database") to "debug",
+    project(":core:datastore") to "debug",
+    project(":core:ui") to "debug",
+    project(":core:location") to "fullDebug",
+    project(":feature:reminders:api") to "debug",
+    project(":feature:reminders") to "fullDebug",
+    project(":feature:ui") to "fullDebug"
+)
+
+// Register a JacocoReport task for code coverage analysis
+tasks.register<JacocoReport>("jacocoFullDebugCodeCoverage") {
+    // Depend on unit tests and Android tests tasks
+    dependsOn(
+        coverageModules.map { (proj, variant) ->
+            val taskName = if (variant == "fullDebug") "testFullDebugUnitTest" else "testDebugUnitTest"
+            proj.tasks.named(taskName)
+        }
+    )
+    dependsOn(androidTests)
+    // Set task grouping and description
+    group = "Reporting"
+    description = "Execute UI and unit tests, generate and combine Jacoco coverage report"
+    // Configure reports to generate both XML and HTML formats
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+    }
+    // Set source directories to the main and full-flavor source directories of all modules
+    sourceDirectories.setFrom(
+        coverageModules.flatMap { (proj, _) ->
+            listOfNotNull(
+                proj.layout.projectDirectory.dir("src/main/java").takeIf { it.asFile.exists() },
+                proj.layout.projectDirectory.dir("src/full/java").takeIf { it.asFile.exists() }
+            )
+        }
+    )
+    // Set class directories to compiled Java and Kotlin classes of all modules,
+    // excluding generated classes and test classes
+    classDirectories.setFrom(
+        coverageModules.flatMap { (proj, variant) ->
+            listOf(
+                fileTree(proj.layout.buildDirectory.dir("intermediates/javac/$variant/")) {
+                    exclude(exclusions)
+                },
+                fileTree(proj.layout.buildDirectory.dir("intermediates/built_in_kotlinc/$variant/")) {
+                    exclude(exclusions)
+                }
+            )
+        }
+    )
+    // Collect execution data from .exec and .ec files generated during test execution in all modules
+    executionData.setFrom(
+        files(
+            coverageModules.map { (proj, _) ->
+                fileTree(proj.layout.buildDirectory) { include(listOf("**/*.exec", "**/*.ec")) }
+            }
+        )
+    )
+}

@@ -1,0 +1,728 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Droid-ify</a> &gt; <a href="index.source.html" class="el_package">com.looker.droidify.service</a> &gt; <span class="el_source">SyncService.kt</span></div><h1>SyncService.kt</h1><pre class="source lang-java linenums">package com.looker.droidify.service
+
+import android.annotation.SuppressLint
+import android.app.PendingIntent
+import android.app.job.JobInfo
+import android.app.job.JobParameters
+import android.app.job.JobService
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.view.ContextThemeWrapper
+import androidx.core.app.NotificationCompat
+import androidx.fragment.app.Fragment
+import androidx.work.NetworkType
+import com.looker.droidify.BuildConfig
+import com.looker.droidify.R
+import com.looker.droidify.database.Database
+import com.looker.droidify.datastore.Settings
+import com.looker.droidify.datastore.SettingsRepository
+import com.looker.droidify.datastore.model.AutoSync
+import com.looker.droidify.index.RepositoryUpdater
+import com.looker.droidify.model.ProductItem
+import com.looker.droidify.model.Repository
+import com.looker.droidify.network.DataSize
+import com.looker.droidify.network.percentBy
+import com.looker.droidify.receivers.CopyErrorReceiver
+import com.looker.droidify.sync.SyncPreference
+import com.looker.droidify.sync.toJobNetworkType
+import com.looker.droidify.utility.common.Constants
+import com.looker.droidify.utility.common.SdkCheck
+import com.looker.droidify.utility.common.createNotificationChannel
+import com.looker.droidify.utility.common.extension.getColorFromAttr
+import com.looker.droidify.utility.common.extension.jobScheduler
+import com.looker.droidify.utility.common.extension.notificationManager
+import com.looker.droidify.utility.common.extension.startForegroundSafe
+import com.looker.droidify.utility.common.extension.startServiceCompat
+import com.looker.droidify.utility.common.extension.stopForegroundCompat
+import com.looker.droidify.utility.common.result.Result
+import com.looker.droidify.utility.extension.startUpdate
+import com.looker.droidify.utility.notifications.updatesAvailableNotification
+import com.looker.droidify.work.DownloadStatsWorker
+import com.looker.droidify.work.RBLogWorker
+import dagger.hilt.android.AndroidEntryPoint
+import java.lang.ref.WeakReference
+import javax.inject.Inject
+import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import android.R as AndroidR
+import com.looker.droidify.R.string as stringRes
+import com.looker.droidify.R.style as styleRes
+import kotlinx.coroutines.Job as CoroutinesJob
+
+<span class="nc" id="L70">@AndroidEntryPoint</span>
+class SyncService : ConnectionService&lt;SyncService.Binder&gt;() {
+
+    companion object {
+        private const val MAX_PROGRESS = 100
+
+        private const val NOTIFICATION_UPDATE_SAMPLING = 400L
+
+        private const val ACTION_CANCEL = &quot;${BuildConfig.APPLICATION_ID}.intent.action.CANCEL&quot;
+
+<span class="pc" id="L80">        val syncState = MutableSharedFlow&lt;State&gt;()</span>
+
+<span class="nc" id="L82">        var autoUpdating = false</span>
+<span class="nc" id="L83">        var autoUpdateStartedFor: List&lt;String&gt; = emptyList()</span>
+
+        fun forceSyncAll(context: Context) {
+<span class="fc" id="L86">            Database.RepositoryAdapter.getAll().forEach {</span>
+<span class="pc bpc" id="L87" title="4 of 8 branches missed.">                if (it.lastModified.isNotEmpty() || it.entityTag.isNotEmpty()) {</span>
+<span class="nc" id="L88">                    Database.RepositoryAdapter.put(it.copy(lastModified = &quot;&quot;, entityTag = &quot;&quot;))</span>
+                }
+<span class="fc" id="L90">            }</span>
+<span class="fc" id="L91">            Connection(</span>
+<span class="fc" id="L92">                SyncService::class.java,</span>
+                onBind = { connection, binder -&gt;
+<span class="fc" id="L94">                    binder.sync(SyncRequest.FORCE)</span>
+<span class="fc" id="L95">                    connection.unbind(context)</span>
+<span class="fc" id="L96">                },</span>
+<span class="fc" id="L97">            ).bind(context)</span>
+<span class="fc" id="L98">        }</span>
+    }
+
+    @Inject
+<span class="nc" id="L102">    lateinit var settingsRepository: SettingsRepository</span>
+
+<span class="fc" id="L104">    sealed class State(val name: String) {</span>
+<span class="fc" id="L105">        class Connecting(appName: String) : State(appName)</span>
+
+<span class="fc" id="L107">        class Syncing(</span>
+<span class="pc" id="L108">            val appName: String,</span>
+<span class="fc" id="L109">            val stage: RepositoryUpdater.Stage,</span>
+<span class="fc" id="L110">            val read: DataSize,</span>
+<span class="fc" id="L111">            val total: DataSize?,</span>
+<span class="fc" id="L112">        ) : State(appName)</span>
+
+<span class="fc" id="L114">        data object Finish : State(&quot;&quot;)</span>
+
+        val progress: Int
+<span class="fc" id="L117">            get() = when (this) {</span>
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">                is Connecting -&gt; Int.MIN_VALUE</span>
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">                Finish -&gt; Int.MAX_VALUE</span>
+<span class="pc bpc" id="L120" title="1 of 4 branches missed.">                is Syncing -&gt; when (stage) {</span>
+<span class="fc" id="L121">                    RepositoryUpdater.Stage.DOWNLOAD -&gt; ((read percentBy total) * 0.4F).roundToInt()</span>
+<span class="fc" id="L122">                    RepositoryUpdater.Stage.PROCESS -&gt; 50</span>
+<span class="fc" id="L123">                    RepositoryUpdater.Stage.MERGE -&gt; 75</span>
+<span class="nc" id="L124">                    RepositoryUpdater.Stage.COMMIT -&gt; 90</span>
+                }
+<span class="fc" id="L126">            }</span>
+    }
+
+<span class="fc" id="L129">    private class Task(val repositoryId: Long, val manual: Boolean)</span>
+<span class="fc" id="L130">    private data class CurrentTask(</span>
+<span class="pc" id="L131">        val task: Task?,</span>
+<span class="pc" id="L132">        val job: CoroutinesJob,</span>
+<span class="pc" id="L133">        val hasUpdates: Boolean,</span>
+<span class="fc" id="L134">        val lastState: State,</span>
+    )
+
+<span class="fc" id="L137">    private enum class Started { NO, AUTO, MANUAL }</span>
+
+<span class="nc" id="L139">    private var started = Started.NO</span>
+    private var foregroundFailed = false
+<span class="nc" id="L141">    private val tasks = mutableListOf&lt;Task&gt;()</span>
+    private var currentTask: CurrentTask? = null
+
+    private var updateNotificationBlockerFragment: WeakReference&lt;Fragment&gt;? = null
+
+<span class="nc" id="L146">    private val downloadConnection = Connection(DownloadService::class.java)</span>
+<span class="nc" id="L147">    private val lock = Mutex()</span>
+
+<span class="fc" id="L149">    enum class SyncRequest { AUTO, MANUAL, FORCE }</span>
+
+<span class="fc" id="L151">    inner class Binder : android.os.Binder() {</span>
+
+        val state: SharedFlow&lt;State&gt;
+<span class="nc" id="L154">            get() = syncState.asSharedFlow()</span>
+
+        private fun sync(ids: List&lt;Long&gt;, request: SyncRequest, settings: Settings) {
+<span class="fc" id="L157">            val cancelledTask =</span>
+<span class="pc bnc" id="L158" title="All 6 branches missed.">                cancelCurrentTask { request == SyncRequest.FORCE &amp;&amp; it.task?.repositoryId in ids }</span>
+<span class="pc bnc" id="L159" title="All 4 branches missed.">            cancelTasks { !it.manual &amp;&amp; it.repositoryId in ids }</span>
+<span class="pc" id="L160">            val currentIds = tasks.asSequence().map { it.repositoryId }.toSet()</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">            val manual = request != SyncRequest.AUTO</span>
+<span class="fc" id="L162">            tasks += ids.asSequence().filter {</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">                it !in currentIds &amp;&amp;</span>
+<span class="pc bpc" id="L164" title="6 of 8 branches missed.">                    it != currentTask?.task?.repositoryId</span>
+<span class="fc" id="L165">            }.map { Task(it, manual) }</span>
+<span class="pc bpc" id="L166" title="3 of 4 branches missed.">            handleNextTask(cancelledTask?.hasUpdates == true, settings)</span>
+<span class="pc bpc" id="L167" title="2 of 4 branches missed.">            if (request != SyncRequest.AUTO &amp;&amp; started == Started.AUTO) {</span>
+<span class="nc" id="L168">                started = Started.MANUAL</span>
+<span class="nc" id="L169">                startServiceCompat()</span>
+<span class="nc" id="L170">                handleSetStarted()</span>
+<span class="nc bnc" id="L171" title="All 4 branches missed.">                currentTask?.lastState?.let { publishForegroundState(true, it) }</span>
+            }
+<span class="fc" id="L173">        }</span>
+
+        fun sync(request: SyncRequest) {
+<span class="fc" id="L176">            val settings = runBlocking { settingsRepository.getInitial() }</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">            if (settings.rbLogsEnabled) RBLogWorker.fetchRBLogs(applicationContext)</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">            if (settings.dlStatsEnabled) DownloadStatsWorker.fetchDownloadStats(applicationContext)</span>
+
+<span class="fc" id="L180">            val ids = Database.RepositoryAdapter.getAll()</span>
+<span class="fc" id="L181">                .filter { it.enabled }</span>
+<span class="fc" id="L182">                .map { it.id }</span>
+
+<span class="fc" id="L184">            sync(ids, request, settings)</span>
+<span class="fc" id="L185">        }</span>
+
+        fun sync(repository: Repository) {
+<span class="nc" id="L188">            val settings = runBlocking { settingsRepository.getInitial() }</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (repository.enabled) {</span>
+<span class="nc" id="L190">                sync(listOf(repository.id), SyncRequest.FORCE, settings)</span>
+            }
+<span class="nc" id="L192">        }</span>
+
+<span class="nc" id="L194">        suspend fun updateAllApps() {</span>
+<span class="nc" id="L195">            val skipSignature = settingsRepository.getInitial().ignoreSignature</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            val updates = Database.ProductAdapter.getUpdates(skipSignature)</span>
+<span class="nc" id="L197">            updateAllAppsInternal(updates)</span>
+<span class="nc" id="L198">        }</span>
+
+        fun setUpdateNotificationBlocker(fragment: Fragment?) {
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">            updateNotificationBlockerFragment = fragment?.let(::WeakReference)</span>
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">            if (fragment != null) {</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                notificationManager?.cancel(Constants.NOTIFICATION_ID_UPDATES)</span>
+            }
+<span class="fc" id="L205">        }</span>
+
+        fun setEnabled(repository: Repository, enabled: Boolean): Boolean {
+<span class="nc" id="L208">            Database.RepositoryAdapter.put(repository.enable(enabled))</span>
+<span class="nc" id="L209">            val settings = runBlocking { settingsRepository.getInitial() }</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            if (enabled) {</span>
+<span class="nc bnc" id="L211" title="All 8 branches missed.">                val isRepoInTasks = repository.id != currentTask?.task?.repositoryId &amp;&amp;</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">                    !tasks.any { it.repositoryId == repository.id }</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                if (isRepoInTasks) {</span>
+<span class="nc" id="L214">                    tasks += Task(repository.id, true)</span>
+<span class="nc" id="L215">                    handleNextTask(false, settings)</span>
+                }
+            } else {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                cancelTasks { it.repositoryId == repository.id }</span>
+<span class="nc" id="L219">                val cancelledTask = cancelCurrentTask {</span>
+<span class="nc bnc" id="L220" title="All 4 branches missed.">                    it.task?.repositoryId == repository.id</span>
+                }
+<span class="nc bnc" id="L222" title="All 4 branches missed.">                handleNextTask(cancelledTask?.hasUpdates == true, settings)</span>
+            }
+<span class="nc" id="L224">            return true</span>
+        }
+
+        fun isCurrentlySyncing(repositoryId: Long): Boolean {
+<span class="nc bnc" id="L228" title="All 6 branches missed.">            return currentTask?.task?.repositoryId == repositoryId</span>
+        }
+
+        fun deleteRepository(repositoryId: Long): Boolean {
+<span class="nc" id="L232">            val repository = Database.RepositoryAdapter.get(repositoryId)</span>
+<span class="nc bnc" id="L233" title="All 4 branches missed.">            return repository != null &amp;&amp; run {</span>
+<span class="nc" id="L234">                setEnabled(repository, false)</span>
+<span class="nc" id="L235">                Database.RepositoryAdapter.markAsDeleted(repository.id)</span>
+<span class="nc" id="L236">                true</span>
+            }
+        }
+
+        fun cancelAuto(): Boolean {
+<span class="nc" id="L241">            val settings = runBlocking { settingsRepository.getInitial() }</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">            val removed = cancelTasks { !it.manual }</span>
+<span class="nc bnc" id="L243" title="All 4 branches missed.">            val currentTask = cancelCurrentTask { it.task?.manual == false }</span>
+<span class="nc bnc" id="L244" title="All 4 branches missed.">            handleNextTask(currentTask?.hasUpdates == true, settings)</span>
+<span class="nc bnc" id="L245" title="All 4 branches missed.">            return removed || currentTask != null</span>
+        }
+    }
+
+<span class="nc" id="L249">    private val binder = Binder()</span>
+<span class="nc" id="L250">    override fun onBind(intent: Intent): Binder = binder</span>
+
+    @OptIn(FlowPreview::class)
+    override fun onCreate() {
+<span class="nc" id="L254">        super.onCreate()</span>
+
+<span class="nc" id="L256">        createNotificationChannel(</span>
+<span class="nc" id="L257">            id = Constants.NOTIFICATION_CHANNEL_SYNCING,</span>
+<span class="nc" id="L258">            name = getString(stringRes.syncing),</span>
+        )
+<span class="nc" id="L260">        createNotificationChannel(</span>
+<span class="nc" id="L261">            id = Constants.NOTIFICATION_CHANNEL_UPDATES,</span>
+<span class="nc" id="L262">            name = getString(stringRes.updates),</span>
+        )
+
+<span class="nc" id="L265">        downloadConnection.bind(this)</span>
+<span class="nc" id="L266">        lifecycleScope.launch {</span>
+<span class="fc" id="L267">            syncState</span>
+<span class="fc" id="L268">                .sample(NOTIFICATION_UPDATE_SAMPLING.milliseconds)</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">                .collectLatest {</span>
+<span class="fc" id="L270">                    publishForegroundState(false, it)</span>
+<span class="fc" id="L271">                }</span>
+<span class="nc" id="L272">        }</span>
+<span class="nc" id="L273">    }</span>
+
+    override fun onTimeout(startId: Int) {
+<span class="nc" id="L276">        super.onTimeout(startId)</span>
+<span class="nc" id="L277">        onDestroy()</span>
+<span class="nc" id="L278">        stopSelf()</span>
+<span class="nc" id="L279">    }</span>
+
+    override fun onDestroy() {
+<span class="nc" id="L282">        super.onDestroy()</span>
+<span class="nc" id="L283">        downloadConnection.unbind(this)</span>
+<span class="nc" id="L284">        cancelTasks { true }</span>
+<span class="nc" id="L285">        cancelCurrentTask { true }</span>
+<span class="nc" id="L286">    }</span>
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+<span class="pc" id="L289">        val settings = runBlocking { settingsRepository.getInitial() }</span>
+<span class="nc bnc" id="L290" title="All 4 branches missed.">        if (intent?.action == ACTION_CANCEL) {</span>
+<span class="nc" id="L291">            tasks.clear()</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            val cancelledTask = cancelCurrentTask { it.task != null }</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">            handleNextTask(cancelledTask?.hasUpdates == true, settings)</span>
+<span class="nc" id="L294">            stopSelf()</span>
+        } else {
+<span class="nc" id="L296">            val promoted = startForegroundSafe(</span>
+<span class="nc" id="L297">                id = Constants.NOTIFICATION_ID_SYNCING,</span>
+<span class="nc" id="L298">                notification = stateNotificationBuilder</span>
+<span class="nc" id="L299">                    .setContentTitle(getString(stringRes.syncing_FORMAT, &quot;&quot;))</span>
+<span class="nc" id="L300">                    .setContentText(getString(stringRes.connecting))</span>
+<span class="nc" id="L301">                    .setProgress(0, 0, true)</span>
+<span class="nc" id="L302">                    .build(),</span>
+            )
+<span class="nc bnc" id="L304" title="All 2 branches missed.">            if (!promoted) {</span>
+<span class="nc" id="L305">                handleForegroundDenied()</span>
+<span class="nc" id="L306">                return START_NOT_STICKY</span>
+            }
+        }
+<span class="nc" id="L309">        return super.onStartCommand(intent, flags, startId)</span>
+    }
+
+    private fun cancelTasks(condition: (Task) -&gt; Boolean): Boolean {
+<span class="nc" id="L313">        return tasks.removeAll(condition)</span>
+    }
+
+    private fun cancelCurrentTask(condition: ((CurrentTask) -&gt; Boolean)): CurrentTask? {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        return currentTask?.let {</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">            if (condition(it)) {</span>
+<span class="nc" id="L319">                currentTask = null</span>
+<span class="nc" id="L320">                it.job.cancel()</span>
+<span class="nc" id="L321">                RepositoryUpdater.await()</span>
+<span class="nc" id="L322">                it</span>
+            } else {
+<span class="nc" id="L324">                null</span>
+<span class="nc" id="L325">            }</span>
+        }
+    }
+
+    private fun showNotificationError(repository: Repository, exception: Exception) {
+<span class="nc" id="L330">        val errorTypeDesc = when (exception) {</span>
+<span class="nc bnc" id="L331" title="All 6 branches missed.">            is RepositoryUpdater.UpdateException -&gt; when (exception.errorType) {</span>
+<span class="nc" id="L332">                RepositoryUpdater.ErrorType.NETWORK -&gt; getString(stringRes.network_error_DESC)</span>
+<span class="nc" id="L333">                RepositoryUpdater.ErrorType.HTTP -&gt; getString(</span>
+<span class="nc" id="L334">                    stringRes.http_error_DESC,</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                    exception.message.orEmpty(),</span>
+                )
+
+<span class="nc" id="L338">                RepositoryUpdater.ErrorType.VALIDATION -&gt; getString(stringRes.validation_index_error_DESC)</span>
+<span class="nc" id="L339">                RepositoryUpdater.ErrorType.PARSING -&gt; getString(stringRes.parsing_index_error_DESC)</span>
+            }
+
+<span class="nc" id="L342">            else -&gt; getString(stringRes.unknown_error_DESC)</span>
+        }
+
+<span class="nc" id="L345">        val description = buildString {</span>
+<span class="nc" id="L346">            append(errorTypeDesc)</span>
+<span class="nc bnc" id="L347" title="All 6 branches missed.">            if (!exception.message.isNullOrBlank()) {</span>
+<span class="nc" id="L348">                append(&quot;: &quot;)</span>
+<span class="nc" id="L349">                append(exception.message)</span>
+            }
+<span class="nc" id="L351">        }</span>
+
+<span class="nc" id="L353">        val fullErrorDetails = buildString {</span>
+<span class="nc" id="L354">            appendLine(&quot;Repository: ${repository.name}&quot;)</span>
+<span class="nc" id="L355">            appendLine(&quot;Address: ${repository.address}&quot;)</span>
+<span class="nc" id="L356">            appendLine(&quot;Error Type: $errorTypeDesc&quot;)</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">            appendLine(&quot;Message: ${exception.message ?: &quot;N/A&quot;}&quot;)</span>
+<span class="nc" id="L358">            appendLine()</span>
+<span class="nc" id="L359">            appendLine(&quot;Stack Trace:&quot;)</span>
+<span class="nc" id="L360">            appendLine(exception.stackTraceToString())</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            exception.cause?.let { cause -&gt;</span>
+<span class="nc" id="L362">                appendLine()</span>
+<span class="nc" id="L363">                appendLine(&quot;Caused by: ${cause.javaClass.name}: ${cause.message}&quot;)</span>
+<span class="nc" id="L364">                appendLine(cause.stackTraceToString())</span>
+<span class="nc" id="L365">            }</span>
+<span class="nc" id="L366">        }</span>
+
+<span class="nc" id="L368">        val notificationTag = &quot;repository-${repository.id}&quot;</span>
+<span class="nc" id="L369">        val copyIntent = Intent(this, CopyErrorReceiver::class.java).apply {</span>
+<span class="nc" id="L370">            action = CopyErrorReceiver.ACTION_COPY_ERROR</span>
+<span class="nc" id="L371">            putExtra(CopyErrorReceiver.EXTRA_ERROR_DETAILS, fullErrorDetails)</span>
+<span class="nc" id="L372">            putExtra(CopyErrorReceiver.EXTRA_NOTIFICATION_TAG, notificationTag)</span>
+<span class="nc" id="L373">            putExtra(CopyErrorReceiver.EXTRA_NOTIFICATION_ID, Constants.NOTIFICATION_ID_SYNCING)</span>
+<span class="nc" id="L374">        }</span>
+
+<span class="nc" id="L376">        val copyPendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L377">            this,</span>
+<span class="nc" id="L378">            repository.id.toInt(),</span>
+<span class="nc" id="L379">            copyIntent,</span>
+<span class="nc" id="L380">            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,</span>
+        )
+
+<span class="nc bnc" id="L383" title="All 2 branches missed.">        notificationManager?.notify(</span>
+<span class="nc" id="L384">            notificationTag,</span>
+<span class="nc" id="L385">            Constants.NOTIFICATION_ID_SYNCING,</span>
+            NotificationCompat
+<span class="nc" id="L387">                .Builder(this, Constants.NOTIFICATION_CHANNEL_SYNCING)</span>
+<span class="nc" id="L388">                .setSmallIcon(AndroidR.drawable.stat_sys_warning)</span>
+<span class="nc" id="L389">                .setColor(</span>
+<span class="nc" id="L390">                    ContextThemeWrapper(this, styleRes.Theme_Main_Light)</span>
+<span class="nc" id="L391">                        .getColorFromAttr(AndroidR.attr.colorPrimary).defaultColor,</span>
+                )
+<span class="nc" id="L393">                .setContentTitle(getString(stringRes.could_not_sync_FORMAT, repository.name))</span>
+<span class="nc" id="L394">                .setContentText(description)</span>
+<span class="nc" id="L395">                .setStyle(NotificationCompat.BigTextStyle().bigText(description))</span>
+<span class="nc" id="L396">                .addAction(</span>
+<span class="nc" id="L397">                    0,</span>
+<span class="nc" id="L398">                    getString(stringRes.copy_error_details),</span>
+<span class="nc" id="L399">                    copyPendingIntent,</span>
+                )
+<span class="nc" id="L401">                .setAutoCancel(true)</span>
+<span class="nc" id="L402">                .build(),</span>
+        )
+<span class="nc" id="L404">    }</span>
+
+<span class="nc" id="L406">    private val stateNotificationBuilder by lazy {</span>
+        NotificationCompat
+<span class="nc" id="L408">            .Builder(this, Constants.NOTIFICATION_CHANNEL_SYNCING)</span>
+<span class="nc" id="L409">            .setSmallIcon(R.drawable.ic_sync)</span>
+<span class="nc" id="L410">            .setColor(</span>
+<span class="nc" id="L411">                ContextThemeWrapper(this, styleRes.Theme_Main_Light)</span>
+<span class="nc" id="L412">                    .getColorFromAttr(AndroidR.attr.colorPrimary).defaultColor,</span>
+            )
+<span class="nc" id="L414">            .addAction(</span>
+<span class="nc" id="L415">                0,</span>
+<span class="nc" id="L416">                getString(stringRes.cancel),</span>
+<span class="nc" id="L417">                PendingIntent.getService(</span>
+<span class="nc" id="L418">                    this,</span>
+<span class="nc" id="L419">                    0,</span>
+<span class="nc" id="L420">                    Intent(this, this::class.java).setAction(ACTION_CANCEL),</span>
+<span class="nc" id="L421">                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,</span>
+                ),
+<span class="nc" id="L423">            )</span>
+    }
+
+    private fun publishForegroundState(force: Boolean, state: State) {
+<span class="nc bnc" id="L427" title="All 2 branches missed.">        if (foregroundFailed) return</span>
+<span class="nc bnc" id="L428" title="All 6 branches missed.">        if (force || currentTask?.lastState != state) {</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">            currentTask = currentTask?.copy(lastState = state)</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            if (started == Started.MANUAL) {</span>
+<span class="nc" id="L431">                val promoted = startForegroundSafe(</span>
+<span class="nc" id="L432">                    id = Constants.NOTIFICATION_ID_SYNCING,</span>
+<span class="nc" id="L433">                    notification = stateNotificationBuilder.apply {</span>
+<span class="nc" id="L434">                        setContentTitle(getString(stringRes.syncing_FORMAT, state.name))</span>
+<span class="nc" id="L435">                        when (state) {</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">                            is State.Connecting -&gt; {</span>
+<span class="nc" id="L437">                                setContentText(getString(stringRes.connecting))</span>
+<span class="nc" id="L438">                                setProgress(0, 0, true)</span>
+                            }
+
+<span class="nc bnc" id="L441" title="All 2 branches missed.">                            is State.Syncing -&gt; {</span>
+<span class="nc bnc" id="L442" title="All 4 branches missed.">                                when (state.stage) {</span>
+                                    RepositoryUpdater.Stage.DOWNLOAD -&gt; {
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                                        if (state.total != null) {</span>
+<span class="nc" id="L445">                                            setContentText(&quot;${state.read} / ${state.total}&quot;)</span>
+<span class="nc" id="L446">                                            setProgress(</span>
+<span class="nc" id="L447">                                                MAX_PROGRESS,</span>
+<span class="nc" id="L448">                                                state.read percentBy state.total,</span>
+<span class="nc" id="L449">                                                false,</span>
+                                            )
+                                        } else {
+<span class="nc" id="L452">                                            setContentText(state.read.toString())</span>
+<span class="nc" id="L453">                                            setProgress(0, 0, true)</span>
+                                        }
+                                    }
+
+                                    RepositoryUpdater.Stage.PROCESS -&gt; {
+<span class="nc" id="L458">                                        val progress = (state.read percentBy state.total)</span>
+<span class="nc bnc" id="L459" title="All 4 branches missed.">                                            .takeIf { it != -1 }</span>
+<span class="nc" id="L460">                                        setContentText(</span>
+<span class="nc" id="L461">                                            getString(</span>
+<span class="nc" id="L462">                                                stringRes.processing_FORMAT,</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">                                                &quot;${progress ?: 0}%&quot;,</span>
+                                            ),
+                                        )
+<span class="nc bnc" id="L466" title="All 4 branches missed.">                                        setProgress(MAX_PROGRESS, progress ?: 0, progress == null)</span>
+                                    }
+
+                                    RepositoryUpdater.Stage.MERGE -&gt; {
+<span class="nc" id="L470">                                        val progress = (state.read percentBy state.total)</span>
+<span class="nc" id="L471">                                        setContentText(</span>
+<span class="nc" id="L472">                                            getString(</span>
+<span class="nc" id="L473">                                                stringRes.merging_FORMAT,</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">                                                &quot;${state.read.value} / ${state.total?.value ?: state.read.value}&quot;,</span>
+                                            ),
+                                        )
+<span class="nc" id="L477">                                        setProgress(MAX_PROGRESS, progress, false)</span>
+                                    }
+
+                                    RepositoryUpdater.Stage.COMMIT -&gt; {
+<span class="nc" id="L481">                                        setContentText(getString(stringRes.saving_details))</span>
+<span class="nc" id="L482">                                        setProgress(0, 0, true)</span>
+                                    }
+                                }
+                            }
+
+<span class="nc" id="L487">                            is State.Finish -&gt; {}</span>
+                        }
+<span class="nc" id="L489">                    }.build(),</span>
+                )
+<span class="nc bnc" id="L491" title="All 2 branches missed.">                if (!promoted) handleForegroundDenied()</span>
+            }
+        }
+<span class="nc" id="L494">    }</span>
+
+    private fun handleForegroundDenied() {
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        if (foregroundFailed) return</span>
+<span class="nc" id="L498">        foregroundFailed = true</span>
+<span class="nc" id="L499">        cancelTasks { true }</span>
+<span class="nc" id="L500">        cancelCurrentTask { true }</span>
+<span class="nc" id="L501">        started = Started.NO</span>
+<span class="nc" id="L502">        stopForegroundCompat()</span>
+<span class="nc" id="L503">    }</span>
+
+    private fun handleSetStarted() {
+<span class="nc" id="L506">        stateNotificationBuilder.setWhen(System.currentTimeMillis())</span>
+<span class="nc" id="L507">    }</span>
+
+    private fun handleNextTask(isIndexModified: Boolean, settings: Settings) {
+<span class="nc bnc" id="L510" title="All 2 branches missed.">        if (currentTask != null) return</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">        if (tasks.isEmpty()) {</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            if (started != Started.NO) {</span>
+<span class="nc" id="L513">                lifecycleScope.launch {</span>
+<span class="nc" id="L514">                    handleUpdates(settings)</span>
+<span class="nc" id="L515">                }</span>
+            }
+<span class="nc" id="L517">            return</span>
+        }
+<span class="nc" id="L519">        val task = tasks.removeAt(0)</span>
+<span class="nc" id="L520">        val repository = Database.RepositoryAdapter.get(task.repositoryId)</span>
+<span class="nc bnc" id="L521" title="All 4 branches missed.">        if (repository == null || !repository.enabled) handleNextTask(isIndexModified, settings)</span>
+<span class="nc" id="L522">        val lastStarted = started</span>
+<span class="nc bnc" id="L523" title="All 4 branches missed.">        val newStarted = if (task.manual || lastStarted == Started.MANUAL) {</span>
+<span class="nc" id="L524">            Started.MANUAL</span>
+        } else {
+<span class="nc" id="L526">            Started.AUTO</span>
+        }
+<span class="nc" id="L528">        started = newStarted</span>
+<span class="nc bnc" id="L529" title="All 4 branches missed.">        if (newStarted == Started.MANUAL &amp;&amp; lastStarted != Started.MANUAL) {</span>
+<span class="nc" id="L530">            startServiceCompat()</span>
+<span class="nc" id="L531">            handleSetStarted()</span>
+        }
+<span class="nc" id="L533">        val initialState = State.Connecting(repository!!.name)</span>
+<span class="nc" id="L534">        publishForegroundState(true, initialState)</span>
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">        lifecycleScope.launch {</span>
+<span class="fc" id="L536">            val downloadJob = downloadFile(</span>
+<span class="fc" id="L537">                task = task,</span>
+<span class="fc" id="L538">                repository = repository,</span>
+<span class="fc" id="L539">                isIndexModified = isIndexModified,</span>
+<span class="fc" id="L540">                settings = settings,</span>
+            )
+<span class="fc" id="L542">            currentTask = CurrentTask(task, downloadJob, isIndexModified, initialState)</span>
+<span class="fc" id="L543">        }</span>
+<span class="nc" id="L544">    }</span>
+
+    private fun CoroutineScope.downloadFile(
+        task: Task,
+        repository: Repository,
+        isIndexModified: Boolean,
+        settings: Settings,
+<span class="pc bpc" id="L551" title="4 of 5 branches missed.">    ): CoroutinesJob = launch(Dispatchers.Default) {</span>
+<span class="fc" id="L552">        var isNewlyModified = isIndexModified</span>
+<span class="fc" id="L553">        try {</span>
+<span class="pc bpc" id="L554" title="1 of 2 branches missed.">            val response = RepositoryUpdater.update(</span>
+<span class="fc" id="L555">                this@SyncService,</span>
+<span class="fc" id="L556">                repository,</span>
+<span class="fc" id="L557">                settings.unstableUpdate,</span>
+            ) { stage, progress, total -&gt;
+<span class="fc" id="L559">                launch {</span>
+<span class="fc" id="L560">                    syncState.emit(</span>
+<span class="fc" id="L561">                        State.Syncing(</span>
+<span class="fc" id="L562">                            appName = repository.name,</span>
+<span class="fc" id="L563">                            stage = stage,</span>
+<span class="fc" id="L564">                            read = DataSize(progress),</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">                            total = total?.let { DataSize(it) },</span>
+                        ),
+                    )
+<span class="fc" id="L568">                }</span>
+<span class="fc" id="L569">            }</span>
+<span class="nc" id="L570">            isNewlyModified = when (response) {</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">                is Result.Error -&gt; {</span>
+<span class="nc bnc" id="L572" title="All 2 branches missed.">                    response.exception?.let {</span>
+<span class="nc" id="L573">                        it.printStackTrace()</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">                        if (task.manual) showNotificationError(repository, it as Exception)</span>
+<span class="nc" id="L575">                    }</span>
+<span class="nc bnc" id="L576" title="All 4 branches missed.">                    response.data == true || isIndexModified</span>
+                }
+
+<span class="nc bnc" id="L579" title="All 4 branches missed.">                is Result.Success -&gt; response.data || isIndexModified</span>
+            }
+        } finally {
+<span class="nc bnc" id="L582" title="All 4 branches missed.">            withContext(NonCancellable) {</span>
+<span class="nc" id="L583">                lock.withLock { currentTask = null }</span>
+<span class="nc" id="L584">                handleNextTask(isNewlyModified, settings)</span>
+<span class="nc" id="L585">            }</span>
+<span class="nc" id="L586">        }</span>
+<span class="nc" id="L587">    }</span>
+
+<span class="nc" id="L589">    suspend fun handleUpdates(settings: Settings) {</span>
+<span class="nc" id="L590">        try {</span>
+<span class="nc bnc" id="L591" title="All 6 branches missed.">            val blocked = updateNotificationBlockerFragment?.get()?.isAdded == true</span>
+<span class="nc" id="L592">            val updates = Database.ProductAdapter.getUpdates(settings.ignoreSignature)</span>
+
+<span class="nc bnc" id="L594" title="All 2 branches missed.">            val needStop = started == Started.MANUAL</span>
+<span class="nc" id="L595">            started = Started.NO</span>
+<span class="nc bnc" id="L596" title="All 2 branches missed.">            if (needStop) stopForegroundCompat()</span>
+
+<span class="nc bnc" id="L598" title="All 6 branches missed.">            if (!blocked &amp;&amp; updates.isNotEmpty()) {</span>
+<span class="nc bnc" id="L599" title="All 2 branches missed.">                if (settings.notifyUpdate) {</span>
+<span class="nc bnc" id="L600" title="All 2 branches missed.">                    notificationManager?.notify(</span>
+<span class="nc" id="L601">                        Constants.NOTIFICATION_ID_UPDATES,</span>
+<span class="nc" id="L602">                        updatesAvailableNotification(this, updates),</span>
+                    )
+                }
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                if (settings.autoUpdate) {</span>
+<span class="nc" id="L606">                    autoUpdating = true</span>
+<span class="nc" id="L607">                    autoUpdateStartedFor = updates.map { it.packageName }</span>
+<span class="nc" id="L608">                    updateAllAppsInternal(updates)</span>
+                }
+            }
+
+<span class="nc" id="L612">            syncState.emit(State.Finish)</span>
+        } finally {
+<span class="nc" id="L614">            withContext(NonCancellable) {</span>
+<span class="nc" id="L615">                lock.withLock { currentTask = null }</span>
+<span class="nc" id="L616">                handleNextTask(false, settings)</span>
+<span class="nc" id="L617">            }</span>
+<span class="nc" id="L618">        }</span>
+<span class="nc" id="L619">    }</span>
+
+    private suspend fun updateAllAppsInternal(updates: List&lt;ProductItem&gt;) {
+<span class="nc" id="L622">        updates</span>
+            // Update Droid-ify the last
+<span class="nc" id="L624">            .sortedBy { if (it.packageName == packageName) 1 else -1 }</span>
+<span class="nc" id="L625">            .map {</span>
+<span class="nc" id="L626">                Database.InstalledAdapter.get(it.packageName, null) to</span>
+<span class="nc" id="L627">                    Database.RepositoryAdapter.get(it.repositoryId)</span>
+            }
+<span class="nc bnc" id="L629" title="All 4 branches missed.">            .filter { it.first != null &amp;&amp; it.second != null }</span>
+<span class="nc" id="L630">            .forEach { (installItem, repo) -&gt;</span>
+<span class="nc" id="L631">                val productRepo = Database.ProductAdapter.get(installItem!!.packageName, null)</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">                    .filter { it.repositoryId == repo!!.id }</span>
+<span class="nc" id="L633">                    .map { it to repo!! }</span>
+<span class="nc" id="L634">                downloadConnection.startUpdate(</span>
+<span class="nc" id="L635">                    installItem.packageName,</span>
+<span class="nc" id="L636">                    installItem,</span>
+<span class="nc" id="L637">                    productRepo,</span>
+                )
+<span class="nc" id="L639">            }</span>
+<span class="nc" id="L640">    }</span>
+
+<span class="nc" id="L642">    @SuppressLint(&quot;SpecifyJobSchedulerIdRange&quot;)</span>
+    class Job : JobService() {
+<span class="nc" id="L644">        private val jobScope = CoroutineScope(Dispatchers.Default)</span>
+        private var syncParams: JobParameters? = null
+        private val syncConnection =
+<span class="nc" id="L647">            Connection(</span>
+<span class="nc" id="L648">                SyncService::class.java,</span>
+<span class="nc" id="L649">                onBind = { connection, binder -&gt;</span>
+<span class="nc" id="L650">                    jobScope.launch {</span>
+<span class="nc" id="L651">                        binder.state.filterIsInstance&lt;State.Finish&gt;().collect {</span>
+<span class="nc" id="L652">                            val params = syncParams</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">                            if (params != null) {</span>
+<span class="nc" id="L654">                                syncParams = null</span>
+<span class="nc" id="L655">                                connection.unbind(this@Job)</span>
+<span class="nc" id="L656">                                jobFinished(params, false)</span>
+                            }
+<span class="nc" id="L658">                        }</span>
+<span class="nc" id="L659">                    }</span>
+<span class="nc" id="L660">                    binder.sync(SyncRequest.AUTO)</span>
+<span class="nc" id="L661">                },</span>
+<span class="nc" id="L662">                onUnbind = { _, binder -&gt;</span>
+<span class="nc" id="L663">                    binder.cancelAuto()</span>
+<span class="nc" id="L664">                    jobScope.cancel()</span>
+<span class="nc" id="L665">                    val params = syncParams</span>
+<span class="nc bnc" id="L666" title="All 2 branches missed.">                    if (params != null) {</span>
+<span class="nc" id="L667">                        syncParams = null</span>
+<span class="nc" id="L668">                        jobFinished(params, true)</span>
+                    }
+<span class="nc" id="L670">                },</span>
+            )
+
+        override fun onStartJob(params: JobParameters): Boolean {
+<span class="nc" id="L674">            syncParams = params</span>
+<span class="nc" id="L675">            syncConnection.bind(this)</span>
+<span class="nc" id="L676">            return true</span>
+        }
+
+        override fun onStopJob(params: JobParameters): Boolean {
+<span class="nc" id="L680">            syncParams = null</span>
+<span class="nc" id="L681">            jobScope.cancel()</span>
+<span class="nc bnc" id="L682" title="All 4 branches missed.">            val reschedule = syncConnection.binder?.cancelAuto() == true</span>
+<span class="nc" id="L683">            syncConnection.unbind(this)</span>
+<span class="nc" id="L684">            return reschedule</span>
+        }
+
+        companion object {
+            fun schedule(context: Context, force: Boolean, autoSync: AutoSync) {
+<span class="fc" id="L689">                val jobScheduler = context.jobScheduler</span>
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">                if (autoSync == AutoSync.NEVER) {</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">                    jobScheduler?.cancel(Constants.JOB_ID_SYNC)</span>
+<span class="nc" id="L692">                    return</span>
+                }
+<span class="pc bpc" id="L694" title="2 of 3 branches missed.">                val syncConditions = when (autoSync) {</span>
+<span class="nc" id="L695">                    AutoSync.ALWAYS -&gt; SyncPreference(NetworkType.CONNECTED)</span>
+<span class="fc" id="L696">                    AutoSync.WIFI_ONLY -&gt; SyncPreference(NetworkType.UNMETERED)</span>
+<span class="nc" id="L697">                    AutoSync.WIFI_PLUGGED_IN -&gt; SyncPreference(</span>
+<span class="nc" id="L698">                        NetworkType.UNMETERED,</span>
+<span class="nc" id="L699">                        pluggedIn = true,</span>
+                    )
+                }
+<span class="pc bpc" id="L702" title="2 of 4 branches missed.">                val isCompleted = jobScheduler?.allPendingJobs</span>
+<span class="pc bpc" id="L703" title="3 of 4 branches missed.">                    ?.any { it.id == Constants.JOB_ID_SYNC } == false</span>
+<span class="pc bpc" id="L704" title="2 of 4 branches missed.">                if (force || isCompleted) {</span>
+<span class="fc" id="L705">                    val period = 12.hours.inWholeMilliseconds</span>
+<span class="fc" id="L706">                    val builder = JobInfo.Builder(</span>
+<span class="fc" id="L707">                        Constants.JOB_ID_SYNC,</span>
+<span class="fc" id="L708">                        ComponentName(context, Job::class.java),</span>
+                    )
+
+<span class="fc" id="L711">                    builder.setRequiredNetworkType(syncConditions.toJobNetworkType())</span>
+<span class="pc bpc" id="L712" title="1 of 2 branches missed.">                    if (SdkCheck.isOreo) {</span>
+<span class="fc" id="L713">                        builder.setRequiresCharging(syncConditions.pluggedIn)</span>
+<span class="fc" id="L714">                        builder.setRequiresBatteryNotLow(syncConditions.batteryNotLow)</span>
+<span class="fc" id="L715">                        builder.setRequiresStorageNotLow(true)</span>
+                    }
+<span class="pc bpc" id="L717" title="1 of 2 branches missed.">                    if (SdkCheck.isNougat) {</span>
+<span class="fc" id="L718">                        builder.setPeriodic(period, JobInfo.getMinFlexMillis())</span>
+                    } else {
+<span class="pc" id="L720">                        builder.setPeriodic(period)</span>
+                    }
+<span class="pc bpc" id="L722" title="1 of 2 branches missed.">                    jobScheduler?.schedule(builder.build())</span>
+                }
+<span class="fc" id="L724">            }</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

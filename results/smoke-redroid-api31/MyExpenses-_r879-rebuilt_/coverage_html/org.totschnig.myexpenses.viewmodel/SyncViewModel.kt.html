@@ -1,0 +1,364 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SyncViewModel.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.viewmodel</a> &gt; <span class="el_source">SyncViewModel.kt</span></div><h1>SyncViewModel.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.viewmodel
+
+import android.accounts.AccountManager.KEY_ACCOUNT_NAME
+import android.accounts.AccountManager.KEY_AUTHTOKEN
+import android.accounts.AccountManager.KEY_PASSWORD
+import android.accounts.AccountManager.KEY_USERDATA
+import android.accounts.AccountManager.get
+import android.accounts.AuthenticatorException
+import android.accounts.OperationCanceledException
+import android.app.Application
+import android.content.ContentValues
+import android.database.sqlite.SQLiteConstraintException
+import android.os.Bundle
+import android.os.Parcelable
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.liveData
+import kotlinx.parcelize.Parcelize
+import org.totschnig.myexpenses.MyApplication
+import org.totschnig.myexpenses.db2.createAccount
+import org.totschnig.myexpenses.db2.findAccountByUuid
+import org.totschnig.myexpenses.db2.loadAccount
+import org.totschnig.myexpenses.db2.requireAccountTypeForSync
+import org.totschnig.myexpenses.db2.storeExchangeRate
+import org.totschnig.myexpenses.model2.Account
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SEALED
+import org.totschnig.myexpenses.provider.KEY_SYNC_ACCOUNT_NAME
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.filter.Operation
+import org.totschnig.myexpenses.provider.useAndMapToList
+import org.totschnig.myexpenses.sync.GenericAccountService
+import org.totschnig.myexpenses.sync.GenericAccountService.Companion.KEY_SYNC_PROVIDER_URL
+import org.totschnig.myexpenses.sync.GenericAccountService.Companion.KEY_SYNC_PROVIDER_USERNAME
+import org.totschnig.myexpenses.sync.GenericAccountService.Companion.getAccount
+import org.totschnig.myexpenses.sync.GenericAccountService.Companion.getSyncBackendProvider
+import org.totschnig.myexpenses.sync.SyncAdapter
+import org.totschnig.myexpenses.sync.SyncBackendProvider
+import org.totschnig.myexpenses.sync.SyncBackendProviderFactory
+import org.totschnig.myexpenses.sync.json.AccountMetaData
+import org.totschnig.myexpenses.util.ResultUnit
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import java.io.IOException
+
+<span class="fc" id="L46">open class SyncViewModel(application: Application) : ContentResolvingAndroidViewModel(application) {</span>
+
+    fun syncLinkRemote(uuid: String, syncAccountName: String): LiveData&lt;Result&lt;Unit&gt;&gt; =
+<span class="nc bnc" id="L49" title="All 4 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L50">            val accountId = repository.findAccountByUuid(uuid)</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">            if (accountId == null) {</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">                emit(Result.failure(IllegalStateException(&quot;Account with uuid $uuid not found&quot;)))</span>
+            } else {
+<span class="nc" id="L54">                val account = repository.loadAccount(accountId)!!</span>
+<span class="nc bnc" id="L55" title="All 2 branches missed.">                emit(deleteAccountsInternal(longArrayOf(accountId)).also {</span>
+<span class="nc bnc" id="L56" title="All 2 branches missed.">                    it.onSuccess {</span>
+<span class="nc" id="L57">                        doSave(account.copy(</span>
+<span class="nc" id="L58">                            syncAccountName = syncAccountName</span>
+                        ))
+<span class="nc" id="L60">                    }</span>
+<span class="nc" id="L61">                })</span>
+            }
+<span class="nc" id="L63">        }</span>
+
+    fun syncLinkLocal(uuid: String, syncAccountName: String): LiveData&lt;Result&lt;Unit&gt;&gt; =
+<span class="nc bnc" id="L66" title="All 4 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L67">            try {</span>
+<span class="nc" id="L68">                configureLocalAccountForSync(syncAccountName, uuid)</span>
+<span class="nc" id="L69">            } catch (_: SQLiteConstraintException) {</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                emit(Result.failure(AccountSealedException()))</span>
+            }
+<span class="nc" id="L72">            resetRemote(syncAccountName, uuid)</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">            emit(ResultUnit)</span>
+<span class="nc" id="L74">        }</span>
+
+
+    fun resetRemote(accountName: String, uuid: String) {
+<span class="nc" id="L78">        GenericAccountService.requestSync(accountName, uuid = uuid, extras = Bundle().apply {</span>
+<span class="nc" id="L79">            putBoolean(SyncAdapter.KEY_RESET_REMOTE_ACCOUNT, true)</span>
+<span class="nc" id="L80">        })</span>
+<span class="nc" id="L81">    }</span>
+
+    protected fun doSave(accountIn: Account) {
+<span class="nc" id="L84">        val accountType = repository.requireAccountTypeForSync(accountIn.type!!.name)</span>
+
+<span class="nc" id="L86">        val account = repository.createAccount(</span>
+<span class="nc" id="L87">            accountIn.copy(type = accountType)</span>
+        )
+<span class="nc" id="L89">        val homeCurrency = currencyContext.homeCurrencyUnit</span>
+<span class="nc" id="L90">        repository.storeExchangeRate(</span>
+<span class="nc" id="L91">            account.id,</span>
+<span class="nc" id="L92">            account.exchangeRate,</span>
+<span class="nc" id="L93">            account.currency,</span>
+<span class="nc" id="L94">            homeCurrency.code</span>
+        )
+<span class="nc" id="L96">        licenceHandler.updateNewAccountEnabled()</span>
+<span class="nc" id="L97">        updateTransferShortcut()</span>
+<span class="nc" id="L98">    }</span>
+
+<span class="nc" id="L100">    fun getReconfigurationData(syncAccount: String) = Bundle().apply {</span>
+<span class="nc" id="L101">        val accountManager = get(getApplication())</span>
+<span class="nc" id="L102">        val account = getAccount(syncAccount)</span>
+<span class="nc" id="L103">        putString(KEY_ORIGINAL_ACCOUNT_NAME, syncAccount)</span>
+<span class="nc" id="L104">        putString(KEY_PASSWORD, accountManager.getPassword(account))</span>
+<span class="nc" id="L105">        putString(KEY_SYNC_PROVIDER_URL, accountManager.getUserData(account, KEY_SYNC_PROVIDER_URL))</span>
+<span class="nc" id="L106">        putString(</span>
+<span class="nc" id="L107">            KEY_SYNC_PROVIDER_USERNAME,</span>
+<span class="nc" id="L108">            accountManager.getUserData(account, KEY_SYNC_PROVIDER_USERNAME)</span>
+        )
+<span class="nc" id="L110">    }</span>
+
+    fun reconfigure(data: Bundle): LiveData&lt;Boolean&gt; =
+<span class="nc bnc" id="L113" title="All 4 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L114">            val accountManager = get(getApplication())</span>
+<span class="nc" id="L115">            val oldName = data.getString(KEY_ORIGINAL_ACCOUNT_NAME)!!</span>
+<span class="nc" id="L116">            var account = getAccount(oldName)</span>
+<span class="nc" id="L117">            val newName = data.getString(KEY_ACCOUNT_NAME)</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            if (oldName != newName) {</span>
+<span class="nc" id="L119">                val accountManagerFuture =</span>
+<span class="nc" id="L120">                    accountManager.renameAccount(account, newName, null, null)</span>
+<span class="nc" id="L121">                account = accountManagerFuture.result</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                if (account.name != newName) {</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                    emit(false)</span>
+<span class="nc" id="L124">                    return@liveData</span>
+                }
+<span class="nc" id="L126">                val contentValues = ContentValues(1).apply {</span>
+<span class="nc" id="L127">                    put(KEY_SYNC_ACCOUNT_NAME, newName)</span>
+<span class="nc" id="L128">                }</span>
+<span class="nc" id="L129">                contentResolver.update(</span>
+<span class="nc" id="L130">                    TransactionProvider.ACCOUNTS_URI,</span>
+<span class="nc" id="L131">                    contentValues,</span>
+<span class="nc" id="L132">                    &quot;$KEY_SYNC_ACCOUNT_NAME = ?&quot;,</span>
+<span class="nc" id="L133">                    arrayOf(oldName)</span>
+                )
+            }
+<span class="nc" id="L136">            accountManager.setPassword(account, data.getString(KEY_PASSWORD))</span>
+<span class="nc" id="L137">            val userData = data.getBundle(KEY_USERDATA)!!</span>
+<span class="nc" id="L138">            accountManager.setUserData(</span>
+<span class="nc" id="L139">                account,</span>
+<span class="nc" id="L140">                KEY_SYNC_PROVIDER_URL,</span>
+<span class="nc" id="L141">                userData.getString(KEY_SYNC_PROVIDER_URL)</span>
+            )
+<span class="nc" id="L143">            accountManager.setUserData(</span>
+<span class="nc" id="L144">                account,</span>
+<span class="nc" id="L145">                KEY_SYNC_PROVIDER_USERNAME,</span>
+<span class="nc" id="L146">                userData.getString(KEY_SYNC_PROVIDER_USERNAME)</span>
+            )
+<span class="nc" id="L148">            userData.keySet().forEach { key -&gt;</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">                if (key != KEY_SYNC_PROVIDER_URL &amp;&amp; key != KEY_SYNC_PROVIDER_USERNAME) {</span>
+<span class="nc" id="L150">                    accountManager.setUserData(account, key, userData.getString(key))</span>
+                }
+<span class="nc" id="L152">            }</span>
+<span class="nc" id="L153">            setOf(</span>
+<span class="nc" id="L154">                GenericAccountService.KEY_WEB_DAV_CERTIFICATE,</span>
+<span class="nc" id="L155">                GenericAccountService.KEY_WEB_DAV_FALLBACK_TO_CLASS1,</span>
+<span class="nc" id="L156">                GenericAccountService.KEY_ALLOW_UNVERIFIED,</span>
+<span class="nc" id="L157">                GenericAccountService.KEY_CLIENT_CERT_ALIAS</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            ).filter { it !in userData.keySet() }.forEach {</span>
+<span class="nc" id="L159">                accountManager.setUserData(account, it, null)</span>
+<span class="nc" id="L160">            }</span>
+<span class="nc" id="L161">            getApplication&lt;MyApplication&gt;().let { app -&gt;</span>
+<span class="nc" id="L162">                app.getSharedPreferences(&quot;webdav_sync&quot;, 0).edit()</span>
+<span class="nc" id="L163">                    .remove(&quot;lockToken&quot;)</span>
+<span class="nc" id="L164">                    .remove(&quot;lockOwnedByUs&quot;)</span>
+<span class="nc" id="L165">                    .remove(&quot;lockTimestamp&quot;)</span>
+<span class="nc" id="L166">                    .apply()</span>
+<span class="nc" id="L167">            }</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            emit(true)</span>
+<span class="nc" id="L169">        }</span>
+
+    fun createSyncAccount(
+        args: Bundle,
+        shouldQueryLocalAccounts: Boolean,
+        shouldReturnBackups: Boolean,
+        shouldQueryRemoteAccounts: Boolean
+    ): LiveData&lt;Result&lt;SyncAccountData&gt;&gt; =
+<span class="nc bnc" id="L177" title="All 4 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc" id="L178">            val accountName = args.getString(KEY_ACCOUNT_NAME)!!</span>
+<span class="nc" id="L179">            val password = args.getString(KEY_PASSWORD)</span>
+<span class="nc" id="L180">            val userData = args.getBundle(KEY_USERDATA)</span>
+<span class="nc" id="L181">            val authToken = args.getString(KEY_AUTHTOKEN)</span>
+<span class="nc" id="L182">            val encryptionPassword = args.getString(GenericAccountService.KEY_PASSWORD_ENCRYPTION)</span>
+<span class="nc" id="L183">            val accountManager = get(getApplication())</span>
+<span class="nc" id="L184">            val account = getAccount(accountName)</span>
+<span class="nc bnc" id="L185" title="All 4 branches missed.">            emit(if (accountManager.addAccountExplicitly(account, password, userData)) {</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                if (authToken != null) {</span>
+<span class="nc" id="L187">                    accountManager.setAuthToken(</span>
+<span class="nc" id="L188">                        account,</span>
+<span class="nc" id="L189">                        GenericAccountService.AUTH_TOKEN_TYPE,</span>
+<span class="nc" id="L190">                        authToken</span>
+                    )
+                }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                if (encryptionPassword != null) {</span>
+<span class="nc" id="L194">                    accountManager.setUserData(</span>
+<span class="nc" id="L195">                        account,</span>
+<span class="nc" id="L196">                        GenericAccountService.KEY_ENCRYPTED,</span>
+<span class="nc" id="L197">                        java.lang.Boolean.toString(true)</span>
+                    )
+                }
+<span class="nc" id="L200">                GenericAccountService.storePassword(</span>
+<span class="nc" id="L201">                    getApplication(),</span>
+<span class="nc" id="L202">                    account,</span>
+<span class="nc" id="L203">                    encryptionPassword</span>
+                )
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                buildResult(</span>
+<span class="nc" id="L206">                    accountName,</span>
+<span class="nc" id="L207">                    shouldReturnBackups,</span>
+<span class="nc" id="L208">                    shouldQueryLocalAccounts,</span>
+<span class="nc" id="L209">                    true,</span>
+<span class="nc" id="L210">                    shouldQueryRemoteAccounts</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                ).onFailure {</span>
+                    //we try to remove a failed account immediately, otherwise user would need to do it, before
+                    //being able to try again
+<span class="nc" id="L214">                    @Suppress(&quot;DEPRECATION&quot;) val accountManagerFuture =</span>
+<span class="nc" id="L215">                        accountManager.removeAccount(account, null, null)</span>
+<span class="nc" id="L216">                    try {</span>
+<span class="nc" id="L217">                        accountManagerFuture.result</span>
+<span class="nc" id="L218">                    } catch (e: OperationCanceledException) {</span>
+<span class="nc" id="L219">                        CrashHandler.report(e)</span>
+<span class="nc" id="L220">                    } catch (e: AuthenticatorException) {</span>
+<span class="nc" id="L221">                        CrashHandler.report(e)</span>
+<span class="nc" id="L222">                    } catch (e: IOException) {</span>
+<span class="nc" id="L223">                        CrashHandler.report(e)</span>
+                    }
+<span class="nc" id="L225">                }</span>
+            } else {
+<span class="nc" id="L227">                Result.failure(Exception(&quot;Error while adding account&quot;))</span>
+            })
+<span class="nc" id="L229">        }</span>
+
+<span class="nc" id="L231">    @Parcelize</span>
+<span class="nc" id="L232">    data class LocalAccount(</span>
+<span class="nc" id="L233">        val id: Long,</span>
+<span class="nc" id="L234">        val label: String,</span>
+<span class="nc" id="L235">        val uuid: String,</span>
+<span class="nc" id="L236">        val isSynced: Boolean,</span>
+<span class="nc" id="L237">        val isSealed: Boolean</span>
+<span class="nc" id="L238">    ) : Parcelable</span>
+
+<span class="nc" id="L240">    private suspend fun buildResult(</span>
+        accountName: String,
+        shouldReturnBackups: Boolean,
+        shouldQueryLocalAccounts: Boolean,
+        create: Boolean,
+<span class="nc" id="L245">        shouldQueryRemoteAccounts: Boolean = true</span>
+    ): Result&lt;SyncAccountData&gt; {
+        //noinspection Recycle
+<span class="nc bnc" id="L248" title="All 4 branches missed.">        val localAccounts = if (shouldQueryLocalAccounts) contentResolver.query(</span>
+<span class="nc" id="L249">            TransactionProvider.ACCOUNTS_URI,</span>
+<span class="nc" id="L250">            arrayOf(KEY_ROWID, KEY_LABEL, KEY_UUID, &quot;$KEY_SYNC_ACCOUNT_NAME IS NULL&quot;, KEY_SEALED),</span>
+<span class="nc" id="L251">            null, null, null</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        )?.useAndMapToList {</span>
+<span class="nc" id="L253">            val uuid = it.getString(2)</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">            if (uuid == null) {</span>
+<span class="nc" id="L255">                CrashHandler.report(Exception(&quot;Account with null uuid&quot;))</span>
+<span class="nc" id="L256">                null</span>
+            } else {
+<span class="nc" id="L258">                LocalAccount(</span>
+<span class="nc" id="L259">                    id = it.getLong(0),</span>
+<span class="nc" id="L260">                    label = it.getString(1),</span>
+<span class="nc" id="L261">                    uuid = uuid,</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                    isSynced = it.getInt(3) == 0,</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">                    isSealed = it.getInt(4) == 1</span>
+                )
+<span class="nc" id="L265">            }</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        }?.filterNotNull() ?: emptyList() else emptyList()</span>
+
+<span class="nc" id="L268">        val account = getAccount(accountName)</span>
+<span class="nc bnc" id="L269" title="All 4 branches missed.">        return SyncBackendProviderFactory.get(getApplication(), account, create)</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            .mapCatching { syncBackendProvider -&gt;</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                val syncAccounts = if (shouldQueryRemoteAccounts)</span>
+<span class="nc" id="L272">                    syncBackendProvider.remoteAccountList</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">                        .mapNotNull { it.getOrNull() }</span>
+<span class="nc bnc" id="L274" title="All 6 branches missed.">                        .filter { remoteAccount -&gt; !localAccounts.any { it.isSynced &amp;&amp; it.uuid == remoteAccount.uuid } } else emptyList()</span>
+<span class="nc" id="L275">                val backups =</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">                    if (shouldReturnBackups) syncBackendProvider.storedBackups else emptyList()</span>
+<span class="nc" id="L277">                SyncAccountData(</span>
+<span class="nc" id="L278">                    accountName,</span>
+<span class="nc" id="L279">                    syncAccounts,</span>
+<span class="nc" id="L280">                    backups,</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                    localAccounts.filter { !it.isSynced }</span>
+<span class="nc" id="L282">                )</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">            }.onFailure { throwable -&gt;</span>
+<span class="nc bnc" id="L284" title="All 4 branches missed.">            if (!(throwable is IOException || throwable is SyncBackendProvider.EncryptionException)) {</span>
+<span class="nc" id="L285">                SyncAdapter.log().e(throwable)</span>
+            }
+<span class="nc" id="L287">        }</span>
+    }
+
+    protected fun configureLocalAccountForSync(accountName: String, vararg uuids: String) {
+<span class="nc" id="L291">        contentResolver.update(</span>
+<span class="nc" id="L292">            TransactionProvider.ACCOUNTS_URI,</span>
+<span class="nc" id="L293">            ContentValues().apply {</span>
+<span class="nc" id="L294">                put(KEY_SYNC_ACCOUNT_NAME, accountName)</span>
+<span class="nc" id="L295">            },</span>
+<span class="nc" id="L296">            KEY_UUID + &quot; &quot; + Operation.IN.getOp(uuids.size),</span>
+<span class="nc" id="L297">            uuids</span>
+        )
+<span class="nc" id="L299">    }</span>
+
+    fun setupFromSyncAccounts(
+        accountUuids: List&lt;String&gt;,
+        accountName: String
+    ): LiveData&lt;Result&lt;Unit&gt;&gt; =
+<span class="nc bnc" id="L305" title="All 5 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            getSyncBackendProvider(</span>
+<span class="nc" id="L307">                getApplication&lt;MyApplication&gt;(),</span>
+<span class="nc" id="L308">                accountName</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">            ).onSuccess { syncBackendProvider -&gt;</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">                emit(runCatching {</span>
+<span class="nc" id="L311">                    syncBackendProvider.remoteAccountList</span>
+<span class="nc" id="L312">                        .asSequence()</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">                        .mapNotNull { it.getOrNull() }</span>
+<span class="nc" id="L314">                        .filter { accountMetaData -&gt; accountUuids.contains(accountMetaData.uuid) }</span>
+<span class="nc" id="L315">                        .map { accountMetaData -&gt;</span>
+<span class="nc" id="L316">                            accountMetaData.toAccount(</span>
+<span class="nc" id="L317">                                currencyContext.homeCurrencyString,</span>
+<span class="nc" id="L318">                                accountName</span>
+<span class="nc" id="L319">                            )</span>
+                        }
+<span class="nc" id="L321">                        .forEach {</span>
+<span class="nc" id="L322">                            doSave(it)</span>
+<span class="nc" id="L323">                        }</span>
+<span class="nc" id="L324">                    GenericAccountService.activateSync(accountName, prefHandler)</span>
+<span class="nc" id="L325">                })</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            }.onFailure {</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                emit(Result.failure(it))</span>
+<span class="nc" id="L328">            }</span>
+<span class="nc" id="L329">        }</span>
+
+
+    fun fetchAccountData(accountName: String): LiveData&lt;Result&lt;SyncAccountData&gt;&gt; =
+<span class="nc bnc" id="L333" title="All 4 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">            emit(</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                buildResult(</span>
+<span class="nc" id="L336">                    accountName,</span>
+<span class="nc" id="L337">                    shouldReturnBackups = true,</span>
+<span class="nc" id="L338">                    shouldQueryLocalAccounts = false,</span>
+<span class="nc" id="L339">                    create = false</span>
+                )
+            )
+<span class="nc" id="L342">        }</span>
+
+    fun removeBackend(accountName: String) =
+<span class="nc" id="L345">        get(getApplication()).removeAccountExplicitly(getAccount(accountName))</span>
+
+    fun save(account: Account): LiveData&lt;Result&lt;Unit&gt;&gt; =
+<span class="nc bnc" id="L348" title="All 3 branches missed.">        liveData(context = coroutineContext()) {</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">            emit(kotlin.runCatching { doSave(account) })</span>
+<span class="nc" id="L350">        }</span>
+
+    companion object {
+        const val KEY_ORIGINAL_ACCOUNT_NAME = &quot;originalAccountName&quot;
+    }
+
+<span class="nc" id="L356">    @Parcelize</span>
+<span class="nc" id="L357">    data class SyncAccountData(</span>
+<span class="nc" id="L358">        val accountName: String,</span>
+<span class="nc" id="L359">        val remoteAccounts: List&lt;AccountMetaData&gt;,</span>
+<span class="nc" id="L360">        val backups: List&lt;String&gt;,</span>
+<span class="nc" id="L361">        val localAccountsNotSynced: List&lt;LocalAccount&gt;</span>
+<span class="nc" id="L362">    ) : Parcelable</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

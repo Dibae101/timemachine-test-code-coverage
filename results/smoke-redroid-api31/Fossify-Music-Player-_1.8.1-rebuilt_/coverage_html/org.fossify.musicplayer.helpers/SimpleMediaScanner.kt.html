@@ -1,0 +1,679 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpleMediaScanner.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Fossify-Music-Player</a> &gt; <a href="index.source.html" class="el_package">org.fossify.musicplayer.helpers</a> &gt; <span class="el_source">SimpleMediaScanner.kt</span></div><h1>SimpleMediaScanner.kt</h1><pre class="source lang-java linenums">package org.fossify.musicplayer.helpers
+
+import android.app.Application
+import android.content.ContentUris
+import android.media.MediaMetadataRetriever
+import android.media.MediaMetadataRetriever.*
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import android.provider.MediaStore.Audio
+import org.fossify.commons.extensions.*
+import org.fossify.commons.helpers.ensureBackgroundThread
+import org.fossify.commons.helpers.isQPlus
+import org.fossify.commons.helpers.isRPlus
+import org.fossify.musicplayer.R
+import org.fossify.musicplayer.extensions.audioHelper
+import org.fossify.musicplayer.extensions.config
+import org.fossify.musicplayer.models.*
+import java.io.File
+import java.io.FileInputStream
+import androidx.core.net.toUri
+import org.fossify.musicplayer.extensions.getFriendlyFolder
+
+/**
+ * This singleton class manages the process of querying [MediaStore] for new audio files, manually scanning storage for missing audio files, and removing outdated
+ * files from the local cache. It ensures that only one scan is running at a time to avoid unnecessary expenses and conflicts.
+ */
+<span class="fc" id="L28">class SimpleMediaScanner(private val context: Application) {</span>
+
+<span class="fc" id="L30">    private val config = context.config</span>
+    private var scanning = false
+    private var showProgress = false
+    private var onScanComplete: ((complete: Boolean) -&gt; Unit)? = null
+
+<span class="fc" id="L35">    private val mediaStorePaths = arrayListOf&lt;String&gt;()</span>
+<span class="fc" id="L36">    private val newTracks = arrayListOf&lt;Track&gt;()</span>
+<span class="fc" id="L37">    private val newAlbums = arrayListOf&lt;Album&gt;()</span>
+<span class="fc" id="L38">    private val newArtists = arrayListOf&lt;Artist&gt;()</span>
+<span class="fc" id="L39">    private val newGenres = arrayListOf&lt;Genre&gt;()</span>
+
+    private var notificationHelper: NotificationHelper? = null
+    private var notificationHandler: Handler? = null
+    private var lastProgressUpdateMs = 0L
+
+<span class="fc" id="L45">    fun isScanning(): Boolean = scanning</span>
+
+    /**
+     * Initiates the scanning process for new audio files, artists, and albums. Since the manual scan can be a slow process, the [callback] parameter is
+     * triggered in two stages to ensure that the UI is updated as soon as possible.
+     */
+<span class="fc" id="L51">    @Synchronized</span>
+<span class="fc" id="L52">    fun scan(progress: Boolean = false, callback: ((complete: Boolean) -&gt; Unit)? = null) {</span>
+<span class="fc" id="L53">        onScanComplete = callback</span>
+<span class="fc" id="L54">        showProgress = progress</span>
+<span class="fc" id="L55">        maybeShowScanProgress()</span>
+
+<span class="fc bfc" id="L57" title="All 2 branches covered.">        if (scanning) {</span>
+<span class="fc" id="L58">            return</span>
+        }
+
+<span class="fc" id="L61">        scanning = true</span>
+<span class="fc" id="L62">        ensureBackgroundThread {</span>
+<span class="fc" id="L63">            try {</span>
+<span class="fc" id="L64">                scanMediaStore()</span>
+<span class="pc bpc" id="L65" title="1 of 2 branches missed.">                if (isQPlus()) {</span>
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">                    onScanComplete?.invoke(false)</span>
+<span class="fc" id="L67">                    scanFilesManually()</span>
+                }
+
+<span class="fc" id="L70">                cleanupDatabase()</span>
+<span class="pc bpc" id="L71" title="1 of 2 branches missed.">                onScanComplete?.invoke(true)</span>
+<span class="nc" id="L72">            } catch (ignored: Exception) {</span>
+            } finally {
+<span class="pc bpc" id="L74" title="2 of 4 branches missed.">                if (showProgress &amp;&amp; newTracks.isEmpty()) {</span>
+<span class="fc" id="L75">                    context.toast(org.fossify.commons.R.string.no_items_found)</span>
+                }
+
+<span class="fc" id="L78">                newTracks.clear()</span>
+<span class="fc" id="L79">                newAlbums.clear()</span>
+<span class="fc" id="L80">                newArtists.clear()</span>
+<span class="fc" id="L81">                newGenres.clear()</span>
+<span class="fc" id="L82">                mediaStorePaths.clear()</span>
+<span class="fc" id="L83">                scanning = false</span>
+<span class="fc" id="L84">                hideScanProgress()</span>
+            }
+<span class="fc" id="L86">        }</span>
+<span class="fc" id="L87">    }</span>
+
+    /**
+     * Scans [MediaStore] for audio files. Querying [MediaStore.Audio.Artists] and [MediaStore.Audio.Albums] is not necessary in this context, we
+     * can manually group tracks by artist and album as done in [scanFilesManually]. However, this approach would require fetching album art bitmaps repeatedly
+     * using [MediaMetadataRetriever] instead of utilizing the cached version provided by [MediaStore]. This may become a necessity when we add more nuanced
+     * features e.g. group albums by `ALBUM-ARTIST` instead of `ARTIST`
+     */
+    private fun scanMediaStore() {
+<span class="fc" id="L96">        newTracks += getTracksSync()</span>
+<span class="fc" id="L97">        newArtists += getArtistsSync()</span>
+<span class="fc" id="L98">        newAlbums += getAlbumsSync(newArtists)</span>
+<span class="fc" id="L99">        newGenres += getGenresSync()</span>
+<span class="pc" id="L100">        mediaStorePaths += newTracks.map { it.path }</span>
+<span class="fc" id="L101">        assignGenreToTracks()</span>
+
+        // ignore tracks from excluded folders and tracks with no albums, artists
+<span class="pc" id="L104">        val albumIds = newAlbums.map { it.id }</span>
+<span class="pc" id="L105">        val artistIds = newArtists.map { it.id }</span>
+<span class="fc" id="L106">        val excludedFolders = config.excludedFolders</span>
+<span class="fc" id="L107">        val tracksToExclude = mutableSetOf&lt;Track&gt;()</span>
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">        for (track in newTracks) {</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (track.path.getParentPath() in excludedFolders) {</span>
+<span class="nc" id="L110">                tracksToExclude.add(track)</span>
+<span class="nc" id="L111">                continue</span>
+            }
+
+<span class="nc bnc" id="L114" title="All 4 branches missed.">            if (track.albumId !in albumIds || track.artistId !in artistIds) {</span>
+<span class="nc" id="L115">                tracksToExclude.add(track)</span>
+            }
+        }
+
+<span class="fc" id="L119">        newTracks.removeAll(tracksToExclude)</span>
+
+        // update album, track count if any tracks were excluded
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">        for (album in newAlbums) {</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            val tracksInAlbum = newTracks.filter { it.albumId == album.id }</span>
+<span class="nc" id="L124">            album.trackCnt = tracksInAlbum.size</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            if (album.trackCnt &gt; 0) {</span>
+<span class="nc" id="L126">                album.dateAdded = tracksInAlbum.first().dateAdded</span>
+            }
+        }
+
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">        for (artist in newArtists) {</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            artist.trackCnt = newTracks.filter { it.artistId == artist.id }.size</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            val albumsByArtist = newAlbums.filter { it.artistId == artist.id }</span>
+<span class="nc" id="L133">            artist.albumCnt = albumsByArtist.size</span>
+<span class="nc bnc" id="L134" title="All 6 branches missed.">            artist.albumArt = albumsByArtist.firstOrNull { it.coverArt.isNotEmpty() }?.coverArt.orEmpty()</span>
+        }
+
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">        for (genre in newGenres) {</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            val genreTracks = newTracks.filter { it.genreId == genre.id }</span>
+<span class="nc" id="L139">            genre.trackCnt = genreTracks.size</span>
+<span class="nc bnc" id="L140" title="All 6 branches missed.">            genre.albumArt = genreTracks.firstOrNull { it.coverArt.isNotEmpty() }?.coverArt.orEmpty()</span>
+        }
+
+        // remove invalid albums, artists
+<span class="pc bnc" id="L144" title="All 2 branches missed.">        newAlbums.removeAll { it.trackCnt == 0 }</span>
+<span class="pc bnc" id="L145" title="All 4 branches missed.">        newArtists.removeAll { it.trackCnt == 0 || it.albumCnt == 0 }</span>
+<span class="pc bnc" id="L146" title="All 2 branches missed.">        newGenres.removeAll { it.trackCnt == 0 }</span>
+
+<span class="fc" id="L148">        updateAllDatabases()</span>
+<span class="fc" id="L149">    }</span>
+
+    /**
+     * Manually scans the storage for audio files. This method is used to find audio files that may not be available in the [MediaStore] database,
+     * as well as files added through unconventional methods (e.g. `adb push`) that may take longer to appear in [MediaStore]. By performing a manual scan,
+     * any new audio files can be immediately detected and made visible within the app. Existing paths already available in [MediaStore] are ignored to optimize
+     * the scanning process for efficiency.
+     */
+    private fun scanFilesManually() {
+<span class="pc" id="L158">        val trackPaths = newTracks.map { it.path }</span>
+<span class="pc" id="L159">        val artistNames = newArtists.map { it.title }</span>
+<span class="pc" id="L160">        val albumNames = newAlbums.map { it.title }</span>
+<span class="pc" id="L161">        val genreNames = newGenres.map { it.title }</span>
+
+<span class="fc" id="L163">        val tracks = findTracksManually(pathsToIgnore = trackPaths)</span>
+<span class="pc bpc" id="L164" title="2 of 4 branches missed.">        if (tracks.isNotEmpty()) {</span>
+<span class="nc" id="L165">            val artists = splitIntoArtists(tracks)</span>
+<span class="nc" id="L166">            val albums = splitIntoAlbums(tracks)</span>
+<span class="nc" id="L167">            val genres = splitIntoGenres(tracks)</span>
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            newTracks += tracks.filter { it.path !in trackPaths }</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">            newAlbums += albums.filter { it.title !in albumNames }</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            newArtists += artists.filter { it.title !in artistNames }</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">            newGenres += genres.filter { it.title !in genreNames }</span>
+
+<span class="nc" id="L174">            updateAllDatabases()</span>
+        }
+<span class="fc" id="L176">    }</span>
+
+    private fun updateAllDatabases() {
+<span class="fc" id="L179">        context.audioHelper.apply {</span>
+<span class="fc" id="L180">            insertTracks(newTracks)</span>
+<span class="fc" id="L181">            insertAlbums(newAlbums)</span>
+<span class="fc" id="L182">            insertArtists(newArtists)</span>
+<span class="fc" id="L183">            insertGenres(newGenres)</span>
+<span class="fc" id="L184">        }</span>
+<span class="fc" id="L185">        updateAllTracksPlaylist()</span>
+<span class="fc" id="L186">    }</span>
+
+    private fun updateAllTracksPlaylist() {
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">        if (!config.wasAllTracksPlaylistCreated) {</span>
+<span class="fc" id="L190">            val allTracksLabel = context.resources.getString(R.string.all_tracks)</span>
+<span class="fc" id="L191">            val playlist = Playlist(ALL_TRACKS_PLAYLIST_ID, allTracksLabel)</span>
+<span class="fc" id="L192">            context.audioHelper.insertPlaylist(playlist)</span>
+<span class="fc" id="L193">            config.wasAllTracksPlaylistCreated = true</span>
+        }
+
+        // avoid re-adding tracks that have been explicitly removed from 'All tracks' playlist
+<span class="fc" id="L197">        val excludedFolders = config.excludedFolders</span>
+<span class="pc" id="L198">        val tracksRemovedFromAllTracks = config.tracksRemovedFromAllTracksPlaylist.map { it.toLong() }</span>
+<span class="fc" id="L199">        val tracksWithPlaylist = newTracks</span>
+<span class="pc bnc" id="L200" title="All 6 branches missed.">            .filter { it.mediaStoreId !in tracksRemovedFromAllTracks &amp;&amp; it.playListId == 0 &amp;&amp; it.path.getParentPath() !in excludedFolders }</span>
+<span class="pc" id="L201">            .onEach { it.playListId = ALL_TRACKS_PLAYLIST_ID }</span>
+<span class="fc" id="L202">        RoomHelper(context).insertTracksWithPlaylist(tracksWithPlaylist as ArrayList&lt;Track&gt;)</span>
+<span class="fc" id="L203">    }</span>
+
+    private fun getTracksSync(): ArrayList&lt;Track&gt; {
+<span class="fc" id="L206">        val tracks = arrayListOf&lt;Track&gt;()</span>
+<span class="fc" id="L207">        val uri = Audio.Media.EXTERNAL_CONTENT_URI</span>
+<span class="fc" id="L208">        val projection = arrayListOf(</span>
+<span class="fc" id="L209">            Audio.Media._ID,</span>
+<span class="fc" id="L210">            Audio.Media.DURATION,</span>
+<span class="fc" id="L211">            Audio.Media.DATA,</span>
+<span class="fc" id="L212">            Audio.Media.TITLE,</span>
+<span class="fc" id="L213">            Audio.Media.ARTIST,</span>
+<span class="fc" id="L214">            Audio.Media.ALBUM,</span>
+<span class="fc" id="L215">            Audio.Media.ALBUM_ID,</span>
+<span class="fc" id="L216">            Audio.Media.ARTIST_ID,</span>
+<span class="fc" id="L217">            Audio.Media.TRACK,</span>
+<span class="fc" id="L218">            Audio.Media.YEAR,</span>
+<span class="fc" id="L219">            Audio.Media.DATE_ADDED</span>
+        )
+
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">        if (isQPlus()) {</span>
+<span class="fc" id="L223">            projection.add(Audio.Media.BUCKET_DISPLAY_NAME)</span>
+        }
+
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">        if (isRPlus()) {</span>
+<span class="fc" id="L227">            projection.add(Audio.Media.GENRE)</span>
+<span class="fc" id="L228">            projection.add(Audio.Media.GENRE_ID)</span>
+<span class="fc" id="L229">            projection.add(Audio.Media.DISC_NUMBER)</span>
+        }
+
+<span class="fc" id="L232">        context.queryCursor(uri, projection.toTypedArray(), showErrors = true) { cursor -&gt;</span>
+<span class="nc" id="L233">            val id = cursor.getLongValue(Audio.Media._ID)</span>
+<span class="nc" id="L234">            val title = cursor.getStringValue(Audio.Media.TITLE)</span>
+<span class="nc" id="L235">            val duration = cursor.getIntValue(Audio.Media.DURATION) / 1000</span>
+<span class="nc bnc" id="L236" title="All 4 branches missed.">            var trackId = cursor.getStringValue(Audio.Media.TRACK)?.firstNumber()</span>
+<span class="nc" id="L237">                ?: cursor.getIntValueOrNull(Audio.Media.TRACK)</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            val path = cursor.getStringValue(Audio.Media.DATA).orEmpty()</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">            val artist = cursor.getStringValue(Audio.Media.ARTIST) ?: MediaStore.UNKNOWN_STRING</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">            val folderName = if (isQPlus()) {</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                cursor.getStringValue(Audio.Media.BUCKET_DISPLAY_NAME) ?: MediaStore.UNKNOWN_STRING</span>
+            } else {
+<span class="nc bnc" id="L243" title="All 4 branches missed.">                context.getFriendlyFolder(path).ifEmpty { MediaStore.UNKNOWN_STRING }</span>
+            }
+
+<span class="nc bnc" id="L246" title="All 2 branches missed.">            val album = cursor.getStringValue(Audio.Media.ALBUM) ?: folderName</span>
+<span class="nc" id="L247">            val albumId = cursor.getLongValue(Audio.Media.ALBUM_ID)</span>
+<span class="nc" id="L248">            val artistId = cursor.getLongValue(Audio.Media.ARTIST_ID)</span>
+<span class="nc" id="L249">            val year = cursor.getIntValue(Audio.Media.YEAR)</span>
+<span class="nc" id="L250">            val dateAdded = cursor.getIntValue(Audio.Media.DATE_ADDED)</span>
+<span class="nc" id="L251">            val coverUri = ContentUris.withAppendedId(artworkUri, albumId)</span>
+<span class="nc" id="L252">            val coverArt = coverUri.toString()</span>
+
+<span class="nc" id="L254">            val genre: String</span>
+<span class="nc" id="L255">            val genreId: Long</span>
+<span class="nc" id="L256">            var discNumber: Int?</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (isRPlus()) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                genre = cursor.getStringValue(Audio.Media.GENRE).orEmpty()</span>
+<span class="nc" id="L259">                genreId = cursor.getLongValue(Audio.Media.GENRE_ID)</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                discNumber = cursor.getStringValue(Audio.Media.DISC_NUMBER)?.firstNumber()</span>
+            } else {
+<span class="nc" id="L262">                genre = &quot;&quot;</span>
+<span class="nc" id="L263">                genreId = 0</span>
+<span class="nc" id="L264">                discNumber = null</span>
+            }
+
+<span class="nc bnc" id="L267" title="All 4 branches missed.">            if (trackId != null &amp;&amp; trackId &gt;= 1000) {</span>
+                // derive disc number from track number when possible
+<span class="nc bnc" id="L269" title="All 2 branches missed.">                if (discNumber == null) {</span>
+<span class="nc" id="L270">                    discNumber = trackId / 1000</span>
+                }
+
+<span class="nc" id="L273">                trackId %= 1000</span>
+            }
+
+<span class="nc bnc" id="L276" title="All 6 branches missed.">            if (!title.isNullOrEmpty()) {</span>
+<span class="nc" id="L277">                val track = Track(</span>
+<span class="nc" id="L278">                    id = 0, mediaStoreId = id, title = title, artist = artist, path = path, duration = duration, album = album, genre = genre,</span>
+<span class="nc" id="L279">                    coverArt = coverArt, playListId = 0, trackId = trackId, discNumber = discNumber, folderName = folderName, albumId = albumId, artistId = artistId,</span>
+<span class="nc" id="L280">                    genreId = genreId, year = year, dateAdded = dateAdded, orderInPlaylist = 0</span>
+                )
+<span class="nc" id="L282">                tracks.add(track)</span>
+            }
+<span class="nc" id="L284">        }</span>
+
+<span class="fc" id="L286">        return tracks</span>
+    }
+
+    private fun getArtistsSync(): ArrayList&lt;Artist&gt; {
+<span class="fc" id="L290">        val artists = arrayListOf&lt;Artist&gt;()</span>
+<span class="fc" id="L291">        val uri = Audio.Artists.EXTERNAL_CONTENT_URI</span>
+<span class="fc" id="L292">        val projection = arrayOf(</span>
+<span class="fc" id="L293">            Audio.Artists._ID,</span>
+<span class="fc" id="L294">            Audio.Artists.ARTIST,</span>
+<span class="fc" id="L295">            Audio.Artists.NUMBER_OF_TRACKS,</span>
+<span class="fc" id="L296">            Audio.Artists.NUMBER_OF_ALBUMS</span>
+        )
+
+<span class="fc" id="L299">        context.queryCursor(uri, projection, showErrors = true) { cursor -&gt;</span>
+<span class="nc" id="L300">            val id = cursor.getLongValue(Audio.Artists._ID)</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">            val title = cursor.getStringValue(Audio.Artists.ARTIST) ?: MediaStore.UNKNOWN_STRING</span>
+<span class="nc" id="L302">            val albumCnt = cursor.getIntValue(Audio.Artists.NUMBER_OF_TRACKS)</span>
+<span class="nc" id="L303">            val trackCnt = cursor.getIntValue(Audio.Artists.NUMBER_OF_ALBUMS)</span>
+<span class="nc" id="L304">            val artist = Artist(id = id, title = title, albumCnt = albumCnt, trackCnt = trackCnt, albumArt = &quot;&quot;)</span>
+<span class="nc bnc" id="L305" title="All 4 branches missed.">            if (artist.albumCnt &gt; 0 &amp;&amp; artist.trackCnt &gt; 0) {</span>
+<span class="nc" id="L306">                newArtists.add(artist)</span>
+            }
+<span class="nc" id="L308">        }</span>
+
+<span class="fc" id="L310">        return artists</span>
+    }
+
+    private fun getAlbumsSync(artists: ArrayList&lt;Artist&gt;): ArrayList&lt;Album&gt; {
+<span class="fc" id="L314">        val albums = arrayListOf&lt;Album&gt;()</span>
+<span class="fc" id="L315">        val uri = Audio.Albums.EXTERNAL_CONTENT_URI</span>
+<span class="fc" id="L316">        val projection = arrayListOf(</span>
+<span class="fc" id="L317">            Audio.Albums._ID,</span>
+<span class="fc" id="L318">            Audio.Albums.ARTIST,</span>
+<span class="fc" id="L319">            Audio.Albums.FIRST_YEAR,</span>
+<span class="fc" id="L320">            Audio.Albums.ALBUM,</span>
+<span class="fc" id="L321">            Audio.Albums.NUMBER_OF_SONGS</span>
+        )
+
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">        if (isQPlus()) {</span>
+<span class="fc" id="L325">            projection.add(Audio.Albums.ARTIST_ID)</span>
+        }
+
+<span class="fc" id="L328">        context.queryCursor(uri, projection.toTypedArray(), null, null, showErrors = true) { cursor -&gt;</span>
+<span class="nc" id="L329">            val id = cursor.getLongValue(Audio.Albums._ID)</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">            val artistName = cursor.getStringValue(Audio.Albums.ARTIST) ?: MediaStore.UNKNOWN_STRING</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            val title = cursor.getStringValue(Audio.Albums.ALBUM) ?: MediaStore.UNKNOWN_STRING</span>
+<span class="nc" id="L332">            val coverArt = ContentUris.withAppendedId(artworkUri, id).toString()</span>
+<span class="nc" id="L333">            val year = cursor.getIntValue(Audio.Albums.FIRST_YEAR)</span>
+<span class="nc" id="L334">            val trackCnt = cursor.getIntValue(Audio.Albums.NUMBER_OF_SONGS)</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            val artistId = if (isQPlus()) {</span>
+<span class="nc" id="L336">                cursor.getLongValue(Audio.Albums.ARTIST_ID)</span>
+            } else {
+<span class="nc" id="L338">                artists.first { it.title == artistName }.id</span>
+            }
+
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            if (trackCnt &gt; 0) {</span>
+<span class="nc" id="L342">                val album = Album(</span>
+<span class="nc" id="L343">                    id = id, artist = artistName, title = title, coverArt = coverArt, year = year, trackCnt = trackCnt, artistId = artistId, dateAdded = 0</span>
+                )
+<span class="nc" id="L345">                albums.add(album)</span>
+            }
+<span class="nc" id="L347">        }</span>
+
+<span class="fc" id="L349">        return albums</span>
+    }
+
+    private fun getGenresSync(): ArrayList&lt;Genre&gt; {
+<span class="fc" id="L353">        val genres = arrayListOf&lt;Genre&gt;()</span>
+<span class="fc" id="L354">        val uri = Audio.Genres.EXTERNAL_CONTENT_URI</span>
+<span class="fc" id="L355">        val projection = arrayListOf(Audio.Genres._ID, Audio.Genres.NAME)</span>
+<span class="fc" id="L356">        context.queryCursor(uri, projection.toTypedArray(), showErrors = true) { cursor -&gt;</span>
+<span class="nc" id="L357">            val id = cursor.getLongValue(Audio.Genres._ID)</span>
+<span class="nc" id="L358">            val title = cursor.getStringValue(Audio.Genres.NAME)</span>
+
+<span class="nc bnc" id="L360" title="All 6 branches missed.">            if (!title.isNullOrEmpty()) {</span>
+<span class="nc" id="L361">                val genre = Genre(id = id, title = title, trackCnt = 0, albumArt = &quot;&quot;)</span>
+<span class="nc" id="L362">                genres.add(genre)</span>
+            }
+<span class="nc" id="L364">        }</span>
+
+<span class="fc" id="L366">        return genres</span>
+    }
+
+    /**
+     * To map tracks to genres, we utilize [MediaStore.Audio.Genres.Members] because [MediaStore.Audio.Media.GENRE_ID] is not available on Android 11 and
+     * below. It is essential to call this method after [getTracksSync].
+     */
+    private fun assignGenreToTracks() {
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">        if (isRPlus()) {</span>
+<span class="fc" id="L375">            return</span>
+        }
+
+<span class="nc" id="L378">        val genreToTracks = hashMapOf&lt;Long, MutableList&lt;Long&gt;&gt;()</span>
+<span class="nc" id="L379">        val uri = GENRE_CONTENT_URI.toUri()</span>
+<span class="nc" id="L380">        val projection = arrayListOf(</span>
+<span class="nc" id="L381">            Audio.Genres.Members.GENRE_ID,</span>
+<span class="nc" id="L382">            Audio.Genres.Members.AUDIO_ID</span>
+        )
+
+<span class="nc" id="L385">        context.queryCursor(uri, projection.toTypedArray(), showErrors = true) {</span>
+<span class="nc" id="L386">            val trackId = it.getLongValue(Audio.Genres.Members.AUDIO_ID)</span>
+<span class="nc" id="L387">            val genreId = it.getLongValue(Audio.Genres.Members.GENRE_ID)</span>
+
+<span class="nc" id="L389">            var tracks = genreToTracks[genreId]</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">            if (tracks == null) {</span>
+<span class="nc" id="L391">                tracks = mutableListOf(trackId)</span>
+            } else {
+<span class="nc" id="L393">                tracks.add(trackId)</span>
+            }
+
+<span class="nc" id="L396">            genreToTracks[genreId] = tracks</span>
+<span class="nc" id="L397">        }</span>
+
+<span class="nc bnc" id="L399" title="All 2 branches missed.">        for ((genreId, trackIds) in genreToTracks) {</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">            for (track in newTracks) {</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">                if (track.mediaStoreId in trackIds) {</span>
+<span class="nc" id="L402">                    track.genreId = genreId</span>
+                }
+            }
+        }
+<span class="nc" id="L406">    }</span>
+
+    private fun findTracksManually(pathsToIgnore: List&lt;String&gt;): ArrayList&lt;Track&gt; {
+<span class="fc" id="L409">        val audioFilePaths = arrayListOf&lt;String&gt;()</span>
+<span class="fc" id="L410">        val excludedPaths = pathsToIgnore.toMutableList().apply { addAll(0, config.excludedFolders) }</span>
+
+<span class="fc bfc" id="L412" title="All 2 branches covered.">        for (rootPath in arrayOf(context.internalStoragePath, context.sdCardPath)) {</span>
+<span class="fc bfc" id="L413" title="All 4 branches covered.">            if (rootPath.isEmpty()) {</span>
+<span class="fc" id="L414">                continue</span>
+            }
+
+<span class="fc" id="L417">            val rootFile = File(rootPath)</span>
+<span class="fc" id="L418">            findAudioFiles(rootFile, audioFilePaths, excludedPaths)</span>
+        }
+
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">        if (audioFilePaths.isEmpty()) {</span>
+<span class="fc" id="L422">            return arrayListOf()</span>
+        }
+
+<span class="nc" id="L425">        val tracks = arrayListOf&lt;Track&gt;()</span>
+<span class="nc" id="L426">        val totalPaths = audioFilePaths.size</span>
+<span class="nc" id="L427">        var pathsScanned = 0</span>
+
+<span class="nc" id="L429">        audioFilePaths.forEach { path -&gt;</span>
+<span class="nc" id="L430">            pathsScanned += 1</span>
+<span class="nc" id="L431">            maybeShowScanProgress(</span>
+<span class="nc" id="L432">                pathBeingScanned = path,</span>
+<span class="nc" id="L433">                progress = pathsScanned,</span>
+<span class="nc" id="L434">                max = totalPaths</span>
+            )
+
+<span class="nc" id="L437">            val retriever = MediaMetadataRetriever()</span>
+<span class="nc" id="L438">            var inputStream: FileInputStream? = null</span>
+
+<span class="nc" id="L440">            try {</span>
+<span class="nc" id="L441">                retriever.setDataSource(path)</span>
+<span class="nc" id="L442">            } catch (ignored: Exception) {</span>
+<span class="nc" id="L443">                try {</span>
+<span class="nc" id="L444">                    inputStream = FileInputStream(path)</span>
+<span class="nc" id="L445">                    retriever.setDataSource(inputStream.fd)</span>
+<span class="nc" id="L446">                } catch (ignored: Exception) {</span>
+<span class="nc" id="L447">                    retriever.release()</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                    inputStream?.close()</span>
+<span class="nc" id="L449">                    return@forEach</span>
+                }
+            }
+
+<span class="nc bnc" id="L453" title="All 2 branches missed.">            val title = retriever.extractMetadata(METADATA_KEY_TITLE) ?: path.getFilenameFromPath()</span>
+<span class="nc bnc" id="L454" title="All 4 branches missed.">            val artist = retriever.extractMetadata(METADATA_KEY_ARTIST) ?: retriever.extractMetadata(METADATA_KEY_ALBUMARTIST) ?: MediaStore.UNKNOWN_STRING</span>
+<span class="nc bnc" id="L455" title="All 4 branches missed.">            val duration = retriever.extractMetadata(METADATA_KEY_DURATION)?.toLongOrNull()?.div(1000)?.toInt() ?: 0</span>
+<span class="nc" id="L456">            val folderName = path.getParentPath().getFilenameFromPath()</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            val album = retriever.extractMetadata(METADATA_KEY_ALBUM) ?: folderName</span>
+<span class="nc" id="L458">            val trackNumber = retriever.extractMetadata(METADATA_KEY_CD_TRACK_NUMBER)</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            val trackId = trackNumber?.firstNumber()</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">            val discNumber = retriever.extractMetadata(METADATA_KEY_DISC_NUMBER)?.firstNumber()</span>
+<span class="nc bnc" id="L461" title="All 4 branches missed.">            val year = retriever.extractMetadata(METADATA_KEY_YEAR)?.toIntOrNull() ?: 0</span>
+<span class="nc" id="L462">            val dateAdded = try {</span>
+<span class="nc" id="L463">                (File(path).lastModified() / 1000L).toInt()</span>
+<span class="nc" id="L464">            } catch (e: Exception) {</span>
+<span class="nc" id="L465">                0</span>
+            }
+
+<span class="nc bnc" id="L468" title="All 2 branches missed.">            val genre = retriever.extractMetadata(METADATA_KEY_GENRE).orEmpty()</span>
+
+<span class="nc bnc" id="L470" title="All 4 branches missed.">            if (title.isNotEmpty()) {</span>
+<span class="nc" id="L471">                val track = Track(</span>
+<span class="nc" id="L472">                    id = 0, mediaStoreId = 0, title = title, artist = artist, path = path, duration = duration, album = album, genre = genre,</span>
+<span class="nc" id="L473">                    coverArt = &quot;&quot;, playListId = 0, trackId = trackId, discNumber = discNumber, folderName = folderName, albumId = 0, artistId = 0,</span>
+<span class="nc" id="L474">                    genreId = 0, year = year, dateAdded = dateAdded, orderInPlaylist = 0, flags = FLAG_MANUAL_CACHE</span>
+                )
+                // use hashCode() as id for tracking purposes, there's a very slim chance of collision
+<span class="nc" id="L477">                track.mediaStoreId = track.hashCode().toLong()</span>
+<span class="nc" id="L478">                tracks.add(track)</span>
+            }
+
+<span class="nc" id="L481">            try {</span>
+<span class="nc bnc" id="L482" title="All 2 branches missed.">                inputStream?.close()</span>
+<span class="nc" id="L483">                retriever.release()</span>
+<span class="nc" id="L484">            } catch (ignored: Exception) {</span>
+            }
+<span class="nc" id="L486">        }</span>
+
+<span class="nc" id="L488">        maybeRescanPaths(audioFilePaths)</span>
+<span class="nc" id="L489">        return tracks</span>
+    }
+
+    private fun findAudioFiles(file: File, destination: ArrayList&lt;String&gt;, excludedPaths: MutableList&lt;String&gt;) {
+<span class="fc bfc" id="L493" title="All 2 branches covered.">        if (file.isHidden) {</span>
+<span class="fc" id="L494">            return</span>
+        }
+
+<span class="fc" id="L497">        val path = file.absolutePath</span>
+<span class="pc bpc" id="L498" title="2 of 4 branches missed.">        if (path in excludedPaths || path.getParentPath() in excludedPaths) {</span>
+<span class="nc" id="L499">            return</span>
+        }
+
+<span class="pc bpc" id="L502" title="1 of 2 branches missed.">        if (file.isFile) {</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if (path.isAudioFast()) {</span>
+<span class="nc" id="L504">                destination.add(path)</span>
+            }
+<span class="fc bfc" id="L506" title="All 2 branches covered.">        } else if (!file.containsNoMedia()) {</span>
+<span class="fc" id="L507">            file.listFiles().orEmpty().forEach { child -&gt;</span>
+<span class="fc" id="L508">                findAudioFiles(child, destination, excludedPaths)</span>
+<span class="fc" id="L509">            }</span>
+        }
+<span class="fc" id="L511">    }</span>
+
+    private fun maybeRescanPaths(paths: ArrayList&lt;String&gt;) {
+<span class="nc bnc" id="L514" title="All 2 branches missed.">        val pathsToRescan = paths.filter { path -&gt; path !in mediaStorePaths }</span>
+<span class="nc" id="L515">        context.rescanPaths(pathsToRescan)</span>
+<span class="nc" id="L516">    }</span>
+
+    private fun splitIntoArtists(tracks: ArrayList&lt;Track&gt;): ArrayList&lt;Artist&gt; {
+<span class="nc" id="L519">        val artists = arrayListOf&lt;Artist&gt;()</span>
+<span class="nc" id="L520">        val tracksGroupedByArtist = tracks.groupBy { it.artist }</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">        for ((artistName, tracksByArtist) in tracksGroupedByArtist) {</span>
+<span class="nc" id="L522">            val trackCnt = tracksByArtist.size</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            if (trackCnt &gt; 0) {</span>
+<span class="nc" id="L524">                val albumCnt = tracksByArtist.groupBy { it.album }.size</span>
+<span class="nc" id="L525">                val artist = Artist(0, artistName, albumCnt, trackCnt, &quot;&quot;)</span>
+<span class="nc" id="L526">                val artistId = artist.hashCode().toLong()</span>
+<span class="nc" id="L527">                artist.id = artistId</span>
+<span class="nc" id="L528">                tracksByArtist.onEach { it.artistId = artistId }</span>
+<span class="nc" id="L529">                artists.add(artist)</span>
+            }
+        }
+
+<span class="nc" id="L533">        return artists</span>
+    }
+
+    private fun splitIntoAlbums(tracks: ArrayList&lt;Track&gt;): ArrayList&lt;Album&gt; {
+<span class="nc" id="L537">        val albums = arrayListOf&lt;Album&gt;()</span>
+<span class="nc" id="L538">        val tracksGroupedByAlbums = tracks.groupBy { it.album }</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">        for ((albumName, tracksInAlbum) in tracksGroupedByAlbums) {</span>
+<span class="nc" id="L540">            val trackCnt = tracksInAlbum.size</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">            if (trackCnt &gt; 0) {</span>
+<span class="nc" id="L542">                val track = tracksInAlbum.first()</span>
+<span class="nc" id="L543">                val artistName = track.artist</span>
+<span class="nc" id="L544">                val year = track.year</span>
+<span class="nc" id="L545">                val album = Album(0, artistName, albumName, &quot;&quot;, year, trackCnt, track.artistId, track.dateAdded)</span>
+<span class="nc" id="L546">                val albumId = album.hashCode().toLong()</span>
+<span class="nc" id="L547">                album.id = albumId</span>
+<span class="nc" id="L548">                tracksInAlbum.onEach { it.albumId = albumId }</span>
+<span class="nc" id="L549">                albums.add(album)</span>
+            }
+        }
+
+<span class="nc" id="L553">        return albums</span>
+    }
+
+    private fun splitIntoGenres(tracks: ArrayList&lt;Track&gt;): ArrayList&lt;Genre&gt; {
+<span class="nc" id="L557">        val genres = arrayListOf&lt;Genre&gt;()</span>
+<span class="nc" id="L558">        val tracksGroupedByGenres = tracks.groupBy { it.genre }</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">        for ((title, tracksInGenre) in tracksGroupedByGenres) {</span>
+<span class="nc" id="L560">            val trackCnt = tracksInGenre.size</span>
+<span class="nc bnc" id="L561" title="All 6 branches missed.">            if (trackCnt &gt; 0 &amp;&amp; title.isNotEmpty()) {</span>
+<span class="nc" id="L562">                val genre = Genre(id = 0, title = title, trackCnt = trackCnt, albumArt = &quot;&quot;)</span>
+<span class="nc" id="L563">                val genreId = genre.hashCode().toLong()</span>
+<span class="nc" id="L564">                genre.id = genreId</span>
+<span class="nc" id="L565">                tracksInGenre.onEach { it.genreId = genreId }</span>
+<span class="nc" id="L566">                genres.add(genre)</span>
+            }
+        }
+
+<span class="nc" id="L570">        return genres</span>
+    }
+
+    private fun cleanupDatabase() {
+        // remove invalid tracks
+<span class="pc" id="L575">        val newTrackIds = newTracks.map { it.mediaStoreId } as ArrayList&lt;Long&gt;</span>
+<span class="pc" id="L576">        val newTrackPaths = newTracks.map { it.path } as ArrayList&lt;String&gt;</span>
+<span class="pc bnc" id="L577" title="All 4 branches missed.">        val invalidTracks = context.audioHelper.getAllTracks().filter { it.mediaStoreId !in newTrackIds || it.path !in newTrackPaths }</span>
+<span class="fc" id="L578">        context.audioHelper.deleteTracks(invalidTracks)</span>
+<span class="fc" id="L579">        newTracks.removeAll(invalidTracks.toSet())</span>
+
+        // remove invalid albums
+<span class="pc" id="L582">        val newAlbumIds = newAlbums.map { it.id }</span>
+<span class="pc bnc" id="L583" title="All 2 branches missed.">        val invalidAlbums = context.audioHelper.getAllAlbums().filter { it.id !in newAlbumIds }.toMutableList()</span>
+<span class="pc bnc" id="L584" title="All 2 branches missed.">        invalidAlbums += newAlbums.filter { album -&gt; newTracks.none { it.albumId == album.id } }</span>
+<span class="fc" id="L585">        context.audioHelper.deleteAlbums(invalidAlbums)</span>
+<span class="fc" id="L586">        newAlbums.removeAll(invalidAlbums.toSet())</span>
+
+        // remove invalid artists
+<span class="pc" id="L589">        val newArtistIds = newArtists.map { it.id }</span>
+<span class="pc bnc" id="L590" title="All 2 branches missed.">        val invalidArtists = context.audioHelper.getAllArtists().filter { it.id !in newArtistIds }.toMutableList()</span>
+<span class="pc bpc" id="L591" title="1 of 2 branches missed.">        for (artist in newArtists) {</span>
+<span class="nc" id="L592">            val artistId = artist.id</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">            val albumsByArtist = newAlbums.filter { it.artistId == artistId }</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">            if (albumsByArtist.isEmpty()) {</span>
+<span class="nc" id="L595">                invalidArtists.add(artist)</span>
+<span class="nc" id="L596">                continue</span>
+            }
+
+            // update album, track counts
+<span class="nc" id="L600">            val albumCnt = albumsByArtist.size</span>
+<span class="nc bnc" id="L601" title="All 2 branches missed.">            val trackCnt = albumsByArtist.sumOf { it.trackCnt }</span>
+<span class="nc bnc" id="L602" title="All 4 branches missed.">            if (trackCnt != artist.trackCnt || albumCnt != artist.albumCnt) {</span>
+<span class="nc" id="L603">                context.audioHelper.deleteArtist(artistId)</span>
+<span class="nc" id="L604">                val updated = artist.copy(trackCnt = trackCnt, albumCnt = albumCnt)</span>
+<span class="nc" id="L605">                context.audioHelper.insertArtists(listOf(updated))</span>
+            }
+        }
+
+<span class="fc" id="L609">        context.audioHelper.deleteArtists(invalidArtists)</span>
+
+        // remove invalid genres
+<span class="pc" id="L612">        val newGenreIds = newGenres.map { it.id }</span>
+<span class="pc bnc" id="L613" title="All 2 branches missed.">        val invalidGenres = context.audioHelper.getAllGenres().filter { it.id !in newGenreIds }.toMutableList()</span>
+<span class="pc bnc" id="L614" title="All 2 branches missed.">        invalidGenres += newGenres.filter { genre -&gt; newTracks.none { it.genreId == genre.id } }</span>
+<span class="fc" id="L615">        context.audioHelper.deleteGenres(invalidGenres)</span>
+<span class="fc" id="L616">    }</span>
+
+<span class="fc" id="L618">    private fun maybeShowScanProgress(pathBeingScanned: String = &quot;&quot;, progress: Int = 0, max: Int = 0) {</span>
+<span class="fc bfc" id="L619" title="All 2 branches covered.">        if (!showProgress) {</span>
+<span class="fc" id="L620">            return</span>
+        }
+
+<span class="pc bpc" id="L623" title="1 of 2 branches missed.">        if (notificationHandler == null) {</span>
+<span class="fc" id="L624">            notificationHandler = Handler(Looper.getMainLooper())</span>
+        }
+
+<span class="pc bpc" id="L627" title="1 of 2 branches missed.">        if (notificationHelper == null) {</span>
+<span class="fc" id="L628">            notificationHelper = NotificationHelper.createInstance(context)</span>
+        }
+
+        // avoid showing notification for a short duration
+<span class="pc bpc" id="L632" title="1 of 2 branches missed.">        val delayNotification = pathBeingScanned.isEmpty()</span>
+<span class="pc bpc" id="L633" title="1 of 2 branches missed.">        if (delayNotification) {</span>
+<span class="pc bpc" id="L634" title="1 of 2 branches missed.">            notificationHandler?.postDelayed({</span>
+<span class="nc" id="L635">                val notification = notificationHelper!!.createMediaScannerNotification(pathBeingScanned, progress, max)</span>
+<span class="nc" id="L636">                notificationHelper!!.notify(SCANNER_NOTIFICATION_ID, notification)</span>
+<span class="pc" id="L637">            }, SCANNER_NOTIFICATION_DELAY)</span>
+        } else {
+<span class="nc bnc" id="L639" title="All 2 branches missed.">            if (System.currentTimeMillis() - lastProgressUpdateMs &gt; 100L) {</span>
+<span class="nc" id="L640">                lastProgressUpdateMs = System.currentTimeMillis()</span>
+<span class="nc" id="L641">                val notification = notificationHelper!!.createMediaScannerNotification(pathBeingScanned, progress, max)</span>
+<span class="nc" id="L642">                notificationHelper!!.notify(SCANNER_NOTIFICATION_ID, notification)</span>
+            }
+        }
+<span class="fc" id="L645">    }</span>
+
+    private fun hideScanProgress() {
+<span class="pc bpc" id="L648" title="1 of 2 branches missed.">        if (showProgress) {</span>
+<span class="pc bpc" id="L649" title="1 of 2 branches missed.">            notificationHandler?.removeCallbacksAndMessages(null)</span>
+<span class="fc" id="L650">            notificationHandler = null</span>
+<span class="fc" id="L651">            context.notificationManager.cancel(SCANNER_NOTIFICATION_ID)</span>
+        }
+<span class="fc" id="L653">    }</span>
+
+    private fun String?.firstNumber(): Int? =
+<span class="nc bnc" id="L656" title="All 2 branches missed.">        this?.trim()</span>
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            ?.substringBefore('/')</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">            ?.takeWhile { it.isDigit() }</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">            ?.toIntOrNull()</span>
+<span class="nc bnc" id="L660" title="All 6 branches missed.">            ?.takeIf { it &gt; 0 }</span>
+
+    companion object {
+        private const val SCANNER_NOTIFICATION_ID = 43
+        private const val SCANNER_NOTIFICATION_DELAY = 1500L
+        private const val GENRE_CONTENT_URI = &quot;content://media/external/audio/genres/all/members&quot;
+
+        private var instance: SimpleMediaScanner? = null
+
+        fun getInstance(app: Application): SimpleMediaScanner {
+<span class="fc bfc" id="L670" title="All 2 branches covered.">            return if (instance != null) {</span>
+<span class="fc" id="L671">                instance!!</span>
+            } else {
+<span class="fc" id="L673">                instance = SimpleMediaScanner(app)</span>
+<span class="fc" id="L674">                instance!!</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

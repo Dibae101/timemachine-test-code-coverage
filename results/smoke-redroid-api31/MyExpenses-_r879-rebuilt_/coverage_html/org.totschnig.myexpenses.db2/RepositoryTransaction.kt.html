@@ -1,0 +1,1486 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepositoryTransaction.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE MyExpenses</a> &gt; <a href="index.source.html" class="el_package">org.totschnig.myexpenses.db2</a> &gt; <span class="el_source">RepositoryTransaction.kt</span></div><h1>RepositoryTransaction.kt</h1><pre class="source lang-java linenums">package org.totschnig.myexpenses.db2
+
+import android.content.ContentProviderOperation
+import android.content.ContentProviderResult
+import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.ContentValues
+import android.os.Bundle
+import androidx.annotation.VisibleForTesting
+import androidx.core.os.BundleCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.totschnig.myexpenses.db2.Repository.Companion.RECORD_SEPARATOR
+import org.totschnig.myexpenses.db2.entities.Transaction
+import org.totschnig.myexpenses.dialog.ArchiveInfo
+import org.totschnig.myexpenses.model.CrStatus
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.model.generateUuid
+import org.totschnig.myexpenses.model.sort.SortDirection
+import org.totschnig.myexpenses.provider.DataBaseAccount
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.uriBuilderForTransactionList
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_SPLIT_PART
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_VOID
+import org.totschnig.myexpenses.provider.DbUtils
+import org.totschnig.myexpenses.provider.KEY_ACCOUNTID
+import org.totschnig.myexpenses.provider.KEY_AMOUNT
+import org.totschnig.myexpenses.provider.KEY_CATID
+import org.totschnig.myexpenses.provider.KEY_COMMENT
+import org.totschnig.myexpenses.provider.KEY_CR_STATUS
+import org.totschnig.myexpenses.provider.KEY_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_DATE
+import org.totschnig.myexpenses.provider.KEY_DEBT_ID
+import org.totschnig.myexpenses.provider.KEY_END
+import org.totschnig.myexpenses.provider.KEY_EQUIVALENT_AMOUNT
+import org.totschnig.myexpenses.provider.KEY_HAS_SEALED_ACCOUNT
+import org.totschnig.myexpenses.provider.KEY_HAS_SEALED_ACCOUNT_WITH_TRANSFER
+import org.totschnig.myexpenses.provider.KEY_HAS_SEALED_DEBT
+import org.totschnig.myexpenses.provider.KEY_ICON
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_METHODID
+import org.totschnig.myexpenses.provider.KEY_ORIGINAL_AMOUNT
+import org.totschnig.myexpenses.provider.KEY_ORIGINAL_CURRENCY
+import org.totschnig.myexpenses.provider.KEY_PARENTID
+import org.totschnig.myexpenses.provider.KEY_PAYEEID
+import org.totschnig.myexpenses.provider.KEY_REFERENCE_NUMBER
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_START
+import org.totschnig.myexpenses.provider.KEY_STATUS
+import org.totschnig.myexpenses.provider.KEY_TAGLIST
+import org.totschnig.myexpenses.provider.KEY_TRANSACTIONID
+import org.totschnig.myexpenses.provider.KEY_TRANSFER_ACCOUNT
+import org.totschnig.myexpenses.provider.KEY_TRANSFER_PEER
+import org.totschnig.myexpenses.provider.KEY_UUID
+import org.totschnig.myexpenses.provider.KEY_VALUE_DATE
+import org.totschnig.myexpenses.provider.PORTFOLIO_ASSET
+import org.totschnig.myexpenses.provider.PORTFOLIO_CASH
+import org.totschnig.myexpenses.provider.PORTFOLIO_CONTAINER
+import org.totschnig.myexpenses.provider.PORTFOLIO_NONE
+import org.totschnig.myexpenses.provider.SPLIT_CATID
+import org.totschnig.myexpenses.provider.STATUS_ARCHIVE
+import org.totschnig.myexpenses.provider.TABLE_TRANSACTIONS
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.TransactionProvider.AUTHORITY
+import org.totschnig.myexpenses.provider.TransactionProvider.EXTENDED_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.KEY_RESULT
+import org.totschnig.myexpenses.provider.TransactionProvider.METHOD_ARCHIVE
+import org.totschnig.myexpenses.provider.TransactionProvider.METHOD_CAN_BE_ARCHIVED
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_DISTINCT
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_GROUP_BY
+import org.totschnig.myexpenses.provider.TransactionProvider.QUERY_PARAMETER_INCLUDE_ALL
+import org.totschnig.myexpenses.provider.TransactionProvider.TRANSACTIONS_URI
+import org.totschnig.myexpenses.provider.TransactionProvider.URI_SEGMENT_UNARCHIVE
+import org.totschnig.myexpenses.provider.VIEW_EXTENDED
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.filter.FilterPersistence
+import org.totschnig.myexpenses.provider.filter.Operation
+import org.totschnig.myexpenses.provider.getBoolean
+import org.totschnig.myexpenses.provider.getLong
+import org.totschnig.myexpenses.provider.getLongOrNull
+import org.totschnig.myexpenses.provider.getString
+import org.totschnig.myexpenses.provider.getStringOrNull
+import org.totschnig.myexpenses.provider.useAndMapToList
+import org.totschnig.myexpenses.provider.withLimit
+import org.totschnig.myexpenses.util.crashreporting.CrashHandler
+import org.totschnig.myexpenses.util.enumValueOrDefault
+import org.totschnig.myexpenses.util.epoch2ZonedDateTime
+import org.totschnig.myexpenses.util.joinArrays
+import org.totschnig.myexpenses.util.toEpoch
+import org.totschnig.myexpenses.viewmodel.MyExpensesViewModel
+import org.totschnig.myexpenses.viewmodel.data.Tag
+import org.totschnig.myexpenses.viewmodel.data.Trade
+import org.totschnig.myexpenses.viewmodel.data.TradeType
+import java.math.BigDecimal
+import java.math.RoundingMode
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.util.Locale
+import kotlin.math.absoluteValue
+
+<span class="nc" id="L100">fun Transaction.asContentValues(</span>
+<span class="nc" id="L101">    withUuid: Boolean = true,</span>
+<span class="nc" id="L102">    withCrStatus: Boolean = true,</span>
+<span class="nc" id="L103">) = ContentValues().apply {</span>
+<span class="nc" id="L104">    put(KEY_COMMENT, comment)</span>
+<span class="nc" id="L105">    put(KEY_DATE, date)</span>
+<span class="nc" id="L106">    put(KEY_VALUE_DATE, valueDate)</span>
+<span class="nc" id="L107">    put(KEY_AMOUNT, amount)</span>
+<span class="nc" id="L108">    put(KEY_CATID, categoryId)</span>
+<span class="nc" id="L109">    put(KEY_ACCOUNTID, accountId)</span>
+<span class="nc bnc" id="L110" title="All 6 branches missed.">    put(KEY_PAYEEID, payeeId?.takeIf { it &gt; 0L })</span>
+<span class="nc bnc" id="L111" title="All 6 branches missed.">    put(KEY_TRANSFER_ACCOUNT, transferAccountId?.takeIf { it &gt; 0L })</span>
+<span class="nc bnc" id="L112" title="All 6 branches missed.">    put(KEY_METHODID, methodId?.takeIf { it &gt; 0L })</span>
+<span class="nc bnc" id="L113" title="All 8 branches missed.">    parentId?.takeIf { it &gt; 0L }?.let {</span>
+<span class="nc" id="L114">        put(KEY_PARENTID, it)</span>
+<span class="nc" id="L115">    }</span>
+<span class="nc" id="L116">    put(KEY_REFERENCE_NUMBER, referenceNumber)</span>
+<span class="nc" id="L117">    put(KEY_ORIGINAL_AMOUNT, originalAmount)</span>
+<span class="nc" id="L118">    put(KEY_ORIGINAL_CURRENCY, originalCurrency)</span>
+<span class="nc" id="L119">    put(KEY_EQUIVALENT_AMOUNT, equivalentAmount)</span>
+<span class="nc bnc" id="L120" title="All 6 branches missed.">    put(KEY_DEBT_ID, debtId?.takeIf { it &gt; 0L })</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">    if (withUuid) {</span>
+<span class="nc bnc" id="L122" title="All 4 branches missed.">        require(uuid.isNotBlank())</span>
+<span class="nc" id="L123">        put(KEY_UUID, uuid)</span>
+    }
+<span class="nc bnc" id="L125" title="All 2 branches missed.">    if (withCrStatus) {</span>
+<span class="nc" id="L126">        put(KEY_CR_STATUS, crStatus.name)</span>
+    }
+<span class="nc" id="L128">    put(KEY_TAGLIST, tagList.joinToString(&quot;$RECORD_SEPARATOR&quot;))</span>
+<span class="nc" id="L129">}</span>
+
+<span class="nc" id="L131">data class RepositoryTransaction(</span>
+<span class="nc" id="L132">    val data: Transaction,</span>
+<span class="nc" id="L133">    val transferPeer: Transaction? = null,</span>
+<span class="nc" id="L134">    val splitParts: List&lt;RepositoryTransaction&gt;? = null,</span>
+<span class="nc" id="L135">    val tags: List&lt;Tag&gt;? = null,</span>
+<span class="nc" id="L136">) {</span>
+<span class="nc" id="L137">    val id = data.id</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">    val isTransfer = transferPeer != null</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">    val isSplit = splitParts != null</span>
+
+    fun isDualSplitCandidate(): Long? {
+<span class="nc bnc" id="L142" title="All 8 branches missed.">        if (!isSplit || splitParts.isNullOrEmpty()) return null</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        val firstTransferAccountId = splitParts[0].data.transferAccountId ?: return null</span>
+<span class="nc bnc" id="L144" title="All 6 branches missed.">        if (splitParts.all { it.data.transferAccountId == firstTransferAccountId }) {</span>
+<span class="nc" id="L145">            return firstTransferAccountId</span>
+        }
+<span class="nc" id="L147">        return null</span>
+    }
+
+    fun toDualSplitSide2(targetAccountId: Long): RepositoryTransaction {
+<span class="nc" id="L151">        val parent2 = data.copy(</span>
+<span class="nc" id="L152">            id = 0L,</span>
+<span class="nc" id="L153">            accountId = targetAccountId,</span>
+<span class="nc" id="L154">            amount = -data.amount,</span>
+<span class="nc" id="L155">            uuid = data.uuid,</span>
+<span class="nc" id="L156">            transferAccountId = null</span>
+        )
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        val parts2 = splitParts?.map { part1 -&gt;</span>
+<span class="nc bnc" id="L159" title="All 4 branches missed.">            val part2Data = part1.transferPeer?.copy(parentId = 0L)</span>
+<span class="nc" id="L160">                ?: part1.data.copy(</span>
+<span class="nc" id="L161">                    id = 0L,</span>
+<span class="nc" id="L162">                    accountId = targetAccountId,</span>
+<span class="nc" id="L163">                    amount = -part1.data.amount,</span>
+<span class="nc" id="L164">                    transferAccountId = data.accountId,</span>
+<span class="nc" id="L165">                    parentId = 0L,</span>
+<span class="nc" id="L166">                    uuid = part1.data.uuid</span>
+                )
+<span class="nc" id="L168">            RepositoryTransaction(</span>
+<span class="nc" id="L169">                data = part2Data,</span>
+<span class="nc" id="L170">                transferPeer = part1.data</span>
+<span class="nc" id="L171">            )</span>
+        }
+<span class="nc" id="L173">        return RepositoryTransaction(parent2, splitParts = parts2)</span>
+    }
+}
+
+fun Repository.createTransaction(repositoryTransaction: RepositoryTransaction): RepositoryTransaction {
+<span class="nc" id="L178">    val dualSplitCandidate = repositoryTransaction.isDualSplitCandidate()</span>
+<span class="nc" id="L179">    return when {</span>
+
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        dualSplitCandidate != null -&gt; {</span>
+<span class="nc" id="L182">            val repoTrans2 = repositoryTransaction.toDualSplitSide2(dualSplitCandidate)</span>
+<span class="nc" id="L183">            createDualSplitTransaction(</span>
+<span class="nc" id="L184">                repositoryTransaction.data,</span>
+<span class="nc" id="L185">                repositoryTransaction.splitParts!!.map { it.data to it.transferPeer },</span>
+<span class="nc" id="L186">                repoTrans2.data,</span>
+<span class="nc" id="L187">                repoTrans2.splitParts!!.map { it.data to it.transferPeer }</span>
+<span class="nc" id="L188">            ).first</span>
+        }
+
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        repositoryTransaction.isTransfer -&gt; createTransfer(</span>
+<span class="nc" id="L192">            repositoryTransaction.data,</span>
+<span class="nc" id="L193">            repositoryTransaction.transferPeer!!</span>
+        )
+
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        repositoryTransaction.isSplit -&gt; createSplitTransaction(</span>
+<span class="nc" id="L197">            repositoryTransaction.data,</span>
+<span class="nc" id="L198">            repositoryTransaction.splitParts!!.map { it.data to it.transferPeer }</span>
+        )
+
+<span class="nc" id="L201">        else -&gt; createTransaction(repositoryTransaction.data)</span>
+    }
+}
+
+fun Repository.updateTransaction(repositoryTransaction: RepositoryTransaction): Array&lt;ContentProviderResult&gt; {
+<span class="nc" id="L206">    val targetAccountId = repositoryTransaction.isDualSplitCandidate()</span>
+<span class="nc" id="L207">    val existingSiblingParentId = findSiblingParentId(repositoryTransaction.id)</span>
+
+<span class="nc" id="L209">    return when {</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        targetAccountId != null -&gt; {</span>
+<span class="nc" id="L211">            val repoTrans2 = repositoryTransaction.toDualSplitSide2(targetAccountId).let {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                if (existingSiblingParentId != null) {</span>
+<span class="nc" id="L213">                    it.copy(data = it.data.copy(id = existingSiblingParentId))</span>
+<span class="nc" id="L214">                } else it</span>
+            }
+<span class="nc" id="L216">            updateDualSplitTransaction(repositoryTransaction, repoTrans2)</span>
+        }
+
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        existingSiblingParentId != null -&gt; {</span>
+            // Demotion: was dual split, now isn't.
+<span class="nc" id="L221">            val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+            // 1. Clear parent_id for parts of mirror parent, so they stay as independent transactions
+<span class="nc" id="L223">            operations.add(</span>
+<span class="nc" id="L224">                ContentProviderOperation.newUpdate(TRANSACTIONS_URI)</span>
+<span class="nc" id="L225">                    .withValue(KEY_PARENTID, null)</span>
+<span class="nc" id="L226">                    .withSelection(&quot;$KEY_PARENTID = ?&quot;, arrayOf(existingSiblingParentId.toString()))</span>
+<span class="nc" id="L227">                    .build()</span>
+            )
+            // 2. Delete sibling parent
+<span class="nc" id="L230">            operations.add(</span>
+<span class="nc" id="L231">                ContentProviderOperation.newDelete(</span>
+<span class="nc" id="L232">                    ContentUris.withAppendedId(TRANSACTIONS_URI, existingSiblingParentId)</span>
+<span class="nc" id="L233">                ).build()</span>
+            )
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            updateSplitTransaction(repositoryTransaction.copy(splitParts = repositoryTransaction.splitParts?.map {</span>
+<span class="nc bnc" id="L236" title="All 8 branches missed.">                it.copy(transferPeer = it.transferPeer?.copy(parentId = it.transferPeer.parentId.takeIf { it != existingSiblingParentId }))</span>
+<span class="nc" id="L237">            }), operations)</span>
+        }
+
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        repositoryTransaction.isTransfer -&gt; updateTransfer(</span>
+<span class="nc" id="L241">            repositoryTransaction.data,</span>
+<span class="nc" id="L242">            repositoryTransaction.transferPeer!!</span>
+        )
+
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        repositoryTransaction.isSplit -&gt; updateSplitTransaction(repositoryTransaction)</span>
+
+<span class="nc" id="L247">        else -&gt; updateTransaction(repositoryTransaction.data)</span>
+    }
+}
+
+fun Repository.createTransaction(transaction: Transaction): RepositoryTransaction {
+<span class="nc bnc" id="L252" title="All 4 branches missed.">    require(transaction.id == 0L) { &quot;Use updateTransaction for existing transactions&quot; }</span>
+<span class="nc bnc" id="L253" title="All 4 branches missed.">    require(transaction.transferAccountId == null) { &quot;Use createTransfer instead&quot; }</span>
+<span class="nc bnc" id="L254" title="All 6 branches missed.">    require(transaction.categoryId != SPLIT_CATID) { &quot;Use createSplitTransaction instead&quot; }</span>
+<span class="nc bnc" id="L255" title="All 8 branches missed.">    require((transaction.originalAmount != null) == (transaction.originalCurrency != null)) {</span>
+<span class="nc" id="L256">        &quot;originalAmount and originalCurrency must be set together&quot;</span>
+    }
+<span class="nc bnc" id="L258" title="All 2 branches missed.">    requireNotNull(transaction.uuid)</span>
+<span class="nc" id="L259">    val id = ContentUris.parseId(</span>
+<span class="nc" id="L260">        contentResolver.insert(</span>
+<span class="nc" id="L261">            TRANSACTIONS_URI,</span>
+<span class="nc" id="L262">            transaction.asContentValues()</span>
+        )!!
+    )
+<span class="nc" id="L265">    return RepositoryTransaction(</span>
+<span class="nc" id="L266">        transaction.copy(id = id)</span>
+    )
+}
+
+fun Repository.updateTransaction(
+    transaction: Transaction,
+<span class="nc" id="L272">) = contentResolver.applyBatch(</span>
+<span class="nc" id="L273">    AUTHORITY,</span>
+<span class="nc" id="L274">    ArrayList&lt;ContentProviderOperation&gt;().apply {</span>
+<span class="nc" id="L275">        add(</span>
+<span class="nc" id="L276">            ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L277">                ContentUris.withAppendedId(TRANSACTIONS_URI, transaction.id)</span>
+            )
+<span class="nc" id="L279">                .withValues(transaction.asContentValues(false))</span>
+<span class="nc" id="L280">                .build()</span>
+        )
+<span class="nc" id="L282">    }</span>
+<span class="nc" id="L283">)</span>
+
+fun Repository.createTransfer(
+    sourceTransaction: Transaction,
+    destinationTransaction: Transaction,
+): RepositoryTransaction {
+<span class="nc bnc" id="L289" title="All 4 branches missed.">    require(sourceTransaction.date == destinationTransaction.date)</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">    requireNotNull(sourceTransaction.uuid)</span>
+<span class="nc" id="L291">    requireNotNull(sourceTransaction.uuid == destinationTransaction.uuid)</span>
+<span class="nc" id="L292">    val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+
+<span class="nc" id="L294">    operations.addAll(</span>
+<span class="nc" id="L295">        getTransferOperations(</span>
+<span class="nc" id="L296">            sourceTransaction,</span>
+<span class="nc" id="L297">            destinationTransaction,</span>
+<span class="nc" id="L298">            0</span>
+        )
+    )
+
+<span class="nc" id="L302">    val results = contentResolver.applyBatch(AUTHORITY, operations)</span>
+
+<span class="nc" id="L304">    val first = ContentUris.parseId(results[0].uri!!)</span>
+<span class="nc" id="L305">    val second = ContentUris.parseId(results[1].uri!!)</span>
+
+<span class="nc" id="L307">    return RepositoryTransaction(</span>
+<span class="nc" id="L308">        sourceTransaction.copy(id = first, transferPeerId = second),</span>
+<span class="nc" id="L309">        destinationTransaction.copy(id = second, transferPeerId = first)</span>
+    )
+}
+
+fun Repository.updateTransfer(
+    sourceTransaction: Transaction,
+    destinationTransaction: Transaction,
+): Array&lt;ContentProviderResult&gt; {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">    require(</span>
+<span class="nc bnc" id="L318" title="All 4 branches missed.">        sourceTransaction.transferAccountId == destinationTransaction.accountId &amp;&amp;</span>
+<span class="nc bnc" id="L319" title="All 4 branches missed.">                sourceTransaction.accountId == destinationTransaction.transferAccountId</span>
+    )
+<span class="nc bnc" id="L321" title="All 2 branches missed.">    require(</span>
+<span class="nc bnc" id="L322" title="All 4 branches missed.">        sourceTransaction.transferPeerId == destinationTransaction.id &amp;&amp;</span>
+<span class="nc bnc" id="L323" title="All 4 branches missed.">                sourceTransaction.id == destinationTransaction.transferPeerId</span>
+    )
+
+<span class="nc" id="L326">    val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc" id="L327">    val destinationUri = ContentUris.withAppendedId(TRANSACTIONS_URI, destinationTransaction.id)</span>
+
+<span class="nc" id="L329">    val destinationOriginalStatus = destinationTransaction.status</span>
+<span class="nc" id="L330">    val tempStatusValues = ContentValues(1).apply {</span>
+<span class="nc" id="L331">        put(KEY_STATUS, -1)</span>
+<span class="nc" id="L332">    }</span>
+<span class="nc" id="L333">    operations.add(</span>
+        ContentProviderOperation
+<span class="nc" id="L335">            .newUpdate(destinationUri)</span>
+<span class="nc" id="L336">            .withValues(tempStatusValues)</span>
+<span class="nc" id="L337">            .build()</span>
+    )
+
+<span class="nc" id="L340">    operations.add(</span>
+<span class="nc" id="L341">        ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L342">            ContentUris.withAppendedId(</span>
+<span class="nc" id="L343">                TRANSACTIONS_URI,</span>
+<span class="nc" id="L344">                sourceTransaction.id</span>
+            )
+        )
+<span class="nc" id="L347">            .withValues(sourceTransaction.asContentValues(false))</span>
+<span class="nc" id="L348">            .build()</span>
+    )
+
+<span class="nc" id="L351">    operations.add(</span>
+<span class="nc" id="L352">        ContentProviderOperation.newUpdate(destinationUri)</span>
+<span class="nc" id="L353">            .withValues(</span>
+<span class="nc" id="L354">                destinationTransaction.asContentValues(</span>
+<span class="nc" id="L355">                    withUuid = false,</span>
+<span class="nc" id="L356">                    withCrStatus = false</span>
+                )
+            )
+<span class="nc" id="L359">            .build()</span>
+    )
+<span class="nc" id="L361">    operations.add(</span>
+        ContentProviderOperation
+<span class="nc" id="L363">            .newUpdate(destinationUri)</span>
+<span class="nc" id="L364">            .withValue(KEY_STATUS, destinationOriginalStatus)</span>
+<span class="nc" id="L365">            .build()</span>
+    )
+<span class="nc" id="L367">    return contentResolver.applyBatch(AUTHORITY, operations)</span>
+}
+
+@VisibleForTesting
+fun Repository.createSplitTransaction(
+    parentTransaction: Transaction,
+    splitTransactions: List&lt;Transaction&gt;,
+<span class="nc" id="L374">): RepositoryTransaction = createSplitTransaction(</span>
+<span class="nc" id="L375">    parentTransaction,</span>
+<span class="nc" id="L376">    splitTransactions.map { it to null }</span>
+<span class="nc" id="L377">)</span>
+
+@VisibleForTesting
+@JvmName(&quot;createSplitTransactionWithTransfers&quot;)
+fun Repository.createSplitTransaction(
+    parentTransaction: Transaction,
+    splitParts: List&lt;Pair&lt;Transaction, Transaction?&gt;&gt;,
+): RepositoryTransaction {
+    // --- Validation ---
+<span class="nc bnc" id="L386" title="All 2 branches missed.">    require(parentTransaction.isSplit) { &quot;Parent transaction must be a split.&quot; }</span>
+<span class="nc bnc" id="L387" title="All 6 branches missed.">    require(splitParts.sumOf { it.first.amount } == parentTransaction.amount) { &quot;Sum of splits must equal parent amount.&quot; }</span>
+<span class="nc bnc" id="L388" title="All 8 branches missed.">    require(splitParts.all { it.first.date == parentTransaction.date &amp;&amp; (it.second == null || it.second!!.date == parentTransaction.date) }) {</span>
+<span class="nc" id="L389">        &quot;Split transactions date must match parent date.&quot;</span>
+    }
+<span class="nc bnc" id="L391" title="All 4 branches missed.">    require(splitParts.all { it.first.accountId == parentTransaction.accountId }) { &quot;All splits must be in the same account.&quot; }</span>
+
+<span class="nc bnc" id="L393" title="All 2 branches missed.">    requireNotNull(parentTransaction.uuid)</span>
+<span class="nc bnc" id="L394" title="All 8 branches missed.">    require(splitParts.all { it.second == null || it.second?.uuid == it.first.uuid })</span>
+
+<span class="nc" id="L396">    val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+
+    // --- Operation 0: Insert the Parent Transaction ---
+<span class="nc" id="L399">    operations.add(</span>
+<span class="nc" id="L400">        ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L401">            .withValues(parentTransaction.asContentValues())</span>
+<span class="nc" id="L402">            .build()</span>
+    )
+<span class="nc" id="L404">    val parentBackRefIndex = 0</span>
+
+    // Prepare to build the complete return objects
+<span class="nc" id="L407">    val finalSplitParts = mutableListOf&lt;RepositoryTransaction&gt;()</span>
+
+    // --- Process each split part ---
+<span class="nc" id="L410">    splitParts.forEach { (splitPart, peer) -&gt;</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">        if (peer == null) {</span>
+            // --- This is a REGULAR split part ---
+<span class="nc bnc" id="L413" title="All 4 branches missed.">            require(splitPart.transferAccountId == null)</span>
+<span class="nc" id="L414">            operations.add(</span>
+<span class="nc" id="L415">                ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L416">                    .withValues(splitPart.asContentValues())</span>
+<span class="nc" id="L417">                    .withValueBackReference(KEY_PARENTID, parentBackRefIndex)</span>
+<span class="nc" id="L418">                    .build()</span>
+            )
+            // Prepare the final object, ID will be filled in later
+<span class="nc" id="L421">            finalSplitParts.add(RepositoryTransaction(splitPart))</span>
+        } else {
+            // --- This is a TRANSFER split part ---
+<span class="nc" id="L424">            operations.addAll(</span>
+<span class="nc" id="L425">                getTransferOperations(</span>
+<span class="nc" id="L426">                    splitPart,</span>
+<span class="nc" id="L427">                    peer,</span>
+<span class="nc" id="L428">                    offset = operations.size, // Pass the current absolute offset</span>
+<span class="nc" id="L429">                    parentBackRefIndex = parentBackRefIndex // Pass the parent's index</span>
+                )
+            )
+            // Prepare the final objects, IDs will be filled in later
+<span class="nc" id="L433">            finalSplitParts.add(</span>
+<span class="nc" id="L434">                RepositoryTransaction(</span>
+<span class="nc" id="L435">                    splitPart,</span>
+<span class="nc" id="L436">                    peer</span>
+                )
+            )
+        }
+<span class="nc" id="L440">    }</span>
+
+    // --- Atomically execute all operations ---
+<span class="nc" id="L443">    val results = contentResolver.applyBatch(AUTHORITY, operations)</span>
+
+    // --- Construct the final return object ---
+<span class="nc" id="L446">    val parentId = ContentUris.parseId(results[0].uri!!)</span>
+<span class="nc" id="L447">    val finalParent = parentTransaction.copy(id = parentId)</span>
+
+<span class="nc" id="L449">    var resultIndex = 1 // Start processing results after the parent</span>
+<span class="nc" id="L450">    val enrichedSplitParts = finalSplitParts.map { (splitPart, peer) -&gt;</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">        if (peer == null) {</span>
+            // Regular split part
+<span class="nc" id="L453">            val newId = ContentUris.parseId(results[resultIndex].uri!!)</span>
+<span class="nc" id="L454">            resultIndex++</span>
+<span class="nc" id="L455">            RepositoryTransaction(splitPart.copy(id = newId, parentId = parentId))</span>
+        } else {
+            // Transfer split part
+<span class="nc" id="L458">            val sourceId = ContentUris.parseId(results[resultIndex].uri!!)</span>
+<span class="nc" id="L459">            val peerId = ContentUris.parseId(results[resultIndex + 1].uri!!)</span>
+<span class="nc" id="L460">            resultIndex += 2</span>
+<span class="nc" id="L461">            RepositoryTransaction(</span>
+<span class="nc" id="L462">                splitPart.copy(</span>
+<span class="nc" id="L463">                    id = sourceId,</span>
+<span class="nc" id="L464">                    parentId = parentId,</span>
+<span class="nc" id="L465">                    transferPeerId = peerId</span>
+<span class="nc" id="L466">                ), peer.copy(</span>
+<span class="nc" id="L467">                    id = peerId,</span>
+<span class="nc" id="L468">                    transferPeerId = sourceId</span>
+                )
+            )
+<span class="nc" id="L471">        }</span>
+    }
+<span class="nc" id="L473">    return RepositoryTransaction(finalParent, splitParts = enrichedSplitParts)</span>
+}
+
+/**
+ * Atomically creates two split transactions that are linked by one or more transfer peers.
+ * Used for inter-depot transfers.
+ */
+fun Repository.createDualSplitTransaction(
+    parent1: Transaction,
+    parts1: List&lt;Pair&lt;Transaction, Transaction?&gt;&gt;,
+    parent2: Transaction,
+    parts2: List&lt;Pair&lt;Transaction, Transaction?&gt;&gt;,
+): Pair&lt;RepositoryTransaction, RepositoryTransaction&gt; {
+<span class="nc bnc" id="L486" title="All 6 branches missed.">    require(parent1.isSplit &amp;&amp; parent2.isSplit)</span>
+<span class="nc" id="L487">    val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+
+    // Op 0: Parent 1
+<span class="nc" id="L490">    operations.add(</span>
+<span class="nc" id="L491">        ContentProviderOperation.newInsert(TRANSACTIONS_URI).withValues(parent1.asContentValues())</span>
+<span class="nc" id="L492">            .build()</span>
+    )
+<span class="nc" id="L494">    val p1Idx = 0</span>
+
+    // Op 1: Parent 2
+<span class="nc" id="L497">    operations.add(</span>
+<span class="nc" id="L498">        ContentProviderOperation.newInsert(TRANSACTIONS_URI).withValues(parent2.asContentValues())</span>
+<span class="nc" id="L499">            .build()</span>
+    )
+<span class="nc" id="L501">    val p2Idx = 1</span>
+
+<span class="nc" id="L503">    val processedUuids = mutableSetOf&lt;String&gt;()</span>
+<span class="nc" id="L504">    val partsInfo1 = mutableListOf&lt;Triple&lt;String, Int, Int?&gt;&gt;() // UUID, Op index, Peer Op index</span>
+<span class="nc" id="L505">    val partsInfo2 = mutableListOf&lt;Triple&lt;String, Int, Int?&gt;&gt;()</span>
+
+<span class="nc" id="L507">    parts1.forEach { (part, externalPeer) -&gt;</span>
+<span class="nc bnc" id="L508" title="All 4 branches missed.">        val otherSide = parts2.find { it.first.uuid == part.uuid }</span>
+<span class="nc" id="L509">        val offset = operations.size</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">        if (otherSide != null) {</span>
+            // Hub-to-Hub link
+<span class="nc" id="L512">            operations.addAll(</span>
+<span class="nc" id="L513">                getTransferOperations(</span>
+<span class="nc" id="L514">                    source = part,</span>
+<span class="nc" id="L515">                    destination = otherSide.first,</span>
+<span class="nc" id="L516">                    offset = offset,</span>
+<span class="nc" id="L517">                    parentBackRefIndex = p1Idx,</span>
+<span class="nc" id="L518">                    peerParentBackRefIndex = p2Idx</span>
+                )
+            )
+<span class="nc" id="L521">            partsInfo1.add(Triple(part.uuid, offset, offset + 1))</span>
+<span class="nc" id="L522">            partsInfo2.add(Triple(part.uuid, offset + 1, offset))</span>
+<span class="nc" id="L523">            processedUuids.add(part.uuid)</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        } else if (externalPeer != null) {</span>
+            // Internal link (Spoke)
+<span class="nc" id="L526">            operations.addAll(</span>
+<span class="nc" id="L527">                getTransferOperations(</span>
+<span class="nc" id="L528">                    source = part,</span>
+<span class="nc" id="L529">                    destination = externalPeer,</span>
+<span class="nc" id="L530">                    offset = offset,</span>
+<span class="nc" id="L531">                    parentBackRefIndex = p1Idx</span>
+                )
+            )
+<span class="nc" id="L534">            partsInfo1.add(Triple(part.uuid, offset, offset + 1))</span>
+        } else {
+            // Regular part
+<span class="nc" id="L537">            operations.add(</span>
+<span class="nc" id="L538">                ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L539">                    .withValues(part.asContentValues())</span>
+<span class="nc" id="L540">                    .withValueBackReference(KEY_PARENTID, p1Idx)</span>
+<span class="nc" id="L541">                    .build()</span>
+            )
+<span class="nc" id="L543">            partsInfo1.add(Triple(part.uuid, offset, null))</span>
+        }
+<span class="nc" id="L545">    }</span>
+
+<span class="nc" id="L547">    parts2.forEach { (part, externalPeer) -&gt;</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (processedUuids.contains(part.uuid)) return@forEach</span>
+
+<span class="nc" id="L550">        val offset = operations.size</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">        if (externalPeer != null) {</span>
+            // Internal link (Spoke)
+<span class="nc" id="L553">            operations.addAll(</span>
+<span class="nc" id="L554">                getTransferOperations(</span>
+<span class="nc" id="L555">                    source = part,</span>
+<span class="nc" id="L556">                    destination = externalPeer,</span>
+<span class="nc" id="L557">                    offset = offset,</span>
+<span class="nc" id="L558">                    parentBackRefIndex = p2Idx</span>
+                )
+            )
+<span class="nc" id="L561">            partsInfo2.add(Triple(part.uuid, offset, offset + 1))</span>
+        } else {
+            // Regular part
+<span class="nc" id="L564">            operations.add(</span>
+<span class="nc" id="L565">                ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L566">                    .withValues(part.asContentValues())</span>
+<span class="nc" id="L567">                    .withValueBackReference(KEY_PARENTID, p2Idx)</span>
+<span class="nc" id="L568">                    .build()</span>
+            )
+<span class="nc" id="L570">            partsInfo2.add(Triple(part.uuid, offset, null))</span>
+        }
+<span class="nc" id="L572">    }</span>
+
+<span class="nc" id="L574">    val results = contentResolver.applyBatch(AUTHORITY, operations)</span>
+
+<span class="nc" id="L576">    val p1Id = ContentUris.parseId(results[p1Idx].uri!!)</span>
+<span class="nc" id="L577">    val p2Id = ContentUris.parseId(results[p2Idx].uri!!)</span>
+
+<span class="nc" id="L579">    val enrichedParts1 = partsInfo1.map { (uuid, opIdx, peerOpIdx) -&gt;</span>
+<span class="nc" id="L580">        val id = ContentUris.parseId(results[opIdx].uri!!)</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        val peer = peerOpIdx?.let {</span>
+<span class="nc" id="L582">            val peerId = ContentUris.parseId(results[it].uri!!)</span>
+<span class="nc bnc" id="L583" title="All 4 branches missed.">            val originalPair = parts1.find { it.first.uuid == uuid }</span>
+<span class="nc bnc" id="L584" title="All 8 branches missed.">            val peerBase = originalPair?.second ?: parts2.find { it.first.uuid == uuid }!!.first</span>
+<span class="nc" id="L585">            peerBase.copy(id = peerId, transferPeerId = id)</span>
+        }
+<span class="nc" id="L587">        RepositoryTransaction(</span>
+<span class="nc bnc" id="L588" title="All 4 branches missed.">            parts1.find { it.first.uuid == uuid }!!.first.copy(</span>
+<span class="nc" id="L589">                id = id,</span>
+<span class="nc" id="L590">                parentId = p1Id,</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">                transferPeerId = peer?.id</span>
+<span class="nc" id="L592">            ), peer</span>
+<span class="nc" id="L593">        )</span>
+    }
+
+<span class="nc" id="L596">    val enrichedParts2 = partsInfo2.map { (uuid, opIdx, peerOpIdx) -&gt;</span>
+<span class="nc" id="L597">        val id = ContentUris.parseId(results[opIdx].uri!!)</span>
+<span class="nc bnc" id="L598" title="All 2 branches missed.">        val peer = peerOpIdx?.let {</span>
+<span class="nc" id="L599">            val peerId = ContentUris.parseId(results[it].uri!!)</span>
+<span class="nc bnc" id="L600" title="All 4 branches missed.">            val originalPair = parts2.find { it.first.uuid == uuid }</span>
+<span class="nc bnc" id="L601" title="All 8 branches missed.">            val peerBase = originalPair?.second ?: parts1.find { it.first.uuid == uuid }!!.first</span>
+<span class="nc" id="L602">            peerBase.copy(id = peerId, transferPeerId = id)</span>
+        }
+<span class="nc" id="L604">        RepositoryTransaction(</span>
+<span class="nc bnc" id="L605" title="All 4 branches missed.">            parts2.find { it.first.uuid == uuid }!!.first.copy(</span>
+<span class="nc" id="L606">                id = id,</span>
+<span class="nc" id="L607">                parentId = p2Id,</span>
+<span class="nc bnc" id="L608" title="All 2 branches missed.">                transferPeerId = peer?.id</span>
+<span class="nc" id="L609">            ), peer</span>
+<span class="nc" id="L610">        )</span>
+    }
+
+<span class="nc" id="L613">    return RepositoryTransaction(parent1.copy(id = p1Id), splitParts = enrichedParts1) to</span>
+<span class="nc" id="L614">            RepositoryTransaction(parent2.copy(id = p2Id), splitParts = enrichedParts2)</span>
+}
+
+fun Repository.updateDualSplitTransaction(
+    repoTrans1: RepositoryTransaction,
+    repoTrans2: RepositoryTransaction,
+): Array&lt;ContentProviderResult&gt; {
+<span class="nc" id="L621">    val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc" id="L622">    val processedPeerIds = mutableSetOf&lt;Long&gt;()</span>
+<span class="nc" id="L623">    val peerBackRefs = mutableMapOf&lt;String, Int&gt;()</span>
+
+    fun addOps(repoTrans: RepositoryTransaction) {
+<span class="nc" id="L626">        val parent = repoTrans.data</span>
+<span class="nc" id="L627">        val splitParts = repoTrans.splitParts!!</span>
+
+<span class="nc" id="L629">        val parentBackRefIdx: Int?</span>
+<span class="nc bnc" id="L630" title="All 2 branches missed.">        if (parent.id != 0L) {</span>
+<span class="nc" id="L631">            parentBackRefIdx = null</span>
+            // Handle Deletions (similar to updateSplitTransaction)
+<span class="nc bnc" id="L633" title="All 2 branches missed.">            val keepIds = splitParts.mapNotNull { if (it.id != 0L) it.id else null }</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">            val placeholders = List(keepIds.size) { &quot;?&quot; }.joinToString(&quot;,&quot;)</span>
+<span class="nc" id="L635">            val deleteSubquery =</span>
+<span class="nc" id="L636">                &quot;SELECT $KEY_ROWID FROM $TABLE_TRANSACTIONS WHERE $KEY_PARENTID = ? AND $KEY_ROWID NOT IN ($placeholders)&quot;</span>
+<span class="nc" id="L637">            val selection =</span>
+<span class="nc" id="L638">                &quot;$KEY_ROWID IN ($deleteSubquery) OR $KEY_TRANSFER_PEER IN ($deleteSubquery)&quot;</span>
+<span class="nc" id="L639">            val baseArgs = arrayOf(parent.id.toString())</span>
+<span class="nc" id="L640">            val keepArgs = keepIds.map { it.toString() }.toTypedArray()</span>
+<span class="nc" id="L641">            operations.add(</span>
+<span class="nc" id="L642">                ContentProviderOperation.newDelete(TRANSACTIONS_URI)</span>
+<span class="nc" id="L643">                    .withSelection(selection, baseArgs + keepArgs + baseArgs + keepArgs).build()</span>
+            )
+
+            // Update Parent
+<span class="nc" id="L647">            operations.add(</span>
+<span class="nc" id="L648">                ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L649">                    ContentUris.withAppendedId(</span>
+<span class="nc" id="L650">                        TRANSACTIONS_URI,</span>
+<span class="nc" id="L651">                        parent.id</span>
+                    )
+                )
+<span class="nc" id="L654">                    .withValues(parent.asContentValues(false)).build()</span>
+            )
+        } else {
+<span class="nc" id="L657">            parentBackRefIdx = operations.size</span>
+<span class="nc" id="L658">            operations.add(</span>
+<span class="nc" id="L659">                ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L660">                    .withValues(parent.asContentValues()).build()</span>
+            )
+        }
+
+<span class="nc bnc" id="L664" title="All 2 branches missed.">        for (transaction in splitParts) {</span>
+<span class="nc bnc" id="L665" title="All 2 branches missed.">            if (transaction.id == 0L) {</span>
+<span class="nc" id="L666">                val values = transaction.data.asContentValues()</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                if (parentBackRefIdx == null) {</span>
+<span class="nc" id="L668">                    values.put(KEY_PARENTID, parent.id)</span>
+                }
+
+<span class="nc" id="L671">                val builder = ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L672">                    .withValues(values)</span>
+
+<span class="nc bnc" id="L674" title="All 2 branches missed.">                if (parentBackRefIdx != null) {</span>
+<span class="nc" id="L675">                    builder.withValueBackReference(KEY_PARENTID, parentBackRefIdx)</span>
+                }
+
+<span class="nc" id="L678">                val uuid = transaction.data.uuid</span>
+<span class="nc bnc" id="L679" title="All 2 branches missed.">                if (peerBackRefs.containsKey(uuid)) {</span>
+<span class="nc" id="L680">                    builder.withValueBackReference(KEY_TRANSFER_PEER, peerBackRefs[uuid]!!)</span>
+<span class="nc bnc" id="L681" title="All 6 branches missed.">                } else if (transaction.transferPeer?.id != null &amp;&amp; transaction.transferPeer.id != 0L) {</span>
+<span class="nc" id="L682">                    builder.withValue(KEY_TRANSFER_PEER, transaction.transferPeer.id)</span>
+                }
+
+<span class="nc" id="L685">                peerBackRefs[uuid] = operations.size</span>
+<span class="nc" id="L686">                operations.add(builder.build())</span>
+            } else {
+<span class="nc" id="L688">                val values = transaction.data.asContentValues(false)</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                if (parentBackRefIdx == null) {</span>
+<span class="nc" id="L690">                    values.put(KEY_PARENTID, parent.id)</span>
+                }
+<span class="nc" id="L692">                val builder = ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L693">                    ContentUris.withAppendedId(TRANSACTIONS_URI, transaction.id)</span>
+                )
+<span class="nc" id="L695">                    .withValues(values)</span>
+<span class="nc bnc" id="L696" title="All 2 branches missed.">                if (parentBackRefIdx != null) {</span>
+<span class="nc" id="L697">                    builder.withValueBackReference(KEY_PARENTID, parentBackRefIdx)</span>
+                }
+<span class="nc" id="L699">                operations.add(builder.build())</span>
+
+<span class="nc bnc" id="L701" title="All 2 branches missed.">                transaction.transferPeer?.let { peer -&gt;</span>
+<span class="nc bnc" id="L702" title="All 4 branches missed.">                    if (peer.id != 0L &amp;&amp; !processedPeerIds.contains(peer.id)) {</span>
+<span class="nc" id="L703">                        operations.add(</span>
+<span class="nc" id="L704">                            ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L705">                                ContentUris.withAppendedId(TRANSACTIONS_URI, peer.id)</span>
+                            )
+<span class="nc" id="L707">                                .withValues(peer.asContentValues(false)).build()</span>
+                        )
+<span class="nc" id="L709">                        processedPeerIds.add(peer.id)</span>
+                    }
+<span class="nc" id="L711">                }</span>
+            }
+        }
+<span class="nc" id="L714">    }</span>
+
+<span class="nc" id="L716">    addOps(repoTrans1)</span>
+<span class="nc" id="L717">    addOps(repoTrans2)</span>
+
+<span class="nc" id="L719">    return contentResolver.applyBatch(AUTHORITY, operations)</span>
+}
+
+<span class="nc" id="L722">fun Repository.updateSplitTransaction(</span>
+    repositoryTransaction: RepositoryTransaction,
+<span class="nc" id="L724">    operationsIn: ArrayList&lt;ContentProviderOperation&gt;? = null,</span>
+): Array&lt;ContentProviderResult&gt; {
+    // --- Validation ---
+<span class="nc" id="L727">    val parentTransaction = repositoryTransaction.data</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">    require(parentTransaction.isSplit) { &quot;Parent transaction must be a split.&quot; }</span>
+<span class="nc" id="L729">    val splitParts = repositoryTransaction.splitParts!!</span>
+<span class="nc bnc" id="L730" title="All 6 branches missed.">    require(splitParts.sumOf { it.data.amount } == parentTransaction.amount) { &quot;Sum of splits must equal parent amount.&quot; }</span>
+<span class="nc bnc" id="L731" title="All 4 branches missed.">    require(splitParts.all { it.data.date == parentTransaction.date }) {</span>
+<span class="nc" id="L732">        &quot;Split transactions date must match parent date.&quot;</span>
+    }
+<span class="nc bnc" id="L734" title="All 4 branches missed.">    require(splitParts.all { it.data.accountId == parentTransaction.accountId }) { &quot;All splits must be in the same account.&quot; }</span>
+
+<span class="nc bnc" id="L736" title="All 2 branches missed.">    val operations = operationsIn ?: ArrayList()</span>
+
+    // --- 1. Handle Deletions ---
+    // Get IDs of parts that have a non-zero ID (i.e., they already exist in the DB).
+<span class="nc bnc" id="L740" title="All 2 branches missed.">    val keepIds = splitParts.mapNotNull { if (it.id != 0L) it.id else null }</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">    val placeholders = List(keepIds.size) { &quot;?&quot; }.joinToString(&quot;,&quot;)</span>
+
+<span class="nc" id="L743">    val deleteSubquery =</span>
+<span class="nc" id="L744">        &quot;SELECT $KEY_ROWID FROM $TABLE_TRANSACTIONS WHERE $KEY_PARENTID = ? AND $KEY_ROWID NOT IN ($placeholders)&quot;</span>
+
+<span class="nc" id="L746">    val selection = &quot;$KEY_ROWID IN ($deleteSubquery) OR $KEY_TRANSFER_PEER IN ($deleteSubquery)&quot;</span>
+
+    // The selection arguments need to be duplicated because the subquery appears twice.
+<span class="nc" id="L749">    val baseArgs = arrayOf(parentTransaction.id.toString())</span>
+<span class="nc" id="L750">    val keepArgs = keepIds.map { it.toString() }.toTypedArray()</span>
+<span class="nc" id="L751">    val selectionArgs = baseArgs + keepArgs + baseArgs + keepArgs</span>
+
+<span class="nc" id="L753">    operations.add(</span>
+<span class="nc" id="L754">        ContentProviderOperation.newDelete(TRANSACTIONS_URI)</span>
+<span class="nc" id="L755">            .withSelection(selection, selectionArgs)</span>
+<span class="nc" id="L756">            .build()</span>
+    )
+
+    // --- 2. Update Parent Transaction ---
+<span class="nc" id="L760">    operations.add(</span>
+<span class="nc" id="L761">        ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L762">            ContentUris.withAppendedId(TRANSACTIONS_URI, parentTransaction.id)</span>
+        )
+<span class="nc" id="L764">            .withValues(parentTransaction.asContentValues(false))</span>
+<span class="nc" id="L765">            .build()</span>
+    )
+
+<span class="nc bnc" id="L768" title="All 2 branches missed.">    for (transaction in splitParts) {</span>
+<span class="nc bnc" id="L769" title="All 2 branches missed.">        if (transaction.id == 0L) {</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">            if (transaction.isTransfer) {</span>
+<span class="nc" id="L771">                operations.addAll(</span>
+<span class="nc" id="L772">                    getTransferOperations(</span>
+<span class="nc" id="L773">                        source = transaction.data,</span>
+<span class="nc" id="L774">                        destination = transaction.transferPeer!!,</span>
+<span class="nc" id="L775">                        offset = operations.size,</span>
+<span class="nc" id="L776">                        parentId = parentTransaction.id</span>
+                    )
+                )
+            } else {
+<span class="nc" id="L780">                operations.add(</span>
+<span class="nc" id="L781">                    ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L782">                        .withValues(</span>
+<span class="nc" id="L783">                            transaction.data.asContentValues()</span>
+<span class="nc" id="L784">                                .apply {</span>
+<span class="nc" id="L785">                                    put(KEY_PARENTID, parentTransaction.id)</span>
+<span class="nc" id="L786">                                })</span>
+<span class="nc" id="L787">                        .build()</span>
+                )
+            }
+        } else {
+<span class="nc" id="L791">            val values = transaction.data.asContentValues(false)</span>
+<span class="nc" id="L792">            values.put(KEY_PARENTID, parentTransaction.id)</span>
+<span class="nc" id="L793">            operations.add(</span>
+<span class="nc" id="L794">                ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L795">                    ContentUris.withAppendedId(TRANSACTIONS_URI, transaction.id)</span>
+                )
+<span class="nc" id="L797">                    .withValues(values).build()</span>
+            )
+<span class="nc bnc" id="L799" title="All 2 branches missed.">            transaction.transferPeer?.let {</span>
+<span class="nc" id="L800">                operations.add(</span>
+<span class="nc" id="L801">                    ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L802">                        ContentUris.withAppendedId(TRANSACTIONS_URI, it.id)</span>
+                    )
+<span class="nc" id="L804">                        .withValues(it.asContentValues(false)).build()</span>
+<span class="nc" id="L805">                )</span>
+            }
+        }
+    }
+
+<span class="nc" id="L810">    return contentResolver.applyBatch(AUTHORITY, operations)</span>
+}
+
+<span class="nc" id="L813">suspend fun Repository.loadTransactions(</span>
+    accountId: Long,
+<span class="nc" id="L815">    limit: Int? = 200,</span>
+<span class="nc" id="L816">    withTags: Boolean = false,</span>
+): List&lt;Transaction&gt; {
+<span class="nc" id="L818">    val filter = FilterPersistence(</span>
+<span class="nc" id="L819">        dataStore = dataStore,</span>
+<span class="nc" id="L820">        prefKey = MyExpensesViewModel.prefNameForCriteria(accountId),</span>
+<span class="nc bnc" id="L821" title="All 2 branches missed.">    ).getValue()?.let {</span>
+<span class="nc" id="L822">        it.getSelectionForParents() to it.getSelectionArgs(false)</span>
+    }
+    //noinspection Recycle
+<span class="nc" id="L825">    return contentResolver.query(</span>
+<span class="nc" id="L826">        uriBuilderForTransactionList(accountId = accountId)</span>
+<span class="nc" id="L827">            .build()</span>
+<span class="nc bnc" id="L828" title="All 2 branches missed.">            .let { if (limit != null) it.withLimit(limit) else it },</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">        Transaction.projection.let { if (withTags) it + KEY_TAGLIST else it },</span>
+<span class="nc bnc" id="L830" title="All 12 branches missed.">        &quot;$KEY_PARENTID IS NULL&quot; + (filter?.first?.takeIf { it != &quot;&quot; }?.let { &quot; AND $it&quot; } ?: &quot;&quot;),</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">        filter?.second,</span>
+<span class="nc" id="L832">        null</span>
+<span class="nc" id="L833">    )!!.useAndMapToList { cursor -&gt; Transaction.fromCursor(cursor) }</span>
+}
+
+<span class="nc" id="L836">fun Repository.loadTransaction(</span>
+    transactionId: Long,
+<span class="nc" id="L838">    withTransfer: Boolean = true,</span>
+<span class="nc" id="L839">    withTags: Boolean = false,</span>
+<span class="nc" id="L840">    extended: Boolean = false,</span>
+<span class="nc" id="L841">): RepositoryTransaction = contentResolver.query(</span>
+<span class="nc bnc" id="L842" title="All 2 branches missed.">    ContentUris.withAppendedId(if (extended) EXTENDED_URI else TRANSACTIONS_URI, transactionId),</span>
+<span class="nc bnc" id="L843" title="All 2 branches missed.">    if (extended) Transaction.projectionExtended else Transaction.projection,</span>
+<span class="nc" id="L844">    null,</span>
+<span class="nc" id="L845">    null,</span>
+<span class="nc" id="L846">    null</span>
+<span class="nc" id="L847">)!!.use { cursor -&gt;</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">    if (cursor.moveToFirst()) Transaction.fromCursor(cursor).let {</span>
+<span class="nc" id="L849">        RepositoryTransaction(</span>
+<span class="nc" id="L850">            data = it,</span>
+<span class="nc bnc" id="L851" title="All 4 branches missed.">            transferPeer = if (withTransfer &amp;&amp; it.transferPeerId != null) loadTransaction(</span>
+<span class="nc" id="L852">                it.transferPeerId,</span>
+<span class="nc" id="L853">                false</span>
+<span class="nc" id="L854">            ).data else null,</span>
+<span class="nc bnc" id="L855" title="All 2 branches missed.">            splitParts = if (it.isSplit) loadSplitParts(it.id).map { split -&gt;</span>
+<span class="nc" id="L856">                RepositoryTransaction(</span>
+<span class="nc" id="L857">                    split,</span>
+<span class="nc bnc" id="L858" title="All 4 branches missed.">                    transferPeer = if (withTransfer &amp;&amp; split.transferPeerId != null) loadTransaction(</span>
+<span class="nc" id="L859">                        split.transferPeerId,</span>
+<span class="nc" id="L860">                        false</span>
+<span class="nc" id="L861">                    ).data else null,</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">                    tags = if (withTags) loadTagsForTransaction(split.id) else null</span>
+<span class="nc" id="L863">                )</span>
+<span class="nc" id="L864">            } else null,</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">            tags = if (withTags) loadTagsForTransaction(transactionId) else null</span>
+<span class="nc" id="L866">        )</span>
+    } else
+<span class="nc" id="L868">        throw IllegalArgumentException(&quot;Transaction not found&quot;)</span>
+<span class="nc" id="L869">}</span>
+
+fun Repository.loadSplitParts(transactionId: Long): List&lt;Transaction&gt; =
+<span class="nc" id="L872">    contentResolver.query(</span>
+<span class="nc" id="L873">        TRANSACTIONS_URI.buildUpon().appendQueryParameter(</span>
+<span class="nc" id="L874">            KEY_PARENTID, transactionId.toString()</span>
+<span class="nc" id="L875">        ).build(), Transaction.projection, null, null, null</span>
+<span class="nc" id="L876">    )!!.useAndMapToList {</span>
+<span class="nc" id="L877">        Transaction.fromCursor(it)</span>
+<span class="nc" id="L878">    }</span>
+
+fun Repository.findSiblingParentId(parentId: Long): Long? {
+<span class="nc" id="L881">    val parts = loadSplitParts(parentId)</span>
+    // Find a part that is a transfer to another split transaction
+<span class="nc bnc" id="L883" title="All 2 branches missed.">    for (part in parts) {</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">        if (part.transferPeerId != null) {</span>
+<span class="nc" id="L885">            val peer = loadTransaction(part.transferPeerId).data</span>
+<span class="nc bnc" id="L886" title="All 2 branches missed.">            if (peer.parentId != null) {</span>
+<span class="nc" id="L887">                return peer.parentId</span>
+            }
+        }
+    }
+<span class="nc" id="L891">    return null</span>
+}
+
+@VisibleForTesting
+<span class="nc" id="L895">fun Repository.transactionExists(transactionId: Long) = contentResolver.query(</span>
+<span class="nc" id="L896">    ContentUris.withAppendedId(TRANSACTIONS_URI, transactionId), null, null, null, null</span>
+<span class="nc" id="L897">)!!.use {</span>
+<span class="nc bnc" id="L898" title="All 2 branches missed.">    it.count == 1</span>
+<span class="nc" id="L899">}</span>
+
+<span class="nc" id="L901">fun Repository.getTransactionSum(account: DataBaseAccount, filter: Criterion? = null) =</span>
+<span class="nc" id="L902">    getTransactionSum(account.id, account.currency, filter)</span>
+
+<span class="nc" id="L904">fun Repository.getTransactionSum(</span>
+    id: Long,
+<span class="nc" id="L906">    currency: String? = null,</span>
+<span class="nc" id="L907">    filter: Criterion? = null,</span>
+): Long {
+<span class="nc" id="L909">    var selection =</span>
+<span class="nc" id="L910">        &quot;$KEY_ACCOUNTID = ? AND $WHERE_NOT_SPLIT_PART AND $WHERE_NOT_VOID&quot;</span>
+<span class="nc" id="L911">    var selectionArgs: Array&lt;String&gt;? = arrayOf(id.toString())</span>
+<span class="nc bnc" id="L912" title="All 2 branches missed.">    if (filter != null) {</span>
+<span class="nc" id="L913">        selection += &quot; AND &quot; + filter.getSelectionForParents()</span>
+<span class="nc" id="L914">        selectionArgs = joinArrays(selectionArgs, filter.getSelectionArgs(false))</span>
+    }
+<span class="nc" id="L916">    return contentResolver.query(</span>
+<span class="nc" id="L917">        uriBuilderForTransactionList(id, currency, extended = false).build(),</span>
+<span class="nc" id="L918">        arrayOf(&quot;${DbUtils.aggregateFunction(prefHandler)}($KEY_AMOUNT)&quot;),</span>
+<span class="nc" id="L919">        selection,</span>
+<span class="nc" id="L920">        selectionArgs,</span>
+<span class="nc" id="L921">        null</span>
+<span class="nc" id="L922">    )!!.use {</span>
+<span class="nc" id="L923">        it.moveToFirst()</span>
+<span class="nc" id="L924">        it.getLong(0)</span>
+    }
+}
+
+
+fun Repository.archive(
+    accountId: Long,
+    range: Pair&lt;LocalDate, LocalDate&gt;,
+<span class="nc" id="L932">) = contentResolver.call(TransactionProvider.DUAL_URI, METHOD_ARCHIVE, null, Bundle().apply {</span>
+<span class="nc" id="L933">    putLong(KEY_ACCOUNTID, accountId)</span>
+<span class="nc" id="L934">    putSerializable(KEY_START, range.first)</span>
+<span class="nc" id="L935">    putSerializable(KEY_END, range.second)</span>
+<span class="nc" id="L936">})!!.getLong(KEY_TRANSACTIONID)</span>
+
+fun Repository.unarchive(id: Long) {
+<span class="nc" id="L939">    val ops = ArrayList&lt;ContentProviderOperation&gt;().apply {</span>
+<span class="nc" id="L940">        add(</span>
+<span class="nc" id="L941">            ContentProviderOperation.newAssertQuery(</span>
+<span class="nc" id="L942">                ContentUris.withAppendedId(TRANSACTIONS_URI, id)</span>
+            )
+<span class="nc" id="L944">                .withSelection(&quot;$KEY_STATUS = $STATUS_ARCHIVE&quot;, null)</span>
+<span class="nc" id="L945">                .withExpectedCount(1).build()</span>
+        )
+<span class="nc" id="L947">        add(</span>
+<span class="nc" id="L948">            ContentProviderOperation.newUpdate(</span>
+<span class="nc" id="L949">                TRANSACTIONS_URI.buildUpon().appendPath(URI_SEGMENT_UNARCHIVE).build()</span>
+            )
+<span class="nc" id="L951">                .withValue(KEY_ROWID, id)</span>
+<span class="nc" id="L952">                .build()</span>
+        )
+<span class="nc" id="L954">    }</span>
+<span class="nc" id="L955">    val result = contentResolver.applyBatch(AUTHORITY, ops)</span>
+<span class="nc" id="L956">    val affectedRows = result[1].count</span>
+<span class="nc bnc" id="L957" title="All 4 branches missed.">    if (affectedRows != 1) {</span>
+<span class="nc" id="L958">        CrashHandler.report(Exception(&quot;Unarchive returned $affectedRows affected rows&quot;))</span>
+    }
+<span class="nc" id="L960">}</span>
+
+fun Repository.canBeArchived(
+    accountId: Long,
+    range: Pair&lt;LocalDate, LocalDate&gt;,
+<span class="nc" id="L965">) = BundleCompat.getParcelable(</span>
+<span class="nc" id="L966">    contentResolver.call(</span>
+<span class="nc" id="L967">        TransactionProvider.DUAL_URI,</span>
+<span class="nc" id="L968">        METHOD_CAN_BE_ARCHIVED,</span>
+<span class="nc" id="L969">        null,</span>
+<span class="nc" id="L970">        Bundle().apply {</span>
+<span class="nc" id="L971">            putLong(KEY_ACCOUNTID, accountId)</span>
+<span class="nc" id="L972">            putSerializable(KEY_START, range.first)</span>
+<span class="nc" id="L973">            putSerializable(KEY_END, range.second)</span>
+<span class="nc" id="L974">        })!!, KEY_RESULT, ArchiveInfo::class.java</span>
+<span class="nc" id="L975">)!!</span>
+
+fun Repository.countTransactionsPerAccount(
+    accountId: Long,
+<span class="nc" id="L979">) = count(</span>
+<span class="nc" id="L980">    TRANSACTIONS_URI,</span>
+<span class="nc" id="L981">    &quot;$KEY_ACCOUNTID = ? AND $KEY_PARENTID is null&quot;,</span>
+<span class="nc" id="L982">    arrayOf(accountId.toString())</span>
+<span class="nc" id="L983">)</span>
+
+<span class="nc" id="L985">fun ContentResolver.findByAccountAndUuid(accountId: Long, uuid: String) = findBySelection(</span>
+<span class="nc" id="L986">    &quot;$KEY_UUID = ? AND $KEY_ACCOUNTID = ?&quot;,</span>
+<span class="nc" id="L987">    arrayOf(uuid, accountId.toString()),</span>
+<span class="nc" id="L988">    KEY_ROWID</span>
+<span class="nc" id="L989">)</span>
+
+<span class="nc" id="L991">fun Repository.getPayeeForTransaction(id: Long) = contentResolver.findBySelection(</span>
+<span class="nc" id="L992">    &quot;$KEY_ROWID = ?&quot;,</span>
+<span class="nc" id="L993">    arrayOf(id.toString()),</span>
+<span class="nc" id="L994">    KEY_PAYEEID</span>
+<span class="nc" id="L995">)</span>
+
+private fun ContentResolver.findBySelection(
+    selection: String,
+    selectionArgs: Array&lt;String&gt;,
+    column: String,
+) =
+<span class="nc bnc" id="L1002" title="All 2 branches missed.">    query(</span>
+<span class="nc" id="L1003">        TRANSACTIONS_URI</span>
+<span class="nc" id="L1004">            .buildUpon()</span>
+<span class="nc" id="L1005">            .appendQueryParameter(QUERY_PARAMETER_INCLUDE_ALL, &quot;1&quot;)</span>
+<span class="nc" id="L1006">            .build(),</span>
+<span class="nc" id="L1007">        arrayOf(column),</span>
+<span class="nc" id="L1008">        selection,</span>
+<span class="nc" id="L1009">        selectionArgs,</span>
+<span class="nc" id="L1010">        null</span>
+<span class="nc bnc" id="L1011" title="All 2 branches missed.">    )?.use {</span>
+<span class="nc bnc" id="L1012" title="All 2 branches missed.">        if (it.moveToFirst()) it.getLong(0) else null</span>
+<span class="nc" id="L1013">    } ?: -1</span>
+
+fun Repository.calculateSplitSummary(id: Long): List&lt;Pair&lt;String, String?&gt;&gt;? {
+<span class="nc" id="L1016">    return contentResolver.query(</span>
+<span class="nc" id="L1017">        TransactionProvider.CATEGORIES_URI.buildUpon()</span>
+<span class="nc" id="L1018">            .appendQueryParameter(KEY_TRANSACTIONID, id.toString()).build(),</span>
+<span class="nc" id="L1019">        arrayOf(KEY_LABEL, KEY_ICON), null, null, null</span>
+    )
+<span class="nc bnc" id="L1021" title="All 2 branches missed.">        ?.useAndMapToList {</span>
+<span class="nc" id="L1022">            it.getString(KEY_LABEL) to it.getStringOrNull(KEY_ICON)</span>
+<span class="nc bnc" id="L1023" title="All 6 branches missed.">        }?.takeIf { it.isNotEmpty() }</span>
+}
+
+fun Repository.loadTrade(transactionId: Long): Trade? =
+<span class="nc" id="L1027">    loadTrades(listOf(transactionId)).firstOrNull()</span>
+
+<span class="nc" id="L1029">fun Repository.loadTrades(</span>
+    transactionIds: List&lt;Long&gt;,
+<span class="nc" id="L1031">    sortOrder: Pair&lt;String, SortDirection&gt;? = null,</span>
+): List&lt;Trade&gt; {
+<span class="nc bnc" id="L1033" title="All 2 branches missed.">    if (transactionIds.isEmpty()) return emptyList()</span>
+
+<span class="nc" id="L1035">    val parents = contentResolver.query(</span>
+<span class="nc" id="L1036">        TRANSACTIONS_URI.buildUpon()</span>
+<span class="nc" id="L1037">            .appendQueryParameter(KEY_TRANSACTIONID, transactionIds.joinToString()).build(),</span>
+<span class="nc" id="L1038">        Transaction.projection,</span>
+<span class="nc" id="L1039">        null,</span>
+<span class="nc" id="L1040">        null,</span>
+<span class="nc bnc" id="L1041" title="All 6 branches missed.">        sortOrder?.takeIf { it.first == KEY_DATE }?.let {</span>
+<span class="nc" id="L1042">            DataBaseAccount.sortOrder(it.first, it.second)</span>
+        }
+<span class="nc" id="L1044">    )!!.useAndMapToList { Transaction.fromCursor(it) }</span>
+
+<span class="nc" id="L1046">    val splits = contentResolver.query(</span>
+<span class="nc" id="L1047">        EXTENDED_URI.buildUpon().appendQueryParameter(KEY_PARENTID, transactionIds.joinToString())</span>
+<span class="nc" id="L1048">            .build(),</span>
+<span class="nc" id="L1049">        Transaction.projectionExtended,</span>
+<span class="nc" id="L1050">        null,</span>
+<span class="nc" id="L1051">        null,</span>
+<span class="nc" id="L1052">        null</span>
+<span class="nc" id="L1053">    )!!.useAndMapToList { Transaction.fromCursor(it) }</span>
+
+<span class="nc" id="L1055">    val splitMap = splits.groupBy { it.parentId }</span>
+
+<span class="nc" id="L1057">    return parents.mapNotNull { parent -&gt;</span>
+<span class="nc bnc" id="L1058" title="All 2 branches missed.">        val parts = splitMap[parent.id] ?: return@mapNotNull null</span>
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">        val parentCurrency = parent.currency ?: return@mapNotNull null</span>
+
+<span class="nc" id="L1061">        var assetPart: Pair&lt;Transaction, Transaction&gt;?</span>
+<span class="nc" id="L1062">        var cashPart: Pair&lt;Transaction, Transaction&gt;? = null</span>
+<span class="nc" id="L1063">        var fundingPart: Pair&lt;Transaction, Transaction?&gt;</span>
+
+        // Identify the fee part (negative amount, no transfer account)
+<span class="nc bnc" id="L1066" title="All 8 branches missed.">        val feePart = parts.find { it.transferAccountId == null &amp;&amp; it.amount &lt; 0 }</span>
+
+        // Load all transfer peers once to identify roles
+<span class="nc bnc" id="L1069" title="All 2 branches missed.">        val transferPeers = parts.filter { it.transferPeerId != null }</span>
+<span class="nc" id="L1070">            .associateWith { loadTransaction(it.transferPeerId!!, false, extended = true).data }</span>
+<span class="nc" id="L1071">            .toList()</span>
+
+<span class="nc bnc" id="L1073" title="All 6 branches missed.">        assetPart = transferPeers.find { it.second.portfolioRole == PORTFOLIO_ASSET }</span>
+
+<span class="nc bnc" id="L1075" title="All 4 branches missed.">        fundingPart = if (assetPart == null) {</span>
+<span class="nc bnc" id="L1076" title="All 6 branches missed.">            cashPart = transferPeers.find { it.second.portfolioRole == PORTFOLIO_CASH }</span>
+<span class="nc bnc" id="L1077" title="All 6 branches missed.">            transferPeers.find { it.second.portfolioRole == PORTFOLIO_NONE }</span>
+        } else {
+<span class="nc bnc" id="L1079" title="All 6 branches missed.">            transferPeers.find { it.second.portfolioRole != PORTFOLIO_ASSET }</span>
+<span class="nc bnc" id="L1080" title="All 8 branches missed.">        } ?: ((parts.find { it.transferPeerId == null } ?: return@mapNotNull null) to null)</span>
+
+
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">        if (assetPart != null) {</span>
+            // --- Buy/Sell/Transfer Trade ---
+<span class="nc" id="L1085">            val peerTransaction = assetPart.second</span>
+<span class="nc" id="L1086">            val quantity = Money(</span>
+<span class="nc" id="L1087">                currencyContext[peerTransaction.currency!!],</span>
+<span class="nc" id="L1088">                peerTransaction.amount</span>
+<span class="nc" id="L1089">            ).absolute()</span>
+
+<span class="nc bnc" id="L1091" title="All 4 branches missed.">            val isTransfer = fundingPart.second?.portfolioRole == PORTFOLIO_CONTAINER</span>
+
+<span class="nc bnc" id="L1093" title="All 2 branches missed.">            val isIncoming = peerTransaction.amount &gt; 0</span>
+<span class="nc bnc" id="L1094" title="All 2 branches missed.">            val tradeType = if (isTransfer) {</span>
+<span class="nc" id="L1095">                TradeType.Transfer(isIncoming)</span>
+            } else {
+<span class="nc bnc" id="L1097" title="All 2 branches missed.">                if (isIncoming) TradeType.AssetTrade.BUY else TradeType.AssetTrade.SELL</span>
+            }
+
+<span class="nc" id="L1100">            val principal =</span>
+<span class="nc" id="L1101">                Money(currencyContext[parentCurrency], assetPart.first.amount).absolute()</span>
+<span class="nc bnc" id="L1102" title="All 2 branches missed.">            val fee = feePart?.let { Money(currencyContext[parentCurrency], it.amount).absolute() }</span>
+<span class="nc bnc" id="L1103" title="All 2 branches missed.">            val price = if (quantity.amountMajor &gt; BigDecimal.ZERO) {</span>
+<span class="nc" id="L1104">                principal.amountMajor.divide(quantity.amountMajor, 8, RoundingMode.HALF_UP)</span>
+<span class="nc" id="L1105">            } else BigDecimal.ZERO</span>
+
+<span class="nc" id="L1107">            Trade(</span>
+<span class="nc" id="L1108">                id = parent.id,</span>
+<span class="nc" id="L1109">                type = tradeType,</span>
+<span class="nc" id="L1110">                date = epoch2ZonedDateTime(parent.date),</span>
+<span class="nc" id="L1111">                quantity = quantity,</span>
+<span class="nc" id="L1112">                principal = principal,</span>
+<span class="nc" id="L1113">                fee = fee,</span>
+<span class="nc" id="L1114">                assetSymbol = peerTransaction.currency,</span>
+<span class="nc" id="L1115">                comment = parent.comment,</span>
+<span class="nc" id="L1116">                price = price,</span>
+<span class="nc bnc" id="L1117" title="All 2 branches missed.">                peerAccount = fundingPart.second?.let { it.accountId to it.accountLabel!! },</span>
+<span class="nc" id="L1118">                currency = parentCurrency,</span>
+<span class="nc" id="L1119">                portfolioId = parent.accountId</span>
+            )
+<span class="nc bnc" id="L1121" title="All 2 branches missed.">        } else if (cashPart != null) {</span>
+            // --- Cash Movement (Deposit/Withdrawal) ---
+            // If fundingPart.amount &lt; 0, money moved Portfolio -&gt; Sub-account (Deposit)
+<span class="nc" id="L1124">            val tradeType =</span>
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">                if (cashPart.first.amount &lt; 0) TradeType.CashMovement.DEPOSIT else TradeType.CashMovement.WITHDRAW</span>
+<span class="nc" id="L1126">            val principal =</span>
+<span class="nc" id="L1127">                Money(currencyContext[parentCurrency], fundingPart.first.amount).absolute()</span>
+<span class="nc bnc" id="L1128" title="All 2 branches missed.">            val fee = feePart?.let { Money(currencyContext[parentCurrency], it.amount).absolute() }</span>
+
+<span class="nc" id="L1130">            Trade(</span>
+<span class="nc" id="L1131">                id = parent.id,</span>
+<span class="nc" id="L1132">                type = tradeType,</span>
+<span class="nc" id="L1133">                date = epoch2ZonedDateTime(parent.date),</span>
+<span class="nc" id="L1134">                quantity = principal,</span>
+<span class="nc" id="L1135">                principal = principal,</span>
+<span class="nc" id="L1136">                fee = fee,</span>
+<span class="nc" id="L1137">                assetSymbol = parentCurrency,</span>
+<span class="nc" id="L1138">                comment = parent.comment,</span>
+<span class="nc" id="L1139">                price = BigDecimal.ONE,</span>
+<span class="nc bnc" id="L1140" title="All 2 branches missed.">                peerAccount = fundingPart.second?.let { it.accountId to it.accountLabel!! },</span>
+<span class="nc" id="L1141">                currency = parentCurrency,</span>
+<span class="nc" id="L1142">                portfolioId = parent.accountId</span>
+            )
+<span class="nc" id="L1144">        } else null</span>
+<span class="nc" id="L1145">    }.let {</span>
+<span class="nc bnc" id="L1146" title="All 4 branches missed.">        if (sortOrder?.first == KEY_AMOUNT) {</span>
+<span class="nc bnc" id="L1147" title="All 2 branches missed.">            if (sortOrder.second == SortDirection.DESC)</span>
+<span class="nc" id="L1148">                it.sortedByDescending { it.principal.amountMinor.absoluteValue } else</span>
+<span class="nc" id="L1149">                it.sortedBy { it.principal.amountMinor.absoluteValue }</span>
+<span class="nc" id="L1150">        } else it</span>
+    }
+}
+
+<span class="nc" id="L1154">fun Repository.insertTransaction(</span>
+    accountId: Long,
+    amount: Long,
+<span class="nc" id="L1157">    parentId: Long? = null,</span>
+<span class="nc" id="L1158">    categoryId: Long? = null,</span>
+<span class="nc" id="L1159">    crStatus: CrStatus = CrStatus.UNRECONCILED,</span>
+<span class="nc" id="L1160">    date: LocalDateTime = LocalDateTime.now(),</span>
+<span class="nc" id="L1161">    equivalentAmount: Long? = null,</span>
+<span class="nc" id="L1162">    originalAmount: Long? = null,</span>
+<span class="nc" id="L1163">    originalCurrency: String? = null,</span>
+<span class="nc" id="L1164">    payeeId: Long? = null,</span>
+<span class="nc" id="L1165">    comment: String? = null,</span>
+<span class="nc" id="L1166">    methodId: Long? = null,</span>
+<span class="nc" id="L1167">    referenceNumber: String? = null,</span>
+<span class="nc" id="L1168">    debtId: Long? = null,</span>
+<span class="nc" id="L1169">): RepositoryTransaction = createTransaction(</span>
+<span class="nc" id="L1170">    Transaction(</span>
+<span class="nc" id="L1171">        accountId = accountId,</span>
+<span class="nc" id="L1172">        amount = amount,</span>
+<span class="nc" id="L1173">        categoryId = categoryId,</span>
+<span class="nc" id="L1174">        crStatus = crStatus,</span>
+<span class="nc" id="L1175">        parentId = parentId,</span>
+<span class="nc" id="L1176">        date = date.toEpoch(),</span>
+<span class="nc" id="L1177">        equivalentAmount = equivalentAmount,</span>
+<span class="nc" id="L1178">        payeeId = payeeId,</span>
+<span class="nc" id="L1179">        originalAmount = originalAmount,</span>
+<span class="nc" id="L1180">        originalCurrency = originalCurrency,</span>
+<span class="nc" id="L1181">        comment = comment,</span>
+<span class="nc" id="L1182">        methodId = methodId,</span>
+<span class="nc" id="L1183">        referenceNumber = referenceNumber,</span>
+<span class="nc" id="L1184">        debtId = debtId,</span>
+<span class="nc" id="L1185">        uuid = generateUuid()</span>
+    )
+<span class="nc" id="L1187">)</span>
+
+<span class="nc" id="L1189">fun Repository.insertTransfer(</span>
+    accountId: Long,
+    transferAccountId: Long,
+    amount: Long,
+<span class="nc" id="L1193">    transferAmount: Long = -amount,</span>
+<span class="nc" id="L1194">    parentId: Long? = null,</span>
+<span class="nc" id="L1195">    categoryId: Long? = prefHandler.defaultTransferCategory,</span>
+<span class="nc" id="L1196">    crStatus: CrStatus = CrStatus.UNRECONCILED,</span>
+<span class="nc" id="L1197">    date: LocalDateTime = LocalDateTime.now(),</span>
+<span class="nc" id="L1198">    payeeId: Long? = null,</span>
+<span class="nc" id="L1199">    comment: String? = null,</span>
+<span class="nc" id="L1200">    uuid: String = generateUuid(),</span>
+<span class="nc" id="L1201">): RepositoryTransaction = createTransfer(</span>
+<span class="nc" id="L1202">    Transaction(</span>
+<span class="nc" id="L1203">        accountId = accountId,</span>
+<span class="nc" id="L1204">        transferAccountId = transferAccountId,</span>
+<span class="nc" id="L1205">        amount = amount,</span>
+<span class="nc" id="L1206">        categoryId = categoryId,</span>
+<span class="nc" id="L1207">        crStatus = crStatus,</span>
+<span class="nc" id="L1208">        parentId = parentId,</span>
+<span class="nc" id="L1209">        date = date.toEpoch(),</span>
+<span class="nc" id="L1210">        payeeId = payeeId,</span>
+<span class="nc" id="L1211">        comment = comment,</span>
+<span class="nc" id="L1212">        uuid = uuid</span>
+<span class="nc" id="L1213">    ), Transaction(</span>
+<span class="nc" id="L1214">        accountId = transferAccountId,</span>
+<span class="nc" id="L1215">        transferAccountId = accountId,</span>
+<span class="nc" id="L1216">        amount = transferAmount,</span>
+<span class="nc" id="L1217">        categoryId = categoryId,</span>
+<span class="nc" id="L1218">        crStatus = crStatus,</span>
+<span class="nc" id="L1219">        parentId = parentId,</span>
+<span class="nc" id="L1220">        date = date.toEpoch(),</span>
+<span class="nc" id="L1221">        payeeId = payeeId,</span>
+<span class="nc" id="L1222">        comment = comment,</span>
+<span class="nc" id="L1223">        uuid = uuid</span>
+    )
+<span class="nc" id="L1225">)</span>
+
+/**
+ * Generates the three ContentProviderOperations needed to atomically create a linked transfer.
+ *
+ * @param source The outgoing part of the transfer.
+ * @param destination The incoming part of the transfer.
+ * @param offset The starting index where these operations will be placed in the final batch list.
+ * @param parentBackRefIndex If the transfer is part of a split, this is the back-reference index to the parent transaction.
+ * @param parentId The ID of the parent transaction, if already known.
+ * @param peerParentBackRefIndex If the peer transaction is part of a split, this is the back-reference index to its parent.
+ * @param peerParentId The ID of the peer's parent transaction, if already known.
+ * @return A list of three operations for creating the transfer.
+ */
+<span class="nc" id="L1239">private fun getTransferOperations(</span>
+    source: Transaction,
+    destination: Transaction,
+    offset: Int,
+<span class="nc" id="L1243">    parentBackRefIndex: Int? = null,</span>
+<span class="nc" id="L1244">    parentId: Long? = null,</span>
+<span class="nc" id="L1245">    peerParentBackRefIndex: Int? = null,</span>
+<span class="nc" id="L1246">    peerParentId: Long? = null,</span>
+): List&lt;ContentProviderOperation&gt; {
+    // The builder for the source transaction, which may or may not be linked to a parent.
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">    require(</span>
+<span class="nc bnc" id="L1250" title="All 4 branches missed.">        source.transferAccountId == destination.accountId &amp;&amp;</span>
+<span class="nc bnc" id="L1251" title="All 4 branches missed.">                source.accountId == destination.transferAccountId</span>
+<span class="nc" id="L1252">    ) { &quot;Account IDs must match.&quot; }</span>
+<span class="nc bnc" id="L1253" title="All 4 branches missed.">    require(source.date == destination.date)</span>
+
+<span class="nc" id="L1255">    return listOf(</span>
+        // Operation at index (offset + 0): Insert the source transaction.
+<span class="nc" id="L1257">        ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L1258">            .withValues(source.asContentValues())</span>
+<span class="nc" id="L1259">            .apply {</span>
+<span class="nc bnc" id="L1260" title="All 2 branches missed.">                if (parentBackRefIndex != null) {</span>
+<span class="nc" id="L1261">                    withValueBackReference(KEY_PARENTID, parentBackRefIndex)</span>
+                }
+<span class="nc bnc" id="L1263" title="All 2 branches missed.">                if (parentId != null) {</span>
+<span class="nc" id="L1264">                    withValue(KEY_PARENTID, parentId)</span>
+                }
+<span class="nc" id="L1266">            }.build(),</span>
+
+        // Operation at index (offset + 1): Insert the destination, linking to the source.
+<span class="nc" id="L1269">        ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L1270">            .withValues(destination.asContentValues())</span>
+<span class="nc" id="L1271">            .withValueBackReference(KEY_TRANSFER_PEER, offset)</span>
+<span class="nc" id="L1272">            .apply {</span>
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">                if (peerParentBackRefIndex != null) {</span>
+<span class="nc" id="L1274">                    withValueBackReference(KEY_PARENTID, peerParentBackRefIndex)</span>
+                }
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">                if (peerParentId != null) {</span>
+<span class="nc" id="L1277">                    withValue(KEY_PARENTID, peerParentId)</span>
+                }
+<span class="nc" id="L1279">            }</span>
+<span class="nc" id="L1280">            .build(),</span>
+
+        //the source is updated by trigger TRANSFER_PEER_TRIGGER
+    )
+}
+
+fun Repository.undeleteTransaction(id: Long): Int {
+<span class="nc" id="L1287">    val uri = ContentUris.appendId(TRANSACTIONS_URI.buildUpon(), id)</span>
+<span class="nc" id="L1288">        .appendPath(TransactionProvider.URI_SEGMENT_UNDELETE)</span>
+<span class="nc" id="L1289">        .build()</span>
+<span class="nc" id="L1290">    return contentResolver.update(uri, null, null, null)</span>
+}
+
+fun Repository.groupToSplitTransaction(ids: LongArray): Result&lt;Boolean&gt; {
+<span class="nc" id="L1294">    val count = ids.size</span>
+<span class="nc" id="L1295">    val projection = arrayOf(</span>
+<span class="nc" id="L1296">        KEY_ACCOUNTID,</span>
+<span class="nc" id="L1297">        KEY_CURRENCY,</span>
+<span class="nc" id="L1298">        KEY_PAYEEID,</span>
+<span class="nc" id="L1299">        KEY_CR_STATUS,</span>
+<span class="nc" id="L1300">        &quot;avg($KEY_DATE) AS $KEY_DATE&quot;,</span>
+<span class="nc" id="L1301">        &quot;sum($KEY_AMOUNT) AS $KEY_AMOUNT&quot;,</span>
+<span class="nc" id="L1302">        &quot;sum($KEY_EQUIVALENT_AMOUNT) AS $KEY_EQUIVALENT_AMOUNT&quot;</span>
+    )
+
+<span class="nc" id="L1305">    val groupBy = String.format(</span>
+<span class="nc" id="L1306">        Locale.ROOT,</span>
+<span class="nc" id="L1307">        &quot;%s, %s, %s, %s&quot;,</span>
+<span class="nc" id="L1308">        &quot;$VIEW_EXTENDED.$KEY_ACCOUNTID&quot;,</span>
+<span class="nc" id="L1309">        &quot;$VIEW_EXTENDED.$KEY_CURRENCY&quot;,</span>
+<span class="nc" id="L1310">        KEY_PAYEEID,</span>
+<span class="nc" id="L1311">        KEY_CR_STATUS</span>
+    )
+<span class="nc" id="L1313">    return contentResolver.query(</span>
+<span class="nc" id="L1314">        EXTENDED_URI.buildUpon()</span>
+<span class="nc" id="L1315">            .appendQueryParameter(KEY_TRANSACTIONID, ids.joinToString())</span>
+<span class="nc" id="L1316">            .appendQueryParameter(QUERY_PARAMETER_GROUP_BY, groupBy)</span>
+<span class="nc" id="L1317">            .appendQueryParameter(QUERY_PARAMETER_DISTINCT, &quot;1&quot;)</span>
+<span class="nc" id="L1318">            .build(),</span>
+<span class="nc" id="L1319">        projection, null, null, null</span>
+<span class="nc" id="L1320">    )!!.use { cursor -&gt;</span>
+
+<span class="nc bnc" id="L1322" title="All 3 branches missed.">        when (cursor.count) {</span>
+            1 -&gt; {
+<span class="nc" id="L1324">                cursor.moveToFirst()</span>
+<span class="nc" id="L1325">                val accountId = cursor.getLong(KEY_ACCOUNTID)</span>
+<span class="nc" id="L1326">                val currencyUnit = currencyContext[cursor.getString(KEY_CURRENCY)]</span>
+<span class="nc" id="L1327">                val amount = Money(</span>
+<span class="nc" id="L1328">                    currencyUnit,</span>
+<span class="nc" id="L1329">                    cursor.getLong(KEY_AMOUNT)</span>
+                )
+<span class="nc" id="L1331">                val equivalentAmount = Money(</span>
+<span class="nc" id="L1332">                    currencyContext.homeCurrencyUnit,</span>
+<span class="nc" id="L1333">                    cursor.getLong(KEY_EQUIVALENT_AMOUNT)</span>
+                )
+<span class="nc" id="L1335">                val payeeId = cursor.getLongOrNull(KEY_PAYEEID)</span>
+<span class="nc" id="L1336">                val date = cursor.getLong(KEY_DATE)</span>
+<span class="nc" id="L1337">                val crStatus =</span>
+<span class="nc" id="L1338">                    enumValueOrDefault(</span>
+<span class="nc" id="L1339">                        cursor.getString(KEY_CR_STATUS),</span>
+<span class="nc" id="L1340">                        CrStatus.UNRECONCILED</span>
+                    )
+<span class="nc" id="L1342">                val parent = Transaction(</span>
+<span class="nc" id="L1343">                    accountId = accountId,</span>
+<span class="nc" id="L1344">                    amount = amount.amountMinor,</span>
+<span class="nc" id="L1345">                    categoryId = SPLIT_CATID,</span>
+<span class="nc" id="L1346">                    date = date,</span>
+<span class="nc" id="L1347">                    uuid = generateUuid(),</span>
+<span class="nc" id="L1348">                    payeeId = payeeId,</span>
+<span class="nc" id="L1349">                    crStatus = crStatus,</span>
+<span class="nc" id="L1350">                    equivalentAmount = equivalentAmount.amountMinor</span>
+                )
+<span class="nc" id="L1352">                val operations = ArrayList&lt;ContentProviderOperation&gt;()</span>
+<span class="nc" id="L1353">                operations.add(</span>
+<span class="nc" id="L1354">                    ContentProviderOperation.newInsert(TRANSACTIONS_URI)</span>
+<span class="nc" id="L1355">                        .withValues(parent.asContentValues())</span>
+<span class="nc" id="L1356">                        .build()</span>
+                )
+<span class="nc" id="L1358">                val where = KEY_ROWID + &quot; &quot; + Operation.IN.getOp(count)</span>
+<span class="nc" id="L1359">                val selectionArgs = ids.map { it.toString() }.toTypedArray()</span>
+
+<span class="nc" id="L1361">                operations.add(</span>
+<span class="nc" id="L1362">                    ContentProviderOperation.newUpdate(TRANSACTIONS_URI)</span>
+<span class="nc" id="L1363">                        .withValues(ContentValues().apply {</span>
+<span class="nc" id="L1364">                            put(KEY_CR_STATUS, CrStatus.UNRECONCILED.name)</span>
+<span class="nc" id="L1365">                            put(KEY_DATE, parent.date)</span>
+<span class="nc" id="L1366">                            putNull(KEY_PAYEEID)</span>
+<span class="nc" id="L1367">                        })</span>
+<span class="nc" id="L1368">                        .withValueBackReference(KEY_PARENTID, 0)</span>
+<span class="nc" id="L1369">                        .withSelection(where, selectionArgs)</span>
+<span class="nc" id="L1370">                        .withExpectedCount(count)</span>
+<span class="nc" id="L1371">                        .build()</span>
+                )
+<span class="nc" id="L1373">                contentResolver.applyBatch(AUTHORITY, operations)</span>
+<span class="nc" id="L1374">                Result.success(true)</span>
+            }
+
+<span class="nc" id="L1377">            0 -&gt; Result.failure(</span>
+<span class="nc" id="L1378">                IllegalStateException(</span>
+<span class="nc" id="L1379">                    &quot;Transactions (${ids.joinToString()}) not found&quot;</span>
+<span class="nc" id="L1380">                ).also {</span>
+<span class="nc" id="L1381">                    CrashHandler.report(it)</span>
+<span class="nc" id="L1382">                })</span>
+
+<span class="nc" id="L1384">            else -&gt; Result.success(false)</span>
+<span class="nc" id="L1385">        }</span>
+    }
+}
+
+<span class="nc" id="L1389">suspend fun Repository.checkSealedStatus(</span>
+    itemIds: List&lt;Long&gt;,
+    withTransfer: Boolean,
+<span class="nc bnc" id="L1392" title="All 2 branches missed.">) = if (itemIds.isEmpty()) {</span>
+<span class="nc" id="L1393">    CrashHandler.throwOrReport(&quot;Called with empty list&quot;)</span>
+<span class="nc" id="L1394">    Result.success(</span>
+<span class="nc" id="L1395">        SealedCheckResult(hasSealedAccount = false, hasSealedDebt = false)</span>
+    )
+<span class="nc bnc" id="L1397" title="All 2 branches missed.">} else performSealedCheck(</span>
+<span class="nc" id="L1398">    selection = &quot;$KEY_ROWID IN (${itemIds.joinToString(&quot;,&quot;) { &quot;?&quot; }})&quot;,</span>
+<span class="nc" id="L1399">    args = itemIds.map { it.toString() }.toTypedArray(),</span>
+<span class="nc bnc" id="L1400" title="All 2 branches missed.">    withTransfer = withTransfer</span>
+<span class="nc" id="L1401">)</span>
+
+<span class="nc" id="L1403">suspend fun Repository.checkSealedStatus(</span>
+    accountId: Long,
+<span class="nc bnc" id="L1405" title="All 2 branches missed.">) = performSealedCheck(</span>
+<span class="nc" id="L1406">    selection = &quot;$KEY_ACCOUNTID = ?&quot;,</span>
+<span class="nc" id="L1407">    args = arrayOf(accountId.toString()),</span>
+<span class="nc" id="L1408">    withTransfer = true</span>
+<span class="nc" id="L1409">)</span>
+
+<span class="nc" id="L1411">data class SealedCheckResult(</span>
+<span class="nc" id="L1412">    val hasSealedAccount: Boolean,</span>
+<span class="nc" id="L1413">    val hasSealedDebt: Boolean,</span>
+)
+
+private suspend fun Repository.performSealedCheck(
+    selection: String,
+    args: Array&lt;String&gt;,
+    withTransfer: Boolean,
+<span class="nc bnc" id="L1420" title="All 2 branches missed.">): Result&lt;SealedCheckResult&gt; = withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L1421">    val projection = arrayOf(</span>
+<span class="nc bnc" id="L1422" title="All 2 branches missed.">        if (withTransfer) KEY_HAS_SEALED_ACCOUNT_WITH_TRANSFER else KEY_HAS_SEALED_ACCOUNT,</span>
+<span class="nc" id="L1423">        KEY_HAS_SEALED_DEBT</span>
+    )
+<span class="nc" id="L1425">    try {</span>
+<span class="nc" id="L1426">        contentResolver.query(</span>
+<span class="nc" id="L1427">            TRANSACTIONS_URI.buildUpon().appendQueryParameter(QUERY_PARAMETER_INCLUDE_ALL, &quot;1&quot;)</span>
+<span class="nc" id="L1428">                .build(),</span>
+<span class="nc" id="L1429">            projection, selection, args, null</span>
+<span class="nc bnc" id="L1430" title="All 2 branches missed.">        )?.use { cursor -&gt;</span>
+<span class="nc bnc" id="L1431" title="All 2 branches missed.">            if (cursor.moveToFirst()) {</span>
+<span class="nc" id="L1432">                val hasSealedAccount = cursor.getBoolean(0)</span>
+<span class="nc" id="L1433">                val hasSealedDebt = cursor.getBoolean(1)</span>
+<span class="nc" id="L1434">                Result.success(</span>
+<span class="nc" id="L1435">                    SealedCheckResult(</span>
+<span class="nc" id="L1436">                        hasSealedAccount = hasSealedAccount,</span>
+<span class="nc" id="L1437">                        hasSealedDebt = hasSealedDebt</span>
+                    )
+                )
+            } else {
+<span class="nc" id="L1441">                Result.failure(Exception(&quot;Cursor returned 0 rows&quot;))</span>
+<span class="nc" id="L1442">            }</span>
+<span class="nc" id="L1443">        } ?: Result.failure(Exception(&quot;Cursor was null&quot;))</span>
+<span class="nc" id="L1444">    } catch (e: Exception) {</span>
+<span class="nc" id="L1445">        CrashHandler.report(e)</span>
+<span class="nc" id="L1446">        Result.failure(e)</span>
+<span class="nc" id="L1447">    }</span>
+<span class="nc" id="L1448">}</span>
+
+/**
+ * @param itemIds list of split transaction IDs
+ * @return Result containing a list of all transfer account IDs linked to the parts of those splits
+ */
+suspend fun Repository.checkTransferAccountOfSplitParts(
+    itemIds: List&lt;Long&gt;,
+<span class="nc" id="L1456">): Result&lt;List&lt;Long&gt;&gt; = withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L1457" title="All 2 branches missed.">    if (itemIds.isEmpty()) {</span>
+<span class="nc" id="L1458">        return@withContext Result.success(emptyList())</span>
+    }
+
+<span class="nc" id="L1461">    val projection = arrayOf(&quot;DISTINCT $KEY_TRANSFER_ACCOUNT&quot;)</span>
+<span class="nc" id="L1462">    val selection =</span>
+<span class="nc" id="L1463">        &quot;$KEY_TRANSFER_ACCOUNT IS NOT NULL AND $KEY_PARENTID IN (${itemIds.joinToString(&quot;,&quot;) { &quot;?&quot; }})&quot;</span>
+<span class="nc" id="L1464">    val args = itemIds.map { it.toString() }.toTypedArray()</span>
+
+<span class="nc" id="L1466">    try {</span>
+<span class="nc" id="L1467">        contentResolver.query(</span>
+<span class="nc" id="L1468">            TRANSACTIONS_URI,</span>
+<span class="nc" id="L1469">            projection,</span>
+<span class="nc" id="L1470">            selection,</span>
+<span class="nc" id="L1471">            args,</span>
+<span class="nc" id="L1472">            null</span>
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">        )?.use { cursor -&gt;</span>
+<span class="nc" id="L1474">            val ids = mutableListOf&lt;Long&gt;()</span>
+<span class="nc bnc" id="L1475" title="All 2 branches missed.">            while (cursor.moveToNext()) {</span>
+<span class="nc" id="L1476">                ids.add(cursor.getLong(0))</span>
+            }
+<span class="nc" id="L1478">            Result.success(ids)</span>
+        }
+<span class="nc" id="L1480">            ?: Result.failure(Exception(&quot;Error while checking transfer account of split parts: Cursor null&quot;))</span>
+<span class="nc" id="L1481">    } catch (e: Exception) {</span>
+<span class="nc" id="L1482">        CrashHandler.report(e)</span>
+<span class="nc" id="L1483">        Result.failure(e)</span>
+<span class="nc" id="L1484">    }</span>
+<span class="nc" id="L1485">}</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

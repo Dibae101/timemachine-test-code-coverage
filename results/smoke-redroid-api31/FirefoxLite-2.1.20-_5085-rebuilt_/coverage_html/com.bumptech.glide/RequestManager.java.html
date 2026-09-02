@@ -1,0 +1,480 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE FirefoxLite</a> &gt; <a href="index.source.html" class="el_package">com.bumptech.glide</a> &gt; <span class="el_source">RequestManager.java</span></div><h1>RequestManager.java</h1><pre class="source lang-java linenums">package com.bumptech.glide;
+
+import static com.bumptech.glide.request.RequestOptions.decodeTypeOf;
+import static com.bumptech.glide.request.RequestOptions.diskCacheStrategyOf;
+import static com.bumptech.glide.request.RequestOptions.skipMemoryCacheOf;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.drawable.Drawable;
+import android.os.Handler;
+import android.os.Looper;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import android.view.View;
+import com.bumptech.glide.load.engine.DiskCacheStrategy;
+import com.bumptech.glide.manager.ConnectivityMonitor;
+import com.bumptech.glide.manager.ConnectivityMonitorFactory;
+import com.bumptech.glide.manager.Lifecycle;
+import com.bumptech.glide.manager.LifecycleListener;
+import com.bumptech.glide.manager.RequestManagerTreeNode;
+import com.bumptech.glide.manager.RequestTracker;
+import com.bumptech.glide.manager.TargetTracker;
+import com.bumptech.glide.request.Request;
+import com.bumptech.glide.request.RequestOptions;
+import com.bumptech.glide.request.target.Target;
+import com.bumptech.glide.request.target.ViewTarget;
+import com.bumptech.glide.request.transition.Transition;
+import com.bumptech.glide.util.Synthetic;
+import com.bumptech.glide.util.Util;
+import java.io.File;
+
+/**
+ * A class for managing and starting requests for Glide. Can use activity, fragment and connectivity
+ * lifecycle events to intelligently stop, start, and restart requests. Retrieve either by
+ * instantiating a new object, or to take advantage built in Activity and Fragment lifecycle
+ * handling, use the static Glide.load methods with your Fragment or Activity.
+ *
+ * @see Glide#with(android.app.Activity)
+ * @see Glide#with(androidx.fragment.app.FragmentActivity)
+ * @see Glide#with(android.app.Fragment)
+ * @see Glide#with(androidx.fragment.app.Fragment)
+ * @see Glide#with(Context)
+ */
+public class RequestManager implements LifecycleListener {
+<span class="nc" id="L45">  private static final RequestOptions DECODE_TYPE_BITMAP = decodeTypeOf(Bitmap.class).lock();</span>
+<span class="nc" id="L46">  private static final RequestOptions DOWNLOAD_ONLY_OPTIONS =</span>
+<span class="nc" id="L47">      diskCacheStrategyOf(DiskCacheStrategy.DATA).priority(Priority.LOW)</span>
+<span class="nc" id="L48">          .skipMemoryCache(true);</span>
+
+  protected final Glide glide;
+  @Synthetic final Lifecycle lifecycle;
+  private final RequestTracker requestTracker;
+  private final RequestManagerTreeNode treeNode;
+<span class="nc" id="L54">  private final TargetTracker targetTracker = new TargetTracker();</span>
+<span class="nc" id="L55">  private final Runnable addSelfToLifecycle = new Runnable() {</span>
+    @Override
+    public void run() {
+<span class="nc" id="L58">      lifecycle.addListener(RequestManager.this);</span>
+<span class="nc" id="L59">    }</span>
+  };
+<span class="nc" id="L61">  private final Handler mainHandler = new Handler(Looper.getMainLooper());</span>
+  private final ConnectivityMonitor connectivityMonitor;
+
+  @NonNull
+  private RequestOptions requestOptions;
+
+  public RequestManager(Glide glide, Lifecycle lifecycle, RequestManagerTreeNode treeNode) {
+<span class="nc" id="L68">    this(glide, lifecycle, treeNode, new RequestTracker(), glide.getConnectivityMonitorFactory());</span>
+<span class="nc" id="L69">  }</span>
+
+  // Our usage is safe here.
+  @SuppressWarnings(&quot;PMD.ConstructorCallsOverridableMethod&quot;)
+  RequestManager(
+      Glide glide,
+      Lifecycle lifecycle,
+      RequestManagerTreeNode treeNode,
+      RequestTracker requestTracker,
+<span class="nc" id="L78">      ConnectivityMonitorFactory factory) {</span>
+<span class="nc" id="L79">    this.glide = glide;</span>
+<span class="nc" id="L80">    this.lifecycle = lifecycle;</span>
+<span class="nc" id="L81">    this.treeNode = treeNode;</span>
+<span class="nc" id="L82">    this.requestTracker = requestTracker;</span>
+
+<span class="nc" id="L84">    final Context context = glide.getGlideContext().getBaseContext();</span>
+
+<span class="nc" id="L86">    connectivityMonitor =</span>
+<span class="nc" id="L87">        factory.build(context, new RequestManagerConnectivityListener(requestTracker));</span>
+
+    // If we're the application level request manager, we may be created on a background thread.
+    // In that case we cannot risk synchronously pausing or resuming requests, so we hack around the
+    // issue by delaying adding ourselves as a lifecycle listener by posting to the main thread.
+    // This should be entirely safe.
+<span class="nc bnc" id="L93" title="All 2 branches missed.">    if (Util.isOnBackgroundThread()) {</span>
+<span class="nc" id="L94">      mainHandler.post(addSelfToLifecycle);</span>
+    } else {
+<span class="nc" id="L96">      lifecycle.addListener(this);</span>
+    }
+<span class="nc" id="L98">    lifecycle.addListener(connectivityMonitor);</span>
+
+<span class="nc" id="L100">    setRequestOptions(glide.getGlideContext().getDefaultRequestOptions());</span>
+
+<span class="nc" id="L102">    glide.registerRequestManager(this);</span>
+<span class="nc" id="L103">  }</span>
+
+  protected void setRequestOptions(@NonNull RequestOptions toSet) {
+<span class="nc" id="L106">    requestOptions = toSet.clone().autoClone();</span>
+<span class="nc" id="L107">  }</span>
+
+  private void updateRequestOptions(RequestOptions toUpdate) {
+<span class="nc" id="L110">    requestOptions = requestOptions.apply(toUpdate);</span>
+<span class="nc" id="L111">  }</span>
+
+  /**
+   * Updates the default {@link RequestOptions} for all loads started with this request manager
+   * with the given {@link RequestOptions}.
+   *
+   * &lt;p&gt;The {@link RequestOptions} provided here are applied on top of those provided via {@link
+   * GlideBuilder#setDefaultRequestOptions(RequestOptions)}. If there are conflicts, the options
+   * applied here will win. Note that this method does not mutate options provided to
+   * {@link GlideBuilder#setDefaultRequestOptions(RequestOptions)}.
+   *
+   * &lt;p&gt;Multiple sets of options can be applied. If there are conflicts the last {@link
+   * RequestOptions} applied will win.
+   *
+   * &lt;p&gt;The modified options will only be applied to loads started after this method is called.
+   *
+   * @see RequestBuilder#apply(RequestOptions)
+   *
+   * @return This request manager.
+   */
+  public RequestManager applyDefaultRequestOptions(RequestOptions requestOptions) {
+<span class="nc" id="L132">    updateRequestOptions(requestOptions);</span>
+<span class="nc" id="L133">    return this;</span>
+  }
+
+  /**
+   * Replaces the default {@link RequestOptions} for all loads started with this request manager
+   * with the given {@link RequestOptions}.
+   *
+   * &lt;p&gt;The {@link RequestOptions} provided here replace those that have been previously provided
+   * via {@link GlideBuilder#setDefaultRequestOptions(RequestOptions)}, {@link
+   * #setDefaultRequestOptions(RequestOptions)} and {@link
+   * #applyDefaultRequestOptions(RequestOptions)}.
+   *
+   * &lt;p&gt;Subsequent calls to {@link #applyDefaultRequestOptions(RequestOptions)} will not mutate
+   * the {@link RequestOptions} provided here. Instead the manager will create a clone of these
+   * options and mutate the clone.
+   *
+   * @see #applyDefaultRequestOptions(RequestOptions)
+   *
+   * @return This request manager.
+   */
+  public RequestManager setDefaultRequestOptions(RequestOptions requestOptions) {
+<span class="nc" id="L154">    setRequestOptions(requestOptions);</span>
+<span class="nc" id="L155">    return this;</span>
+  }
+
+  /**
+   * @see android.content.ComponentCallbacks2#onTrimMemory(int)
+   *
+   * @deprecated This method is called automatically by Glide's internals and shouldn't be called
+   * externally.
+   */
+  @Deprecated
+  public void onTrimMemory(int level) {
+<span class="nc" id="L166">    glide.onTrimMemory(level);</span>
+<span class="nc" id="L167">  }</span>
+
+  /**
+   * @see android.content.ComponentCallbacks2#onLowMemory()
+   *
+   * @deprecated This method is called automatically by Glide's internals and shouldn't be called
+   * externally.
+   */
+  @Deprecated
+  public void onLowMemory() {
+<span class="nc" id="L177">    glide.onLowMemory();</span>
+<span class="nc" id="L178">  }</span>
+
+  /**
+   * Returns true if loads for this {@link RequestManager} are currently paused.
+   *
+   * @see #pauseRequests()
+   * @see #resumeRequests()
+   */
+  public boolean isPaused() {
+<span class="nc" id="L187">    Util.assertMainThread();</span>
+<span class="nc" id="L188">    return requestTracker.isPaused();</span>
+  }
+
+  /**
+   * Cancels any in progress loads, but does not clear resources of completed loads.
+   *
+   * @see #isPaused()
+   * @see #resumeRequests()
+   */
+  public void pauseRequests() {
+<span class="nc" id="L198">    Util.assertMainThread();</span>
+<span class="nc" id="L199">    requestTracker.pauseRequests();</span>
+<span class="nc" id="L200">  }</span>
+
+  /**
+   * Performs {@link #pauseRequests()} recursively for all managers that are contextually
+   * descendant to this manager based on the Activity/Fragment hierarchy:
+   *
+   * &lt;ul&gt;
+   *   &lt;li&gt;When pausing on an Activity all attached fragments will also get paused.
+   *   &lt;li&gt;When pausing on an attached Fragment all descendant fragments will also get paused.
+   *   &lt;li&gt;When pausing on a detached Fragment or the application context only the current
+   *   RequestManager is paused.
+   * &lt;/ul&gt;
+   *
+   * &lt;p&gt;Note, on pre-Jelly Bean MR1 calling pause on a Fragment will not cause child fragments to
+   * pause, in this case either call pause on the Activity or use a support Fragment.
+   */
+  public void pauseRequestsRecursive() {
+<span class="nc" id="L217">    Util.assertMainThread();</span>
+<span class="nc" id="L218">    pauseRequests();</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">    for (RequestManager requestManager : treeNode.getDescendants()) {</span>
+<span class="nc" id="L220">      requestManager.pauseRequests();</span>
+<span class="nc" id="L221">    }</span>
+<span class="nc" id="L222">  }</span>
+
+  /**
+   * Restarts any loads that have not yet completed.
+   *
+   * @see #isPaused()
+   * @see #pauseRequests()
+   */
+  public void resumeRequests() {
+<span class="nc" id="L231">    Util.assertMainThread();</span>
+<span class="nc" id="L232">    requestTracker.resumeRequests();</span>
+<span class="nc" id="L233">  }</span>
+
+  /**
+   * Performs {@link #resumeRequests()} recursively for all managers that are contextually
+   * descendant to this manager based on the Activity/Fragment hierarchy. The hierarchical semantics
+   * are identical as for {@link #pauseRequestsRecursive()}.
+   */
+  public void resumeRequestsRecursive() {
+<span class="nc" id="L241">    Util.assertMainThread();</span>
+<span class="nc" id="L242">    resumeRequests();</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">    for (RequestManager requestManager : treeNode.getDescendants()) {</span>
+<span class="nc" id="L244">      requestManager.resumeRequests();</span>
+<span class="nc" id="L245">    }</span>
+<span class="nc" id="L246">  }</span>
+
+  /**
+   * Lifecycle callback that registers for connectivity events (if the
+   * android.permission.ACCESS_NETWORK_STATE permission is present) and restarts failed or paused
+   * requests.
+   */
+  @Override
+  public void onStart() {
+<span class="nc" id="L255">    resumeRequests();</span>
+<span class="nc" id="L256">    targetTracker.onStart();</span>
+<span class="nc" id="L257">  }</span>
+
+  /**
+   * Lifecycle callback that unregisters for connectivity events (if the
+   * android.permission.ACCESS_NETWORK_STATE permission is present) and pauses in progress loads.
+   */
+  @Override
+  public void onStop() {
+<span class="nc" id="L265">    pauseRequests();</span>
+<span class="nc" id="L266">    targetTracker.onStop();</span>
+<span class="nc" id="L267">  }</span>
+
+  /**
+   * Lifecycle callback that cancels all in progress requests and clears and recycles resources for
+   * all completed requests.
+   */
+  @Override
+  public void onDestroy() {
+<span class="nc" id="L275">    targetTracker.onDestroy();</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">    for (Target&lt;?&gt; target : targetTracker.getAll()) {</span>
+<span class="nc" id="L277">      clear(target);</span>
+<span class="nc" id="L278">    }</span>
+<span class="nc" id="L279">    targetTracker.clear();</span>
+<span class="nc" id="L280">    requestTracker.clearRequests();</span>
+<span class="nc" id="L281">    lifecycle.removeListener(this);</span>
+<span class="nc" id="L282">    lifecycle.removeListener(connectivityMonitor);</span>
+<span class="nc" id="L283">    mainHandler.removeCallbacks(addSelfToLifecycle);</span>
+<span class="nc" id="L284">    glide.unregisterRequestManager(this);</span>
+<span class="nc" id="L285">  }</span>
+
+  /**
+   * Attempts to always load the resource as a {@link android.graphics.Bitmap}, even if it could
+   * actually be animated.
+   *
+   * @return A new request builder for loading a {@link android.graphics.Bitmap}
+   */
+  public RequestBuilder&lt;Bitmap&gt; asBitmap() {
+<span class="nc" id="L294">    return as(Bitmap.class).apply(DECODE_TYPE_BITMAP);</span>
+  }
+
+  /**
+   * Attempts to always load the resource using any registered {@link
+   * com.bumptech.glide.load.ResourceDecoder}s that can decode any subclass of {@link Drawable}.
+   *
+   * &lt;p&gt; By default, may return either a {@link android.graphics.drawable.BitmapDrawable},
+   * but if additional decoders are registered for other {@link Drawable} subclasses,
+   * any of those subclasses may also be returned. &lt;/p&gt;
+   *
+   * @return A new request builder for loading a {@link Drawable}.
+   */
+  public RequestBuilder&lt;Drawable&gt; asDrawable() {
+<span class="nc" id="L308">    return as(Drawable.class);</span>
+  }
+
+  /**
+   * A helper method equivalent to calling {@link #asDrawable()} and then {@link
+   * RequestBuilder#load(Object)} with the given model.
+   *
+   * @return A new request builder for loading a {@link Drawable} using the given model.
+   */
+  public RequestBuilder&lt;Drawable&gt; load(@Nullable Object model) {
+<span class="nc" id="L318">    return asDrawable().load(model);</span>
+  }
+
+  /**
+   * Attempts always load the resource into the cache and return the {@link File} containing the
+   * cached source data.
+   *
+   * &lt;p&gt;This method is designed to work for remote data that is or will be cached using {@link
+   * com.bumptech.glide.load.engine.DiskCacheStrategy#DATA}. As a result, specifying a
+   * {@link com.bumptech.glide.load.engine.DiskCacheStrategy} on this request is generally not
+   * recommended.
+   *
+   * @return A new request builder for downloading content to cache and returning the cache File.
+   */
+  public RequestBuilder&lt;File&gt; downloadOnly() {
+<span class="nc" id="L333">    return as(File.class).apply(DOWNLOAD_ONLY_OPTIONS);</span>
+  }
+
+  /**
+   * A helper method equivalent to calling {@link #downloadOnly()} ()} and then {@link
+   * RequestBuilder#load(Object)} with the given model.
+   *
+   * @return A new request builder for loading a {@link Drawable} using the given model.
+   */
+  public RequestBuilder&lt;File&gt; download(@Nullable Object model) {
+<span class="nc" id="L343">    return downloadOnly().load(model);</span>
+  }
+
+  /**
+   * Attempts to always load a {@link File} containing the resource, either using a file path
+   * obtained from the media store (for local images/videos), or using Glide's disk cache
+   * (for remote images/videos).
+   *
+   * &lt;p&gt;For remote content, prefer {@link #downloadOnly()}.
+   *
+   * @return A new request builder for obtaining File paths to content.
+   */
+  public RequestBuilder&lt;File&gt; asFile() {
+<span class="nc" id="L356">    return as(File.class).apply(skipMemoryCacheOf(true));</span>
+  }
+
+  /**
+   * Attempts to load the resource using any registered
+   * {@link com.bumptech.glide.load.ResourceDecoder}s
+   * that can decode the given resource class or any subclass of the given resource class.
+   *
+   * @param resourceClass The resource to decode.
+   * @return A new request builder for loading the given resource class.
+   */
+  public &lt;ResourceType&gt; RequestBuilder&lt;ResourceType&gt; as(Class&lt;ResourceType&gt; resourceClass) {
+<span class="nc" id="L368">    return new RequestBuilder&lt;&gt;(glide, this, resourceClass);</span>
+  }
+
+  /**
+   * Cancel any pending loads Glide may have for the view and free any resources that may have been
+   * loaded for the view.
+   *
+   * &lt;p&gt; Note that this will only work if {@link View#setTag(Object)} is not called on this view
+   * outside of Glide. &lt;/p&gt;
+   *
+   * @param view The view to cancel loads and free resources for.
+   * @throws IllegalArgumentException if an object other than Glide's metadata is put as the view's
+   *                                  tag.
+   * @see #clear(Target)
+   */
+  public void clear(View view) {
+<span class="nc" id="L384">    clear(new ClearTarget(view));</span>
+<span class="nc" id="L385">  }</span>
+
+  /**
+   * Cancel any pending loads Glide may have for the target and free any resources (such as
+   * {@link Bitmap}s) that may have been loaded for the target so they may be reused.
+   *
+   * @param target The Target to cancel loads for.
+   */
+  public void clear(@Nullable final Target&lt;?&gt; target) {
+<span class="nc bnc" id="L394" title="All 2 branches missed.">    if (target == null) {</span>
+<span class="nc" id="L395">      return;</span>
+    }
+
+<span class="nc bnc" id="L398" title="All 2 branches missed.">    if (Util.isOnMainThread()) {</span>
+<span class="nc" id="L399">      untrackOrDelegate(target);</span>
+    } else {
+<span class="nc" id="L401">      mainHandler.post(new Runnable() {</span>
+        @Override
+        public void run() {
+<span class="nc" id="L404">          clear(target);</span>
+<span class="nc" id="L405">        }</span>
+      });
+    }
+<span class="nc" id="L408">  }</span>
+
+  private void untrackOrDelegate(Target&lt;?&gt; target) {
+<span class="nc" id="L411">    boolean isOwnedByUs = untrack(target);</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">    if (!isOwnedByUs) {</span>
+<span class="nc" id="L413">      glide.removeFromManagers(target);</span>
+    }
+<span class="nc" id="L415">  }</span>
+
+  boolean untrack(Target&lt;?&gt; target) {
+<span class="nc" id="L418">    Request request = target.getRequest();</span>
+    // If the Target doesn't have a request, it's already been cleared.
+<span class="nc bnc" id="L420" title="All 2 branches missed.">    if (request == null) {</span>
+<span class="nc" id="L421">      return true;</span>
+    }
+
+<span class="nc bnc" id="L424" title="All 2 branches missed.">    if (requestTracker.clearRemoveAndRecycle(request)) {</span>
+<span class="nc" id="L425">      targetTracker.untrack(target);</span>
+<span class="nc" id="L426">      target.setRequest(null);</span>
+<span class="nc" id="L427">      return true;</span>
+    } else {
+<span class="nc" id="L429">      return false;</span>
+    }
+  }
+
+  void track(Target&lt;?&gt; target, Request request) {
+<span class="nc" id="L434">    targetTracker.track(target);</span>
+<span class="nc" id="L435">    requestTracker.runRequest(request);</span>
+<span class="nc" id="L436">  }</span>
+
+  RequestOptions getDefaultRequestOptions() {
+<span class="nc" id="L439">    return requestOptions;</span>
+  }
+
+  @NonNull
+  &lt;T&gt; TransitionOptions&lt;?, T&gt; getDefaultTransitionOptions(Class&lt;T&gt; transcodeClass) {
+<span class="nc" id="L444">    return glide.getGlideContext().getDefaultTransitionOptions(transcodeClass);</span>
+  }
+
+  @Override
+  public String toString() {
+<span class="nc" id="L449">    return super.toString() + &quot;{tracker=&quot; + requestTracker + &quot;, treeNode=&quot; + treeNode + &quot;}&quot;;</span>
+  }
+
+  private static class RequestManagerConnectivityListener implements ConnectivityMonitor
+      .ConnectivityListener {
+    private final RequestTracker requestTracker;
+
+<span class="nc" id="L456">    public RequestManagerConnectivityListener(RequestTracker requestTracker) {</span>
+<span class="nc" id="L457">      this.requestTracker = requestTracker;</span>
+<span class="nc" id="L458">    }</span>
+
+    @Override
+    public void onConnectivityChanged(boolean isConnected) {
+<span class="nc bnc" id="L462" title="All 2 branches missed.">      if (isConnected) {</span>
+<span class="nc" id="L463">        requestTracker.restartRequests();</span>
+      }
+<span class="nc" id="L465">    }</span>
+  }
+
+  private static class ClearTarget extends ViewTarget&lt;View, Object&gt; {
+
+    public ClearTarget(View view) {
+<span class="nc" id="L471">      super(view);</span>
+<span class="nc" id="L472">    }</span>
+
+    @Override
+    public void onResourceReady(Object resource, Transition&lt;? super Object&gt; transition) {
+      // Do nothing.
+<span class="nc" id="L477">    }</span>
+  }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

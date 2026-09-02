@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BergamotModelManager.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE Feeder</a> &gt; <a href="index.source.html" class="el_package">com.nononsenseapps.feeder.localtranslation</a> &gt; <span class="el_source">BergamotModelManager.kt</span></div><h1>BergamotModelManager.kt</h1><pre class="source lang-java linenums">package com.nononsenseapps.feeder.localtranslation
+
+import com.nononsenseapps.feeder.util.FilePathProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.kodein.di.DI
+import org.kodein.di.DIAware
+import org.kodein.di.instance
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.Locale
+
+<span class="fc" id="L30">class BergamotModelManager(</span>
+<span class="fc" id="L31">    override val di: DI,</span>
+<span class="fc" id="L32">    private val registryUrl: String = DEFAULT_REGISTRY_URL,</span>
+<span class="fc" id="L33">) : DIAware {</span>
+<span class="fc" id="L34">    private val filePathProvider: FilePathProvider by instance()</span>
+<span class="pc" id="L35">    private val okHttpClient: OkHttpClient by instance()</span>
+<span class="fc" id="L36">    private val modelRoot: File = filePathProvider.filesDir.resolve(&quot;translation-models&quot;).resolve(&quot;bergamot&quot;)</span>
+    private val json =
+<span class="fc" id="L38">        Json {</span>
+<span class="fc" id="L39">            ignoreUnknownKeys = true</span>
+<span class="fc" id="L40">            explicitNulls = false</span>
+<span class="fc" id="L41">            prettyPrint = false</span>
+<span class="fc" id="L42">        }</span>
+<span class="fc" id="L43">    private val registryFile: File = modelRoot.resolve(&quot;registry.json&quot;)</span>
+<span class="fc" id="L44">    private val downloadMutex = Mutex()</span>
+<span class="fc" id="L45">    private val _downloadProgress = MutableStateFlow&lt;BergamotModelDownloadProgress?&gt;(null)</span>
+<span class="fc" id="L46">    val downloadProgress: StateFlow&lt;BergamotModelDownloadProgress?&gt; = _downloadProgress.asStateFlow()</span>
+
+    suspend fun prepare(
+        sourceLanguage: String,
+        targetLanguage: String,
+    ): BergamotModelPreparation =
+<span class="nc" id="L52">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L53">            downloadMutex.withLock {</span>
+<span class="nc" id="L54">                val source = normalizeLanguageCode(sourceLanguage)</span>
+<span class="nc" id="L55">                val target = normalizeLanguageCode(targetLanguage)</span>
+<span class="nc" id="L56">                try {</span>
+<span class="nc" id="L57">                    val registry =</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">                        loadRegistry(</span>
+<span class="nc" id="L59">                            sourceLanguage = source,</span>
+<span class="nc" id="L60">                            targetLanguage = target,</span>
+                        )
+<span class="nc" id="L62">                            ?: return@withLock BergamotModelPreparation.Error(</span>
+<span class="nc" id="L63">                                reason = BergamotModelPreparation.ErrorReason.RegistryMissing,</span>
+<span class="nc" id="L64">                                sourceLanguage = source,</span>
+<span class="nc" id="L65">                                targetLanguage = target,</span>
+                            )
+
+<span class="nc" id="L68">                    val path =</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">                        resolvePath(registry, source, target)</span>
+<span class="nc" id="L70">                            ?: return@withLock BergamotModelPreparation.Error(</span>
+<span class="nc" id="L71">                                reason = BergamotModelPreparation.ErrorReason.NoAppModel,</span>
+<span class="nc" id="L72">                                sourceLanguage = source,</span>
+<span class="nc" id="L73">                                targetLanguage = target,</span>
+                            )
+
+<span class="nc" id="L76">                    val downloadState = ModelDownloadState.forPath(path)</span>
+<span class="nc" id="L77">                    val entries = mutableListOf&lt;BergamotModelRegistryEntry&gt;()</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                    for (entry in path) {</span>
+<span class="nc" id="L79">                        val downloaded =</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                            ensureDownloaded(</span>
+<span class="nc" id="L81">                                entry = entry,</span>
+<span class="nc" id="L82">                                downloadState = downloadState,</span>
+<span class="nc" id="L83">                            ) ?: return@withLock BergamotModelPreparation.Error(</span>
+<span class="nc" id="L84">                                reason = BergamotModelPreparation.ErrorReason.DownloadFailed,</span>
+<span class="nc" id="L85">                                sourceLanguage = entry.from,</span>
+<span class="nc" id="L86">                                targetLanguage = entry.to,</span>
+                            )
+<span class="nc" id="L88">                        entries += downloaded</span>
+                    }
+
+<span class="nc" id="L91">                    BergamotModelPreparation.Ready(entries)</span>
+                } finally {
+<span class="nc" id="L93">                    _downloadProgress.value = null</span>
+<span class="nc" id="L94">                }</span>
+<span class="nc" id="L95">            }</span>
+<span class="nc" id="L96">        }</span>
+
+<span class="nc" id="L98">    suspend fun languagePairStatus(</span>
+        sourceLanguage: String,
+        targetLanguage: String,
+<span class="nc" id="L101">        allowNetwork: Boolean = true,</span>
+    ): BergamotLanguagePairStatus =
+<span class="nc" id="L103">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L104">            val source = normalizeLanguageCode(sourceLanguage)</span>
+<span class="nc" id="L105">            val target = normalizeLanguageCode(targetLanguage)</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            val registry = loadRegistry(allowNetwork = allowNetwork) ?: return@withContext BergamotLanguagePairStatus.RegistryMissing</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">            val path = resolvePath(registry, source, target) ?: return@withContext BergamotLanguagePairStatus.Unavailable</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">            if (path.all(::isDownloaded)) {</span>
+<span class="nc" id="L109">                BergamotLanguagePairStatus.Downloaded</span>
+            } else {
+<span class="nc" id="L111">                BergamotLanguagePairStatus.AvailableToDownload</span>
+<span class="nc" id="L112">            }</span>
+<span class="nc" id="L113">        }</span>
+
+    suspend fun deleteLanguagePair(
+        sourceLanguage: String,
+        targetLanguage: String,
+    ) {
+<span class="nc" id="L119">        withContext(Dispatchers.IO) {</span>
+<span class="nc" id="L120">            val source = normalizeLanguageCode(sourceLanguage)</span>
+<span class="nc" id="L121">            val target = normalizeLanguageCode(targetLanguage)</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            val registry = loadRegistry(allowNetwork = false) ?: return@withContext</span>
+<span class="nc" id="L123">            resolvePath(registry, source, target)</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">                ?.forEach { entry -&gt; pairDir(entry.from, entry.to).deleteRecursively() }</span>
+<span class="nc" id="L125">        }</span>
+<span class="nc" id="L126">    }</span>
+
+<span class="nc" id="L128">    fun storageLocation(): File = modelRoot</span>
+
+    suspend fun getDownloadedLanguagePairs(): List&lt;LanguagePairInfo&gt; =
+<span class="nc" id="L131">        withContext(Dispatchers.IO) {</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            val registry = loadRegistry(allowNetwork = false) ?: return@withContext emptyList()</span>
+<span class="nc" id="L133">            registry</span>
+<span class="nc" id="L134">                .filter { entry -&gt;</span>
+<span class="nc" id="L135">                    val dir = pairDir(entry.from, entry.to)</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                    dir.isDirectory &amp;&amp;</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                        entry.files.values.all { file -&gt;</span>
+<span class="nc" id="L138">                            dir.resolve(file.name.sanitizedModelFileName()).isFile</span>
+<span class="nc" id="L139">                        }</span>
+<span class="nc" id="L140">                }.map { entry -&gt;</span>
+<span class="nc" id="L141">                    val dir = pairDir(entry.from, entry.to)</span>
+<span class="nc" id="L142">                    val totalSize =</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                        if (dir.isDirectory) {</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                            dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }</span>
+                        } else {
+<span class="nc" id="L146">                            0L</span>
+                        }
+<span class="nc" id="L148">                    LanguagePairInfo(</span>
+<span class="nc" id="L149">                        sourceLanguage = entry.from,</span>
+<span class="nc" id="L150">                        targetLanguage = entry.to,</span>
+<span class="nc" id="L151">                        sizeBytes = totalSize,</span>
+<span class="nc" id="L152">                    )</span>
+<span class="nc" id="L153">                }</span>
+<span class="nc" id="L154">        }</span>
+
+<span class="nc bnc" id="L156" title="All 2 branches missed.">    fun getRegistryEntries(): List&lt;BergamotModelRegistryEntry&gt; = loadRegistry(allowNetwork = false).orEmpty()</span>
+
+<span class="nc" id="L158">    private fun loadRegistry(</span>
+<span class="nc" id="L159">        allowNetwork: Boolean = true,</span>
+<span class="nc" id="L160">        sourceLanguage: String? = null,</span>
+<span class="nc" id="L161">        targetLanguage: String? = null,</span>
+    ): List&lt;BergamotModelRegistryEntry&gt;? {
+<span class="nc" id="L163">        registryFile</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">            .takeIf(File::isFile)</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            ?.readText()</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            ?.let(::parseRegistry)</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            ?.let { return it }</span>
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (allowNetwork) {</span>
+<span class="nc bnc" id="L170" title="All 4 branches missed.">            if (sourceLanguage != null &amp;&amp; targetLanguage != null) {</span>
+<span class="nc" id="L171">                _downloadProgress.value =</span>
+<span class="nc" id="L172">                    BergamotModelDownloadProgress(</span>
+<span class="nc" id="L173">                        sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L174">                        targetLanguage = targetLanguage,</span>
+<span class="nc" id="L175">                        fileName = REGISTRY_FILE_NAME,</span>
+<span class="nc" id="L176">                        downloadedBytes = 0L,</span>
+<span class="nc" id="L177">                        totalBytes = 0L,</span>
+                    )
+            }
+<span class="nc bnc" id="L180" title="All 2 branches missed.">            fetchRegistry()?.let { return it }</span>
+        }
+
+<span class="nc" id="L183">        return null</span>
+    }
+
+    private fun fetchRegistry(): List&lt;BergamotModelRegistryEntry&gt;? =
+<span class="nc" id="L187">        runCatching {</span>
+<span class="nc" id="L188">            val request = Request.Builder().url(registryUrl).build()</span>
+<span class="nc" id="L189">            okHttpClient.newCall(request).execute().use { response -&gt;</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (!response.isSuccessful) {</span>
+<span class="nc" id="L191">                    return@runCatching null</span>
+                }
+<span class="nc" id="L193">                response.body.string().also { body -&gt;</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                    registryFile.parentFile?.mkdirs()</span>
+<span class="nc" id="L195">                    registryFile.writeText(body)</span>
+<span class="nc" id="L196">                }</span>
+<span class="nc" id="L197">            }</span>
+<span class="nc bnc" id="L198" title="All 4 branches missed.">        }.getOrNull()?.let(::parseRegistry)</span>
+
+    private fun parseRegistry(content: String): List&lt;BergamotModelRegistryEntry&gt;? =
+<span class="nc" id="L201">        runCatching {</span>
+<span class="nc" id="L202">            json</span>
+<span class="nc" id="L203">                .parseToJsonElement(content)</span>
+<span class="nc" id="L204">                .jsonObject</span>
+<span class="nc" id="L205">                .mapNotNull { (key, value) -&gt;</span>
+<span class="nc" id="L206">                    val normalizedKey = key.lowercase(Locale.ROOT)</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                    if (normalizedKey.length &lt; 4) {</span>
+<span class="nc" id="L208">                        return@mapNotNull null</span>
+                    }
+<span class="nc" id="L210">                    val from = normalizedKey.substring(0, 2)</span>
+<span class="nc" id="L211">                    val to = normalizedKey.substring(2, 4)</span>
+<span class="nc" id="L212">                    val files = parseModelFiles(value.jsonObject, from, to)</span>
+<span class="nc" id="L213">                    BergamotModelRegistryEntry(</span>
+<span class="nc" id="L214">                        from = from,</span>
+<span class="nc" id="L215">                        to = to,</span>
+<span class="nc" id="L216">                        files = files,</span>
+<span class="nc" id="L217">                    )</span>
+<span class="nc" id="L218">                }</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        }.getOrNull()</span>
+
+    private fun parseModelFiles(
+        files: JsonObject,
+        from: String,
+        to: String,
+    ): Map&lt;String, BergamotModelFile&gt; =
+<span class="nc" id="L226">        files</span>
+<span class="nc" id="L227">            .mapNotNull { (part, value) -&gt;</span>
+<span class="nc bnc" id="L228" title="All 4 branches missed.">                val fileObject = value as? JsonObject ?: return@mapNotNull null</span>
+<span class="nc" id="L229">                val name =</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                    fileObject[&quot;name&quot;]</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                        ?.jsonPrimitive</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                        ?.contentOrNull</span>
+<span class="nc" id="L233">                        ?: return@mapNotNull null</span>
+<span class="nc" id="L234">                val remoteUrl =</span>
+<span class="nc bnc" id="L235" title="All 4 branches missed.">                    if (name.startsWith(&quot;http://&quot;, ignoreCase = true) || name.startsWith(&quot;https://&quot;, ignoreCase = true)) {</span>
+<span class="nc" id="L236">                        name</span>
+                    } else {
+<span class="nc" id="L238">                        &quot;$DEFAULT_MODEL_BASE_URL/$from$to/$name&quot;</span>
+                    }
+<span class="nc" id="L240">                part to</span>
+<span class="nc" id="L241">                    BergamotModelFile(</span>
+<span class="nc" id="L242">                        name = name.substringAfterLast('/'),</span>
+<span class="nc" id="L243">                        remoteUrl = remoteUrl,</span>
+<span class="nc bnc" id="L244" title="All 8 branches missed.">                        size = fileObject[&quot;size&quot;]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,</span>
+<span class="nc bnc" id="L245" title="All 6 branches missed.">                        expectedSha256Hash = fileObject[&quot;expectedSha256Hash&quot;]?.jsonPrimitive?.contentOrNull.orEmpty(),</span>
+<span class="nc" id="L246">                        config = fileObject[&quot;config&quot;],</span>
+<span class="nc" id="L247">                    )</span>
+<span class="nc" id="L248">            }.toMap()</span>
+
+    private fun resolvePath(
+        registry: List&lt;BergamotModelRegistryEntry&gt;,
+        sourceLanguage: String,
+        targetLanguage: String,
+    ): List&lt;BergamotModelRegistryEntry&gt;? {
+<span class="nc bnc" id="L255" title="All 6 branches missed.">        registry.firstOrNull { it.from == sourceLanguage &amp;&amp; it.to == targetLanguage }?.let { return listOf(it) }</span>
+
+<span class="nc bnc" id="L257" title="All 4 branches missed.">        if (sourceLanguage == PIVOT_LANGUAGE || targetLanguage == PIVOT_LANGUAGE) {</span>
+<span class="nc" id="L258">            return null</span>
+        }
+
+<span class="nc bnc" id="L261" title="All 4 branches missed.">        val outbound = registry.firstOrNull { it.from == sourceLanguage &amp;&amp; it.to == PIVOT_LANGUAGE }</span>
+<span class="nc bnc" id="L262" title="All 4 branches missed.">        val inbound = registry.firstOrNull { it.from == PIVOT_LANGUAGE &amp;&amp; it.to == targetLanguage }</span>
+<span class="nc bnc" id="L263" title="All 4 branches missed.">        return if (outbound != null &amp;&amp; inbound != null) {</span>
+<span class="nc" id="L264">            listOf(outbound, inbound)</span>
+        } else {
+<span class="nc" id="L266">            null</span>
+        }
+    }
+
+    private fun ensureDownloaded(
+        entry: BergamotModelRegistryEntry,
+        downloadState: ModelDownloadState,
+    ): BergamotModelRegistryEntry? {
+<span class="nc" id="L274">        val downloadedFiles = mutableMapOf&lt;String, BergamotModelFile&gt;()</span>
+<span class="nc" id="L275">        val dir = pairDir(entry.from, entry.to)</span>
+<span class="nc" id="L276">        dir.mkdirs()</span>
+
+<span class="nc" id="L278">        entry.files.forEach { (part, file) -&gt;</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">            if (file.expectedSha256Hash.isBlank()) {</span>
+<span class="nc" id="L280">                return null</span>
+            }
+<span class="nc" id="L282">            val localFile = dir.resolve(file.name.sanitizedModelFileName())</span>
+<span class="nc" id="L283">            val ready =</span>
+<span class="nc bnc" id="L284" title="All 4 branches missed.">                if (localFile.isFile &amp;&amp; file.matchesSha256(localFile)) {</span>
+<span class="nc" id="L285">                    downloadState.addAlreadyDownloaded(file)</span>
+<span class="nc" id="L286">                    true</span>
+                } else {
+<span class="nc" id="L288">                    downloadFile(</span>
+<span class="nc" id="L289">                        modelFile = file,</span>
+<span class="nc" id="L290">                        destination = localFile,</span>
+<span class="nc" id="L291">                        sourceLanguage = entry.from,</span>
+<span class="nc" id="L292">                        targetLanguage = entry.to,</span>
+<span class="nc" id="L293">                        downloadState = downloadState,</span>
+                    )
+                }
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (!ready) {</span>
+<span class="nc" id="L297">                return null</span>
+            }
+<span class="nc" id="L299">            downloadedFiles[part] = file.copy(url = &quot;file://&quot; + localFile.absolutePath)</span>
+<span class="nc" id="L300">        }</span>
+
+<span class="nc" id="L302">        val downloadedEntry = entry.copy(files = downloadedFiles)</span>
+<span class="nc" id="L303">        dir.resolve(&quot;model.json&quot;).writeText(json.encodeToString(downloadedEntry))</span>
+<span class="nc" id="L304">        return downloadedEntry</span>
+    }
+
+    private fun downloadFile(
+        modelFile: BergamotModelFile,
+        destination: File,
+        sourceLanguage: String,
+        targetLanguage: String,
+        downloadState: ModelDownloadState,
+    ): Boolean =
+<span class="nc" id="L314">        runCatching {</span>
+<span class="nc" id="L315">            _downloadProgress.value =</span>
+<span class="nc" id="L316">                downloadState.toProgress(</span>
+<span class="nc" id="L317">                    sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L318">                    targetLanguage = targetLanguage,</span>
+<span class="nc" id="L319">                    fileName = modelFile.name,</span>
+                )
+<span class="nc" id="L321">            val request = Request.Builder().url(modelFile.remoteUrl).build()</span>
+<span class="nc" id="L322">            okHttpClient.newCall(request).execute().use { response -&gt;</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                if (!response.isSuccessful) {</span>
+<span class="nc" id="L324">                    return@runCatching false</span>
+                }
+<span class="nc" id="L326">                val tempFile = File(destination.parentFile, &quot;${destination.name}.download&quot;)</span>
+<span class="nc" id="L327">                tempFile.delete()</span>
+<span class="nc" id="L328">                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)</span>
+<span class="nc" id="L329">                response.body.byteStream().use { input -&gt;</span>
+<span class="nc" id="L330">                    tempFile.outputStream().use { output -&gt;</span>
+<span class="nc" id="L331">                        while (true) {</span>
+<span class="nc" id="L332">                            val read = input.read(buffer)</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                            if (read &lt;= 0) {</span>
+<span class="nc" id="L334">                                break</span>
+                            }
+<span class="nc" id="L336">                            output.write(buffer, 0, read)</span>
+<span class="nc" id="L337">                            downloadState.addBytes(read.toLong())</span>
+<span class="nc" id="L338">                            _downloadProgress.value =</span>
+<span class="nc" id="L339">                                downloadState.toProgress(</span>
+<span class="nc" id="L340">                                    sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L341">                                    targetLanguage = targetLanguage,</span>
+<span class="nc" id="L342">                                    fileName = modelFile.name,</span>
+                                )
+                        }
+<span class="nc" id="L345">                    }</span>
+<span class="nc" id="L346">                }</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                if (!modelFile.matchesSha256(tempFile)) {</span>
+<span class="nc" id="L348">                    tempFile.delete()</span>
+<span class="nc" id="L349">                    return@runCatching false</span>
+                }
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                destination.parentFile?.mkdirs()</span>
+<span class="nc" id="L352">                moveDownloadedFile(tempFile, destination)</span>
+<span class="nc" id="L353">            }</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">        }.getOrDefault(false)</span>
+
+    private fun isDownloaded(entry: BergamotModelRegistryEntry): Boolean =
+<span class="nc" id="L357">        entry.files.values.all { file -&gt;</span>
+<span class="nc" id="L358">            val localFile = pairDir(entry.from, entry.to).resolve(file.name.sanitizedModelFileName())</span>
+<span class="nc bnc" id="L359" title="All 4 branches missed.">            localFile.isFile &amp;&amp; file.matchesSha256(localFile)</span>
+<span class="nc" id="L360">        }</span>
+
+    fun pairDir(
+        from: String,
+        to: String,
+<span class="nc" id="L365">    ): File = modelRoot.resolve(&quot;$from-$to&quot;)</span>
+
+    private fun moveDownloadedFile(
+        tempFile: File,
+        destination: File,
+    ): Boolean =
+<span class="nc" id="L371">        runCatching {</span>
+<span class="nc" id="L372">            Files.move(</span>
+<span class="nc" id="L373">                tempFile.toPath(),</span>
+<span class="nc" id="L374">                destination.toPath(),</span>
+<span class="nc" id="L375">                StandardCopyOption.REPLACE_EXISTING,</span>
+<span class="nc" id="L376">                StandardCopyOption.ATOMIC_MOVE,</span>
+            )
+<span class="nc" id="L378">            true</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">        }.recoverCatching {</span>
+<span class="nc" id="L380">            Files.move(</span>
+<span class="nc" id="L381">                tempFile.toPath(),</span>
+<span class="nc" id="L382">                destination.toPath(),</span>
+<span class="nc" id="L383">                StandardCopyOption.REPLACE_EXISTING,</span>
+            )
+<span class="nc" id="L385">            true</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        }.getOrElse {</span>
+<span class="nc" id="L387">            tempFile.delete()</span>
+<span class="nc" id="L388">            false</span>
+<span class="nc" id="L389">        }</span>
+
+<span class="nc bnc" id="L391" title="All 6 branches missed.">    private fun BergamotModelFile.matchesSha256(file: File): Boolean = expectedSha256Hash.isNotBlank() &amp;&amp; sha256(file).equals(expectedSha256Hash, ignoreCase = true)</span>
+
+    private fun sha256(file: File): String {
+<span class="nc" id="L394">        val digest = MessageDigest.getInstance(&quot;SHA-256&quot;)</span>
+<span class="nc" id="L395">        file.inputStream().use { input -&gt;</span>
+<span class="nc" id="L396">            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)</span>
+<span class="nc" id="L397">            while (true) {</span>
+<span class="nc" id="L398">                val read = input.read(buffer)</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                if (read &lt;= 0) {</span>
+<span class="nc" id="L400">                    break</span>
+                }
+<span class="nc" id="L402">                digest.update(buffer, 0, read)</span>
+            }
+<span class="nc" id="L404">        }</span>
+<span class="nc" id="L405">        return digest.digest().joinToString(separator = &quot;&quot;) { byte -&gt; &quot;%02x&quot;.format(byte) }</span>
+    }
+
+    private fun String.sanitizedModelFileName(): String =
+<span class="nc" id="L409">        substringAfterLast('/')</span>
+<span class="nc" id="L410">            .replace(Regex(&quot;[^A-Za-z0-9._-]+&quot;), &quot;_&quot;)</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            .ifBlank { &quot;model-file&quot; }</span>
+
+    companion object {
+        private const val DEFAULT_REGISTRY_URL = &quot;https://bergamot.s3.amazonaws.com/models/index.json&quot;
+        private const val DEFAULT_MODEL_BASE_URL = &quot;https://bergamot.s3.amazonaws.com/models&quot;
+        private const val PIVOT_LANGUAGE = &quot;en&quot;
+        private const val REGISTRY_FILE_NAME = &quot;registry.json&quot;
+    }
+}
+
+<span class="nc" id="L421">data class BergamotModelDownloadProgress(</span>
+<span class="nc" id="L422">    val sourceLanguage: String,</span>
+<span class="nc" id="L423">    val targetLanguage: String,</span>
+<span class="nc" id="L424">    val fileName: String,</span>
+<span class="nc" id="L425">    val downloadedBytes: Long,</span>
+<span class="nc" id="L426">    val totalBytes: Long,</span>
+) {
+    val isIndeterminate: Boolean
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        get() = totalBytes &lt;= 0L</span>
+
+    val fraction: Float
+        get() =
+<span class="nc" id="L433">            when {</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                totalBytes &lt;= 0L -&gt; 0f</span>
+<span class="nc" id="L435">                else -&gt; (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)</span>
+<span class="nc" id="L436">            }</span>
+}
+
+<span class="nc" id="L439">private data class ModelDownloadState(</span>
+<span class="nc" id="L440">    val totalBytes: Long,</span>
+<span class="nc" id="L441">    var downloadedBytes: Long = 0L,</span>
+<span class="nc" id="L442">) {</span>
+    fun addAlreadyDownloaded(file: BergamotModelFile) {
+<span class="nc" id="L444">        downloadedBytes += file.size.coerceAtLeast(0L)</span>
+<span class="nc" id="L445">    }</span>
+
+    fun addBytes(bytes: Long) {
+<span class="nc" id="L448">        downloadedBytes += bytes.coerceAtLeast(0L)</span>
+<span class="nc" id="L449">    }</span>
+
+    fun toProgress(
+        sourceLanguage: String,
+        targetLanguage: String,
+        fileName: String,
+    ): BergamotModelDownloadProgress =
+<span class="nc" id="L456">        BergamotModelDownloadProgress(</span>
+<span class="nc" id="L457">            sourceLanguage = sourceLanguage,</span>
+<span class="nc" id="L458">            targetLanguage = targetLanguage,</span>
+<span class="nc" id="L459">            fileName = fileName,</span>
+<span class="nc" id="L460">            downloadedBytes = downloadedBytes,</span>
+<span class="nc" id="L461">            totalBytes = totalBytes,</span>
+<span class="nc" id="L462">        )</span>
+
+    companion object {
+        fun forPath(path: List&lt;BergamotModelRegistryEntry&gt;): ModelDownloadState =
+<span class="nc" id="L466">            ModelDownloadState(</span>
+                totalBytes =
+<span class="nc" id="L468">                    path</span>
+<span class="nc" id="L469">                        .flatMap { it.files.values }</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">                        .sumOf { it.size.coerceAtLeast(0L) },</span>
+<span class="nc" id="L471">            )</span>
+    }
+}
+
+sealed interface BergamotModelPreparation {
+<span class="nc" id="L476">    data class Ready(</span>
+<span class="nc" id="L477">        val modelRegistry: List&lt;BergamotModelRegistryEntry&gt;,</span>
+    ) : BergamotModelPreparation
+
+<span class="nc" id="L480">    data class Error(</span>
+<span class="nc" id="L481">        val reason: ErrorReason,</span>
+<span class="nc" id="L482">        val sourceLanguage: String,</span>
+<span class="nc" id="L483">        val targetLanguage: String,</span>
+    ) : BergamotModelPreparation
+
+    enum class ErrorReason {
+<span class="nc" id="L487">        RegistryMissing,</span>
+<span class="nc" id="L488">        NoAppModel,</span>
+<span class="nc" id="L489">        DownloadFailed,</span>
+    }
+}
+
+enum class BergamotLanguagePairStatus {
+<span class="nc" id="L494">    RegistryMissing,</span>
+<span class="nc" id="L495">    Unavailable,</span>
+<span class="nc" id="L496">    AvailableToDownload,</span>
+<span class="nc" id="L497">    Downloaded,</span>
+}
+
+<span class="nc bnc" id="L500" title="All 2 branches missed.">@Serializable</span>
+<span class="nc" id="L501">data class BergamotModelRegistryEntry(</span>
+<span class="nc" id="L502">    val from: String,</span>
+<span class="nc" id="L503">    val to: String,</span>
+<span class="nc" id="L504">    val files: Map&lt;String, BergamotModelFile&gt;,</span>
+)
+
+<span class="nc bnc" id="L507" title="All 26 branches missed.">@Serializable</span>
+<span class="nc" id="L508">data class BergamotModelFile(</span>
+<span class="nc" id="L509">    val name: String,</span>
+<span class="nc" id="L510">    val remoteUrl: String,</span>
+<span class="nc" id="L511">    val size: Long,</span>
+<span class="nc" id="L512">    val expectedSha256Hash: String = &quot;&quot;,</span>
+<span class="nc" id="L513">    val url: String? = null,</span>
+<span class="nc" id="L514">    val config: JsonElement? = null,</span>
+<span class="nc" id="L515">)</span>
+
+<span class="nc" id="L517">data class LanguagePairInfo(</span>
+<span class="nc" id="L518">    val sourceLanguage: String,</span>
+<span class="nc" id="L519">    val targetLanguage: String,</span>
+<span class="nc" id="L520">    val sizeBytes: Long,</span>
+)
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

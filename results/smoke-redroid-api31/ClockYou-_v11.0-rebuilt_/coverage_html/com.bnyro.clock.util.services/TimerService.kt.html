@@ -1,0 +1,516 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TimerService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">SMOKE ClockYou</a> &gt; <a href="index.source.html" class="el_package">com.bnyro.clock.util.services</a> &gt; <span class="el_source">TimerService.kt</span></div><h1>TimerService.kt</h1><pre class="source lang-java linenums">package com.bnyro.clock.util.services
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Binder
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.os.Vibrator
+import android.text.format.DateUtils
+import android.util.Log
+import androidx.annotation.RequiresApi
+import androidx.annotation.StringRes
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import com.bnyro.clock.R
+import com.bnyro.clock.domain.model.TimerDescriptor
+import com.bnyro.clock.domain.model.TimerObject
+import com.bnyro.clock.domain.model.WatchState
+import com.bnyro.clock.util.NotificationHelper
+import com.bnyro.clock.util.RingtoneHelper
+
+import java.util.Timer
+import java.util.TimerTask
+
+<span class="fc" id="L42">class TimerService : Service() {</span>
+<span class="fc" id="L43">    private val notificationId = 2</span>
+<span class="fc" id="L44">    private val timer = Timer()</span>
+<span class="fc" id="L45">    private val binder = LocalBinder()</span>
+<span class="fc" id="L46">    private val handler = Handler(Looper.getMainLooper())</span>
+
+    private var mediaPlayer: MediaPlayer? = null
+    private var isPlaying = false
+<span class="fc" id="L50">    private var oldnow = SystemClock.elapsedRealtime()</span>
+<span class="pc" id="L51">    private val vibrator: Vibrator by lazy {</span>
+<span class="nc" id="L52">        getSystemService(Context.VIBRATOR_SERVICE) as Vibrator</span>
+    }
+
+<span class="pc" id="L55">    var onChangeTimers: (objects: Array&lt;TimerObject&gt;) -&gt; Unit = {}</span>
+<span class="pc" id="L56">    var timerObjects = mutableListOf&lt;TimerObject&gt;()</span>
+
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    @SuppressLint(&quot;ServiceCast&quot;, &quot;ScheduleExactAlarm&quot;)
+    private fun scheduleAlarm(timerObject: TimerObject) {
+<span class="nc" id="L62">        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager</span>
+
+<span class="nc" id="L64">        val intent = Intent(this, TimerAlarmReceiver::class.java).apply {</span>
+<span class="nc" id="L65">            putExtra(ID_EXTRA_KEY, timerObject.id)</span>
+<span class="nc" id="L66">            action = ACTION_TIMER_EXPIRED</span>
+<span class="nc" id="L67">        }</span>
+<span class="nc" id="L68">        val pendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L69">            this,</span>
+<span class="nc" id="L70">            timerObject.id,</span>
+<span class="nc" id="L71">            intent,</span>
+<span class="nc" id="L72">            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+        )
+
+<span class="nc" id="L75">        val triggerTime = System.currentTimeMillis() + timerObject.currentPosition.value</span>
+<span class="nc" id="L76">        val alarmInfo = AlarmManager.AlarmClockInfo(triggerTime, pendingIntent)</span>
+
+<span class="nc" id="L78">        try {</span>
+<span class="nc" id="L79">            alarmManager.setAlarmClock(alarmInfo, pendingIntent)</span>
+<span class="nc" id="L80">        } catch (e: SecurityException) {</span>
+<span class="nc" id="L81">            Log.e(&quot;TimerService&quot;, &quot;timer error!&quot;, e)</span>
+        }
+<span class="nc" id="L83">    }</span>
+
+    private fun cancelAlarm(timerObject: TimerObject) {
+<span class="nc" id="L86">        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager</span>
+<span class="nc" id="L87">        val intent = Intent(this, TimerAlarmReceiver::class.java).apply {</span>
+<span class="nc" id="L88">            action = ACTION_TIMER_EXPIRED</span>
+<span class="nc" id="L89">            putExtra(ID_EXTRA_KEY, timerObject.id)</span>
+<span class="nc" id="L90">        }</span>
+
+<span class="nc" id="L92">        val pendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L93">            this,</span>
+<span class="nc" id="L94">            timerObject.id,</span>
+<span class="nc" id="L95">            intent,</span>
+<span class="nc" id="L96">            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE</span>
+        )
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        pendingIntent?.let {</span>
+<span class="nc" id="L99">            alarmManager.cancel(it)</span>
+<span class="nc" id="L100">            it.cancel()</span>
+<span class="nc" id="L101">        }</span>
+<span class="nc" id="L102">    }</span>
+
+<span class="fc" id="L104">    private val receiver = object : BroadcastReceiver() {</span>
+        override fun onReceive(context: Context, intent: Intent) {
+<span class="nc" id="L106">            Log.e(&quot;receive&quot;, intent.toString())</span>
+<span class="nc" id="L107">            val id = intent.getIntExtra(ID_EXTRA_KEY, 0)</span>
+<span class="nc bnc" id="L108" title="All 8 branches missed.">            val obj = timerObjects.find { it.id == id } ?: return</span>
+<span class="nc bnc" id="L109" title="All 5 branches missed.">            when (intent.getStringExtra(ACTION_EXTRA_KEY)) {</span>
+                ACTION_STOP -&gt; {
+<span class="nc" id="L111">                    stop(obj, cancelled = true)</span>
+<span class="nc" id="L112">                    stopForeground(true)</span>
+                }
+
+                ACTION_PAUSE_RESUME -&gt; {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                    if (obj.state.value == WatchState.PAUSED) resume(obj) else pause(obj)</span>
+                }
+
+                ACTION_ADD_5_MIN -&gt; {
+<span class="nc" id="L120">                    obj.currentPosition.value += 300000</span>
+<span class="nc" id="L121">                    updateNotification(obj)</span>
+                }
+
+                TIMER_RESTART -&gt; {
+<span class="nc" id="L125">                    stopAudio()</span>
+
+<span class="nc" id="L127">                    oldnow = System.currentTimeMillis()</span>
+
+<span class="nc" id="L129">                    obj.currentPosition.value = obj.initialPosition</span>
+<span class="nc" id="L130">                    obj.state.value = WatchState.RUNNING</span>
+
+<span class="nc" id="L132">                    cancelAlarm(obj)</span>
+<span class="nc" id="L133">                    scheduleAlarm(obj)</span>
+<span class="nc" id="L134">                    acquireWakeLock()</span>
+
+<span class="nc" id="L136">                    val finishedNotificationId = (Integer.MAX_VALUE / 3) + obj.id * 10</span>
+<span class="nc" id="L137">                    val notificationManager = NotificationManagerCompat.from(context)</span>
+<span class="nc" id="L138">                    notificationManager.cancel(finishedNotificationId)</span>
+<span class="nc" id="L139">                    notificationManager.cancel(obj.id)</span>
+
+<span class="nc" id="L141">                    invokeChangeListener()</span>
+<span class="nc" id="L142">                    updateNotification(obj)</span>
+                }
+            }
+<span class="nc" id="L145">        }</span>
+    }
+
+    private fun play(timerObject: TimerObject) {
+<span class="nc" id="L149">        stopAudio()</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        val alert: Uri = timerObject.ringtone ?: RingtoneManager.getDefaultUri(</span>
+<span class="nc" id="L151">            RingtoneManager.TYPE_ALARM</span>
+        )
+
+<span class="nc" id="L154">        mediaPlayer = MediaPlayer()</span>
+
+<span class="nc" id="L156">        try {</span>
+<span class="nc" id="L157">            mediaPlayer!!.setDataSource(this, alert)</span>
+<span class="nc" id="L158">            startAlarm(mediaPlayer!!)</span>
+<span class="nc" id="L159">        } catch (e: Exception) {</span>
+<span class="nc" id="L160">            Log.e(&quot;failed to play ringtone&quot;, e.message, e)</span>
+        }
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (timerObject.vibrate) {</span>
+<span class="nc" id="L163">            val pattern = longArrayOf(0, 500, 500)</span>
+<span class="nc" id="L164">            vibrator.vibrate(pattern, 0)</span>
+        } else {
+<span class="nc" id="L166">            vibrator.cancel()</span>
+        }
+<span class="nc" id="L168">        isPlaying = true</span>
+<span class="nc" id="L169">    }</span>
+
+    private fun startAlarm(player: MediaPlayer) {
+<span class="nc" id="L172">        player.isLooping = true</span>
+<span class="nc" id="L173">        player.setAudioAttributes(NotificationHelper.audioAttributes)</span>
+<span class="nc" id="L174">        player.prepare()</span>
+<span class="nc" id="L175">        player.start()</span>
+<span class="nc" id="L176">    }</span>
+
+    /**
+     * Stops the audio and vibration
+     */
+    private fun stopAudio() {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (!isPlaying) return</span>
+<span class="nc" id="L183">        isPlaying = false</span>
+
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (mediaPlayer != null) {</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            mediaPlayer?.stop()</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            mediaPlayer?.release()</span>
+<span class="nc" id="L188">            mediaPlayer = null</span>
+        }
+
+<span class="nc" id="L191">        vibrator.cancel()</span>
+<span class="nc" id="L192">    }</span>
+
+    private fun acquireWakeLock() {
+<span class="nc bnc" id="L195" title="All 6 branches missed.">        if (wakeLock?.isHeld == false) {</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            wakeLock?.acquire()</span>
+        }
+<span class="nc" id="L198">    }</span>
+
+    private fun releaseWakeLock() {
+<span class="nc bnc" id="L201" title="All 6 branches missed.">        if (wakeLock?.isHeld == true) {</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            wakeLock?.release()</span>
+        }
+<span class="nc" id="L204">    }</span>
+
+    @SuppressLint(&quot;UnspecifiedRegisterReceiverFlag&quot;)
+    override fun onCreate() {
+<span class="fc" id="L208">        super.onCreate()</span>
+
+        // PARTIAL_WAKE_LOCK should make it so that uhhhhh the screen still turns off???
+<span class="fc" id="L211">        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager</span>
+<span class="fc" id="L212">        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, &quot;TimerService::Lock&quot;).apply {</span>
+<span class="fc" id="L213">            setReferenceCounted(false)</span>
+<span class="fc" id="L214">        }</span>
+
+<span class="fc" id="L216">        timer.schedule(</span>
+<span class="fc" id="L217">            object : TimerTask() {</span>
+                override fun run() {
+<span class="fc" id="L219">                    handler.post(this@TimerService::updateState)</span>
+<span class="fc" id="L220">                }</span>
+<span class="fc" id="L221">            }, 0, UPDATE_DELAY.toLong()</span>
+        )
+<span class="fc" id="L223">        ContextCompat.registerReceiver(</span>
+<span class="fc" id="L224">            this, receiver, IntentFilter(UPDATE_STATE_ACTION), ContextCompat.RECEIVER_EXPORTED</span>
+        )
+<span class="fc" id="L226">    }</span>
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+<span class="nc bnc" id="L230" title="All 4 branches missed.">        if (intent?.action == ACTION_TIMER_EXPIRED) {</span>
+<span class="nc" id="L231">            val id = intent.getIntExtra(ID_EXTRA_KEY, 0)</span>
+<span class="nc bnc" id="L232" title="All 8 branches missed.">            timerObjects.find { it.id == id }?.let {</span>
+<span class="nc" id="L233">                play(it)</span>
+
+<span class="nc" id="L235">                val notificationManager = NotificationManagerCompat.from(this)</span>
+<span class="nc" id="L236">                notificationManager.cancel(it.id)</span>
+
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                if (timerObjects.size &lt;= 1) {</span>
+<span class="nc" id="L239">                    stopForeground(STOP_FOREGROUND_REMOVE)</span>
+                }
+
+<span class="nc" id="L242">                showFinishedNotification(it)</span>
+<span class="nc" id="L243">                it.currentPosition.value = 0</span>
+<span class="nc" id="L244">                it.state.value = WatchState.PAUSED</span>
+
+<span class="nc bnc" id="L246" title="All 4 branches missed.">                if (timerObjects.none { t -&gt; t.state.value == WatchState.RUNNING }) {</span>
+<span class="nc" id="L247">                    releaseWakeLock()</span>
+                }
+
+<span class="nc" id="L250">                invokeChangeListener()</span>
+<span class="nc" id="L251">            }</span>
+
+<span class="nc" id="L253">            return START_STICKY</span>
+        }
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        val timer = if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.TIRAMISU) {</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            intent?.getParcelableExtra(INITIAL_TIMER_EXTRA_KEY, TimerDescriptor::class.java)</span>
+        } else {
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            @Suppress(&quot;DEPRECATION&quot;) intent?.getParcelableExtra(INITIAL_TIMER_EXTRA_KEY) as TimerDescriptor?</span>
+        }
+<span class="nc bnc" id="L260" title="All 2 branches missed.">        if (timer != null) {</span>
+<span class="nc" id="L261">            val scheduledObject = timer.asScheduledObject()</span>
+<span class="nc" id="L262">            startForeground(scheduledObject.id, getStartNotification())</span>
+<span class="nc" id="L263">            enqueueNew(scheduledObject)</span>
+        } else {
+<span class="nc" id="L265">            startForeground(notificationId, getStartNotification())</span>
+        }
+<span class="nc" id="L267">        return START_STICKY</span>
+    }
+
+<span class="nc" id="L270">    private fun getNotification(timerObject: TimerObject) = NotificationCompat.Builder(</span>
+<span class="nc" id="L271">        this, NotificationHelper.TIMER_CHANNEL</span>
+<span class="nc" id="L272">    ).setContentTitle(getText(R.string.timer))</span>
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        .setUsesChronometer(timerObject.state.value == WatchState.RUNNING).apply {</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">            if (Build.VERSION.SDK_INT &gt;= Build.VERSION_CODES.N) {</span>
+<span class="nc" id="L275">                setChronometerCountDown(true)</span>
+            } else {
+<span class="nc" id="L277">                setContentText(</span>
+<span class="nc" id="L278">                    DateUtils.formatElapsedTime(</span>
+<span class="nc" id="L279">                        (timerObject.currentPosition.value / 1000).toLong()</span>
+                    )
+                )
+            }
+<span class="nc" id="L283">        }.setWhen(System.currentTimeMillis() + timerObject.currentPosition.value)</span>
+<span class="nc" id="L284">        .addAction(stopAction(timerObject)).addAction(pauseResumeAction(timerObject))</span>
+<span class="nc" id="L285">        .addAction(restarttimer(timerObject)).addAction(add5MinAction(timerObject))</span>
+<span class="nc" id="L286">        .setSmallIcon(R.drawable.ic_notification).setOngoing(true).build()</span>
+
+    fun invokeChangeListener() {
+<span class="fc" id="L289">        onChangeTimers.invoke(timerObjects.toTypedArray())</span>
+<span class="fc" id="L290">    }</span>
+
+    private fun updateState() {
+<span class="fc" id="L293">        val now = System.currentTimeMillis()</span>
+<span class="fc" id="L294">        val delta = now - oldnow</span>
+<span class="fc" id="L295">        oldnow = now</span>
+
+<span class="fc" id="L297">        timerObjects.forEach {</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (it.state.value == WatchState.RUNNING) {</span>
+<span class="nc" id="L299">                it.currentPosition.value =</span>
+<span class="nc" id="L300">                    (it.currentPosition.value - delta.toInt()).coerceAtLeast(0)</span>
+
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                if (Build.VERSION.SDK_INT &lt; Build.VERSION_CODES.N) {</span>
+<span class="nc" id="L303">                    updateNotification(it)</span>
+                }
+            }
+<span class="nc" id="L306">        }</span>
+<span class="fc" id="L307">    }</span>
+
+    fun enqueueNew(timerObject: TimerObject) {
+<span class="nc" id="L310">        timerObject.state.value = WatchState.RUNNING</span>
+<span class="nc" id="L311">        timerObjects.add(timerObject)</span>
+
+<span class="nc" id="L313">        scheduleAlarm(timerObject)</span>
+<span class="nc" id="L314">        acquireWakeLock()</span>
+
+<span class="nc" id="L316">        invokeChangeListener()</span>
+<span class="nc" id="L317">        updateNotification(timerObject)</span>
+<span class="nc" id="L318">    }</span>
+
+    private fun pause(timerObject: TimerObject) {
+<span class="nc" id="L321">        timerObject.state.value = WatchState.PAUSED</span>
+<span class="nc" id="L322">        cancelAlarm(timerObject)</span>
+<span class="nc" id="L323">        updateNotification(timerObject)</span>
+
+<span class="nc bnc" id="L325" title="All 4 branches missed.">        if (timerObjects.none { it.state.value == WatchState.RUNNING }) {</span>
+<span class="nc" id="L326">            releaseWakeLock()</span>
+        }
+<span class="nc" id="L328">    }</span>
+
+    private fun resume(timerObject: TimerObject) {
+<span class="nc" id="L331">        timerObject.state.value = WatchState.RUNNING</span>
+<span class="nc" id="L332">        scheduleAlarm(timerObject)</span>
+<span class="nc" id="L333">        acquireWakeLock()</span>
+<span class="nc" id="L334">        updateNotification(timerObject)</span>
+<span class="nc" id="L335">    }</span>
+
+    private fun updateNotification(timerObject: TimerObject) {
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (ActivityCompat.checkSelfPermission(</span>
+<span class="nc" id="L339">                this, Manifest.permission.POST_NOTIFICATIONS</span>
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+<span class="nc" id="L342">            NotificationManagerCompat.from(this)</span>
+<span class="nc" id="L343">                .notify(timerObject.id, getNotification(timerObject))</span>
+        }
+<span class="nc" id="L345">    }</span>
+
+    private fun stop(timerObject: TimerObject, cancelled: Boolean) {
+<span class="nc" id="L348">        cancelAlarm(timerObject)</span>
+<span class="nc" id="L349">        stopAudio()</span>
+<span class="nc" id="L350">        timerObjects.remove(timerObject)</span>
+
+<span class="nc bnc" id="L352" title="All 4 branches missed.">        if (timerObjects.none { it.state.value == WatchState.RUNNING }) {</span>
+<span class="nc" id="L353">            releaseWakeLock()</span>
+        }
+
+<span class="nc" id="L356">        invokeChangeListener()</span>
+<span class="nc" id="L357">        val notificationManager = NotificationManagerCompat.from(this)</span>
+<span class="nc" id="L358">        notificationManager.cancel(timerObject.id)</span>
+<span class="nc" id="L359">        val finishedNotificationId = (Integer.MAX_VALUE / 3) + timerObject.id * 10</span>
+<span class="nc" id="L360">        notificationManager.cancel(finishedNotificationId)</span>
+
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (timerObjects.isEmpty()) stopSelf()</span>
+<span class="nc" id="L363">    }</span>
+
+    private fun showFinishedNotification(timerObject: TimerObject) {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        if (ActivityCompat.checkSelfPermission(</span>
+<span class="nc" id="L367">                this, Manifest.permission.POST_NOTIFICATIONS</span>
+            ) != PackageManager.PERMISSION_GRANTED
+<span class="nc" id="L369">        ) return</span>
+
+<span class="nc" id="L371">        val notificationChannelId = NotificationHelper.TIMER_FINISHED_CHANNEL</span>
+<span class="nc" id="L372">        val finishedNotificationId = (Integer.MAX_VALUE / 3) + timerObject.id * 10</span>
+
+<span class="nc" id="L374">        val stopIntent = Intent(UPDATE_STATE_ACTION).apply {</span>
+<span class="nc" id="L375">            putExtra(ACTION_EXTRA_KEY, ACTION_STOP)</span>
+<span class="nc" id="L376">            putExtra(ID_EXTRA_KEY, timerObject.id)</span>
+<span class="nc" id="L377">        }</span>
+<span class="nc" id="L378">        val stopPendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L379">            this,</span>
+<span class="nc" id="L380">            finishedNotificationId,</span>
+<span class="nc" id="L381">            stopIntent,</span>
+<span class="nc" id="L382">            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+        )
+<span class="nc" id="L384">        val stopAction = NotificationCompat.Action.Builder(</span>
+<span class="nc" id="L385">            null, getString(R.string.stop), stopPendingIntent</span>
+<span class="nc" id="L386">        ).build()</span>
+
+<span class="nc" id="L388">        val restartIntent = Intent(UPDATE_STATE_ACTION).apply {</span>
+<span class="nc" id="L389">            putExtra(ACTION_EXTRA_KEY, TIMER_RESTART)</span>
+<span class="nc" id="L390">            putExtra(ID_EXTRA_KEY, timerObject.id)</span>
+<span class="nc" id="L391">        }</span>
+<span class="nc" id="L392">        val restartPendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L393">            this,</span>
+<span class="nc" id="L394">            finishedNotificationId + 2,</span>
+<span class="nc" id="L395">            restartIntent,</span>
+<span class="nc" id="L396">            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+        )
+<span class="nc" id="L398">        val restartAction = NotificationCompat.Action.Builder(</span>
+<span class="nc" id="L399">            null, getString(R.string.timer_restart), restartPendingIntent</span>
+<span class="nc" id="L400">        ).build()</span>
+
+<span class="nc" id="L402">        cancelAlarm(timerObject)</span>
+
+<span class="nc" id="L404">        val deleteIntent = Intent(UPDATE_STATE_ACTION).apply {</span>
+<span class="nc" id="L405">            putExtra(ACTION_EXTRA_KEY, ACTION_STOP)</span>
+<span class="nc" id="L406">            putExtra(ID_EXTRA_KEY, timerObject.id)</span>
+<span class="nc" id="L407">        }</span>
+<span class="nc" id="L408">        val deletePendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L409">            this, finishedNotificationId + 1, deleteIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+        )
+
+<span class="nc" id="L412">        val notification = NotificationCompat.Builder(this, notificationChannelId)</span>
+<span class="nc" id="L413">            .setSmallIcon(R.drawable.ic_notification)</span>
+<span class="nc" id="L414">            .setSilent(true)</span>
+<span class="nc" id="L415">            .setContentTitle(getString(R.string.timer_finished))</span>
+<span class="nc" id="L416">            .setContentText(timerObject.label.value)</span>
+<span class="nc" id="L417">            .setCategory(NotificationCompat.CATEGORY_ALARM)</span>
+<span class="nc" id="L418">            .setPriority(NotificationCompat.PRIORITY_MAX)</span>
+<span class="nc" id="L419">            .setDeleteIntent(deletePendingIntent)</span>
+<span class="nc" id="L420">            .setOngoing(false)</span>
+<span class="nc" id="L421">            .addAction(stopAction)</span>
+<span class="nc" id="L422">            .addAction(restartAction)</span>
+<span class="nc" id="L423">            .build().apply {</span>
+<span class="nc" id="L424">                flags = flags or NotificationCompat.FLAG_INSISTENT</span>
+<span class="nc" id="L425">            }</span>
+
+<span class="nc" id="L427">        NotificationManagerCompat.from(this).notify(finishedNotificationId, notification)</span>
+<span class="nc" id="L428">    }</span>
+
+    private fun pauseResumeAction(timerObject: TimerObject): NotificationCompat.Action {
+<span class="nc" id="L431">        val text =</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (timerObject.state.value == WatchState.PAUSED) R.string.resume else R.string.pause</span>
+<span class="nc" id="L433">        return getAction(text, ACTION_PAUSE_RESUME, 5, timerObject.id)</span>
+    }
+
+    private fun getAction(
+        @StringRes stringRes: Int, action: String, requestCode: Int, objectId: Int
+    ): NotificationCompat.Action {
+<span class="nc" id="L439">        val intent = Intent(UPDATE_STATE_ACTION).putExtra(ACTION_EXTRA_KEY, action)</span>
+<span class="nc" id="L440">            .putExtra(ID_EXTRA_KEY, objectId)</span>
+<span class="nc" id="L441">        val pendingIntent = PendingIntent.getBroadcast(</span>
+<span class="nc" id="L442">            this,</span>
+<span class="nc" id="L443">            requestCode + objectId,</span>
+<span class="nc" id="L444">            intent,</span>
+<span class="nc" id="L445">            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE</span>
+        )
+<span class="nc" id="L447">        return NotificationCompat.Action.Builder(null, getString(stringRes), pendingIntent).build()</span>
+    }
+
+<span class="nc" id="L450">    private fun stopAction(timerObject: TimerObject) = getAction(</span>
+<span class="nc" id="L451">        R.string.stop, ACTION_STOP, 4, timerObject.id</span>
+<span class="nc" id="L452">    )</span>
+
+<span class="nc" id="L454">    private fun restarttimer(timerObject: TimerObject) = getAction(</span>
+<span class="nc" id="L455">        R.string.timer_restart, TIMER_RESTART, 7, timerObject.id</span>
+<span class="nc" id="L456">    )</span>
+
+<span class="nc" id="L458">    private fun add5MinAction(timerObject: TimerObject) = getAction(</span>
+<span class="nc" id="L459">        R.string.add_5_minutes, ACTION_ADD_5_MIN, 6, timerObject.id</span>
+<span class="nc" id="L460">    )</span>
+
+    fun updateLabel(id: Int, newLabel: String) {
+<span class="nc bnc" id="L463" title="All 4 branches missed.">        timerObjects.firstOrNull { it.id == id }?.let {</span>
+<span class="nc" id="L464">            it.label.value = newLabel</span>
+<span class="nc" id="L465">        }</span>
+<span class="nc" id="L466">    }</span>
+
+    fun updateRingtone(id: Int, newRingtoneUri: Uri?) {
+<span class="nc bnc" id="L469" title="All 4 branches missed.">        timerObjects.firstOrNull { it.id == id }?.let {</span>
+<span class="nc" id="L470">            it.ringtone = newRingtoneUri</span>
+<span class="nc" id="L471">        }</span>
+<span class="nc" id="L472">    }</span>
+
+    fun updateVibrate(id: Int, vibrate: Boolean) {
+<span class="nc bnc" id="L475" title="All 4 branches missed.">        timerObjects.firstOrNull { it.id == id }?.let {</span>
+<span class="nc" id="L476">            it.vibrate = vibrate</span>
+<span class="nc" id="L477">        }</span>
+<span class="nc" id="L478">    }</span>
+
+    override fun onDestroy() {
+<span class="nc" id="L481">        releaseWakeLock()</span>
+<span class="nc" id="L482">        runCatching {</span>
+<span class="nc" id="L483">            unregisterReceiver(receiver)</span>
+<span class="nc" id="L484">        }</span>
+<span class="nc" id="L485">        timer.cancel()</span>
+<span class="nc" id="L486">        super.onDestroy()</span>
+<span class="nc" id="L487">    }</span>
+
+<span class="nc" id="L489">    private fun getStartNotification() = NotificationCompat.Builder(</span>
+<span class="nc" id="L490">        this, NotificationHelper.TIMER_SERVICE_CHANNEL</span>
+<span class="nc" id="L491">    ).setContentTitle(getString(R.string.timer_service)).setSmallIcon(R.drawable.ic_notification)</span>
+<span class="nc" id="L492">        .build()</span>
+
+<span class="fc" id="L494">    override fun onBind(intent: Intent) = binder</span>
+
+<span class="fc" id="L496">    inner class LocalBinder : Binder() {</span>
+<span class="fc" id="L497">        fun getService() = this@TimerService</span>
+    }
+
+
+
+
+    companion object {
+        const val UPDATE_STATE_ACTION = &quot;com.bnyro.clock.UPDATE_STATE&quot;
+        const val ACTION_EXTRA_KEY = &quot;action&quot;
+        const val ID_EXTRA_KEY = &quot;id&quot;
+        const val INITIAL_TIMER_EXTRA_KEY = &quot;timer&quot;
+        const val ACTION_PAUSE_RESUME = &quot;pause_resume&quot;
+        const val ACTION_STOP = &quot;stop&quot;
+        private const val UPDATE_DELAY = 100
+        const val TIMER_RESTART = &quot;timer_restart&quot;
+        const val ACTION_ADD_5_MIN = &quot;add_5_min&quot;
+        const val ACTION_TIMER_EXPIRED = &quot;com.bnyro.clock.TIMER_EXPIRED&quot;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.13.202504020838</span></div></body></html>

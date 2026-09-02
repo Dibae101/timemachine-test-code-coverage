@@ -1,0 +1,245 @@
+/*
+ * This file is part of Track & Graph
+ *
+ * Track & Graph is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Track & Graph is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package com.samco.trackandgraph.reminders.ui
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.navigation3.runtime.NavKey
+import com.samco.trackandgraph.R
+import com.samco.trackandgraph.permissions.rememberAlarmAndNotificationPermissionRequester
+import com.samco.trackandgraph.ui.compose.appbar.AppBarConfig
+import com.samco.trackandgraph.ui.compose.appbar.LocalTopBarController
+import com.samco.trackandgraph.ui.theming.TnGComposeTheme
+import com.samco.trackandgraph.ui.ui.EmptyPageHintText
+import com.samco.trackandgraph.ui.ui.LoadingOverlay
+import com.samco.trackandgraph.ui.ui.inputSpacingXLarge
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.serialization.Serializable
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
+
+@Serializable
+data object RemindersNavKey : NavKey
+
+@Composable
+fun RemindersScreen(navArgs: RemindersNavKey) {
+    val viewModel: RemindersScreenViewModel = hiltViewModel<RemindersScreenViewModelImpl>()
+
+    val reminders by viewModel.currentReminders.collectAsState()
+    val isLoading by viewModel.loading.collectAsState()
+    var showAddReminderDialog by rememberSaveable(navArgs) { mutableStateOf(false) }
+    var editReminderId by rememberSaveable(navArgs) { mutableStateOf<Long?>(null) }
+
+    LaunchedEffect(Unit) {
+        viewModel.scrollToTopEvents.receiveAsFlow().collect {
+            viewModel.lazyListState.animateScrollToItem(0)
+        }
+    }
+
+    TopAppBarContent(navArgs) {
+        editReminderId = null
+        showAddReminderDialog = true
+    }
+
+    RemindersScreen(
+        reminders = reminders,
+        isLoading = isLoading,
+        showAddReminderDialog = showAddReminderDialog,
+        editReminderId = editReminderId,
+        lazyListState = viewModel.lazyListState,
+        onEditReminder = {
+            editReminderId = it
+            showAddReminderDialog = true
+        },
+        onHideAddReminderDialog = { showAddReminderDialog = false },
+        onDeleteReminder = viewModel::deleteReminder,
+        onDuplicateReminder = viewModel::duplicateReminder,
+        onDragStart = viewModel::onDragStart,
+        onDragSwap = viewModel::onDragSwap,
+        onDragEnd = viewModel::onDragEnd,
+    )
+}
+
+@Composable
+private fun TopAppBarContent(
+    navArgs: RemindersNavKey,
+    showAddReminderDialog: () -> Unit,
+) {
+    val topBarController = LocalTopBarController.current
+    val title = stringResource(R.string.reminders)
+    val permissionRequester = rememberAlarmAndNotificationPermissionRequester()
+
+    val actions: @Composable RowScope.() -> Unit =
+        remember(permissionRequester, showAddReminderDialog) {
+            {
+                IconButton(
+                    onClick = {
+                        showAddReminderDialog()
+                        permissionRequester()
+                    }
+                ) {
+                    Icon(painterResource(R.drawable.add_icon), stringResource(R.string.add))
+                }
+            }
+        }
+
+    topBarController.Set(
+        navArgs,
+        AppBarConfig(
+            title = title,
+            actions = actions
+        )
+    )
+}
+
+@Composable
+fun RemindersScreen(
+    reminders: List<ReminderViewData>,
+    isLoading: Boolean,
+    showAddReminderDialog: Boolean,
+    editReminderId: Long?,
+    lazyListState: LazyListState,
+    onEditReminder: (Long) -> Unit,
+    onHideAddReminderDialog: () -> Unit,
+    onDeleteReminder: (ReminderViewData) -> Unit,
+    onDuplicateReminder: (ReminderViewData) -> Unit,
+    onDragStart: () -> Unit,
+    onDragSwap: (Int, Int) -> Unit,
+    onDragEnd: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val reorderableLazyListState = rememberReorderableLazyListState(lazyListState) { from, to ->
+        onDragSwap(from.index, to.index)
+    }
+
+    LaunchedEffect(reorderableLazyListState.isAnyItemDragging) {
+        if (reorderableLazyListState.isAnyItemDragging) {
+            onDragStart()
+        } else {
+            onDragEnd()
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        if (reminders.isEmpty()) {
+            // Empty state
+            EmptyPageHintText(
+                modifier = Modifier
+                    .padding(inputSpacingXLarge)
+                    .align(Alignment.Center),
+                text = stringResource(id = R.string.no_reminders_hint)
+            )
+        } else {
+            // Reminders list with drag-and-drop
+            LazyColumn(
+                state = lazyListState,
+                contentPadding = WindowInsets.safeDrawing
+                    .only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+                    .asPaddingValues(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(
+                    items = reminders,
+                    key = { it.id }
+                ) { reminder ->
+                    ReorderableItem(reorderableLazyListState, key = reminder.id) { isDragging ->
+                        Reminder(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .longPressDraggableHandle()
+                                .zIndex(if (isDragging) 1f else 0f),
+                            isElevated = isDragging,
+                            reminderViewData = reminder,
+                            onDeleteClick = { onDeleteReminder(reminder) },
+                            onEditClick = { onEditReminder(reminder.id) },
+                            onDuplicateClick = { onDuplicateReminder(reminder) }
+                        )
+                    }
+                }
+                item { Spacer(modifier = Modifier.height(80.dp)) }
+            }
+        }
+
+        // Add reminder dialog
+        if (showAddReminderDialog) {
+            AddReminderDialog(
+                editReminderId = editReminderId,
+                onDismiss = onHideAddReminderDialog
+            )
+        }
+
+        // Loading overlay
+        if (isLoading) LoadingOverlay()
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun RemindersScreenPreview() {
+    TnGComposeTheme {
+        Column {
+            // Empty state preview
+            RemindersScreen(
+                reminders = emptyList(),
+                isLoading = false,
+                showAddReminderDialog = false,
+                editReminderId = null,
+                lazyListState = LazyListState(),
+                onHideAddReminderDialog = {},
+                onDeleteReminder = {},
+                onDuplicateReminder = {},
+                onDragStart = {},
+                onDragSwap = { _, _ -> },
+                onDragEnd = {},
+                onEditReminder = {},
+            )
+        }
+    }
+}

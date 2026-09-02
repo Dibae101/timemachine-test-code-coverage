@@ -1,0 +1,71 @@
+/*
+ *  This file is part of Track & Graph
+ *
+ *  Track & Graph is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  Track & Graph is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with Track & Graph.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package com.samco.trackandgraph.data.interactor
+
+import com.samco.trackandgraph.data.database.dto.DeletedGroupInfo
+import com.samco.trackandgraph.data.database.dto.Group
+import com.samco.trackandgraph.data.database.dto.GroupChildDisplayIndex
+import com.samco.trackandgraph.data.database.dto.GroupChildType
+import com.samco.trackandgraph.data.database.dto.GroupCreateRequest
+import com.samco.trackandgraph.data.database.dto.ComponentDeleteRequest
+import com.samco.trackandgraph.data.database.dto.CreatedComponent
+import com.samco.trackandgraph.data.database.dto.GroupUpdateRequest
+
+/**
+ * An interface for managing groups. Do not use this interface directly, it is implemented by
+ * the DataInteractor interface.
+ *
+ * The implementation of GroupHelper will manage the complete lifecycle of groups.
+ * It will perform all changes inside a transaction and throw an exception if anything goes wrong.
+ */
+interface GroupHelper {
+    suspend fun insertGroup(request: GroupCreateRequest): CreatedComponent
+
+    suspend fun updateGroup(request: GroupUpdateRequest)
+
+    suspend fun deleteGroup(request: ComponentDeleteRequest): DeletedGroupInfo
+
+    suspend fun getGroupById(id: Long): Group?
+
+    suspend fun getAllGroupsSync(): List<Group>
+
+    suspend fun getGroupsForGroupSync(parentGroupId: Long): List<Group>
+
+    suspend fun hasAnyGroups(): Boolean
+
+    suspend fun getDisplayIndicesForGroup(groupId: Long): List<GroupChildDisplayIndex>
+
+    /**
+     * Updates the order of children of [groupId] by associating the groupItemId to the
+     * display index. The other fields are ignored for now.
+     */
+    suspend fun updateGroupChildOrder(groupId: Long, children: List<GroupChildDisplayIndex>)
+
+    /**
+     * Returns the set of group IDs that must not be used as symlink targets when creating a
+     * symlink inside [groupId]. Includes [groupId] itself and all its transitive ancestors.
+     * Selecting any of these as a GROUP symlink target would create a cycle in the hierarchy.
+     */
+    suspend fun getAncestorAndSelfGroupIds(groupId: Long): Set<Long>
+
+    /**
+     * Creates a symlink: adds an entry to group_items_table so that [childId] of [childType]
+     * appears in the group [inGroupId]. The component itself is not moved or modified.
+     */
+    suspend fun createSymlink(inGroupId: Long, childId: Long, childType: GroupChildType)
+}
