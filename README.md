@@ -26,6 +26,50 @@ Two different things have been checked, and they are not equivalent:
 report checks, and its execution data is **synthesized, not measured** - see
 [the note below](#report-validation-is-not-a-coverage-measurement).
 
+Both trees use the **same layout**, so one consumer can read either:
+
+```
+results/<smoke|report-validation>/<apk-slug>/
+├── coverage.ec        device execution data     (smoke only)
+├── synthetic.exec     synthesized               (report-validation only)
+├── coverage.xml       jacoco XML report
+├── coverage_html/     annotated, colour-coded HTML
+├── probe_report.txt   jacococli execinfo
+└── probe_summary.csv  per-class probe hits
+results/<...>/smoke_summary.csv | validation_summary.csv
+```
+
+Directory names are identical for the 26 apps present in both, and the summary
+CSVs share their first twelve columns. The execution-data filename differs on
+purpose, and `validation_summary.csv` carries a `coverage_source` column
+(`device` vs `synthetic`) so the two cannot be conflated.
+
+### Which emulator an app needs
+
+`MANIFEST.tsv` records `min_sdk` per APK, because that decides where an app can be
+smoke tested:
+
+* **44 of 61** install on the API 25 image the original set was tested on.
+* **17 need something newer** - 13 at API 26, then Calculator-You (27), uhabits
+  (28), Feeder (29) and FastNFitness (31).
+
+An API 31 image covers all 61. The original 26 were pinned to API 25 because newer
+images change permission and storage behaviour and several of them stop launching,
+so two passes are more reliable than one: API 25 for the 44, a newer image for the
+rest.
+
+Check before booting anything:
+
+```bash
+DRY_RUN=1 ./smoke_test_dataset.sh            # against API 25
+DRY_RUN=1 API=31 ./smoke_test_dataset.sh     # against API 31
+```
+
+`DRY_RUN` needs no emulator. It lists every discovered APK with its `min_sdk`,
+declared class count, resolved class/source directories, and flags LFS pointers or
+unresolved paths. It reports 61 discovered, 0 dataset problems, 17 too new for API
+25.
+
 The 35 apps added most recently have not been run on a device, because the host
 they were built on cannot run one (aarch64, no `/dev/kvm`). Their datasets are
 structurally complete and reportable; whether each app installs and launches on
@@ -99,6 +143,20 @@ The smoke test exists to answer one question per app: *does this dataset work?*
 It installs the APK, launches it, fires **40 monkey events over about 90 seconds**,
 broadcasts the coverage dump, pulls the `.ec` file, and builds a report. An app
 passes when the report generates with **zero mismatched classes**.
+
+Two caveats on the numbers in the committed smoke output:
+
+* **The `html_pages` column understated every Kotlin app.** It counted only
+  `*.java.html`, so StreetComplete was recorded as 2 pages when its report
+  actually contains 964 `*.kt.html`. Kiwix (322) and Breezy-Weather (424) were
+  affected the same way. The reports were always correct; the column was not.
+  Fixed, but the committed CSV still carries the old figures.
+* **Three apps were measured over a fraction of their code.** Binary-Eye's
+  headline 47.17% is 25 covered lines out of a 53-line denominator, because only
+  4 of its classes were declared at the time. Kiwix analysed 1,339 lines against
+  the 16,425 it has now, and Open-Food-Facts 9,861 against 24,198. Those three
+  percentages are not app-level coverage, which is why the class directories were
+  rebuilt.
 
 That is a plumbing check. The percentages it produces are a floor - what you get
 from a minute and a half of random tapping. A real TimeMachine run explores for an

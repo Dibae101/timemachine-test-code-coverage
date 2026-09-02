@@ -32,12 +32,14 @@ Usage
 """
 
 import csv
+import glob
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(HERE)
@@ -48,9 +50,33 @@ JACOCOCLI = os.path.join(PROJECT, "fuzzingandroid", "libs", "jacococli-0.8.13.ja
 JAVA = os.environ.get("JAVA", "/usr/lib/jvm/java-17-openjdk-arm64/bin/java")
 FRACTION = os.environ.get("FRACTION", "0.55")
 
-FIELDS = ["app", "apk", "apk_mb", "class_dirs", "source_dirs", "classes_declared",
-          "exec_classes", "line_total", "line_covered", "line_pct",
-          "html_pages", "highlight_spans", "analyze_error", "verdict", "detail"]
+# Same columns as results/smoke/smoke_summary.csv, in the same order, so both
+# result sets can be read by one consumer. Two columns are added rather than
+# reused:
+#
+#   coverage_source  "synthetic" here, "device" in smoke_summary.csv. This is the
+#                    column that stops the two being conflated.
+#   line_total       smoke does not record its denominator, which is what made it
+#                    impossible to see that Binary-Eye's 47% was 25 lines of 53.
+#
+# installed/launched are recorded as "n/a": nothing is installed or launched here.
+FIELDS = ["app", "apk", "package", "installed", "launched", "ec_bytes",
+          "classes_found", "line_coverage_pct", "mismatched_classes",
+          "html_pages", "verdict", "seconds",
+          "coverage_source", "line_total", "line_covered", "class_dirs",
+          "source_dirs", "exec_classes", "highlight_spans", "analyze_error",
+          "detail"]
+
+
+def smoke_slug(apk_name):
+    """The directory name smoke_test_dataset.sh would use for this APK.
+
+    It is `echo "${apk%.apk}" | tr -c 'A-Za-z0-9._-' '_'`, and the trailing
+    underscore in the existing directories is real: echo's newline is translated
+    too. Reproduced exactly so the two result trees line up.
+    """
+    stem = apk_name[:-4] if apk_name.endswith(".apk") else apk_name
+    return "".join(c if re.match(r"[A-Za-z0-9._-]", c) else "_" for c in stem) + "_"
 
 
 def synth_classpath():
@@ -124,23 +150,44 @@ def html_stats(html_dir):
     return pages, spans
 
 
+def package_of(apk_path):
+    """Package name via aapt, matching what the smoke test records."""
+    aapt = os.environ.get("AAPT")
+    if not aapt or not os.path.isfile(aapt):
+        sdk = os.environ.get("SDK", "/home/ubuntu/android-sdk")
+        found = sorted(glob.glob(os.path.join(sdk, "build-tools", "*", "aapt")))
+        aapt = found[-1] if found else shutil.which("aapt")
+    if not aapt:
+        return ""
+    try:
+        out = subprocess.run([aapt, "dump", "badging", apk_path],
+                             capture_output=True, text=True, timeout=180).stdout
+        m = re.search(r"^package: name='([^']+)'", out, re.M)
+        return m.group(1) if m else ""
+    except Exception:  # noqa: BLE001 - a missing package name is not fatal here
+        return ""
+
+
 def verify_apk(app, app_dir, apk_name, info, cp):
-    slug = re.sub(r"[^A-Za-z0-9._-]", "_", "%s__%s" % (app, apk_name[:-4]))
-    dest = os.path.join(OUT, slug)
+    t0 = time.time()
+    dest = os.path.join(OUT, smoke_slug(apk_name))
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest, exist_ok=True)
 
     row = {k: "" for k in FIELDS}
-    row.update(app=app, apk=apk_name, verdict="FAIL")
+    row.update(app=app, apk=apk_name, verdict="FAIL", coverage_source="synthetic",
+               installed="n/a", launched="n/a")
 
     apk_path = os.path.join(app_dir, apk_name)
     if not os.path.isfile(apk_path):
         row["detail"] = "declared APK missing"
+        row["seconds"] = int(time.time() - t0)
         return row
     if is_lfs_pointer(apk_path):
         row["detail"] = "APK is an unfetched Git LFS pointer"
+        row["seconds"] = int(time.time() - t0)
         return row
-    row["apk_mb"] = round(os.path.getsize(apk_path) / 1e6, 1)
+    row["package"] = package_of(apk_path)
 
     cls = [os.path.join(app_dir, p) for p in info.get("classfiles", [])]
     src = [os.path.join(app_dir, p) for p in info.get("sourcefiles", [])]
@@ -154,20 +201,27 @@ def verify_apk(app, app_dir, apk_name, info, cp):
         row["detail"] = "no class directories declared"
         return row
 
-    row["classes_declared"] = count_classes(cls)
-    if not row["classes_declared"]:
+    row["classes_found"] = count_classes(cls)
+    if not row["classes_found"]:
         row["detail"] = "declared class dirs hold no .class files"
+        row["seconds"] = int(time.time() - t0)
         return row
 
     # ---- synthesize execution data over exactly these classes
+    #
+    # Deliberately NOT named coverage.ec. The smoke tree's coverage.ec is pulled
+    # off a device; giving this file that name is all it would take for the two to
+    # be mixed up later.
     exec_path = os.path.join(dest, "synthetic.exec")
     p = subprocess.run([JAVA, "-cp", cp, "SynthExec", exec_path, FRACTION] + cls,
-                       capture_output=True, text=True, timeout=1800)
+                       capture_output=True, text=True, timeout=1800)  # noqa: E501
     if p.returncode != 0:
         row["detail"] = ("SynthExec failed: " + (p.stderr.strip().splitlines() or [""])[-1])[:160]
+        row["seconds"] = int(time.time() - t0)
         return row
     m = re.search(r"written=(\d+)", p.stdout)
     row["exec_classes"] = int(m.group(1)) if m else 0
+    row["ec_bytes"] = os.path.getsize(exec_path)
 
     # ---- report
     xml_path = os.path.join(dest, "coverage.xml")
@@ -184,30 +238,37 @@ def verify_apk(app, app_dir, apk_name, info, cp):
     open(os.path.join(dest, "jacococli-output.txt"), "w").write(
         " ".join(cmd) + "\n" + combined)
 
+    row["mismatched_classes"] = combined.count("does not match")
+
     if "Error while analyzing" in combined:
         bad = re.search(r"Error while analyzing ([^\s]+)", combined)
         row["analyze_error"] = bad.group(1)[-70:] if bad else "yes"
         row["detail"] = "jacococli aborted analyzing a class"
+        row["verdict"] = "ANALYZE ERROR"
+        row["seconds"] = int(time.time() - t0)
         return row
     if r.returncode != 0 or not os.path.isfile(xml_path):
         row["detail"] = ("jacococli rc=%s %s" % (r.returncode, combined.strip()[-120:]))
+        row["seconds"] = int(time.time() - t0)
         return row
 
     counts = xml_line_counter(xml_path)
     if not counts:
         row["detail"] = "report has no LINE counter"
+        row["seconds"] = int(time.time() - t0)
         return row
     covered, missed = counts
     total = covered + missed
     row["line_total"] = total
     row["line_covered"] = covered
-    row["line_pct"] = round(100.0 * covered / total, 1) if total else 0.0
+    row["line_coverage_pct"] = "%.2f" % (100.0 * covered / total) if total else "0.00"
 
     pages, spans = html_stats(html_dir)
     row["html_pages"] = pages
     row["highlight_spans"] = spans
+    row["seconds"] = int(time.time() - t0)
 
-    row["detail"] = "mismatch warnings: %d" % combined.count("does not match")
+    row["detail"] = "mismatch warnings: %d" % row["mismatched_classes"]
     if total == 0:
         row["detail"] = "no lines counted"
     elif covered == 0:
@@ -242,16 +303,28 @@ def main():
         for apk_name, info in sorted(entries.items()):
             row = verify_apk(app, app_dir, apk_name, info, cp)
             rows.append(row)
-            print("%-4s %-26s %-44s lines=%-7s cov=%-6s pages=%-5s %s"
-                  % (row["verdict"], app[:26], apk_name[:44], row["line_total"],
-                     row["line_pct"], row["html_pages"], row["detail"][:60]))
+            print("%-14s %-26s %-40s lines=%-7s cov=%-7s pages=%-5s %s"
+                  % (row["verdict"], app[:26], apk_name[:40], row["line_total"],
+                     row["line_coverage_pct"], row["html_pages"],
+                     row["detail"][:52]))
 
-    csv_path = os.path.join(OUT, "report_validation.csv")
-    with open(csv_path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=FIELDS)
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
+    # Same filename shape as smoke_summary.csv, in the same layout, so one
+    # consumer can read both. validation_summary.csv is the current name;
+    # report_validation.csv is written too so existing references keep working.
+    csv_path = os.path.join(OUT, "validation_summary.csv")
+    for path in (csv_path, os.path.join(OUT, "report_validation.csv")):
+        with open(path, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=FIELDS)
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+
+    # Same probe-level artefacts the smoke test produces, so a result directory
+    # here has the same file set as one under results/smoke/.
+    probe = os.path.join(PROJECT, "probe_report.py")
+    if os.path.isfile(probe):
+        print()
+        subprocess.run([sys.executable, probe, OUT], timeout=7200)
 
     ok = [r for r in rows if r["verdict"] == "PASS"]
     apps_ok = {r["app"] for r in ok}

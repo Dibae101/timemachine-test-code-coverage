@@ -25,7 +25,10 @@
 set -uo pipefail
 
 SDK="${SDK:-/home/ubuntu/android-sdk}"
-PROJECT="${PROJECT:-/home/ubuntu/TimeMachine}"
+# Default to the clone this script lives in. Hardcoding an absolute path meant
+# every checkout that was not at /home/ubuntu/TimeMachine silently looked for its
+# apps in a directory that did not exist.
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 APPS_DIR="$PROJECT/instrumented_apps"
 OUT="${OUT:-$PROJECT/results/smoke}"
 JACOCO="${JACOCO:-$PROJECT/fuzzingandroid/libs/jacococli-0.8.13.jar}"
@@ -36,8 +39,15 @@ SETTLE="${SETTLE:-8}"             # seconds to let the app initialise
 INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-600}"   # per install attempt, seconds
 BROADCAST_TIMEOUT="${BROADCAST_TIMEOUT:-900}" # COLLECT_COVERAGE dump, seconds
 EMU_ARGS="${EMU_ARGS:--accel off -gpu guest}"
-AAPT="$SDK/build-tools/28.0.3/aapt"
-ADB="$SDK/platform-tools/adb"
+# build-tools 28.0.3 is not the only version that can dump a badging record, and
+# pinning it made the script unusable on an SDK that has any other one.
+AAPT="${AAPT:-$SDK/build-tools/28.0.3/aapt}"
+if [ ! -x "$AAPT" ]; then
+  AAPT=$(ls -1 "$SDK"/build-tools/*/aapt 2>/dev/null | sort -V | tail -1)
+  [ -n "${AAPT:-}" ] || AAPT=$(command -v aapt || true)
+fi
+ADB="${ADB:-$SDK/platform-tools/adb}"
+[ -x "$ADB" ] || ADB=$(command -v adb || true)
 export ANDROID_SDK_ROOT="$SDK" ANDROID_HOME="$SDK"
 export PATH="$SDK/platform-tools:$SDK/emulator:$PATH"
 
@@ -153,6 +163,62 @@ for p in info.get('classfiles', []):
 print(n)
 PY
 }
+
+# DRY_RUN checks everything that does not need a device: which apps are
+# discovered, that each APK is a real file rather than an LFS pointer, that the
+# declared class and source directories resolve, and what jacococli would be
+# called with. Worth running before committing an emulator host to a full pass,
+# and it is the only part of this script that can run on a host with no emulator
+# available at all (there is no linux-aarch64 emulator build, for instance).
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  echo "DRY RUN - no emulator, no install, no coverage"
+  echo "PROJECT=$PROJECT"
+  echo "APPS_DIR=$APPS_DIR"
+  echo "AAPT=${AAPT:-<none>}"
+  echo
+  n=0; bad=0; toonew=0
+  while IFS='|' read -r app apk; do
+    [ -n "$app" ] || continue
+    if [ ${#} -gt 0 ]; then
+      match=0
+      for f in "$@"; do
+        case "${app,,}/${apk,,}" in *"${f,,}"*) match=1 ;; esac
+      done
+      [ "$match" = 1 ] || continue
+    fi
+    n=$((n+1))
+    app_dir="$APPS_DIR/$app"
+    apk_path="$app_dir/$apk"
+    size=$(stat -c %s "$apk_path" 2>/dev/null || echo 0)
+    classes=$(count_classes "$app_dir" "$apk")
+    mapfile -d '' -t JARGS < <(jacoco_args "$app_dir" "$apk")
+    ncls=0; nsrc=0
+    for ((i=0; i<${#JARGS[@]}; i+=2)); do
+      case "${JARGS[i]}" in
+        --classfiles) ncls=$((ncls+1)) ;;
+        --sourcefiles) nsrc=$((nsrc+1)) ;;
+      esac
+    done
+    minsdk=$(timeout 120 "$AAPT" dump badging "$apk_path" 2>/dev/null \
+             | sed -n "s/.*sdkVersion:'\([0-9]*\)'.*/\1/p" | head -1)
+    status=ok
+    [ "$size" -lt 1024 ] && status="APK IS AN LFS POINTER"
+    [ "$classes" -gt 0 ] || status="NO CLASS FILES"
+    [ "$ncls" -gt 0 ] || status="NO CLASSFILES DIRS RESOLVE"
+    [ "$status" = ok ] || bad=$((bad+1))
+    if [ -n "$minsdk" ] && [ "$minsdk" -gt "${API:-25}" ]; then
+      status="$status (minSdk $minsdk > API ${API:-25}: will not install)"
+      toonew=$((toonew+1))
+    fi
+    printf '%-26s %-44s %9s B  minSdk=%-4s classes=%-6s dirs=%-3s src=%-3s %s\n' \
+      "$app" "$apk" "$size" "${minsdk:-?}" "$classes" "$ncls" "$nsrc" "$status"
+  done < <(discover)
+  echo
+  echo "$n apk entries discovered, $bad with dataset problems"
+  echo "$toonew need an emulator newer than API ${API:-25}"
+  echo "results would be written to: $OUT/<apk-slug>/"
+  exit $(( bad > 0 ? 1 : 0 ))
+fi
 
 boot_emulator || exit 1
 
@@ -301,7 +367,11 @@ for entry in "${ENTRIES[@]}"; do
             --name "SMOKE $app" 2>&1)
     echo "$rep" >> "$APP_LOG"
     mismatch=$(echo "$rep" | grep -c 'does not match')
-    pages=$(find "$dest/coverage_html" -name '*.java.html' 2>/dev/null | wc -l)
+    # Count Kotlin pages too. Matching only *.java.html reported 2 pages for
+    # StreetComplete, which actually has 964 *.kt.html, and likewise understated
+    # every other Kotlin app. The reports were correct; the column was not.
+    pages=$(find "$dest/coverage_html" \( -name '*.java.html' -o -name '*.kt.html' \) \
+              2>/dev/null | wc -l)
     pct=$(python3 - "$dest/coverage.xml" <<'PY'
 import sys, xml.dom.minidom as m
 try:

@@ -27,14 +27,26 @@ import re
 import subprocess
 import sys
 
-JACOCO = '/home/ubuntu/TimeMachine/fuzzingandroid/libs/jacococli.jar'
+HERE = os.path.dirname(os.path.abspath(__file__))
+# Resolved relative to this file, not to one developer's home directory. The
+# absolute path meant any other checkout ran `java -jar` against a jar that was
+# not there and reported every app as an execinfo failure.
+JACOCO = os.environ.get(
+    'JACOCO', os.path.join(HERE, 'fuzzingandroid', 'libs', 'jacococli.jar'))
+JAVA = os.environ.get('JAVA', 'java')
+
+# Execution data is coverage.ec when pulled from a device, and synthetic.exec
+# when written by dataset_builder/verify_reports.py on a host with no emulator.
+# Both are valid input here; the filename is what distinguishes them.
+EXEC_NAMES = ('coverage.ec', 'synthetic.exec')
+
 ROW = re.compile(r'^([0-9a-f]{16})\s+(\d+)\s+of\s+(\d+)\s+(\S+)')
 
 
 def analyse(ec_path):
     """Return (rows, hits, probes) parsed from jacococli execinfo."""
     try:
-        out = subprocess.run(['java', '-jar', JACOCO, 'execinfo', ec_path],
+        out = subprocess.run([JAVA, '-jar', JACOCO, 'execinfo', ec_path],
                              capture_output=True, text=True, timeout=600).stdout
     except Exception as exc:
         return None, 0, 0, 'execinfo failed: %s' % exc
@@ -52,15 +64,18 @@ def analyse(ec_path):
 
 
 def main():
-    base = sys.argv[1] if len(sys.argv) > 1 else '/home/ubuntu/TimeMachine/results/smoke'
+    base = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, 'results', 'smoke')
+    if not os.path.isdir(base):
+        sys.exit('no such directory: %s' % base)
     results = []
 
     for name in sorted(os.listdir(base)):
         d = os.path.join(base, name)
-        ec = os.path.join(d, 'coverage.ec')
-        if not os.path.isdir(d) or not os.path.isfile(ec):
+        if not os.path.isdir(d):
             continue
-        if os.path.getsize(ec) == 0:
+        ec = next((os.path.join(d, n) for n in EXEC_NAMES
+                   if os.path.isfile(os.path.join(d, n))), None)
+        if not ec or os.path.getsize(ec) == 0:
             continue
 
         rows, hits, probes, raw = analyse(ec)

@@ -29,8 +29,8 @@ SDK = os.environ.get("SDK", "/home/ubuntu/android-sdk")
 AAPT = os.path.join(SDK, "build-tools", "28.0.3", "aapt")
 STATUS = os.path.join(HERE, "status.csv")
 
-FIELDS = ["app", "apk", "package", "sha256", "size_mb", "class_dirs",
-          "class_files", "source_dirs", "paths_ok", "provenance"]
+FIELDS = ["app", "apk", "package", "min_sdk", "target_sdk", "sha256", "size_mb",
+          "class_dirs", "class_files", "source_dirs", "paths_ok", "provenance"]
 
 
 def sha256(path):
@@ -41,14 +41,25 @@ def sha256(path):
     return h.hexdigest()
 
 
-def package_of(apk):
+def badging(apk):
+    """(package, min_sdk, target_sdk) from aapt.
+
+    min_sdk is recorded because it decides which emulator an app can be smoke
+    tested on. 17 of the 61 apps cannot install on the API 25 image the original
+    set was tested on, and without this column that only shows up as an
+    unexplained install failure.
+    """
     try:
         out = subprocess.run([AAPT, "dump", "badging", apk], capture_output=True,
                              text=True, timeout=180).stdout
-        m = re.search(r"^package: name='([^']+)'", out, re.M)
-        return m.group(1) if m else ""
     except Exception:
-        return ""
+        return "", "", ""
+    pkg = re.search(r"^package: name='([^']+)'", out, re.M)
+    mins = re.search(r"sdkVersion:'(\d+)'", out)
+    targ = re.search(r"targetSdkVersion:'(\d+)'", out)
+    return (pkg.group(1) if pkg else "",
+            mins.group(1) if mins else "",
+            targ.group(1) if targ else "")
 
 
 def count_classes(dirs):
@@ -126,10 +137,13 @@ def main():
                 broken.append("%s / %s: class dirs contain no .class files"
                               % (app, apk_name))
 
+            pkg, min_sdk, target_sdk = badging(apk_path)
             rows.append({
                 "app": app,
                 "apk": apk_name,
-                "package": package_of(apk_path),
+                "package": pkg,
+                "min_sdk": min_sdk,
+                "target_sdk": target_sdk,
                 "sha256": sha256(apk_path),
                 "size_mb": round(os.path.getsize(apk_path) / 1e6, 1),
                 "class_dirs": len(cls),
