@@ -194,8 +194,21 @@ def gradle_properties(module_dir):
     return props
 
 
+def _local_variable(text, name):
+    """Value of a `def x = "..."` / `val x = "..."` declaration in a build file."""
+    m = re.search(r'(?:def|val|var)\s+%s\s*=\s*[\'"]([\w.]+)[\'"]' % re.escape(name),
+                  text)
+    return m.group(1) if m else None
+
+
 def _resolve_package_expr(text, module_dir, keys=("namespace", "applicationId")):
-    """Package from `namespace`/`applicationId`, literal or property lookup."""
+    """Package from `namespace`/`applicationId`, however it is expressed.
+
+    Three forms appear in this subject set:
+      namespace "com.foo"                             a literal
+      namespace = project.property("APP_ID")          every Fossify app
+      namespace packageName                           Aegis, a local Groovy def
+    """
     props = None
     for key in keys:
         m = re.search(r'%s\s*=?\s*[\'"]([\w.]+)[\'"]' % key, text)
@@ -212,10 +225,50 @@ def _resolve_package_expr(text, module_dir, keys=("namespace", "applicationId"))
             val = props.get(m.group(1))
             if val and re.fullmatch(r"[\w.]+", val):
                 return val
+        # namespace packageName  -> def packageName = "com.foo", else a property
+        m = re.search(r'%s\s*=?\s*([A-Za-z_]\w*)\s*$' % key, text, re.M)
+        if m:
+            ident = m.group(1)
+            val = _local_variable(text, ident)
+            if val:
+                return val
+            if props is None:
+                props = gradle_properties(module_dir)
+            val = props.get(ident)
+            if val and re.fullmatch(r"[\w.]+", val):
+                return val
     return None
 
 
-def harness_package(module_dir, gradle_file):
+def _buildsrc_constant(tree, prop):
+    """A `val <prop> = "..."` declared in buildSrc or build-logic.
+
+    Convention-plugin projects keep the namespace in shared Kotlin, for example
+    Simple Time Tracker's `namespace = Base.namespace`.
+    """
+    for holder in ("buildSrc", "build-logic", "build-conventions"):
+        base = os.path.join(tree, holder)
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in ("build", ".gradle")]
+            for f in files:
+                if not f.endswith((".kt", ".kts", ".java", ".gradle")):
+                    continue
+                try:
+                    body = open(os.path.join(root, f), encoding="utf-8",
+                                errors="replace").read()
+                except OSError:
+                    continue
+                m = re.search(
+                    r'(?:const\s+)?(?:val|var|String)\s+%s\s*=\s*[\'"]([\w.]+)[\'"]'
+                    % re.escape(prop), body)
+                if m:
+                    return m.group(1)
+    return None
+
+
+def harness_package(module_dir, gradle_file, tree=None):
     """Package to host the harness: manifest package, else gradle namespace."""
     manifest = find_manifest(module_dir)
     text = open(manifest, encoding="utf-8", errors="replace").read()
@@ -226,6 +279,12 @@ def harness_package(module_dir, gradle_file):
     pkg = _resolve_package_expr(g, module_dir)
     if pkg:
         return pkg
+    # namespace = Base.namespace  -> resolve the property out of buildSrc
+    m = re.search(r'namespace\s*=?\s*(?:\w+\s*\.\s*)+(\w+)', g)
+    if m and tree:
+        pkg = _buildsrc_constant(tree, m.group(1))
+        if pkg:
+            return pkg
     raise InstrumentError("cannot determine package/namespace")
 
 
@@ -416,7 +475,7 @@ def instrument_project(tree, logfile=None):
     """Apply the whole harness to a checkout. Returns a summary dict."""
     module_dir, gradle_file = find_app_module(tree)
     agp = agp_major(tree)
-    package = harness_package(module_dir, gradle_file)
+    package = harness_package(module_dir, gradle_file, tree)
     steps = {
         "module": os.path.relpath(module_dir, tree),
         "agp_major": agp,

@@ -452,6 +452,23 @@ def count_classes(dirs):
     return n
 
 
+def count_main_sources(source_dirs):
+    """.java/.kt files in the app's own main source sets.
+
+    Test sources are skipped: they are not compiled into the APK, so counting
+    them would raise the bar for no reason.
+    """
+    n = 0
+    for d in source_dirs:
+        norm = d.replace(os.sep, "/").lower()
+        if "/src/test/" in norm or "/src/androidtest/" in norm \
+                or norm.endswith("/src/test") or norm.endswith("/src/androidtest"):
+            continue
+        for _, _, files in os.walk(d):
+            n += sum(1 for f in files if f.endswith((".java", ".kt")))
+    return n
+
+
 def find_source_dirs(tree):
     out = []
     for root, dirs, files in os.walk(tree):
@@ -888,21 +905,28 @@ def build_subject(subject, status_rows):
         log("  %s: NO PRODUCTS (apks=%d class_dirs=%d)" % (name, len(apks), len(class_dirs)))
         return row
 
-    # Refuse an entry that declares far less code than the APK contains. Pruning
-    # is destructive, so a wrong set of class directories has to be caught here
-    # rather than at report time.
-    dex_classes = apk_dex_class_count(apk)
-    floor = max(10, int(dex_classes * 0.01))
-    if dex_classes and n_classes < floor:
+    # Refuse an entry that declares far less code than the app is written in.
+    # Pruning is destructive, so a wrong set of class directories has to be
+    # caught here rather than at report time.
+    #
+    # The app's own source count is the right yardstick. Comparing against the
+    # APK's dex instead does not work: a small Compose app bundles tens of
+    # thousands of library classes, so Fossify Clock's 198 genuine classes sit
+    # against 38938 in dex and look like a failure, while Feeder's 4 out of 1849
+    # is the real thing this catches.
+    n_sources = count_main_sources(source_dirs)
+    floor = max(10, int(n_sources * 0.4))
+    if n_sources and n_classes < floor:
         row.update(state="too_few_classes",
                    class_dirs=str(len(class_dirs)), class_files=str(n_classes),
-                   detail="declared %d classes, APK dex defines %d"
-                          % (n_classes, dex_classes),
+                   source_dirs=str(len(source_dirs)),
+                   detail="declared %d classes for %d main sources (dex has %d)"
+                          % (n_classes, n_sources, apk_dex_class_count(apk)),
                    seconds=str(int(time.time() - t0)))
         status_rows[key] = row
         save_status(status_rows)
-        log("  %s: TOO FEW CLASSES (%d declared vs %d in dex)"
-            % (name, n_classes, dex_classes))
+        log("  %s: TOO FEW CLASSES (%d declared for %d sources)"
+            % (name, n_classes, n_sources))
         return row
 
     # Name the locally built APK after the published one so a dataset that
