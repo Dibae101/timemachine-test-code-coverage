@@ -92,20 +92,58 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true")
     ap.add_argument("-m", "--message", default="Add validated coverage datasets")
+    ap.add_argument("--apps", nargs="*", default=None,
+                    help="stage only these apps (exact names)")
+    ap.add_argument("--batch", type=int, default=0,
+                    help="stage at most this many not-yet-tracked apps")
     args = ap.parse_args()
 
     good, bad, rows = valid_apps()
+
+    # Staging 61 apps at once is a single ~2 GB push, and the APKs alone exceed
+    # the free LFS allowance. Batching keeps a rejected push from costing the
+    # whole set.
+    if args.apps:
+        wanted = set(args.apps)
+        unknown = wanted - set(good)
+        if unknown:
+            print("not staged, not valid datasets: %s" % ", ".join(sorted(unknown)))
+        good = [a for a in good if a in wanted]
+    elif args.batch:
+        tracked = set()
+        for line in git("ls-files", os.path.join(APPS_REL)).stdout.splitlines():
+            parts = line.split("/")
+            if len(parts) > 1:
+                tracked.add(parts[1])
+        pending = [a for a in good if a not in tracked]
+        good = pending[:args.batch]
+        print("%d valid apps, %d not yet tracked, staging %d"
+              % (len(pending) + len(tracked & set(good)), len(pending), len(good)))
     on_disk = sorted(d for d in os.listdir(APPS)
                      if os.path.isdir(os.path.join(APPS, d)))
     incomplete = [a for a in on_disk if a not in good]
 
-    # any gitlink already recorded for an incomplete subject has to come out of
-    # the index, otherwise it stays on the remote as a phantom submodule
+    # A gitlink left behind by `git add` on an unbuilt subject has to come out of
+    # the index, otherwise it stays on the remote as a phantom submodule.
+    #
+    # The 13 upstream/ provenance submodules are declared in .gitmodules and are
+    # deliberate, so they are left alone. Removing them too, which this did at
+    # first, deletes documented provenance for every app that has it.
+    declared = set()
+    gitmodules = os.path.join(PROJECT, ".gitmodules")
+    if os.path.isfile(gitmodules):
+        for line in open(gitmodules, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if line.startswith("path"):
+                declared.add(line.split("=", 1)[1].strip())
+
     tracked = git("ls-tree", "-r", "HEAD").stdout.splitlines()
     gitlinks = [ln.split("\t", 1)[1] for ln in tracked
                 if ln.split(" ", 1)[0] == "160000"]
     removed_links = 0
     for path in gitlinks:
+        if path in declared:
+            continue
         git("rm", "--cached", "-q", "--", path, check=False)
         removed_links += 1
 
