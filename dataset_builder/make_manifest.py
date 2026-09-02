@@ -30,7 +30,27 @@ AAPT = os.path.join(SDK, "build-tools", "28.0.3", "aapt")
 STATUS = os.path.join(HERE, "status.csv")
 
 FIELDS = ["app", "apk", "package", "min_sdk", "target_sdk", "sha256", "size_mb",
-          "class_dirs", "class_files", "source_dirs", "paths_ok", "provenance"]
+          "class_dirs", "class_files", "source_dirs", "paths_ok", "provenance",
+          "source_commit"]
+
+PROVENANCE = os.path.join(APPS, "PROVENANCE.tsv")
+
+
+def source_commits():
+    """app -> commit, from PROVENANCE.tsv when record_provenance.py has run.
+
+    The provenance column only ever held a ref name. A ref is not a commit: tags
+    move, and the instrumented branches several subjects use are mutable, so the
+    ref alone does not identify the source an APK was built from.
+    """
+    out = {}
+    if not os.path.isfile(PROVENANCE):
+        return out
+    with open(PROVENANCE) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            if r.get("commit"):
+                out[(r["app"], r["apk"])] = r["commit"]
+    return out
 
 
 def sha256(path):
@@ -98,6 +118,7 @@ def provenance():
 
 def main():
     prov = provenance()
+    commits = source_commits()
     rows = []
     broken = []
 
@@ -151,6 +172,7 @@ def main():
                 "source_dirs": len(src),
                 "paths_ok": paths_ok,
                 "provenance": prov.get(app, ""),
+                "source_commit": commits.get((app, apk_name), ""),
             })
 
     out = os.path.join(APPS, "MANIFEST.tsv")

@@ -858,6 +858,23 @@ def build_subject(subject, status_rows):
         cmd += [subject["repo"], tree]
         rc = run(cmd, timeout=CLONE_TIMEOUT, logfile=logfile)
         if rc == 0:
+            # Record the commit BEFORE .git is deleted. A ref is a name: tags can
+            # be moved and the instrumented branches several subjects use are
+            # mutable by definition, so without this the exact source an entry was
+            # built from is unrecoverable afterwards.
+            try:
+                sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree,
+                                     capture_output=True, text=True,
+                                     timeout=120).stdout.strip()
+            except Exception:  # noqa: BLE001 - provenance is not worth failing on
+                sha = ""
+            if sha:
+                with open(os.path.join(app_dir, "SOURCE_COMMIT.txt"), "a") as fh:
+                    fh.write("%s\t%s\t%s\t%s\n" % (
+                        os.path.basename(tree), subject.get("repo", ""),
+                        subject.get("ref", ""), sha))
+                with open(logfile, "a") as fh:
+                    fh.write("source commit: %s\n" % sha)
             # Drop the checkout's own git metadata straight away. If a tree
             # still contains .git when the dataset is committed, git records a
             # gitlink (a submodule reference) instead of the files, so the

@@ -305,6 +305,50 @@ highest-numbered tag is from 2012; KeePassDroid's newest tags are GitHub
 dataset. The rest fail to build or to instrument, and are named with their state in
 the `status-*.csv` files under `dataset_builder/`.
 
+## Where each APK came from
+
+**Every APK is built here, from the source tree shipped beside it.** That is what
+the `-rebuilt` suffix means, and it is the whole point: the compiled classes in the
+entry are byte-for-byte the ones inside that APK, which is what makes a report come
+out with no mismatched classes. The APK is *not* an upstream release binary paired
+with a guessed-at source tree.
+
+So the answer to "is the code the latest and the APK a different release?" is no:
+the checkout is pinned to a release tag, not to `HEAD`, and the APK is compiled
+from that checkout.
+
+One exception. **MaterialFBook** ships its published APK, because its instrumented
+source branch was lost with a deleted GitHub account. Its classes happen to match.
+
+`instrumented_apps/PROVENANCE.tsv` pins each entry to a commit:
+
+| refs | count | note |
+|---|--:|---|
+| tag | 53 | immutable in practice |
+| branch | 8 | **mutable** - the Themis `instrumented-version-*` branches, plus nextcloud's `buggy-4792` |
+
+`MANIFEST.tsv` carries the same SHA in its `source_commit` column.
+
+Two honest caveats:
+
+* The commit was **not** recorded when these entries were built. The builder
+  deleted each checkout's `.git` immediately after cloning, so only the ref name
+  survived, and `record_provenance.py` resolved those refs afterwards. For a tag
+  that has not moved this is exact; for the 8 mutable branches it is today's tip,
+  which may not be what was built. `build_dataset.py` now captures
+  `git rev-parse HEAD` before `.git` is removed and appends it to
+  `SOURCE_COMMIT.txt`, so entries built from here on are pinned exactly.
+* Verified where possible. 46 of the 51 tag-resolved entries have an APK
+  `versionName` matching their tag. The other five are explained, not wrong:
+  Open-Food-Facts and OpenCalc declare a `versionName` upstream never bumped
+  (3.9.0 at tag `v3.10.2`, 3.2.0 at `v3.2.1`), MyExpenses uses a marketing version
+  against a revision tag, and Kore and Jellyfin derive their version from
+  `git describe`. The last two are worth knowing about: with the checkout's `.git`
+  removed, Kore's build resolved to *this* repository and stamped its commit hash
+  as the app's `versionName`. `commons` is the useful cross-check in the other
+  direction - its `versionName` embeds `~36cdb86`, which matches the SHA resolved
+  for its branch.
+
 ## What a dataset contains
 
 ```
