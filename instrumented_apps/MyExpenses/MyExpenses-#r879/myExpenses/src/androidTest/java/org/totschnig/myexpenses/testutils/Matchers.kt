@@ -1,0 +1,304 @@
+package org.totschnig.myexpenses.testutils
+
+import android.net.Uri
+import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ImageView
+import android.widget.TextView
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.ViewInteraction
+import androidx.test.espresso.matcher.BoundedMatcher
+import androidx.test.espresso.matcher.ViewMatchers.isDescendantOfA
+import androidx.test.espresso.matcher.ViewMatchers.withId
+import androidx.test.espresso.matcher.ViewMatchers.withParent
+import androidx.test.espresso.matcher.ViewMatchers.withParentIndex
+import com.kazy.fontdrawable.FontDrawable
+import org.hamcrest.CoreMatchers.instanceOf
+import org.hamcrest.Description
+import org.hamcrest.Matcher
+import org.hamcrest.Matchers.allOf
+import org.hamcrest.Matchers.`is`
+import org.hamcrest.TypeSafeMatcher
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.adapter.IdHolder
+import org.totschnig.myexpenses.adapter.SpinnerItem
+import org.totschnig.myexpenses.delegate.TransactionDelegate.OperationType
+import org.totschnig.myexpenses.model.AccountType
+import org.totschnig.myexpenses.model.CrStatus
+import org.totschnig.myexpenses.ui.DateButton
+import org.totschnig.myexpenses.viewmodel.data.Account
+import org.totschnig.myexpenses.viewmodel.data.Currency
+import org.totschnig.myexpenses.viewmodel.data.FontAwesomeIcons
+import org.totschnig.myexpenses.viewmodel.data.PaymentMethod
+import java.time.LocalDate
+
+fun withMethod(label: String): Matcher<Any> =
+    object : BoundedMatcher<Any, PaymentMethod>(PaymentMethod::class.java) {
+        override fun matchesSafely(myObj: PaymentMethod): Boolean {
+            return myObj.label == label
+        }
+
+        override fun describeTo(description: Description) {
+            description.appendText("with method '${label}'")
+        }
+    }
+
+fun withStatus(status: CrStatus): Matcher<Any> =
+    object : BoundedMatcher<Any, CrStatus>(CrStatus::class.java) {
+        override fun matchesSafely(myObj: CrStatus): Boolean {
+            return myObj == status
+        }
+
+        override fun describeTo(description: Description) {
+            description.appendText("with status '${status.name}'")
+        }
+    }
+
+fun withOperationType(type: Int): Matcher<Any> =
+    object : BoundedMatcher<Any, OperationType>(OperationType::class.java) {
+        override fun matchesSafely(myObj: OperationType): Boolean {
+            return myObj.type == type
+        }
+
+        override fun describeTo(description: Description) {
+            description.appendText("with operation type '$type'")
+        }
+    }
+
+fun withCurrency(currency: String): Matcher<Any> =
+    object : BoundedMatcher<Any, Currency>(Currency::class.java) {
+        override fun matchesSafely(myObj: Currency): Boolean {
+            return myObj.code == currency
+        }
+
+        override fun describeTo(description: Description) {
+            description.appendText("with currency '$currency'")
+        }
+    }
+
+fun withAccountType(expectedTypeName: String) =
+    object : TypeSafeMatcher<SpinnerItem.Item<AccountType>>() {
+        override fun describeTo(description: Description) {
+            description.appendText("SpinnerItem.Item<AccountType>: '$expectedTypeName'")
+        }
+
+        override fun matchesSafely(item: SpinnerItem.Item<AccountType>): Boolean {
+            return item.data.name == expectedTypeName
+        }
+    }
+
+fun withAccount(content: String): Matcher<Any> =
+    object : BoundedMatcher<Any, IdHolder>(IdHolder::class.java) {
+        override fun matchesSafely(myObj: IdHolder): Boolean {
+            return myObj.toString() == content
+        }
+
+        override fun describeTo(description: Description) {
+            description.appendText("with label '$content'")
+        }
+    }
+
+
+fun withAccountGrouped(expectedAccount: String): Matcher<SpinnerItem.Item<Account>> =
+    object : TypeSafeMatcher<SpinnerItem.Item<Account>>() {
+        override fun describeTo(description: Description) {
+            description.appendText("SpinnerItem.Item<Account>: '$expectedAccount'")
+        }
+
+        override fun matchesSafely(item: SpinnerItem.Item<Account>): Boolean {
+            return item.data.label == expectedAccount
+        }
+    }
+
+/**
+ * https://stackoverflow.com/a/63330069/1199911
+ * @param parentViewId the resource id of the parent [View].
+ * @param position the child index of the [View] to match.
+ * @return a [Matcher] that matches the child [View] which has the given [position] within the specified parent.
+ */
+fun withPositionInParent(parentViewId: Int, position: Int): Matcher<View> =
+    allOf(withParent(withId(parentViewId)), withParentIndex(position))
+
+fun toolbarMainTitle(): ViewInteraction =
+    onView(withIdAndAncestor(R.id.title, R.id.toolbar))
+
+fun toolbarMainSubtitle(): ViewInteraction =
+    onView(withIdAndAncestor(R.id.subtitle, R.id.toolbar))
+
+fun toolbarTitle(): ViewInteraction =
+    onView(allOf(instanceOf(TextView::class.java), withParent(withId(R.id.toolbar))))
+
+//Espresso recorder
+fun childAtPosition(parentMatcher: Matcher<View>, position: Int) =
+    object : TypeSafeMatcher<View>() {
+        override fun describeTo(description: Description) {
+            description.appendText("Child at position $position in parent ")
+            parentMatcher.describeTo(description)
+        }
+
+        public override fun matchesSafely(view: View): Boolean {
+            val parent = view.parent
+            return parent is ViewGroup && parentMatcher.matches(parent)
+                    && view == parent.getChildAt(position)
+        }
+    }
+
+
+//https://google.github.io/android-testing-support-library/docs/espresso/advanced/#asserting-that-a-data-item-is-not-in-an-adapter
+fun withAdaptedData(dataMatcher: Matcher<out Any>) = object : TypeSafeMatcher<View>() {
+
+    override fun describeTo(description: Description) {
+        description.appendText("with class name: ")
+        dataMatcher.describeTo(description)
+    }
+
+    public override fun matchesSafely(view: View): Boolean {
+        if (view !is AdapterView<*>) {
+            return false
+        }
+
+        val adapter = view.adapter
+        for (i in 0 until adapter.count) {
+            if (dataMatcher.matches(adapter.getItem(i))) {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
+// Credits: http://stackoverflow.com/a/30361345/1199911
+@Suppress("unused")
+fun withListSize(size: Int) = withListSize(`is`(size))
+
+fun withListSize(integerMatcher: Matcher<Int>) =
+    object : BoundedMatcher<View, AdapterView<*>>(AdapterView::class.java) {
+        override fun describeTo(description: Description) {
+            description.appendText("with number: ")
+            integerMatcher.describeTo(description)
+        }
+
+        public override fun matchesSafely(adapterView: AdapterView<*>): Boolean {
+            return integerMatcher.matches(adapterView.adapter.count)
+        }
+    }
+
+fun withIdAndParent(id: Int, parentId: Int): Matcher<View> =
+    allOf(withId(id), withParent(withId(parentId)))
+
+fun withIdAndAncestor(id: Int, parentId: Int): Matcher<View> =
+    allOf(withId(id), isDescendantOfA(withId(parentId)))
+
+fun withChain(id: Int, ancestor1: Int, ancestor2: Int) =
+    allOf(
+        withId(id),
+        isDescendantOfA(
+            allOf(
+                withId(ancestor1),
+                isDescendantOfA(withId(ancestor2))
+            )
+        )
+    )
+
+fun dateButtonHasDate(expectedDate: LocalDate): Matcher<View> {
+    return object : TypeSafeMatcher<View>() {
+        override fun describeTo(description: Description?) {
+            description?.appendText("DateButton has date: ")
+            description?.appendValue(expectedDate.toString())
+        }
+
+        override fun matchesSafely(item: View?): Boolean {
+            if (item !is DateButton) {
+                return false
+            }
+            return item.date == expectedDate
+        }
+    }
+}
+
+fun withDrawableState(state: Int): Matcher<View> {
+    return object : TypeSafeMatcher<View>() {
+        override fun describeTo(description: Description) {
+            description.appendText("with drawable state: $state")
+        }
+
+        override fun matchesSafely(view: View): Boolean {
+            // getDrawableState() returns the array of all active states on the view.
+            return view.drawableState.contains(state).also {
+                if (it) {
+                    println("View has drawable state: $view")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A custom Hamcrest matcher that checks if a Uri's string representation
+ * starts with a given prefix.
+ *
+ * @param uriPrefix The string prefix to match against the Uri.
+ * @return A Matcher<Uri> that can be used with IntentMatchers.hasData().
+</Uri> */
+fun uriStartsWith(uriPrefix: String?): Matcher<Uri> {
+    return object : TypeSafeMatcher<Uri>() {
+        override fun describeTo(description: Description) {
+            description.appendText("a Uri that starts with " + uriPrefix)
+        }
+
+        override fun matchesSafely(uri: Uri): Boolean {
+            return uri.toString().startsWith(uriPrefix!!)
+        }
+    }
+}
+
+fun withCategoryIcon(icon: String): TypeSafeMatcher<View> {
+    return object : TypeSafeMatcher<View>() {
+        override fun describeTo(description: Description) {
+            description.appendText("has a start drawable")
+        }
+
+        override fun matchesSafely(item: View): Boolean {
+            val startIcon = when (item) {
+                is TextView -> {
+                    item.compoundDrawables[0]
+                }
+
+                is ImageView -> {
+                    item.drawable
+                }
+
+                else -> null
+            }
+
+            if (startIcon !is FontDrawable) {
+                return false
+            }
+
+            // --- 3. Use reflection to access the private 'fontCode' field ---
+            return try {
+                // Get the class of the drawable
+                val fontDrawableClass = startIcon.javaClass
+
+                // Get the private field named "fontCode"
+                val fontCodeField = fontDrawableClass.getDeclaredField("fontCode")
+
+                // Make the private field temporarily accessible
+                fontCodeField.isAccessible = true
+
+                // Get the actual font code value from the specific 'startIcon' instance
+                val actualFontCode = fontCodeField.get(startIcon) as? Char
+
+                // 4. Perform the comparison with the expected FontAwesome icon's unicode
+                actualFontCode == FontAwesomeIcons[icon]?.unicode
+            } catch (e: Exception) {
+                // If reflection fails for any reason (e.g., field name changes in a future library update),
+                // the match should fail gracefully.
+                e.printStackTrace()
+                false
+            }
+        }
+    }
+}

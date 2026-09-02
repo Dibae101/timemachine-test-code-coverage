@@ -1,0 +1,69 @@
+package org.totschnig.myexpenses.viewmodel.data
+
+import android.content.Context
+import android.database.Cursor
+import android.os.Parcelable
+import kotlinx.parcelize.IgnoredOnParcel
+import kotlinx.parcelize.Parcelize
+import org.totschnig.myexpenses.model.CurrencyEnum
+import org.totschnig.myexpenses.provider.KEY_CODE
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_USAGES
+import org.totschnig.myexpenses.provider.getIntIfExistsOr0
+import org.totschnig.myexpenses.provider.getString
+import org.totschnig.myexpenses.provider.getStringOrNull
+import org.totschnig.myexpenses.util.Utils
+import java.io.Serializable
+import java.util.Locale
+
+@Parcelize
+data class Currency(
+    val code: String,
+    val displayName: String,
+    val usages: Int = 0,
+) : Parcelable, Serializable {
+    @IgnoredOnParcel
+    val sortClass = when {
+        code == "XXX" -> 3
+        CurrencyEnum.isPreciousMetal(code) -> 2
+        else -> 1
+    }
+
+    override fun toString() = displayName
+
+    override fun hashCode() = code.hashCode()
+
+    override fun equals(other: Any?) = when {
+        this === other -> true
+        other !is Currency -> false
+        code != other.code -> false
+        else -> true
+    }
+
+    companion object {
+        fun create(code: String, context: Context) = create(code, Utils.localeFromContext(context))
+
+        fun create(code: String, locale: Locale) = Currency(code, findDisplayName(code, locale))
+
+        fun create(cursor: Cursor, locale: Locale): Currency {
+            val code = cursor.getString(KEY_CODE)
+            val label = cursor.getStringOrNull(KEY_LABEL)
+            val usages = cursor.getIntIfExistsOr0(KEY_USAGES)
+            return Currency(
+                code = code,
+                displayName = label ?: findDisplayName(code, locale),
+                usages = usages,
+            )
+        }
+
+        private fun findDisplayName(code: String, locale: Locale) = try {
+            java.util.Currency.getInstance(code).getDisplayName(locale)
+        } catch (_: IllegalArgumentException) {
+            try {
+                CurrencyEnum.valueOf(code).description
+            } catch (_: IllegalArgumentException) {
+                code
+            }
+        }
+    }
+}

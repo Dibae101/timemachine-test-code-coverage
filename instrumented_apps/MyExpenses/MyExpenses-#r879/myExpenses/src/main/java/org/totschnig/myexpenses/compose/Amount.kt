@@ -1,0 +1,202 @@
+package org.totschnig.myexpenses.compose
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.dp
+import org.totschnig.myexpenses.db2.FLAG_EXPENSE
+import org.totschnig.myexpenses.db2.FLAG_INCOME
+import org.totschnig.myexpenses.db2.FLAG_NEUTRAL
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.model.Money
+import org.totschnig.myexpenses.util.formatMoney
+import kotlin.math.sign
+
+fun Modifier.amountBorder(color: Color) = this
+    .border(
+        border = BorderStroke(1.dp, color),
+        shape = RoundedCornerShape(16.dp),
+    )
+    .padding(8.dp)
+
+@Composable
+fun AmountText(
+    amount: Long,
+    currency: CurrencyUnit,
+    modifier: Modifier = Modifier,
+    fontWeight: FontWeight? = null,
+    textAlign: TextAlign? = null,
+    textDecoration: TextDecoration? = null,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    color: Color = Color.Unspecified,
+    prefix: String = "",
+    postfix: String = "",
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+    currencySymbol: String? = null
+) {
+    val money = Money(currency, amount)
+    Text(
+        modifier = modifier.amountSemantics(amount),
+        fontWeight = fontWeight,
+        fontSize = fontSize,
+        textAlign = textAlign,
+        textDecoration = textDecoration,
+        color = color,
+        text = prefix + LocalCurrencyFormatter.current.formatMoney(
+            money,
+            configure = currencySymbol?.let { symbol ->
+                {
+                    it.decimalFormatSymbols = it.decimalFormatSymbols.apply {
+                        this.currencySymbol = symbol
+                    }
+                }
+            }
+        ) + postfix,
+        overflow = overflow,
+        softWrap = softWrap,
+        maxLines = maxLines
+    )
+}
+
+@Composable
+fun ColoredAmountText(
+    amount: Long,
+    currency: CurrencyUnit,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    fontWeight: FontWeight? = null,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    textAlign: TextAlign? = null,
+    withBorder: Boolean = false,
+    prefix: String = "",
+    postfix: String = "",
+    type: Byte? = null,
+    absolute: Boolean = false,
+    colorFix: Boolean = true,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+) {
+    ColoredAmountText(
+        money = Money(currency, amount),
+        modifier = modifier,
+        style = style,
+        fontWeight = fontWeight,
+        fontSize = fontSize,
+        textAlign = textAlign,
+        withBorder = withBorder,
+        prefix = prefix,
+        postfix = postfix,
+        type = type,
+        absolute = absolute,
+        colorFix = colorFix,
+        overflow = overflow,
+        softWrap = softWrap,
+        maxLines = maxLines
+    )
+}
+
+@Composable
+fun ColoredAmountText(
+    money: Money,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    fontWeight: FontWeight? = null,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    textAlign: TextAlign? = null,
+    withBorder: Boolean = false,
+    prefix: String = "",
+    postfix: String = "",
+    type: Byte? = null,
+    absolute: Boolean = false,
+    colorFix: Boolean = true,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+) {
+    val type = type ?: when (money.amountMinor.sign) {
+        1 -> FLAG_INCOME
+        -1 -> FLAG_EXPENSE
+        else -> FLAG_NEUTRAL
+    }
+    val formatCurrency = LocalCurrencyFormatter.current.formatCurrency(
+        money.amountMajor.let {
+            if (absolute) it.abs() else it
+        },
+        money.currencyUnit
+    )
+    if (colorFix) {
+        Text(
+            modifier = modifier
+                .conditional(withBorder) {
+                    amountBorder(type.typeBorderColor)
+                }
+                .amountSemantics(money),
+            fontWeight = fontWeight,
+            fontSize = fontSize,
+            textAlign = textAlign,
+            style = style,
+            text = prefix + formatCurrency + postfix,
+            color = type.typeTextColor,
+            overflow = overflow,
+            softWrap = softWrap,
+            maxLines = maxLines
+
+        )
+    } else {
+        Text(
+            modifier = modifier
+                .conditional(withBorder) {
+                    amountBorder(type.typeBorderColor)
+                }
+                .amountSemantics(money),
+            fontWeight = fontWeight,
+            fontSize = fontSize,
+            textAlign = textAlign,
+            style = style,
+            text = coloredAmountText(formatCurrency, prefix, postfix, type.typeTextColor),
+            overflow = overflow,
+            softWrap = softWrap,
+            maxLines = maxLines
+        )
+    }
+}
+
+@Composable
+fun coloredAmountText(
+    money: String,
+    prefix: String,
+    postfix: String,
+    type: Color,
+): AnnotatedString = buildAnnotatedString {
+    append(prefix)
+    withStyle(style = SpanStyle(color = type)) {
+        append(money)
+    }
+    append(postfix)
+}
+
+@Preview
+@Composable
+private fun AmountPreview() {
+    ColoredAmountText(money = Money(CurrencyUnit.DebugInstance, 8000), withBorder = true)
+}

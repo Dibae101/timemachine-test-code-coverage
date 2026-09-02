@@ -1,0 +1,157 @@
+package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.os.Parcelable
+import androidx.lifecycle.SavedStateHandle
+import app.cash.copper.flow.mapToOne
+import app.cash.copper.flow.observeQuery
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.withContext
+import kotlinx.parcelize.IgnoredOnParcel
+import kotlinx.parcelize.Parcelize
+import org.totschnig.myexpenses.db2.FLAG_NEUTRAL
+import org.totschnig.myexpenses.db2.asCategoryType
+import org.totschnig.myexpenses.db2.tagMapFlow
+import org.totschnig.myexpenses.model.AccountGrouping
+import org.totschnig.myexpenses.model.CurrencyUnit
+import org.totschnig.myexpenses.model.Grouping
+import org.totschnig.myexpenses.provider.DataBaseAccount
+import org.totschnig.myexpenses.provider.DataBaseAccount.Companion.uriBuilderForTransactionList
+import org.totschnig.myexpenses.provider.KEY_CATID
+import org.totschnig.myexpenses.provider.KEY_DISPLAY_AMOUNT
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_SPLIT
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_VOID
+import org.totschnig.myexpenses.provider.DbUtils
+import org.totschnig.myexpenses.provider.effectiveTypeExpression
+import org.totschnig.myexpenses.provider.effectiveTypeExpressionIncludeTransfers
+import org.totschnig.myexpenses.viewmodel.data.Transaction2
+
+const val KEY_LOADING_INFO = "loadingInfo"
+
+class TransactionListViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle
+) : ContentResolvingAndroidViewModel(application) {
+
+    val loadingInfo
+        get() = savedStateHandle.get<LoadingInfo>(KEY_LOADING_INFO)!!
+
+    @Parcelize
+    data class LoadingInfo(
+        val accountId: Long,
+        val currency: CurrencyUnit,
+        val accountFlag: Long? = null,
+        val accountType: Long? = null,
+        val label: String,
+        val catId: Long = 0,
+        val grouping: Grouping = Grouping.NONE,
+        val groupingClause: String? = null,
+        val groupingArgs: List<String> = emptyList(),
+        val type: Boolean? = null,
+        val aggregateNeutral: Boolean = false,
+        val withTransfers: Boolean = false,
+        val icon: String? = null,
+        val withNewButton: Boolean = false,
+        val color: Int? = null
+    ) : Parcelable {
+        @IgnoredOnParcel
+        val accountGrouping = if (accountId == 0L) {
+            when {
+                accountFlag != null -> AccountGrouping.FLAG
+                accountType != null -> AccountGrouping.TYPE
+                else -> AccountGrouping.CURRENCY
+            }
+        } else null
+    }
+
+    val sum: Flow<Long>
+        get() = with(loadingInfo) {
+            val (selection, selectionArgs) = selectionInfo
+            contentResolver.observeQuery(
+                transactionUri, arrayOf("sum(${KEY_DISPLAY_AMOUNT})"), selection, selectionArgs
+            ).mapToOne {
+                it.getLong(0)
+            }
+        }
+
+    private val transactionUri
+        get() = uriBuilderForTransactionList(
+            accountId = loadingInfo.accountId,
+            currency = loadingInfo.currency.code,
+            flag = loadingInfo.accountFlag,
+            type = loadingInfo.accountType,
+            accountGrouping = loadingInfo.accountGrouping,
+            shortenComment = true,
+            extended = false
+        ).apply {
+            if (loadingInfo.catId != 0L) {
+                appendQueryParameter(KEY_CATID, loadingInfo.catId.toString())
+            }
+        }.build()
+
+
+    val transactions: Flow<List<Transaction2>>
+        get() = with(loadingInfo) {
+            val (selection, selectionArgs) = selectionInfo
+            combine(
+                flow = contentResolver.tagMapFlow,
+                flow2 = contentResolver.observeQuery(
+                    transactionUri,
+                    Transaction2.projection(
+                        DataBaseAccount.isAggregate(accountId),
+                        grouping,
+                        prefHandler,
+                        extended = false
+                    ),
+                    selection,
+                    selectionArgs
+                )
+            ) { tags, query ->
+                withContext(Dispatchers.IO) {
+                    query.run()?.use { cursor ->
+                        buildList {
+                            while (cursor.moveToNext()) {
+                                add(
+                                    Transaction2.fromCursor(
+                                        currencyContext = currencyContext,
+                                        cursor = cursor,
+                                        tags = tags,
+                                        accountCurrency = currency,
+                                        grouping = grouping
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }.filterNotNull()
+        }
+
+    private val selectionInfo: Pair<String, Array<String>>
+        get() = with(loadingInfo) {
+            val selectionParts = mutableListOf<String>()
+            val selectionArgs = mutableListOf<String>()
+            selectionParts += WHERE_NOT_VOID
+            if (catId == 0L) {
+                selectionParts += WHERE_NOT_SPLIT
+            }
+            groupingClause?.takeIf { it.isNotEmpty() }?.let {
+                selectionParts += it
+                selectionArgs.addAll(groupingArgs)
+            }
+            val typeWithFallback = DbUtils.typeWithFallBack(prefHandler)
+            if (type != null) {
+                val typeExpression = when {
+                    aggregateNeutral -> "$typeWithFallback IN (${type.asCategoryType}, $FLAG_NEUTRAL)"
+                    withTransfers -> effectiveTypeExpressionIncludeTransfers(typeWithFallback) + " = " + type.asCategoryType
+                    else -> effectiveTypeExpression(typeWithFallback) + " = " + type.asCategoryType
+                }
+                selectionParts += typeExpression
+            }
+            selectionParts.joinToString(" AND ") to selectionArgs.toTypedArray()
+        }
+}
+

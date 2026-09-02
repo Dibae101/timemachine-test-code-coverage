@@ -1,0 +1,64 @@
+package org.totschnig.myexpenses.viewmodel
+
+import android.app.Application
+import android.os.Bundle
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import org.totschnig.myexpenses.db2.AccountOpeningInfo
+import org.totschnig.myexpenses.db2.loadOpeningBalancesPerAccountV1
+import org.totschnig.myexpenses.db2.loadOpeningBalancesPerAccountV2
+import org.totschnig.myexpenses.model.AccountGrouping
+import org.totschnig.myexpenses.model.Grouping
+import org.totschnig.myexpenses.model.KEY_ACCOUNT_GROUPING
+import org.totschnig.myexpenses.provider.DataBaseAccount
+import org.totschnig.myexpenses.provider.KEY_ACCOUNTID
+import org.totschnig.myexpenses.provider.KEY_GROUPING
+import org.totschnig.myexpenses.util.enumValueOrDefault
+
+class HistoryViewModel(application: Application, val savedStateHandle: SavedStateHandle) :
+    ContentResolvingAndroidViewModel(application) {
+    private val accountId by lazy { savedStateHandle.get<Long>(KEY_ACCOUNTID) }
+    private val defaultGrouping: Grouping by lazy {
+        savedStateHandle.get<Grouping>(KEY_GROUPING)
+            .takeIf { it != Grouping.NONE }
+            ?: Grouping.MONTH
+    }
+    private val groupingPrefKey = stringPreferencesKey("historyGrouping_$accountId")
+
+    val grouping by lazy {
+        dataStore.data.map {
+            enumValueOrDefault(it[groupingPrefKey], defaultGrouping)
+        }.stateIn(viewModelScope, SharingStarted.Lazily, defaultGrouping)
+    }
+
+    fun accountInfo(extras: Bundle) = combine(account(extras), grouping, openingBalances(extras)) {
+        account, grouping, openingBalances ->
+        Triple(account, grouping, openingBalances)
+    }
+
+    fun openingBalances(extras: Bundle): Flow<Map<Long, AccountOpeningInfo>> {
+        val accountId = extras.getLong(KEY_ACCOUNTID)
+        return when {
+            DataBaseAccount.isHomeAggregate(accountId) -> repository.loadOpeningBalancesPerAccountV1(accountId)
+            accountId == 0L && extras.containsKey(KEY_ACCOUNT_GROUPING) && extras.getString(KEY_ACCOUNT_GROUPING) != AccountGrouping.CURRENCY.name ->
+                repository.loadOpeningBalancesPerAccountV2(extras)
+            else -> account(extras).map { mapOf(it.id to AccountOpeningInfo(it.currency, it.openingBalance, it.dynamicExchangeRates, it.exchangeRate)) }
+        }
+    }
+
+    fun persistGrouping(grouping: Grouping) {
+        viewModelScope.launch {
+            dataStore.edit { preference ->
+                preference[groupingPrefKey] = grouping.name
+            }
+        }
+    }
+}

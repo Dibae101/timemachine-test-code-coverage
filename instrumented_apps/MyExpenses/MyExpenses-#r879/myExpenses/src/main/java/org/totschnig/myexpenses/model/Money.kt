@@ -1,0 +1,74 @@
+/*   This file is part of My Expenses.
+ *   My Expenses is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation, either version 3 of the License, or
+ *   (at your option) any later version.
+ *
+ *   My Expenses is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with My Expenses.  If not, see <http://www.gnu.org/licenses/>.
+*/
+package org.totschnig.myexpenses.model
+
+import android.os.Parcelable
+import androidx.compose.runtime.Immutable
+import kotlinx.parcelize.Parcelize
+import java.math.BigDecimal
+import java.math.RoundingMode
+import kotlin.math.pow
+
+@Parcelize
+@Immutable
+data class Money(val currencyUnit: CurrencyUnit, val amountMinor: Long) : Parcelable {
+
+    @Throws(ArithmeticException::class)
+    private constructor(currencyUnit: CurrencyUnit, amountMajor: BigDecimal, roundingMode: RoundingMode = RoundingMode.HALF_EVEN) :
+            this(currencyUnit, convertBigDecimal(amountMajor, currencyUnit.fractionDigits, roundingMode))
+
+    operator fun unaryMinus() = Money(currencyUnit, Math.negateExact(amountMinor))
+
+    fun absolute() = if (amountMinor < 0) -this else this
+
+    operator fun plus(other: Money): Money {
+        require(currencyUnit == other.currencyUnit) { "Currency units must match" }
+        return Money(currencyUnit, Math.addExact(amountMinor, other.amountMinor))
+    }
+
+    operator fun minus(other: Money): Money {
+        require(currencyUnit == other.currencyUnit) { "Currency units must match" }
+        return Money(currencyUnit, Math.subtractExact(amountMinor, other.amountMinor))
+    }
+
+
+    val amountMajor: BigDecimal
+        get() = BigDecimal(amountMinor).movePointLeft(currencyUnit.fractionDigits)
+
+    companion object {
+
+        fun convertBigDecimal(input: BigDecimal, fractionDigits: Int, roundingMode: RoundingMode = RoundingMode.HALF_EVEN) = input
+            .movePointRight(fractionDigits)
+            .setScale(0, roundingMode)
+            .longValueExact()
+        /**
+         * Builds a Money instance where amount is provided in micro units (=1/1000000 of the main unit)
+         *
+         * @return a new Money object
+         */
+        fun buildWithMicros(currency: CurrencyUnit, amountMicros: Long): Money {
+            val amountMinor: Long
+            val fractionDigits = currency.fractionDigits
+            amountMinor = (amountMicros * (10.0).pow(fractionDigits - 6)).toLong()
+            return Money(currency, amountMinor)
+        }
+
+        fun buildWithMajor(currency: CurrencyUnit, amountMajor: BigDecimal, roundingMode: RoundingMode = RoundingMode.HALF_EVEN) = runCatching {
+            Money(currency, amountMajor, roundingMode)
+        }
+    }
+}
+
+fun Money?.isNullOr0() = this == null || this.amountMinor == 0L

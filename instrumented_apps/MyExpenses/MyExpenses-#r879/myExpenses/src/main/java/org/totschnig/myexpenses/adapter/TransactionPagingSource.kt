@@ -1,0 +1,203 @@
+package org.totschnig.myexpenses.adapter
+
+import android.annotation.SuppressLint
+import android.content.ContentResolver
+import android.content.Context
+import android.database.ContentObserver
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import androidx.paging.PagingState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.totschnig.myexpenses.BuildConfig
+import org.totschnig.myexpenses.model.CurrencyContext
+import org.totschnig.myexpenses.preference.PrefHandler
+import org.totschnig.myexpenses.provider.DatabaseConstants.WHERE_NOT_SPLIT_PART
+import org.totschnig.myexpenses.provider.TransactionProvider
+import org.totschnig.myexpenses.provider.asSequence
+import org.totschnig.myexpenses.provider.filter.Criterion
+import org.totschnig.myexpenses.provider.withLimit
+import org.totschnig.myexpenses.viewmodel.data.PageAccount
+import org.totschnig.myexpenses.viewmodel.data.Transaction2
+import org.totschnig.myexpenses.viewmodel.data.mergeTransfers
+import org.totschnig.myexpenses.viewmodel.data.pickForMerge
+import org.totschnig.myexpenses.viewmodel.pageSize
+import timber.log.Timber
+import java.time.Duration
+import java.time.Instant
+
+open class TransactionPagingSource(
+    val context: Context,
+    val account: PageAccount,
+    val whereFilter: StateFlow<Criterion?>,
+    val tags: StateFlow<Map<String, Pair<String, Int?>>>,
+    val currencyContext: CurrencyContext,
+    coroutineScope: CoroutineScope,
+    prefHandler: PrefHandler,
+) : ClearingPagingSource<Int, Transaction2, TransactionPagingSource>() {
+
+    val contentResolver: ContentResolver
+        get() = context.contentResolver
+    private val uri: Uri
+    private val projection: Array<String>
+    private val observer: ContentObserver
+    private var criterion: Criterion? = null
+    private var hasNewCriterion: Boolean = false
+
+    private var filterJob: Job? = null
+    private var tagsJob: Job? = null
+
+    init {
+        account.loadingInfo(prefHandler).also {
+            uri = it.first
+            projection = it.second
+        }
+        observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                Timber.i("Data changed for account %d, now invalidating", account.id)
+                invalidate()
+            }
+        }
+        contentResolver.registerContentObserver(
+            TransactionProvider.TRANSACTIONS_URI,
+            true,
+            observer
+        )
+        criterion = whereFilter.value
+        filterJob = coroutineScope.launch {
+            whereFilter.drop(1).collect {
+                invalidate()
+            }
+        }
+        tagsJob = coroutineScope.launch {
+            tags.drop(1).collect {
+                invalidate()
+            }
+        }
+
+        registerInvalidatedCallback {
+            clear()
+        }
+    }
+
+    override val jumpingSupported: Boolean
+        get() = true
+
+    override fun clear() {
+        contentResolver.unregisterContentObserver(observer)
+        filterJob?.cancel()
+        tagsJob?.cancel()
+    }
+
+    override fun compareWithLast(lastPagingSource: TransactionPagingSource?) {
+        hasNewCriterion = criterion != lastPagingSource?.criterion
+    }
+
+    override fun getRefreshKey(state: PagingState<Int, Transaction2>) =
+        if (hasNewCriterion) null
+        else state.anchorPosition?.let { anchorPosition ->
+            (anchorPosition - state.config.pageSize / 2).coerceAtLeast(0)
+        }.also {
+            Timber.i("Calculating refreshKey for anchorPosition %d: %d", state.anchorPosition, it)
+        }
+
+    @SuppressLint("InlinedApi")
+    override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Transaction2> = try {
+        val position = params.key ?: 0
+        //if the previous page was loaded from an offset between 0 and loadSize,
+        //we must take care to load only the missing items before the offset
+        val loadSize = if (position < 0) params.loadSize + position else params.loadSize
+        val fetchSize = if (account.isAggregate) loadSize + 1 else loadSize // We'll fetch one more item as a lookahead.
+        Timber.i("Requesting data for account %d at position %d with loadSize %d", account.id, position, loadSize)
+        var selection = WHERE_NOT_SPLIT_PART
+        var selectionArgs: Array<String>? = null
+        whereFilter.value?.let { filter ->
+            val selectionForParents = filter.getSelectionForParents()
+            if (selectionForParents.isNotEmpty()) {
+                selection += " AND $selectionForParents"
+                selectionArgs = filter.getSelectionArgs(false).takeIf { it.isNotEmpty() }
+            }
+        }
+        val startTime = if (BuildConfig.DEBUG) Instant.now() else null
+
+        val offset = position.coerceAtLeast(0)
+        val (totalCount, fullList) = withContext(Dispatchers.IO) {
+            contentResolver.query(
+                uri,
+                arrayOf("count(*)"),
+                selection,
+                selectionArgs,
+                null
+            )!!.use {
+                it.moveToFirst()
+                it.getInt(0)
+            } to contentResolver.query(
+                uri.withLimit(fetchSize, offset),
+                projection,
+                selection,
+                selectionArgs,
+                account.sortOrder,
+                null
+            )!!.use { cursor ->
+                if (BuildConfig.DEBUG) {
+                    val endTime = Instant.now()
+                    val duration = Duration.between(startTime, endTime)
+                    Timber.i("Cursor delivered %d rows after %s", cursor.count, duration)
+                }
+                cursor.asSequence.map {
+                    Transaction2.fromCursor(
+                        currencyContext = currencyContext,
+                        cursor = it,
+                        tags = tags.value,
+                        accountCurrency = currencyContext[account.currency],
+                        accountLabel = account.label,
+                        grouping = account.grouping
+                    )
+                }.toList()
+            }
+        }
+
+        val itemsForThisPage = fullList.take(loadSize) // The items that actually belong to this page.
+        val lookaheadItem = if (account.isAggregate) fullList.getOrNull(loadSize) else null // The (N+1)th item.
+
+        var includeNextHalfTransfer = false
+        val mergedList = if (account.isAggregate) {
+            itemsForThisPage.mergeTransfers(account, currencyContext.homeCurrencyString).let { merged ->
+                val lastItem = merged.lastOrNull()
+                val lookAheadItemId = lookaheadItem?.id
+                if (lastItem?.transferPeer != null && lookAheadItemId != null && lastItem.transferPeer == lookAheadItemId ) {
+                    includeNextHalfTransfer = true
+                    // We pull the half transfer in and advance nextKey by one more
+                    merged.toMutableList().also {
+                        it[it.lastIndex] = listOf(lastItem, lookaheadItem).pickForMerge(account, currencyContext.homeCurrencyString)
+                    }
+                } else merged
+            }
+        } else itemsForThisPage
+
+        val prevKey = if (position > 0) (position - pageSize) else null
+        val nextKey = if (fullList.size < fetchSize) null else
+            offset + loadSize + if (includeNextHalfTransfer) 1 else 0
+        val itemsAfter = if (nextKey == null) 0 else (totalCount - nextKey).coerceAtLeast(0)
+        Timber.i("Setting prevKey %d, nextKey %d, itemsBefore %d, itemsAfter %d", prevKey, nextKey, offset, itemsAfter)
+        LoadResult.Page(
+            data = mergedList,
+            prevKey = prevKey,
+            nextKey = nextKey,
+            itemsBefore = offset,
+            itemsAfter = itemsAfter
+        )
+    } catch (e: Throwable) {
+        LoadResult.Error(e)
+    } finally {
+        onLoadFinished()
+    }
+
+    open fun onLoadFinished() {}
+}

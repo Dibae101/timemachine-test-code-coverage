@@ -1,0 +1,68 @@
+/*   This file is part of My Expenses.
+ *   My Expenses is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation, either version 3 of the License, or
+ *   (at your option) any later version.
+ *
+ *   My Expenses is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with My Expenses.  If not, see <http://www.gnu.org/licenses/>.
+ */
+package org.totschnig.myexpenses.dialog
+
+import android.app.Dialog
+import android.content.DialogInterface
+import android.os.Bundle
+import android.view.View
+import org.totschnig.myexpenses.R
+import org.totschnig.myexpenses.activity.BaseMyExpenses
+import org.totschnig.myexpenses.databinding.BalanceBinding
+import org.totschnig.myexpenses.provider.KEY_CLEARED_TOTAL
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_RECONCILED_TOTAL
+import org.totschnig.myexpenses.util.ui.UiUtils
+import org.totschnig.myexpenses.util.ui.postScrollToBottom
+
+class BalanceDialogFragment : DialogViewBinding<BalanceBinding>(), DialogInterface.OnClickListener {
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        val builder = initBuilder {
+            BalanceBinding.inflate(it)
+        }
+        UiUtils.configureAmountTextViewForHebrew(binding.TotalReconciled)
+        binding.TotalReconciled.text = requireArguments().getString(KEY_RECONCILED_TOTAL)
+        UiUtils.configureAmountTextViewForHebrew(binding.TotalCleared)
+        binding.TotalCleared.text = requireArguments().getString(KEY_CLEARED_TOTAL)
+        binding.balanceDelete.setOnCheckedChangeListener { _, isChecked ->
+            binding.balanceDeleteWarning.visibility = if (isChecked) View.VISIBLE else View.GONE
+            if (isChecked) {
+                binding.root.postScrollToBottom()
+            }
+        }
+        return builder
+                .setTitle(getString(R.string.dialog_title_balance_account, requireArguments().getString(KEY_LABEL)))
+                .setView(dialogView)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok, this)
+                .create()
+    }
+
+    override fun onClick(dialog: DialogInterface, which: Int) {
+        val ctx = activity as? BaseMyExpenses<*> ?: return
+        requireArguments().putInt(ConfirmationDialogFragment.KEY_COMMAND_POSITIVE, R.id.BALANCE_COMMAND_DO)
+        ctx.onPositive(requireArguments(), binding.balanceDelete.isChecked)
+    }
+
+    companion object {
+        @JvmStatic
+        fun newInstance(bundle: Bundle?): BalanceDialogFragment {
+            val dialogFragment = BalanceDialogFragment()
+            dialogFragment.arguments = bundle
+            return dialogFragment
+        }
+    }
+}

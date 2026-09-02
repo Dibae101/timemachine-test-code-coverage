@@ -1,0 +1,46 @@
+package org.totschnig.myexpenses.dialog.select
+
+import android.net.Uri
+import org.totschnig.myexpenses.activity.RemapHandler.Companion.MAP_ACCOUNT_REQUEST
+import org.totschnig.myexpenses.provider.KEY_IS_PORTFOLIO
+import org.totschnig.myexpenses.provider.KEY_LABEL
+import org.totschnig.myexpenses.provider.KEY_PARENTID
+import org.totschnig.myexpenses.provider.KEY_ROWID
+import org.totschnig.myexpenses.provider.KEY_SEALED
+import org.totschnig.myexpenses.provider.PORTFOLIO_NONE
+import org.totschnig.myexpenses.provider.TABLE_ACCOUNTS
+import org.totschnig.myexpenses.provider.TransactionProvider
+
+open class SelectSingleAccountDialogFragment : SelectSingleDialogFragment() {
+    open val withPortfolio = false
+    override val uri: Uri = TransactionProvider.ACCOUNTS_URI
+    override val column: String = KEY_LABEL
+    override val selection: String
+        get() = listOfNotNull(
+            "$KEY_SEALED = 0",
+            "$KEY_PARENTID IS NULL",
+            if (withPortfolio) null else "$KEY_IS_PORTFOLIO = $PORTFOLIO_NONE",
+            arguments?.getLongArray(KEY_EXCLUDED_IDS)?.let {
+                "$TABLE_ACCOUNTS.$KEY_ROWID NOT IN (${it.joinToString()})"
+            }
+        ).joinToString(" AND ")
+
+    companion object {
+        const val KEY_EXCLUDED_IDS = "excludedIds"
+        fun newInstance(dialogTitle: Int, emptyMessage: Int, excludedIds: List<Long>) =
+            SelectSingleAccountDialogFragment().apply {
+                arguments =
+                    buildArguments(dialogTitle, emptyMessage, MAP_ACCOUNT_REQUEST, excludedIds)
+            }
+
+        internal fun buildArguments(
+            dialogTitle: Int,
+            emptyMessage: Int? = null,
+            requestKey: String,
+            excludedIds: List<Long>,
+        ) = buildArguments(dialogTitle, emptyMessage, requestKey).apply {
+            putLongArray(KEY_EXCLUDED_IDS, excludedIds.toLongArray())
+        }
+
+    }
+}
