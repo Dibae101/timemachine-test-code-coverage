@@ -233,6 +233,72 @@ def has_class_file(path):
 TEST_OUTPUT_MARKERS = ("unittest", "androidtest", "unit_test", "android_test",
                        "testdebug", "testfixtures")
 
+# Directories that hold something other than the app's primary class output.
+#
+#   transform*ClassesWithAsm  AGP's post-processed copy of every class, so each
+#                             one collides with the original
+#   kapt/ksp stub trees       source stubs compiled only so annotation
+#                             processors can read signatures; their method
+#                             bodies are empty and jacococli crashes on them
+#                             with a null cursor in the ASM tree
+#
+# Declaring any of these aborts the whole report, so they are dropped up front.
+#   buildSrc / build-logic    gradle build logic, compiled for the build itself
+#                             and never shipped in the APK
+DERIVED_OUTPUT_MARKERS = ("transformclasseswithasm", "classeswithasm",
+                          "kapt3", "kaptstubs", "kapt_stubs", "kaptgeneratestubs",
+                          "incrementaldata", "generatestubs",
+                          "buildsrc/", "buildlogic/", "buildconventions/")
+
+# Primary class output locations, most trustworthy first. Used to decide which
+# directory keeps a class when two of them define the same name.
+PRIMARY_OUTPUT_MARKERS = ("/javac/", "/built_in_kotlinc/", "/tmp/kotlin-classes/",
+                          "/classes/java/", "/classes/kotlin/")
+
+
+def class_names_in(root):
+    """Internal names of every class under a root, derived from the layout."""
+    names = set()
+    for cur, _, files in os.walk(root):
+        rel = os.path.relpath(cur, root).replace(os.sep, "/")
+        prefix = "" if rel == "." else rel + "/"
+        for f in files:
+            if f.endswith(".class"):
+                names.add(prefix + f[: -len(".class")])
+    return names
+
+
+def resolve_duplicate_roots(dirs, variant=None):
+    """Drop roots whose classes are already provided by a preferred root.
+
+    jacococli refuses a duplicate outright - "Can't add different class with same
+    name" - and writes no report. It happens whenever two class directories
+    survive for one APK: two product flavours (Markor), a Hilt or ASM
+    post-processing copy (Aegis, Droid-ify, ReadYou), or a kapt stub tree.
+
+    The APK's variant decides who wins. Without it, ReadYou keeps its javac
+    output from fdroidDebug next to its Kotlin output from githubDebug, which
+    reports one flavour's classes against another's APK.
+    """
+    low_variant = (variant or "").lower()
+
+    def score(d):
+        norm = d.replace(os.sep, "/").lower() + "/"
+        on_variant = 0 if low_variant and low_variant in norm else 1
+        primary = 0 if any(m in norm for m in PRIMARY_OUTPUT_MARKERS) else 1
+        return (on_variant, primary, -len(class_names_in(d)), d)
+
+    kept, seen = [], set()
+    for d in sorted(dirs, key=score):
+        names = class_names_in(d)
+        if not names:
+            continue
+        if names & seen:
+            continue
+        kept.append(d)
+        seen |= names
+    return sorted(kept)
+
 
 def class_internal_name(path):
     """The internal name (com/foo/Bar) recorded inside a .class file.
@@ -377,6 +443,9 @@ def find_class_dirs(tree):
         if any(s.startswith("jacoco") for s in segments):
             continue
         if any(marker in rel for marker in TEST_OUTPUT_MARKERS):
+            continue
+        if any(marker in rel.replace("-", "").replace("_", "")
+               for marker in DERIVED_OUTPUT_MARKERS):
             continue
         if not has_class_file(d):
             continue
@@ -885,14 +954,18 @@ def build_subject(subject, status_rows):
     apk = pick_apk(apks)
     # Even when assembleDebug succeeded for every flavour, only one APK is
     # declared, so narrow the classes to that APK's variant.
-    if apk:
-        variant = apk_variant(apk)
-        if variant:
-            narrowed = filter_dirs_to_variant(class_dirs, variant)
-            if narrowed and narrowed != class_dirs:
-                log("  %s: narrowing classes to variant %s (%d of %d dirs)"
-                    % (name, variant, len(narrowed), len(class_dirs)))
-                class_dirs = narrowed
+    variant = apk_variant(apk) if apk else None
+    if variant:
+        narrowed = filter_dirs_to_variant(class_dirs, variant)
+        if narrowed and narrowed != class_dirs:
+            log("  %s: narrowing classes to variant %s (%d of %d dirs)"
+                % (name, variant, len(narrowed), len(class_dirs)))
+            class_dirs = narrowed
+    before = len(class_dirs)
+    class_dirs = resolve_duplicate_roots(class_dirs, variant)
+    if len(class_dirs) != before:
+        log("  %s: dropped %d duplicate class root(s)"
+            % (name, before - len(class_dirs)))
     source_dirs = find_source_dirs(tree)
     n_classes = count_classes(class_dirs)
 
