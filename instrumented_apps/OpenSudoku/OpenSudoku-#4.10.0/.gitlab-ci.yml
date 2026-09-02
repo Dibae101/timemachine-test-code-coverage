@@ -1,0 +1,101 @@
+#file: noinspection LongLine,SpellCheckingInspection
+default:
+  image: cimg/android:2026.08
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - .gradle/
+
+variables:
+  CACHE_FALLBACK_KEY: develop-protected
+  MEMORY_CONFIG: "-Xmx3200m -Xms256m -XX:MaxMetaspaceSize=1g"
+  MEMORY_CONFIG_DEBUG: "-Xmx3200m -Xms256m -XX:MaxMetaspaceSize=1g -verbose:gc -Xlog:gc*"
+  JVM_OPTS: ${MEMORY_CONFIG}
+  JAVA_TOOL_OPTIONS: ${MEMORY_CONFIG}
+  GRADLE_OPTS: ${MEMORY_CONFIG}
+  PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/OpenSudoku/${CI_COMMIT_TAG}"
+  PACKAGE_APK: "opensudoku-${CI_COMMIT_TAG}.apk"
+  PACKAGE_APK_IDSIG: "opensudoku-${CI_COMMIT_TAG}.apk.idsig"
+
+stages:
+  - Assemble and check
+  - APK
+  - Publish
+  - Release
+
+Assemble Debug:
+  stage: Assemble and check
+  script: ./gradlew assembleDebug
+  artifacts:
+    name: opensudoku-debug-${CI_COMMIT_SHA}
+    paths:
+      - app/build/outputs/apk/debug/app-debug.apk
+
+Assemble Release:
+  stage: Assemble and check
+  script: ./gradlew assembleRelease
+  artifacts:
+    name: opensudoku-release-unsigned-${CI_COMMIT_SHA}
+    paths:
+      - app/build/outputs/apk/release/app-release-unsigned.apk
+
+Check:
+    stage: Assemble and check
+    script: ./gradlew testDebug
+
+Generate Signed Develop APK:
+  stage: APK
+  script:
+    - openssl aes-256-cbc -K ${OPENSUDOKU_KEYSTORE_KEY} -iv ${OPENSUDOKU_KEYSTORE_IV} -in opensudoku-keystore.enc -out opensudoku-keystore -base64 -d
+    - mkdir -p ${CI_PROJECT_DIR}/opensudoku-debug ${CI_PROJECT_DIR}/opensudoku-release
+    - cp app/build/outputs/apk/debug/app-debug.apk ${CI_PROJECT_DIR}/opensudoku-debug/opensudoku-debug-${CI_COMMIT_SHA}.apk
+    - cp app/build/outputs/apk/release/app-release-unsigned.apk ${CI_PROJECT_DIR}/opensudoku-release/opensudoku-${CI_COMMIT_SHA}.apk
+    - APKSIGNER=(${ANDROID_HOME}/build-tools/*/apksigner)
+    - ${APKSIGNER[0]} sign --verbose --ks ${CI_PROJECT_DIR}/opensudoku-keystore --ks-pass pass:${OPENSUDOKU_KEYSTORE_STOREPASS} --key-pass pass:${OPENSUDOKU_KEYSTORE_KEYPASS} ${CI_PROJECT_DIR}/opensudoku-debug/opensudoku-debug-${CI_COMMIT_SHA}.apk
+    - ${APKSIGNER[0]} verify --verbose ${CI_PROJECT_DIR}/opensudoku-debug/opensudoku-debug-${CI_COMMIT_SHA}.apk
+    - ${APKSIGNER[0]} sign --verbose --ks ${CI_PROJECT_DIR}/opensudoku-keystore --ks-pass pass:${OPENSUDOKU_KEYSTORE_STOREPASS} --key-pass pass:${OPENSUDOKU_KEYSTORE_KEYPASS} ${CI_PROJECT_DIR}/opensudoku-release/opensudoku-${CI_COMMIT_SHA}.apk
+    - ${APKSIGNER[0]} verify --verbose ${CI_PROJECT_DIR}/opensudoku-release/opensudoku-${CI_COMMIT_SHA}.apk
+  artifacts:
+    name: opensudoku-${CI_COMMIT_SHA}
+    paths:
+      - opensudoku-debug/
+      - opensudoku-release/
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "develop" && $CI_PROJECT_ID == "38056645"
+
+Generate Signed APK:
+  stage: APK
+  script:
+    - openssl aes-256-cbc -K ${OPENSUDOKU_KEYSTORE_KEY} -iv ${OPENSUDOKU_KEYSTORE_IV} -in opensudoku-keystore.enc -out opensudoku-keystore -base64 -d
+    - mkdir -p ${CI_PROJECT_DIR}/opensudoku-release
+    - cp app/build/outputs/apk/release/app-release-unsigned.apk ${CI_PROJECT_DIR}/opensudoku-release/${PACKAGE_APK}
+    - APKSIGNER=(${ANDROID_HOME}/build-tools/*/apksigner)
+    - ${APKSIGNER[0]} sign --verbose --ks ${CI_PROJECT_DIR}/opensudoku-keystore --ks-pass pass:${OPENSUDOKU_KEYSTORE_STOREPASS} --key-pass pass:${OPENSUDOKU_KEYSTORE_KEYPASS} ${CI_PROJECT_DIR}/opensudoku-release/${PACKAGE_APK}
+    - ${APKSIGNER[0]} verify --verbose ${CI_PROJECT_DIR}/opensudoku-release/${PACKAGE_APK}
+  artifacts:
+    name: opensudoku-${CI_COMMIT_TAG}
+    paths:
+      - opensudoku-release/
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_PROJECT_ID == "38056645"
+
+Publish Signed APK:
+  stage: Publish
+  image: curlimages/curl:latest
+  script:
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file opensudoku-release/${PACKAGE_APK} "${PACKAGE_REGISTRY_URL}/${PACKAGE_APK}"
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file opensudoku-release/${PACKAGE_APK_IDSIG} "${PACKAGE_REGISTRY_URL}/${PACKAGE_APK_IDSIG}"
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_PROJECT_ID == "38056645"
+
+Release:
+  stage: Release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script: |
+    release-cli create --name "Release ${CI_COMMIT_TAG}" --tag-name ${CI_COMMIT_TAG} \
+      --assets-link "{\"name\":\"${PACKAGE_APK}\",\"url\":\"${PACKAGE_REGISTRY_URL}/${PACKAGE_APK}\"}" \
+      --assets-link "{\"name\":\"${PACKAGE_APK_IDSIG}\",\"url\":\"${PACKAGE_REGISTRY_URL}/${PACKAGE_APK_IDSIG}\"}"
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_PROJECT_ID == "38056645"
