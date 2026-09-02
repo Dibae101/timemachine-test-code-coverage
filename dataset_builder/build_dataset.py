@@ -61,9 +61,62 @@ def set_status_path(subjects_file):
     STATUS = os.path.join(HERE, "status-%s.csv" % stem)
 
 SDK = os.environ.get("SDK", "/home/ubuntu/android-sdk")
-JDK8 = "/usr/lib/jvm/java-8-openjdk-amd64"
-JDK17 = "/usr/lib/jvm/java-17-openjdk-amd64"
-AAPT = os.path.join(SDK, "build-tools", "28.0.3", "aapt")
+
+
+def _jvm_arch():
+    """Debian JVM directories are suffixed with the dpkg architecture.
+
+    Hardcoding -amd64 makes every JAVA_HOME wrong on an aarch64 host, and gradle
+    then silently runs on whatever `java` is first on PATH. Resolve the suffix
+    from what is actually installed instead.
+    """
+    import platform
+    machine = platform.machine()
+    if machine in ("aarch64", "arm64"):
+        return "arm64"
+    if machine in ("x86_64", "amd64"):
+        return "amd64"
+    return machine
+
+
+JVM_ARCH = _jvm_arch()
+
+
+def _jdk_home(version):
+    """First existing JVM directory for a major version, else a plain guess."""
+    candidates = [
+        "/usr/lib/jvm/java-%s-openjdk-%s" % (version, JVM_ARCH),
+        "/usr/lib/jvm/java-1.%s.0-openjdk-%s" % (version, JVM_ARCH),
+        "/usr/lib/jvm/java-%s-openjdk" % version,
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return candidates[0]
+
+
+JDK8 = _jdk_home("8")
+JDK17 = _jdk_home("17")
+AAPT = os.environ.get("AAPT") or os.path.join(SDK, "build-tools", "28.0.3", "aapt")
+
+# Google publishes aapt2, aidl and zipalign only for linux-x86_64, so on an
+# aarch64 host the copies AGP fetches from Maven cannot execute at all
+# ("cannot run program ... Exec format error").
+#
+# Two ways out, and the second is the one used here:
+#
+#   1. Point android.aapt2FromMavenOverride at a native aarch64 aapt2. Debian
+#      ships one, but it is aapt2 2.19-debian and it cannot read the resource
+#      tables of android-35 or android-36 ("RES_TABLE_TYPE_TYPE entry offsets
+#      overlap actual entry data", then a segfault on 36), which rules out every
+#      current app.
+#   2. Register qemu-user for x86_64 (binfmt_misc) and give it an x86_64 glibc
+#      sysroot through QEMU_LD_PREFIX. Then the official binaries run as-is,
+#      AGP's own version-matched aapt2 is used, and aidl/zipalign work too.
+#
+# Set AAPT2 explicitly only to force option 1.
+AAPT2 = os.environ.get("AAPT2", "")
+QEMU_LD_PREFIX = os.environ.get("QEMU_LD_PREFIX", "/opt/x86_64-sysroot")
 
 BUILD_TIMEOUT = int(os.environ.get("BUILD_TIMEOUT", "3600"))
 CLONE_TIMEOUT = int(os.environ.get("CLONE_TIMEOUT", "1800"))
@@ -333,19 +386,31 @@ def wrapper_gradle_major(tree):
     return int(m.group(1)) if m else None
 
 
-JDKS = {"8": JDK8, "11": "/usr/lib/jvm/java-11-openjdk-amd64", "17": JDK17,
-        "21": "/usr/lib/jvm/java-21-openjdk-amd64"}
+JDKS = {"8": JDK8, "11": _jdk_home("11"), "17": JDK17, "21": _jdk_home("21")}
+
+
+def gradle_extra_args():
+    """Flags every gradle invocation needs on this host."""
+    args = []
+    if AAPT2 and os.path.isfile(AAPT2):
+        args.append("-Pandroid.aapt2FromMavenOverride=%s" % AAPT2)
+    return args
 
 
 def gradle_env(jdk):
     java_home = JDKS.get(str(jdk), JDK17)
-    return {
+    env = {
         "JAVA_HOME": java_home,
         "ANDROID_SDK_ROOT": SDK,
         "ANDROID_HOME": SDK,
         "GRADLE_OPTS": "-Xmx3g -Dorg.gradle.daemon=false -Dfile.encoding=UTF-8",
         "TERM": "dumb",
     }
+    # Where qemu-user finds the x86_64 loader and libc for the SDK's native
+    # tools. Harmless on an x86_64 host, required on aarch64.
+    if os.path.isdir(QEMU_LD_PREFIX):
+        env["QEMU_LD_PREFIX"] = QEMU_LD_PREFIX
+    return env
 
 
 def discover_debug_tasks(tree, jdk, logfile):
@@ -361,7 +426,8 @@ def discover_debug_tasks(tree, jdk, logfile):
     if not os.path.isfile(wrapper):
         return []
     out = os.path.join(LOGS, "tasks-%s.txt" % os.path.basename(tree))
-    rc = run([wrapper, "--no-daemon", "-I", INIT_SCRIPT, "tasks", "--all", "-q"],
+    rc = run([wrapper, "--no-daemon", "-I", INIT_SCRIPT] + gradle_extra_args()
+             + ["tasks", "--all", "-q"],
              cwd=tree, env=gradle_env(jdk), timeout=900, logfile=out)
     names = []
     if os.path.isfile(out):
@@ -416,7 +482,7 @@ def gradle_build(tree, jdk, logfile, tasks=None):
     env = gradle_env(jdk)
     for task_set in (tasks or [["assembleDebug"]]):
         cmd = [wrapper, "--no-daemon", "--stacktrace",
-               "-I", INIT_SCRIPT] + task_set
+               "-I", INIT_SCRIPT] + gradle_extra_args() + task_set
         rc = run(cmd, cwd=tree, env=env, timeout=BUILD_TIMEOUT, logfile=logfile)
         if rc == 0:
             return 0, " ".join(task_set)
@@ -577,6 +643,13 @@ def build_subject(subject, status_rows):
                 (other == "17" and (gv is None or gv >= 6)) or
                 (other == "21" and (gv is None or gv >= 8))
             )
+            # A JAVA_HOME that does not exist is worse than no retry: gradle
+            # falls back to whatever `java` is on PATH, so the "retry on JDK 8"
+            # actually re-runs the identical build and the log claims a JDK that
+            # was never used.
+            if runnable and not os.path.isdir(JDKS.get(other, "")):
+                log("  %s: skipping JDK %s (not installed)" % (name, other))
+                continue
             if not runnable:
                 log("  %s: skipping JDK %s (gradle %s cannot run on it)"
                     % (name, other, gv))

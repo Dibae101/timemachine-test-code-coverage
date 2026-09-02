@@ -162,6 +162,59 @@ def find_manifest(module_dir):
                           % os.path.basename(module_dir))
 
 
+def gradle_properties(module_dir):
+    """Merged gradle.properties visible to a module, module value winning.
+
+    Needed because a namespace is not always a literal. Every Fossify app
+    declares `namespace = project.property("APP_ID").toString()` and keeps the
+    real value in gradle.properties, so a literal-only search finds nothing and
+    the subject fails before it is ever built.
+    """
+    props = {}
+    seen = set()
+    # walk up from the module so the root project's file is read first
+    chain, cur = [], os.path.abspath(module_dir)
+    while cur and cur not in seen:
+        seen.add(cur)
+        chain.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    for d in reversed(chain):
+        p = os.path.join(d, "gradle.properties")
+        if not os.path.isfile(p):
+            continue
+        for line in open(p, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            props[k.strip()] = v.strip()
+    return props
+
+
+def _resolve_package_expr(text, module_dir, keys=("namespace", "applicationId")):
+    """Package from `namespace`/`applicationId`, literal or property lookup."""
+    props = None
+    for key in keys:
+        m = re.search(r'%s\s*=?\s*[\'"]([\w.]+)[\'"]' % key, text)
+        if m:
+            return m.group(1)
+        # namespace = project.property("APP_ID").toString()
+        # namespace project.properties['APP_ID']
+        m = re.search(
+            r'%s\s*=?\s*(?:project\s*\.\s*)?(?:property\s*\(|properties\s*\[)\s*'
+            r'[\'"](\w+)[\'"]' % key, text)
+        if m:
+            if props is None:
+                props = gradle_properties(module_dir)
+            val = props.get(m.group(1))
+            if val and re.fullmatch(r"[\w.]+", val):
+                return val
+    return None
+
+
 def harness_package(module_dir, gradle_file):
     """Package to host the harness: manifest package, else gradle namespace."""
     manifest = find_manifest(module_dir)
@@ -170,12 +223,9 @@ def harness_package(module_dir, gradle_file):
     if m:
         return m.group(1)
     g = open(gradle_file, encoding="utf-8", errors="replace").read()
-    m = re.search(r'namespace\s*=?\s*[\'"]([\w.]+)[\'"]', g)
-    if m:
-        return m.group(1)
-    m = re.search(r'applicationId\s*=?\s*[\'"]([\w.]+)[\'"]', g)
-    if m:
-        return m.group(1)
+    pkg = _resolve_package_expr(g, module_dir)
+    if pkg:
+        return pkg
     raise InstrumentError("cannot determine package/namespace")
 
 
