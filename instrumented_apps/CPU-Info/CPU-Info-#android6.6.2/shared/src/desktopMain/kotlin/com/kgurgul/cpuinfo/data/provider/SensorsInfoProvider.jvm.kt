@@ -1,0 +1,81 @@
+/*
+ * Copyright KG Soft
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.kgurgul.cpuinfo.data.provider
+
+import com.kgurgul.cpuinfo.domain.model.SensorData
+import com.kgurgul.cpuinfo.domain.model.TextResource
+import com.kgurgul.cpuinfo.features.temperature.TemperatureFormatter
+import com.kgurgul.cpuinfo.shared.Res
+import com.kgurgul.cpuinfo.shared.sensors_cpu_temperature
+import com.kgurgul.cpuinfo.shared.sensors_cpu_voltage
+import com.kgurgul.cpuinfo.shared.sensors_fan_speeds
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
+import oshi.SystemInfo
+
+actual class SensorsInfoProvider actual constructor() : KoinComponent {
+
+    private val systemInfo: SystemInfo by inject()
+    private val temperatureFormatter: TemperatureFormatter by inject()
+
+    actual fun getSensorData(): Flow<List<SensorData>> = flow {
+        val sensors = systemInfo.hardware.sensors
+        val sensorList = buildList {
+            if (!sensors.cpuTemperature.isNaN() && sensors.cpuTemperature != 0.0) {
+                add(
+                    SensorData(
+                        id = CPU_TEMP_ID,
+                        name = TextResource.Resource(Res.string.sensors_cpu_temperature),
+                        value = temperatureFormatter.format(sensors.cpuTemperature.toFloat()),
+                    )
+                )
+            }
+            if (sensors.cpuTemperature != 0.0) {
+                add(
+                    SensorData(
+                        id = CPU_VOLTAGE_ID,
+                        name = TextResource.Resource(Res.string.sensors_cpu_voltage),
+                        value = "${sensors.cpuVoltage}V",
+                    )
+                )
+            }
+            if (sensors.fanSpeeds.isNotEmpty()) {
+                val fanSpeeds =
+                    buildString { sensors.fanSpeeds.forEach { appendLine("${it}RPM") } }.trim()
+                add(
+                    SensorData(
+                        id = FAN_SPEED_ID,
+                        name = TextResource.Resource(Res.string.sensors_fan_speeds),
+                        value = fanSpeeds,
+                    )
+                )
+            }
+        }
+        emit(sensorList)
+        delay(REFRESH_DELAY)
+    }
+
+    companion object {
+        private const val CPU_TEMP_ID = "0"
+        private const val CPU_VOLTAGE_ID = "1"
+        private const val FAN_SPEED_ID = "2"
+
+        private const val REFRESH_DELAY = 100L
+    }
+}

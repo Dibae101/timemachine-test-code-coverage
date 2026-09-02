@@ -1,0 +1,71 @@
+/*
+ * Copyright KG Soft
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.kgurgul.cpuinfo.data
+
+import com.kgurgul.cpuinfo.data.local.IDataStore
+import com.kgurgul.cpuinfo.data.local.IUserPreferencesRepository
+import com.kgurgul.cpuinfo.data.local.LocalDataStore
+import com.kgurgul.cpuinfo.data.local.UserPreferencesRepository
+import com.kgurgul.cpuinfo.data.provider.ApplicationsDataProvider
+import com.kgurgul.cpuinfo.data.provider.CpuDataNativeProvider
+import com.kgurgul.cpuinfo.data.provider.CpuDataProvider
+import com.kgurgul.cpuinfo.data.provider.GpuDataProvider
+import com.kgurgul.cpuinfo.data.provider.HardwareDataProvider
+import com.kgurgul.cpuinfo.data.provider.IApplicationsDataProvider
+import com.kgurgul.cpuinfo.data.provider.ICpuDataNativeProvider
+import com.kgurgul.cpuinfo.data.provider.ICpuDataProvider
+import com.kgurgul.cpuinfo.data.provider.IGpuDataProvider
+import com.kgurgul.cpuinfo.data.provider.ILicensesProvider
+import com.kgurgul.cpuinfo.data.provider.IOsDataProvider
+import com.kgurgul.cpuinfo.data.provider.IPackageNameProvider
+import com.kgurgul.cpuinfo.data.provider.IProcessesProvider
+import com.kgurgul.cpuinfo.data.provider.IRamDataProvider
+import com.kgurgul.cpuinfo.data.provider.IScreenDataProvider
+import com.kgurgul.cpuinfo.data.provider.IStorageDataProvider
+import com.kgurgul.cpuinfo.data.provider.ITemperatureProvider
+import com.kgurgul.cpuinfo.data.provider.LicensesProvider
+import com.kgurgul.cpuinfo.data.provider.OsDataProvider
+import com.kgurgul.cpuinfo.data.provider.PackageNameProvider
+import com.kgurgul.cpuinfo.data.provider.ProcessesProvider
+import com.kgurgul.cpuinfo.data.provider.RamDataProvider
+import com.kgurgul.cpuinfo.data.provider.ScreenDataProvider
+import com.kgurgul.cpuinfo.data.provider.SensorsInfoProvider
+import com.kgurgul.cpuinfo.data.provider.StorageDataProvider
+import com.kgurgul.cpuinfo.data.provider.TemperatureProvider
+import org.koin.core.module.dsl.factoryOf
+import org.koin.core.module.dsl.singleOf
+import org.koin.dsl.bind
+import org.koin.dsl.module
+
+val dataModule = module {
+    factoryOf(::CpuDataProvider) bind ICpuDataProvider::class
+    factoryOf(::GpuDataProvider) bind IGpuDataProvider::class
+    factoryOf(::HardwareDataProvider)
+    factoryOf(::OsDataProvider) bind IOsDataProvider::class
+    factoryOf(::PackageNameProvider) bind IPackageNameProvider::class
+    factoryOf(::ProcessesProvider) bind IProcessesProvider::class
+    factoryOf(::RamDataProvider) bind IRamDataProvider::class
+    factoryOf(::ScreenDataProvider) bind IScreenDataProvider::class
+    factoryOf(::SensorsInfoProvider)
+    factoryOf(::StorageDataProvider) bind IStorageDataProvider::class
+    factoryOf(::TemperatureProvider) bind ITemperatureProvider::class
+    factoryOf(::LicensesProvider) bind ILicensesProvider::class
+
+    singleOf(::ApplicationsDataProvider) bind IApplicationsDataProvider::class
+    singleOf(::CpuDataNativeProvider) bind ICpuDataNativeProvider::class
+    singleOf(::LocalDataStore) bind IDataStore::class
+    singleOf(::UserPreferencesRepository) bind IUserPreferencesRepository::class
+}
