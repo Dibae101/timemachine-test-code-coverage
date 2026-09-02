@@ -15,12 +15,19 @@ TimeMachine does.
 
 ## Verification status, per app
 
-Two different things have been checked, and they are not equivalent:
-
 | level | apps | what it proves |
 |---|--:|---|
-| Device smoke test | 26 | the APK installs on an API 25 emulator, runs, dumps a real `.ec`, and reports with zero mismatched classes |
-| Report validation | 61 | every declared class directory parses, sources resolve, and `jacococli` produces colour-coded HTML |
+| **Device smoke test, redroid Android 12** | **61** | every APK installs, launches, and dumps a real `.ec`; 59 report with zero mismatched classes |
+| Device smoke test, API 25 emulator | 26 | the original run, kept for comparison |
+| Report validation | 61 | class directories parse and `jacococli` produces colour-coded HTML, on a host with no emulator |
+
+**All 61 apps now have measured device coverage.** `results/smoke-redroid-api31/`
+holds the current run: 61 installed, 61 launched, 59 PASS, 2 with a small
+mismatched-class residue documented [below](#the-two-remaining-mismatches).
+Coverage ranges 0.51% to 31.66%, median 9.40%, from 5.6 MB of execution data.
+
+Report validation is no longer the only evidence for the newer apps; it remains
+useful on a host that cannot run a device at all.
 
 `results/smoke/` holds the device runs. `results/report-validation/` holds the
 report checks, and its execution data is **synthesized, not measured** - see
@@ -43,6 +50,69 @@ Directory names are identical for the 26 apps present in both, and the summary
 CSVs share their first twelve columns. The execution-data filename differs on
 purpose, and `validation_summary.csv` carries a `coverage_source` column
 (`device` vs `synthetic`) so the two cannot be conflated.
+
+### Running the device test without an emulator: redroid
+
+[redroid](https://github.com/remote-android/redroid-doc) runs Android as a Docker
+container against the host kernel, so it needs no KVM and it publishes arm64
+images. That is what makes a device run possible on an aarch64 host where the SDK
+emulator does not even exist as a binary. It is also far quicker than the software
+-emulated AVD: about 25 seconds per app against 60-150, and a ~10 second boot
+rather than five minutes.
+
+```bash
+# host kernel modules (once)
+sudo apt-get install -y linux-modules-extra-$(uname -r)
+sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+
+docker run -itd --name redroid31 --privileged \
+    -v ~/redroid-data/api31:/data -p 5555:5555 \
+    redroid/redroid:12.0.0-latest \
+    androidboot.use_memfd=1 ro.secure=0
+
+adb connect localhost:5555
+PROJECT="$PWD" SDK=/path/to/sdk ADB=/usr/bin/adb SERIAL=localhost:5555 \
+    ./smoke_test_dataset.sh
+```
+
+Three details matter:
+
+* `androidboot.use_memfd=1` - `ashmem_linux` does not exist on current kernels, and
+  redroid needs one or the other.
+* `ro.secure=0` - gives a root `adb shell`, without which `coverage.ec` cannot be
+  read out of app-private storage.
+* Use a **native** `adb`. The SDK's is x86_64 and dies under binfmt with
+  `Could not open '/lib64/ld-linux-x86-64.so.2'` unless `QEMU_LD_PREFIX` is set.
+* Use the **non-`_64only`** image. Several apps ship 32-bit native libraries.
+
+Two changes to the harness were needed to make the coverage dump work on a modern
+API level at all, and they apply to any emulator newer than API 25:
+
+* **The broadcast must name the receiver.** An implicit broadcast to a
+  manifest-declared receiver is not delivered on API 26 and above. It returns
+  `Broadcast completed: result=0` with no receiver having run and no `.ec` written,
+  which looks exactly like a broken dataset. Setting the package is not sufficient;
+  the component has to be named, and it is read back from `dumpsys package`.
+* **The app must really be running.** `monkey -p <pkg> 1` can exit without starting
+  an activity. The dump then contains only the two harness classes - 224 bytes for
+  geohashdroid instead of 1600 - because none of the app's own code ever ran. The
+  launcher activity is resolved and started directly now.
+
+### The two remaining mismatches
+
+Kiwix reports 4 mismatched classes of 1402, and Open-Food-Facts 3 of 1805. Both are
+classes rewritten by a bytecode transformer after `javac`:
+
+* Kiwix: `NotesEntityCursor`, `RecentSearchEntityCursor`, `BookmarkEntityCursor`,
+  `HistoryEntityCursor` - generated and transformed by ObjectBox.
+* Open-Food-Facts: `SplashActivity`, `WelcomeActivity`, `OFFApplication` - Hilt
+  `@AndroidEntryPoint` and `@HiltAndroidApp` classes.
+
+Unlike the five apps fixed by declaring AGP's `transformClassesWithAsm` output,
+these two write no post-transform copy to disk: the transformed bytecode exists
+only inside the APK's dex. No directory can match it, so `jacococli` drops those
+3-4 classes. It is 0.2-0.3% of each app's classes and it is not a fixable
+declaration problem.
 
 ### Which emulator an app needs
 

@@ -1,0 +1,1 @@
+-keep,allowobfuscation,allowshrinking class me.ash.reader.ui.page.settings.accounts.AccountViewModel
