@@ -118,7 +118,9 @@ never be matched.
 
 Two ways. Docker is easier and faster, and it is what produced the committed results.
 
-First, get the code:
+First, get the code. You need the full clone for the harness and the committed results;
+[section 6](#6-downloading-datasets-without-cloning) covers grabbing individual
+datasets as zips instead.
 
 ```bash
 git lfs install                      # REQUIRED before cloning: APKs are LFS objects
@@ -222,24 +224,48 @@ about 35 minutes. `run_coverage.sh` wraps it with a hard timeout.
 
 ---
 
-## 6. Downloading a single dataset
+## 6. Downloading datasets without cloning
+
+All 59 are published as zips on the
+**[v1.0 release](https://github.com/Dibae101/timemachine-test-code-coverage/releases/tag/v1.0)**.
+Each is self-contained: APK, sources, compiled classes, `class_files.json`, and a
+`DATASET.txt` describing the entry.
+
+```bash
+# one app
+gh release download v1.0 --repo Dibae101/timemachine-test-code-coverage \
+    --pattern 'Markor.zip' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS 2>/dev/null | grep Markor
+unzip Markor.zip
+
+# all 59 (2.5 GB)
+gh release download v1.0 --repo Dibae101/timemachine-test-code-coverage --pattern '*.zip'
+```
+
+Or download any single zip straight from the release page, no `gh` needed.
+
+`all-datasets.zip` is 2.51 GB, over GitHub's 2 GB per-asset limit, so it is published
+in two parts:
+
+```bash
+cat all-datasets.zip.part0 all-datasets.zip.part1 > all-datasets.zip
+sha256sum -c ALL_DATASETS_SHA256
+unzip all-datasets.zip
+```
+
+It holds exactly the same per-app zips, so downloading the individual ones you want is
+smaller and faster.
+
+To rebuild the archives yourself:
 
 ```bash
 ./package_datasets.sh            # dist/<App>.zip for all 59 + all-datasets.zip
 ./package_datasets.sh Markor     # just one
 ```
 
-Each zip is self-contained: APK, sources, compiled classes, `class_files.json`, and a
-`DATASET.txt` describing the entry. `dist/SHA256SUMS` covers them all.
-
-The zips are **not committed**: they total ~2.5 GB, individual ones reach 210 MB
-(GitHub rejects files over 100 MB outside LFS), and the repository already holds every
-byte — `git clone` *is* the complete bundle. To publish them, use release assets,
-which allow 2 GB each:
-
-```bash
-gh release create v1.0 dist/*.zip --title "59 JaCoCo-ready Android datasets"
-```
+The zips are not committed to git (`dist/` is ignored): they total 2.51 GB, five exceed
+GitHub's 100 MB non-LFS file limit, and the repository already holds every byte —
+`git clone` *is* the complete bundle.
 
 ## 7. Rebuilding things
 
