@@ -229,16 +229,82 @@ def has_class_file(path):
     return False
 
 
-# Where each AGP generation puts compiled application classes. Ordered from most
-# to least specific; deeper matches win so a single variant is declared rather
-# than every flavour at once.
-CLASS_DIR_GLOBS = [
-    "**/build/intermediates/javac/*/*/classes",   # AGP 3.2+
-    "**/build/intermediates/javac/*/classes",     # AGP 3.0-3.1
-    "**/build/intermediates/classes/*/*",         # AGP 2.x: classes/<flavour>/<type>
-    "**/build/intermediates/classes/*",           # AGP 2.x: classes/<type>
-    "**/build/tmp/kotlin-classes/*",              # Kotlin output
-]
+# Directories that hold classes belonging to tests rather than to the app.
+TEST_OUTPUT_MARKERS = ("unittest", "androidtest", "unit_test", "android_test",
+                       "testdebug", "testfixtures")
+
+
+def class_internal_name(path):
+    """The internal name (com/foo/Bar) recorded inside a .class file.
+
+    Used to locate the root of a class output directory. Matching on known
+    output paths instead does not survive contact with new tool versions: AGP's
+    built-in Kotlin support writes to
+    intermediates/built_in_kotlinc/<variant>/compile<Variant>Kotlin/classes,
+    which no earlier glob covered, so Feeder declared 4 classes instead of 1849
+    and pruning then deleted the 1845 that were never declared.
+    """
+    import struct
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read()
+    except OSError:
+        return None
+    if len(blob) < 10 or blob[:4] != b"\xca\xfe\xba\xbe":
+        return None
+    count = struct.unpack_from(">H", blob, 8)[0]
+    offsets = {}
+    pos = 10
+    i = 1
+    try:
+        while i < count:
+            tag = blob[pos]
+            offsets[i] = pos
+            if tag == 1:                       # Utf8
+                pos += 3 + struct.unpack_from(">H", blob, pos + 1)[0]
+            elif tag in (7, 8, 16, 19, 20):    # Class/String/MethodType/Module
+                pos += 3
+            elif tag == 15:                    # MethodHandle
+                pos += 4
+            elif tag in (5, 6):                # Long/Double take two slots
+                pos += 9
+                i += 1
+            else:                              # 3,4,9,10,11,12,17,18
+                pos += 5
+            i += 1
+        access_pos = pos + 2                   # skip access_flags
+        this_class = struct.unpack_from(">H", blob, access_pos)[0]
+        name_index = struct.unpack_from(">H", blob, offsets[this_class] + 1)[0]
+        length = struct.unpack_from(">H", blob, offsets[name_index] + 1)[0]
+        start = offsets[name_index] + 3
+        return blob[start:start + length].decode("utf-8", "replace")
+    except (IndexError, KeyError, struct.error):
+        return None
+
+
+def class_root_of(directory):
+    """The output root a directory of .class files belongs to.
+
+    Given .../classes/com/foo/Bar.class the root is .../classes. Derived from the
+    class's own package rather than from the directory layout, so it holds for
+    any AGP or Kotlin plugin version.
+    """
+    sample = None
+    for f in sorted(os.listdir(directory)):
+        if f.endswith(".class"):
+            sample = os.path.join(directory, f)
+            break
+    if not sample:
+        return None
+    internal = class_internal_name(sample)
+    if internal is None:
+        return None
+    package = internal.rsplit("/", 1)[0] if "/" in internal else ""
+    root = directory
+    if package:
+        for _ in package.split("/"):
+            root = os.path.dirname(root)
+    return os.path.normpath(root)
 
 
 def is_instrumented_class(path):
@@ -284,28 +350,70 @@ def find_class_dirs(tree):
     Kotlin modules.
 
     Turning coverage on adds a second copy of every class: AGP writes the
-    instrumented ones to intermediates/classes/<variant>/jacoco<Variant>/, which
-    the AGP 2.x glob also matches. Those are excluded here - they are what goes
-    into the APK, but a report has to be built from the original bytecode.
+    instrumented ones to intermediates/classes/<variant>/jacoco<Variant>/. Those
+    are excluded here - they are what goes into the APK, but a report has to be
+    built from the original bytecode.
+
+    Test output is excluded too: it is compiled against the app but is not part
+    of the shipped APK, and counting it would dilute the coverage denominator.
     """
-    found = []
-    for pattern in CLASS_DIR_GLOBS:
-        for path in glob.glob(os.path.join(tree, pattern), recursive=True):
-            if os.path.isdir(path) and has_class_file(path):
-                found.append(os.path.normpath(path))
-    found = sorted(set(found))
-    # keep the deepest match on each branch
-    keep = [d for d in found
-            if not any(other != d and other.startswith(d + os.sep) for other in found)]
+    roots = set()
+    for build_root, dirs, _ in os.walk(tree):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        if os.path.basename(build_root) != "build":
+            continue
+        for root, subdirs, files in os.walk(build_root):
+            if not any(f.endswith(".class") for f in files):
+                continue
+            derived = class_root_of(root)
+            if derived:
+                roots.add(derived)
+
     clean = []
-    for d in keep:
-        segments = d.replace(os.sep, "/").split("/")
-        if any(s.lower().startswith("jacoco") for s in segments):
+    for d in sorted(roots):
+        rel = os.path.relpath(d, tree).replace(os.sep, "/").lower()
+        segments = rel.split("/")
+        if any(s.startswith("jacoco") for s in segments):
+            continue
+        if any(marker in rel for marker in TEST_OUTPUT_MARKERS):
+            continue
+        if not has_class_file(d):
             continue
         if holds_instrumented_output(d):
             continue
         clean.append(d)
-    return clean
+
+    # Drop any root nested inside another so a class is declared once only.
+    return [d for d in clean
+            if not any(o != d and d.startswith(o + os.sep) for o in clean)]
+
+
+def apk_dex_class_count(apk_path):
+    """Classes defined in an APK's dex files, from the dex headers.
+
+    A cheap independent measure of how much code an APK contains, used to catch
+    an entry that declares far too few classes. Feeder built fine and declared 4
+    classes out of 1849 because its Kotlin output sat in a directory no glob
+    matched; nothing downstream noticed, and pruning then deleted the rest.
+
+    class_defs_size is a uint at offset 0x60 of the dex header.
+    """
+    import struct
+    import zipfile
+    total = 0
+    try:
+        with zipfile.ZipFile(apk_path) as zf:
+            for name in zf.namelist():
+                if not name.endswith(".dex"):
+                    continue
+                head = zf.open(name).read(112)
+                if len(head) < 112 or head[:4] != b"dex\n":
+                    continue
+                total += struct.unpack_from("<I", head, 0x60)[0]
+    except (OSError, zipfile.BadZipFile, struct.error):
+        return 0
+    return total
 
 
 def apk_variant(apk_path):
@@ -778,6 +886,23 @@ def build_subject(subject, status_rows):
         status_rows[key] = row
         save_status(status_rows)
         log("  %s: NO PRODUCTS (apks=%d class_dirs=%d)" % (name, len(apks), len(class_dirs)))
+        return row
+
+    # Refuse an entry that declares far less code than the APK contains. Pruning
+    # is destructive, so a wrong set of class directories has to be caught here
+    # rather than at report time.
+    dex_classes = apk_dex_class_count(apk)
+    floor = max(10, int(dex_classes * 0.01))
+    if dex_classes and n_classes < floor:
+        row.update(state="too_few_classes",
+                   class_dirs=str(len(class_dirs)), class_files=str(n_classes),
+                   detail="declared %d classes, APK dex defines %d"
+                          % (n_classes, dex_classes),
+                   seconds=str(int(time.time() - t0)))
+        status_rows[key] = row
+        save_status(status_rows)
+        log("  %s: TOO FEW CLASSES (%d declared vs %d in dex)"
+            % (name, n_classes, dex_classes))
         return row
 
     # Name the locally built APK after the published one so a dataset that
